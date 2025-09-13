@@ -1,0 +1,115 @@
+:root {
+  --primary: #1765a3;
+  --secondary: #f6f8fa;
+  --accent: #099268;
+  --text: #222;
+  --bg: #fff;
+  --alt-bg: #f2f6f9;
+}
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+header {
+  background: var(--primary);
+  color: #fff;
+  padding: 0.5rem 0;
+}
+header .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 850px;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+header h1 { margin: 0; font-size: 1.6rem; }
+header .accent { color: var(--accent); }
+nav a {
+  color: #fff;
+  text-decoration: none;
+  margin-left: 1.2rem;
+  font-weight: 500;
+  transition: color .15s;
+}
+nav a.active, nav a:hover { color: var(--secondary); }
+
+.hero {
+  background: var(--alt-bg);
+  padding: 2.5rem 0 2rem 0;
+  text-align: center;
+}
+.hero h2 { margin-top: 0; color: var(--primary); font-size: 2rem; }
+.hero p { font-size: 1.1rem; }
+
+.section {
+  padding: 2rem 0;
+}
+.section.alt {
+  background: var(--alt-bg);
+}
+.section h2, .section h3 { color: var(--primary); }
+.section ul {
+  margin: 1rem 0 0 1rem;
+  padding: 0;
+}
+.section ul li {
+  margin-bottom: 0.7rem;
+  font-size: 1.05rem;
+  line-height: 1.5;
+}
+
+.container {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+footer {
+  background: var(--primary);
+  color: #fff;
+  text-align: center;
+  padding: 1rem 0;
+  margin-top: 2rem;
+}
+
+.team-list {
+  display: flex; flex-wrap: wrap; gap: 2rem; margin-top: 1.5rem;
+}
+.team-member {
+  background: #f6f8fa; padding: 1rem 1.5rem; border-radius: 8px;
+  min-width: 220px; flex: 1 1 220px;
+}
+.job-posting, .blog-post {
+  background: #f2f6f9; margin-bottom: 1.5rem; padding: 1rem 1.5rem; border-radius: 8px;
+}
+.apply-btn {
+  display: inline-block; margin-top: 1rem; background: var(--primary); color: #fff; padding: 0.5rem 1.2rem; border-radius: 4px; text-decoration: none; font-weight: 600;
+}
+
+form {
+  display: flex; flex-direction: column; gap: 1rem; max-width: 400px;
+}
+form label { font-weight: 500; }
+form input, form textarea {
+  margin-top: 0.25rem;
+  padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 1rem;
+}
+form button {
+  background: var(--accent); color: #fff; border: none; padding: 0.7rem 1.4rem; border-radius: 4px; font-size: 1rem; font-weight: 600; cursor: pointer;
+}
+form button:hover { background: var(--primary); }
+
+@media (max-width: 600px) {
+  header .container, .container {
+    flex-direction: column;
+    padding: 0 0.7rem;
+  }
+  nav a { margin-left: 0.7rem; }
+  .hero h2 { font-size: 1.4rem; }
+  .team-list { flex-direction: column; gap: 1rem; }
+}

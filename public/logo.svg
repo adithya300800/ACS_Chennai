@@ -1,0 +1,9 @@
+<svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="120" height="120" rx="24" fill="#111827"/>
+  <g>
+    <circle cx="60" cy="60" r="38" fill="#2563eb"/>
+    <rect x="40" y="40" width="40" height="40" rx="8" fill="#fff" opacity="0.9"/>
+    <path d="M60 48 L72 72 H48 Z" fill="#2563eb" />
+    <text x="60" y="108" font-family="Inter, Arial, sans-serif" font-size="18" fill="#fff" font-weight="bold" text-anchor="middle">ACS</text>
+  </g>
+</svg>
