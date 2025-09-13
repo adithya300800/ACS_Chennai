@@ -2,7 +2,7 @@
 
 ## Company Overview
 
-ACS Chennai is a technology-driven Construction Project Management and Business Process Solutions provider, based in Oragadam, Chennai, India. We blend the rigor of traditional infrastructure management with modern digital platforms to deliver robust, scalable, and transparent solutions for the built environment and remote business operations.
+ACS Chennai is a technology-driven Construction Project Management and Business Process Solutions provider, based in Oragadam, Chennai, India. Bringing 30+ years of industrial experience, we blend the rigor of traditional infrastructure management with modern digital platforms to deliver robust, scalable, and transparent solutions for the built environment and remote business operations.
 
 ## Technical Focus
 

@@ -4,19 +4,31 @@ export default function About() {
   return (
     <section className="section">
       <div className="container">
-        <h2>About ACS Chennai</h2>
-        <p>
-          ACS Chennai is a technology-driven Construction Project Management and Business Process Solutions provider, based in Oragadam, Chennai, India.
-          We blend the rigor of traditional infrastructure management with modern digital platforms to deliver robust, scalable, and transparent solutions for the built environment and remote business operations.
+        <h2 className="section-title reveal" data-reveal>About ACS Chennai</h2>
+        <p className="section-sub reveal" data-reveal>Project Management Consultancy for Civil Engineering Works</p>
+        <p className="reveal" data-reveal>
+          With 30+ years of industrial experience, we are a Chennai‑based PMC focused on
+          delivering civil engineering projects with precision and transparency. Our team
+          brings site‑tested processes and modern digital tooling together—so stakeholders
+          get predictable schedules, quality, and cost control.
         </p>
-        <h3>Technical Focus</h3>
+
+        <h3 className="reveal" data-reveal>Technical Profile</h3>
         <ul>
-          <li><b>Project Management Systems:</b> Cloud-native project management for construction/facility management using Zoho WorkDrive, Zoho Mail, and DevSecOps toolchains.</li>
-          <li><b>Remote Team Orchestration:</b> Real-time, secure collaboration with cloud storage, document versioning, RBAC, and mobile-first automation.</li>
-          <li><b>HR & Talent Infrastructure:</b> Automated onboarding, offer letter management, and digital HR compliance.</li>
-          <li><b>Business Process Automation:</b> APIs and low-code integrations for procurement, payroll, and scheduling workflows.</li>
-          <li><b>Data Security & Compliance:</b> Encrypted storage, MFA, audit trails, ISO/client compliance.</li>
+          <li className="reveal" data-reveal><b>Planning & Controls:</b> Work breakdown structures, resource planning, CPM, look‑ahead, S‑curves.</li>
+          <li className="reveal" data-reveal><b>QA/QC & Safety:</b> ITPs, method statements, inspection logs, NCR tracking, safety toolbox and audits.</li>
+          <li className="reveal" data-reveal><b>Commercials:</b> BOQ validation, progress measurements, RA bills, reconciliations, and change orders.</li>
+          <li className="reveal" data-reveal><b>Digital Workflows:</b> Cloud docs, approvals, role‑based access, and automated reporting.</li>
+          <li className="reveal" data-reveal><b>Compliance:</b> Material submittals, test reports, and site documentation aligned to standards.</li>
         </ul>
+
+        <img
+          src="https://images.unsplash.com/photo-1531834685032-c34bf0d84c77?q=80&w=1400&auto=format&fit=crop"
+          alt="Team at construction site"
+          className="reveal"
+          data-reveal
+          style={{ width:'100%', borderRadius:12, marginTop:'1rem', boxShadow:'var(--shadow)'}}
+        />
       </div>
     </section>
   );
