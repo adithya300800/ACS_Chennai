@@ -1,1 +1,19 @@
-{\n  "name": "acs-chennai-website",\n  "version": "1.0.0",\n  "private": true,\n  "scripts": {\n    "dev": "vite",\n    "build": "vite build",\n    "preview": "vite preview"\n  },\n  "dependencies": {\n    "react": "^18.2.0",\n    "react-dom": "^18.2.0",\n    "react-router-dom": "^6.23.0"\n  },\n  "devDependencies": {\n    "@vitejs/plugin-react": "^4.0.3",\n    "vite": "^5.0.0"\n  }\n}
+{
+  "name": "acs-chennai-website",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.23.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.0.3",
+    "vite": "^5.0.0"
+  }
+}
