@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Env files
+.env
+.env.*.local
+
+# OS / editor
+.DS_Store
+*.log
+.vscode/
+.idea/
+
+# Lockfiles (optional if you prefer one package manager)
+yarn.lock
+pnpm-lock.yaml
