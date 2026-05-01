@@ -10,7 +10,8 @@
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.23.0"
+    "react-router-dom": "^6.23.0",
+    "resend": "^6.12.2"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",

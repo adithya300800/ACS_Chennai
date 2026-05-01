@@ -1,4 +1,7 @@
 import React, { useState } from 'react';
+import { Resend } from 'resend';
+
+const resend = new Resend('re_iJhBsVbG_BgzTkm6Tycb1bPACMkiSqrei');
 
 export default function Contact() {
   const [form, setForm] = useState({
@@ -20,34 +23,26 @@ export default function Contact() {
     setStatus('loading');
 
     try {
-      const res = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer re_iJhBsVbG_BgzTkm6Tycb1bPACMkiSqrei`,
-        },
-        body: JSON.stringify({
-          from: 'ACS Chennai <onboarding@resend.dev>',
-          to: ['info@acschennai.com'],
-          subject: `Project Enquiry${form.projectType ? ` — ${form.projectType}` : ''} from ${form.name}`,
-          html: `
-            <h2>New Project Enquiry</h2>
-            <p><strong>Name:</strong> ${form.name}</p>
-            <p><strong>Company:</strong> ${form.company || 'N/A'}</p>
-            <p><strong>Email:</strong> ${form.email}</p>
-            <p><strong>Phone:</strong> ${form.phone || 'N/A'}</p>
-            <p><strong>Project Type:</strong> ${form.projectType || 'Not specified'}</p>
-            <hr />
-            <p><strong>Message:</strong></p>
-            <p>${form.message.replace(/\n/g, '<br/>')}</p>
-          `,
-          reply_to: form.email,
-        }),
+      const { data, error } = await resend.emails.send({
+        from: 'ACS Chennai <onboarding@resend.dev>',
+        to: ['info@acschennai.com'],
+        subject: `Project Enquiry${form.projectType ? ` — ${form.projectType}` : ''} from ${form.name}`,
+        html: `
+          <h2>New Project Enquiry</h2>
+          <p><strong>Name:</strong> ${form.name}</p>
+          <p><strong>Company:</strong> ${form.company || 'N/A'}</p>
+          <p><strong>Email:</strong> ${form.email}</p>
+          <p><strong>Phone:</strong> ${form.phone || 'N/A'}</p>
+          <p><strong>Project Type:</strong> ${form.projectType || 'Not specified'}</p>
+          <hr />
+          <p><strong>Message:</strong></p>
+          <p>${form.message.replace(/\n/g, '<br/>')}</p>
+        `,
+        reply_to: form.email,
       });
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.message || 'Failed to send email');
+      if (error) {
+        throw new Error(error.message || 'Failed to send email');
       }
 
       setStatus('success');
