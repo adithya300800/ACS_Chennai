@@ -24,7 +24,7 @@ export default function Contact() {
 
     try {
       const { data, error } = await resend.emails.send({
-        from: 'ACS Chennai <onboarding@resend.dev>',
+        from: 'ACS Chennai <info@acschennai.com>',
         to: ['info@acschennai.com'],
         subject: `Project Enquiry${form.projectType ? ` — ${form.projectType}` : ''} from ${form.name}`,
         html: `
