@@ -88,7 +88,9 @@
       "Bash(curl -sI \"https://adithya300800.github.io/ACS_Chennai/assets/index-DFMKFeqX.js\")",
       "Bash(curl -s \"https://adithya300800.github.io/ACS_Chennai/assets/index-DFMKFeqX.js\")",
       "Bash(curl -sI \"https://adithya300800.github.io/ACS_Chennai/assets/index-DFMKFeqX.js?_=$\\(date +%s\\)\")",
-      "Bash(npx serve *)"
+      "Bash(npx serve *)",
+      "Bash(curl -s \"https://adithya300800.github.io/ACS_Chennai/assets/index-Cx0oA164.js\")",
+      "Bash(curl -s /Users/adithyamohanavel/Documents/Repo/ACS_Chennai/dist/assets/index-Cx0oA164.js)"
     ],
     "additionalDirectories": [
       "/Users/adithyamohanavel/.claude",
