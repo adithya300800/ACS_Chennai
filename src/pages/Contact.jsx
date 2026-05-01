@@ -1,8 +1,6 @@
 import React, { useState } from 'react';
 import { Resend } from 'resend';
 
-const resend = new Resend(import.meta.env.VITE_RESEND_API_KEY);
-
 export default function Contact() {
   const [form, setForm] = useState({
     name: '',
@@ -20,6 +18,15 @@ export default function Contact() {
 
   const handleSubmit = (e) => {
     e.preventDefault();
+
+    const apiKey = import.meta.env.VITE_RESEND_API_KEY;
+    if (!apiKey) {
+      console.error('Resend API key not configured');
+      setStatus('error');
+      return;
+    }
+
+    const resend = new Resend(apiKey);
     setStatus('loading');
 
     resend.emails.send({
