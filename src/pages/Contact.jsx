@@ -18,16 +18,15 @@ export default function Contact() {
     setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
   };
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
     setStatus('loading');
 
-    try {
-      const { data, error } = await resend.emails.send({
-        from: 'info@acschennai.com',
-        to: 'info@acschennai.com',
-        subject: `Project Enquiry${form.projectType ? ` — ${form.projectType}` : ''} from ${form.name}`,
-        html: `<h2>New Project Enquiry</h2>
+    resend.emails.send({
+      from: 'info@acschennai.com',
+      to: 'info@acschennai.com',
+      subject: `Project Enquiry${form.projectType ? ` — ${form.projectType}` : ''} from ${form.name}`,
+      html: `<h2>New Project Enquiry</h2>
 <p><strong>Name:</strong> ${form.name}</p>
 <p><strong>Company:</strong> ${form.company || 'N/A'}</p>
 <p><strong>Email:</strong> ${form.email}</p>
@@ -36,21 +35,13 @@ export default function Contact() {
 <hr />
 <p><strong>Message:</strong></p>
 <p>${form.message.replace(/\n/g, '<br/>')}</p>`,
-      });
-
-      if (error) {
-        console.error('Resend error:', error);
-        throw new Error(error.message || 'Failed to send email');
-      }
-
-      console.log('Email sent:', data);
-
+    }).then(() => {
       setStatus('success');
       setForm({ name: '', company: '', email: '', phone: '', projectType: '', message: '' });
-    } catch (err) {
+    }).catch((err) => {
+      console.error('Resend error:', err);
       setStatus('error');
-      console.error('Email send error:', err);
-    }
+    });
   };
 
   return (
