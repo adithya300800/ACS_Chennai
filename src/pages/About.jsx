@@ -77,7 +77,7 @@ export default function About() {
 
           <div className="reveal" data-reveal>
             <img
-              src="/about-team.jpg"
+              src="./about-team.jpg"
               alt="ACS Chennai team at project site"
               style={{ width: '100%', borderRadius: 16, boxShadow: 'var(--shadow-lg)' }}
             />

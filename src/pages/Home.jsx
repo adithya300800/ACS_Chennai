@@ -75,14 +75,14 @@ const PROJECT_TEASERS = [
     sector: 'Chemical / PMC',
     desc: 'End-to-end project management consultancy for a major chemical facility — earthworks, structural concrete, process foundations, pipeline routing, and PCPCB compliance documentation.',
     metric: 'Large-Scale Chemical Facility',
-    image: '/project-chemical.jpg',
+    image: './project-chemical.jpg',
   },
   {
     name: 'PMC for Pharmaceutical Manufacturing Facility — Chennai',
     sector: 'Pharma / PMC',
     desc: 'Full-scope construction PMC for a GMP-certified pharmaceutical plant — civil works, utility installation, cleanroom infrastructure, and regulatory compliance aligned to Schedule II.',
     metric: 'GMP-Certified Pharma Facility',
-    image: '/project-pharma.jpg',
+    image: './project-pharma.jpg',
   },
 ];
 
@@ -103,7 +103,7 @@ export default function Home() {
         <div className="hero-image-wrap">
           <img
             className="hero-img"
-            src="/hero-site.jpg"
+            src="./hero-site.jpg"
             alt="Construction site — ACS Chennai project"
           />
           <div className="hero-img-overlay" />
@@ -186,7 +186,7 @@ export default function Home() {
           <div className="about-strip">
             <div className="about-strip-img">
               <img
-                src="/about-team.jpg"
+                src="./about-team.jpg"
                 alt="ACS Chennai team at project site"
               />
             </div>

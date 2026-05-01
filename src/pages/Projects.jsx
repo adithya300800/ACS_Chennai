@@ -8,7 +8,7 @@ const PROJECTS = [
     desc: 'End-to-end project management consultancy for a chemical manufacturing facility in Cuddalore — earthworks, structural concrete, process equipment foundations, pipeline routing, and Pollution Control Board compliance documentation.',
     metric: 'Large-Scale Chemical Facility',
     metricLabel: 'Project Type',
-    image: '/project-chemical.jpg',
+    image: './project-chemical.jpg',
   },
   {
     name: 'PMC for Pharmaceutical Manufacturing Facility — Chennai',
@@ -16,7 +16,7 @@ const PROJECTS = [
     desc: 'Full-scope construction PMC for a GMP-certified pharmaceutical plant — civil structural works, utility installation, cleanroom infrastructure, and regulatory compliance aligned to Schedule II and ISO standards.',
     metric: 'GMP-Certified Pharma Facility',
     metricLabel: 'Project Type',
-    image: '/project-pharma.jpg',
+    image: './project-pharma.jpg',
   },
   {
     name: 'Quantity Verification & Billing Audit — Leading Developer',
@@ -24,7 +24,7 @@ const PROJECTS = [
     desc: 'Independent quantity verification and billing audit for a major residential township development — RA bill processing, cost control, reconciliation, and change order management ensuring financial transparency.',
     metric: 'Large-Scale Billing Audit',
     metricLabel: 'Project Type',
-    image: '/project-logistics.jpg',
+    image: './project-logistics.jpg',
   },
   {
     name: 'PMC for Data Centre Facility — Bangalore',
@@ -32,7 +32,7 @@ const PROJECTS = [
     desc: 'Construction project management for a data centre facility — civil works, electrical infrastructure, cooling systems, and peripheral development with strict timeline adherence and quality standards.',
     metric: 'Data Centre Infrastructure',
     metricLabel: 'Project Type',
-    image: '/project-chemical.jpg',
+    image: './project-chemical.jpg',
   },
   {
     name: 'Procurement Advisory — Religious Infrastructure Project, Bangalore',
@@ -40,7 +40,7 @@ const PROJECTS = [
     desc: 'Procurement advisory role for a multi-level prayer hall construction — procurement strategy, vendor coordination, cost optimization, and quality assurance for religious infrastructure.',
     metric: 'Cultural Infrastructure',
     metricLabel: 'Project Type',
-    image: '/project-pharma.jpg',
+    image: './project-pharma.jpg',
   },
   {
     name: 'Cost Estimation for Multi-Tower Residential Development — Chennai',
@@ -48,7 +48,7 @@ const PROJECTS = [
     desc: 'Comprehensive cost estimation for a multi-tower residential complex — detailed BOQ validation, progress measurements, cost control, and financial reconciliation for large-scale housing project.',
     metric: 'Multi-Tower Residential Complex',
     metricLabel: 'Project Type',
-    image: '/project-logistics.jpg',
+    image: './project-logistics.jpg',
   },
   {
     name: 'Independent Quality Monitoring — Warehouse Development',
@@ -56,7 +56,7 @@ const PROJECTS = [
     desc: 'Independent quality audit service for warehouse development — QA/QC inspection, method statement review, safety audit trails, and compliance documentation for logistics infrastructure.',
     metric: 'Independent Quality Audit',
     metricLabel: 'Project Type',
-    image: '/project-chemical.jpg',
+    image: './project-chemical.jpg',
   },
 ];
 
