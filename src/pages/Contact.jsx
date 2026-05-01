@@ -24,26 +24,26 @@ export default function Contact() {
 
     try {
       const { data, error } = await resend.emails.send({
-        from: 'ACS Chennai <info@acschennai.com>',
-        to: ['info@acschennai.com'],
+        from: 'info@acschennai.com',
+        to: 'info@acschennai.com',
         subject: `Project Enquiry${form.projectType ? ` — ${form.projectType}` : ''} from ${form.name}`,
-        html: `
-          <h2>New Project Enquiry</h2>
-          <p><strong>Name:</strong> ${form.name}</p>
-          <p><strong>Company:</strong> ${form.company || 'N/A'}</p>
-          <p><strong>Email:</strong> ${form.email}</p>
-          <p><strong>Phone:</strong> ${form.phone || 'N/A'}</p>
-          <p><strong>Project Type:</strong> ${form.projectType || 'Not specified'}</p>
-          <hr />
-          <p><strong>Message:</strong></p>
-          <p>${form.message.replace(/\n/g, '<br/>')}</p>
-        `,
-        reply_to: form.email,
+        html: `<h2>New Project Enquiry</h2>
+<p><strong>Name:</strong> ${form.name}</p>
+<p><strong>Company:</strong> ${form.company || 'N/A'}</p>
+<p><strong>Email:</strong> ${form.email}</p>
+<p><strong>Phone:</strong> ${form.phone || 'N/A'}</p>
+<p><strong>Project Type:</strong> ${form.projectType || 'Not specified'}</p>
+<hr />
+<p><strong>Message:</strong></p>
+<p>${form.message.replace(/\n/g, '<br/>')}</p>`,
       });
 
       if (error) {
+        console.error('Resend error:', error);
         throw new Error(error.message || 'Failed to send email');
       }
+
+      console.log('Email sent:', data);
 
       setStatus('success');
       setForm({ name: '', company: '', email: '', phone: '', projectType: '', message: '' });
