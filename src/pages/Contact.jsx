@@ -9,22 +9,53 @@ export default function Contact() {
     projectType: '',
     message: '',
   });
-  const [submitted, setSubmitted] = useState(false);
+  const [status, setStatus] = useState('idle'); // 'idle' | 'loading' | 'success' | 'error'
 
   const handleChange = (e) => {
     setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    const subject = encodeURIComponent(
-      `Project Enquiry${form.projectType ? ` — ${form.projectType}` : ''} from ${form.name}`
-    );
-    const body = encodeURIComponent(
-      `Name: ${form.name}\nCompany: ${form.company}\nEmail: ${form.email}\nPhone: ${form.phone}\nProject Type: ${form.projectType}\n\nMessage:\n${form.message}`
-    );
-    window.location.href = `mailto:info@acschennai.com?subject=${subject}&body=${body}`;
-    setSubmitted(true);
+    setStatus('loading');
+
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer re_iJhBsVbG_BgzTkm6Tycb1bPACMkiSqrei`,
+        },
+        body: JSON.stringify({
+          from: 'ACS Chennai <onboarding@resend.dev>',
+          to: ['info@acschennai.com'],
+          subject: `Project Enquiry${form.projectType ? ` — ${form.projectType}` : ''} from ${form.name}`,
+          html: `
+            <h2>New Project Enquiry</h2>
+            <p><strong>Name:</strong> ${form.name}</p>
+            <p><strong>Company:</strong> ${form.company || 'N/A'}</p>
+            <p><strong>Email:</strong> ${form.email}</p>
+            <p><strong>Phone:</strong> ${form.phone || 'N/A'}</p>
+            <p><strong>Project Type:</strong> ${form.projectType || 'Not specified'}</p>
+            <hr />
+            <p><strong>Message:</strong></p>
+            <p>${form.message.replace(/\n/g, '<br/>')}</p>
+          `,
+          reply_to: form.email,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.message || 'Failed to send email');
+      }
+
+      setStatus('success');
+      setForm({ name: '', company: '', email: '', phone: '', projectType: '', message: '' });
+    } catch (err) {
+      setStatus('error');
+      console.error('Email send error:', err);
+    }
   };
 
   return (
@@ -51,7 +82,7 @@ export default function Contact() {
                 </div>
                 <div>
                   <div className="contact-card-label">Phone</div>
-                  <div className="contact-card-value">+91 98765 43210</div>
+                  <div className="contact-card-value">+91 6382 591 110</div>
                   <div className="contact-card-sub">Mon–Sat, 9am–6pm IST</div>
                 </div>
               </div>
@@ -65,7 +96,7 @@ export default function Contact() {
                 </div>
                 <div>
                   <div className="contact-card-label">WhatsApp</div>
-                  <div className="contact-card-value">+91 98765 43210</div>
+                  <div className="contact-card-value">+91 6382 591 110</div>
                   <div className="contact-card-sub">Quick responses, share documents directly</div>
                 </div>
               </div>
@@ -103,7 +134,7 @@ export default function Contact() {
             {/* Big WhatsApp CTA */}
             <div style={{ marginTop: '1.5rem' }}>
               <a
-                href="https://wa.me/919876543210"
+                href="https://wa.me/916382591110"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="btn btn-amber"
@@ -127,13 +158,18 @@ export default function Contact() {
                 Tell us about your project and we'll get back within 24 hours.
               </p>
 
-              {submitted ? (
+              {status === 'success' ? (
                 <div className="form-success">
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                    <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>
-                    Message opened in your email client
+                    <svg width="18" height="18" fill="none" stroke="#16A34A" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>
+                    Enquiry sent successfully!
                   </div>
-                  <p style={{ fontSize: '0.87rem', fontWeight: '400', color: '#16A34A' }}>Please send the email to complete your enquiry. You can also reach us directly via phone or WhatsApp.</p>
+                  <p style={{ fontSize: '0.87rem', fontWeight: '400', color: '#16A34A' }}>We've received your message and will get back to you within 24 hours on business days.</p>
+                </div>
+              ) : status === 'error' ? (
+                <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 12, padding: '1.2rem', marginBottom: '0.5rem' }}>
+                  <p style={{ fontSize: '0.87rem', color: '#DC2626', fontWeight: '600', marginBottom: '0.3rem' }}>Failed to send message.</p>
+                  <p style={{ fontSize: '0.82rem', color: '#991B1B' }}>Please try again or reach us directly via phone or WhatsApp.</p>
                 </div>
               ) : (
                 <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -227,13 +263,14 @@ export default function Contact() {
                       style={{ resize: 'vertical', minHeight: '100px' }}
                     />
                   </div>
-                  <button type="submit" className="btn btn-primary" style={{ justifyContent: 'center', padding: '0.85rem' }}>
-                    <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><path d="M22 6l-10 7L2 6"/></svg>
-                    Send Enquiry
+                  <button type="submit" className="btn btn-primary" style={{ justifyContent: 'center', padding: '0.85rem' }} disabled={status === 'loading'}>
+                    {status === 'loading' ? 'Sending...' : (
+                      <>
+                        <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0 2-.9 2-2V6c0-1.1.9-2 2-2z"/><path d="M22 6l-10 7L2 6"/></svg>
+                        Send Enquiry
+                      </>
+                    )}
                   </button>
-                  <p style={{ fontSize: '0.78rem', color: 'var(--steel)', textAlign: 'center', marginTop: '-0.3rem' }}>
-                    Or email us directly at <a href="mailto:info@acschennai.com" style={{ color: 'var(--blue)' }}>info@acschennai.com</a>
-                  </p>
                 </form>
               )}
             </div>
