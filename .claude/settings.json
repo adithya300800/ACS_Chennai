@@ -80,7 +80,11 @@
       "Bash(cp /Users/adithyamohanavel/Documents/Repo/ACS_Chennai/public/*.jpg /Users/adithyamohanavel/Documents/Repo/ACS_Chennai/src/assets/)",
       "Bash(cp /Users/adithyamohanavel/Documents/Repo/ACS_Chennai/public/*.svg /Users/adithyamohanavel/Documents/Repo/ACS_Chennai/src/assets/)",
       "Bash(curl -sI \"https://adithya300800.github.io/ACS_Chennai/project-logistics.jpg\")",
-      "Bash(curl -sI \"https://adithya300800.github.io/hero-site.jpg\")"
+      "Bash(curl -sI \"https://adithya300800.github.io/hero-site.jpg\")",
+      "Bash(curl -sI \"https://adithya300800.github.io/ACS_Chennai/assets/index-IuxA6XiQ.js\")",
+      "Bash(curl -sL \"https://adithya300800.github.io/ACS_Chennai/hero-site.jpg\")",
+      "Bash(curl -sI \"https://adithya300800.github.io/ACS_Chennai/about\")",
+      "Bash(node -e \"const pkg = require\\('/Users/adithyamohanavel/Documents/Repo/ACS_Chennai/node_modules/react-router-dom/package.json'\\); console.log\\(pkg.version\\);\")"
     ],
     "additionalDirectories": [
       "/Users/adithyamohanavel/.claude",
