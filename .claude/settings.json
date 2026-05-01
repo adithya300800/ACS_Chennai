@@ -84,7 +84,11 @@
       "Bash(curl -sI \"https://adithya300800.github.io/ACS_Chennai/assets/index-IuxA6XiQ.js\")",
       "Bash(curl -sL \"https://adithya300800.github.io/ACS_Chennai/hero-site.jpg\")",
       "Bash(curl -sI \"https://adithya300800.github.io/ACS_Chennai/about\")",
-      "Bash(node -e \"const pkg = require\\('/Users/adithyamohanavel/Documents/Repo/ACS_Chennai/node_modules/react-router-dom/package.json'\\); console.log\\(pkg.version\\);\")"
+      "Bash(node -e \"const pkg = require\\('/Users/adithyamohanavel/Documents/Repo/ACS_Chennai/node_modules/react-router-dom/package.json'\\); console.log\\(pkg.version\\);\")",
+      "Bash(curl -sI \"https://adithya300800.github.io/ACS_Chennai/assets/index-DFMKFeqX.js\")",
+      "Bash(curl -s \"https://adithya300800.github.io/ACS_Chennai/assets/index-DFMKFeqX.js\")",
+      "Bash(curl -sI \"https://adithya300800.github.io/ACS_Chennai/assets/index-DFMKFeqX.js?_=$\\(date +%s\\)\")",
+      "Bash(npx serve *)"
     ],
     "additionalDirectories": [
       "/Users/adithyamohanavel/.claude",
