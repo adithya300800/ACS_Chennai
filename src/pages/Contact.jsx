@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Resend } from 'resend';
 
-const resend = new Resend('re_iJhBsVbG_BgzTkm6Tycb1bPACMkiSqrei');
+const resend = new Resend(import.meta.env.VITE_RESEND_API_KEY);
 
 export default function Contact() {
   const [form, setForm] = useState({
