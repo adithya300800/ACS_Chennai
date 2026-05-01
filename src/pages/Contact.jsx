@@ -27,7 +27,7 @@ export default function Contact() {
           Authorization: `Bearer re_iJhBsVbG_BgzTkm6Tycb1bPACMkiSqrei`,
         },
         body: JSON.stringify({
-          from: 'ACS Chennai <onboarding@resend.dev>',
+          from: 'ACS Chennai <info@acschennai.com>',
           to: ['info@acschennai.com'],
           subject: `Project Enquiry${form.projectType ? ` — ${form.projectType}` : ''} from ${form.name}`,
           html: `
