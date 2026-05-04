@@ -14,7 +14,7 @@ export default function Contact() {
         </form>
         <div className="mt-8 text-base">
           <b>Email:</b> info@acschennai.com<br/>
-          <b>Phone:</b> +91 98765 43210<br/>
+          <b>Phone:</b> +91 89395 01843<br/>
           <b>Location:</b> Chennai, India
         </div>
       </div>

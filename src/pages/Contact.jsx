@@ -75,7 +75,7 @@ export default function Contact() {
                 </div>
                 <div>
                   <div className="contact-card-label">Phone</div>
-                  <div className="contact-card-value">+91 6382 591 110</div>
+                  <div className="contact-card-value">+91 89395 01843</div>
                   <div className="contact-card-sub">Mon–Sat, 9am–6pm IST</div>
                 </div>
               </div>
@@ -89,7 +89,7 @@ export default function Contact() {
                 </div>
                 <div>
                   <div className="contact-card-label">WhatsApp</div>
-                  <div className="contact-card-value">+91 6382 591 110</div>
+                  <div className="contact-card-value">+91 89395 01843</div>
                   <div className="contact-card-sub">Quick responses, share documents directly</div>
                 </div>
               </div>
@@ -127,7 +127,7 @@ export default function Contact() {
             {/* Big WhatsApp CTA */}
             <div style={{ marginTop: '1.5rem' }}>
               <a
-                href="https://wa.me/916382591110"
+                href="https://wa.me/918939501843"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="btn btn-amber"
