@@ -79,17 +79,33 @@ router.post('/zoho/callback', async (req, res) => {
     const tokens = await tokenRes.json();
     const { access_token, refresh_token } = tokens;
 
-    // Get user info from Zoho People API
-    const userRes = await fetch(`https://people.zoho.com/people/api/v1/user`, {
-      headers: { Authorization: `Zoho-oauthtoken ${access_token}` },
-    });
+    // Get user info from Zoho - try multiple endpoints
+    let email = null;
 
-    if (!userRes.ok) {
-      return res.status(401).json({ error: 'Failed to get user info from Zoho' });
+    // Try Zoho Connect userinfo endpoint
+    try {
+      const connectRes = await fetch(`https://connect.zoho.comapi/v1/userinfo`, {
+        headers: { Authorization: `Zoho-oauthtoken ${access_token}` },
+      });
+      if (connectRes.ok) {
+        const data = await connectRes.json();
+        email = data.email;
+      }
+    } catch (e) {}
+
+    // If not found, try parsing from ID token (if using openid scope)
+    if (!email && tokens.id_token) {
+      try {
+        const idTokenParts = tokens.id_token.split('.');
+        const idPayload = JSON.parse(atob(idTokenParts[1]));
+        email = idPayload.email;
+      } catch (e) {}
     }
 
-    const zohoUser = await userRes.json();
-    const email = zohoUser.email || zohoUser.Email || zohoUser.userEmail;
+    // If still no email, return error
+    if (!email) {
+      return res.status(400).json({ error: 'Could not determine email from Zoho. Please ensure your Zoho account has an email address.' });
+    }
 
     if (!email) {
       return res.status(400).json({ error: 'Could not get email from Zoho' });
