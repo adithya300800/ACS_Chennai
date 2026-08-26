@@ -18,7 +18,7 @@ router.get('/zoho', (req, res) => {
     return res.status(503).json({ error: 'Zoho OAuth not configured' });
   }
 
-  const scopes = 'ZohoOAuth.userinfo.profile.READ';
+  const scopes = 'openid';
   const state = Math.random().toString(36).substring(7);
 
   const authUrl = `${ZOHO_DOMAIN}/oauth/v2/auth?` +
