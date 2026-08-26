@@ -27,6 +27,68 @@ export default function PortalLogin() {
     }
   };
 
+  const handleZohoLogin = async () => {
+    setStatus('loading');
+    setErrorMsg('');
+
+    try {
+      // Get Zoho OAuth URL
+      const res = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/zoho`);
+      if (!res.ok) throw new Error('Zoho OAuth not configured');
+      const { authUrl } = await res.json();
+
+      // Open Zoho OAuth in popup
+      const width = 500;
+      const height = 600;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+      const popup = window.open(
+        authUrl,
+        'zoho-oauth',
+        `width=${width},height=${height},left=${left},top=${top}`
+      );
+
+      // Listen for OAuth callback
+      const receiveMessage = async (event) => {
+        if (event.origin !== window.location.origin) return;
+        if (!event.data?.code) return;
+
+        window.removeEventListener('message', receiveMessage);
+        popup.close();
+
+        // Exchange code for tokens
+        setStatus('loading');
+        try {
+          const tokenRes = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/zoho/callback`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: event.data.code }),
+          });
+
+          if (!tokenRes.ok) throw new Error('Zoho authentication failed');
+
+          const { accessToken, refreshToken, employee } = await tokenRes.json();
+
+          // Store auth data
+          localStorage.setItem('acs_auth', JSON.stringify({ accessToken, employee }));
+          localStorage.setItem('acs_refresh', refreshToken);
+
+          // Redirect to attendance
+          navigate('/portal/attendance');
+          window.location.reload(); // Reload to apply auth state
+        } catch (err) {
+          setStatus('error');
+          setErrorMsg(err.message || 'Zoho login failed');
+        }
+      };
+
+      window.addEventListener('message', receiveMessage);
+    } catch (err) {
+      setStatus('error');
+      setErrorMsg(err.message || 'Zoho OAuth not available');
+    }
+  };
+
   return (
     <div className="portal-auth-bg">
       <div className="portal-auth-card">
@@ -55,6 +117,26 @@ export default function PortalLogin() {
           </div>
         )}
 
+        {/* Zoho SSO Button */}
+        <button
+          type="button"
+          onClick={handleZohoLogin}
+          className="btn btn-primary"
+          style={{ width: '100%', justifyContent: 'center', padding: '0.85rem', marginBottom: '1rem', background: '#0258D8' }}
+          disabled={status === 'loading'}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="white" style={{ marginRight: '0.5rem' }}>
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/>
+          </svg>
+          Sign in with Zoho
+        </button>
+
+        <div style={{ display: 'flex', alignItems: 'center', margin: '1rem 0', color: 'var(--steel)', fontSize: '0.85rem' }}>
+          <div style={{ flex: 1, height: '1px', background: '#ddd' }} />
+          <span style={{ padding: '0 1rem' }}>or</span>
+          <div style={{ flex: 1, height: '1px', background: '#ddd' }} />
+        </div>
+
         <form onSubmit={handleSubmit} className="portal-auth-form">
           <div className="form-group">
             <label htmlFor="email">Email Address</label>
@@ -66,7 +148,6 @@ export default function PortalLogin() {
               placeholder="you@acschennai.com"
               value={form.email}
               onChange={handleChange}
-              required
               autoComplete="email"
             />
           </div>
@@ -81,7 +162,6 @@ export default function PortalLogin() {
               placeholder="••••••••"
               value={form.password}
               onChange={handleChange}
-              required
               autoComplete="current-password"
             />
           </div>

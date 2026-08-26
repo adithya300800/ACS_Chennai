@@ -35,6 +35,15 @@ export function AuthProvider({ children }) {
     return employee;
   }, []);
 
+  const setAuthData = useCallback((accessToken, employee, refreshToken) => {
+    localStorage.setItem('acs_auth', JSON.stringify({ accessToken, employee }));
+    if (refreshToken) {
+      localStorage.setItem('acs_refresh', refreshToken);
+    }
+    setAccessToken(accessToken);
+    setEmployee(employee);
+  }, []);
+
   const logout = useCallback(() => {
     localStorage.removeItem('acs_auth');
     localStorage.removeItem('acs_refresh');
@@ -66,6 +75,7 @@ export function AuthProvider({ children }) {
       login,
       logout,
       refreshToken: refreshTokenFn,
+      setAuthData,
       isAuthenticated: !!accessToken,
     }}>
       {children}
