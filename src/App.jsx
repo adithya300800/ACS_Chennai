@@ -11,6 +11,7 @@ import Projects from './pages/Projects.jsx';
 import Contact from './pages/Contact.jsx';
 import PortalLogin from './pages/PortalLogin.jsx';
 import Attendance from './pages/portal/Attendance.jsx';
+import Admin from './pages/portal/Admin.jsx';
 
 function App() {
   const location = useLocation();
@@ -51,6 +52,7 @@ function App() {
           }
         >
           <Route path="attendance" element={<Attendance />} />
+          <Route path="admin" element={<Admin />} />
           <Route path="leave" element={<ComingSoon name="Leave Management" />} />
           <Route path="training" element={<ComingSoon name="Training" />} />
           <Route path="assets" element={<ComingSoon name="Assets" />} />
