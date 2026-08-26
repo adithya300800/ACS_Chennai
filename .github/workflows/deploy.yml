@@ -35,6 +35,7 @@ jobs:
           npm run build
         env:
           VITE_RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

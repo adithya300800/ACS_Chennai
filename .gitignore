@@ -17,3 +17,6 @@ dist/
 # Lockfiles (optional if you prefer one package manager)
 yarn.lock
 pnpm-lock.yaml
+
+# Claude settings (never commit)
+.claude/
