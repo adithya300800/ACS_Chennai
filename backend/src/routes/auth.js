@@ -18,7 +18,7 @@ router.get('/zoho', (req, res) => {
     return res.status(503).json({ error: 'Zoho OAuth not configured' });
   }
 
-  const scopes = 'openid';
+  const scopes = 'openid profile email';
   const state = Math.random().toString(36).substring(7);
 
   const authUrl = `${ZOHO_DOMAIN}/oauth/v2/auth?` +
@@ -37,14 +37,11 @@ router.get('/zoho/callback', async (req, res) => {
   const { code } = req.query;
 
   if (!code) {
-    return res.send('<html><body><script>window.opener.postMessage({error: "No code received"}, "*"); window.close();</script><p>No authorization code received. Please close this window and try again.</p></body></html>');
+    return res.redirect(`${process.env.FRONTEND_URL}/#/portal/login?error=no_code`);
   }
 
-  // Send code to opener window and close
-  res.send(`<html><body><script>
-    window.opener.postMessage({ code: "${code}" }, "*");
-    setTimeout(function() { window.close(); }, 1000);
-  </script><p>Authentication successful! Closing...</p></body></html>`);
+  // Redirect to frontend with code
+  res.redirect(`${process.env.FRONTEND_URL}/#/portal/login?code=${code}`);
 });
 
 // POST /api/auth/zoho/callback - Exchange code for tokens and login

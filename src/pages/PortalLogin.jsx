@@ -1,13 +1,56 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
 
 export default function PortalLogin() {
   const { login } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [form, setForm] = useState({ email: '', password: '' });
   const [status, setStatus] = useState('idle'); // idle | loading | error
   const [errorMsg, setErrorMsg] = useState('');
+
+  // Check for OAuth code in URL on mount
+  useEffect(() => {
+    const code = searchParams.get('code');
+    const error = searchParams.get('error');
+
+    if (error) {
+      setStatus('error');
+      setErrorMsg('Zoho authentication failed');
+      return;
+    }
+
+    if (code) {
+      setStatus('loading');
+      setErrorMsg('');
+
+      fetch(`${import.meta.env.VITE_API_URL}/api/auth/zoho/callback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.error) throw new Error(data.error);
+
+          // Store auth data
+          localStorage.setItem('acs_auth', JSON.stringify({
+            accessToken: data.accessToken,
+            employee: data.employee
+          }));
+          localStorage.setItem('acs_refresh', data.refreshToken);
+
+          // Reload to apply auth state
+          window.location.hash = '#/portal/attendance';
+          window.location.reload();
+        })
+        .catch((err) => {
+          setStatus('error');
+          setErrorMsg(err.message || 'Zoho login failed');
+        });
+    }
+  }, [searchParams]);
 
   const handleChange = (e) => {
     setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
@@ -37,52 +80,8 @@ export default function PortalLogin() {
       if (!res.ok) throw new Error('Zoho OAuth not configured');
       const { authUrl } = await res.json();
 
-      // Open Zoho OAuth in popup
-      const width = 500;
-      const height = 600;
-      const left = window.screenX + (window.outerWidth - width) / 2;
-      const top = window.screenY + (window.outerHeight - height) / 2;
-      const popup = window.open(
-        authUrl,
-        'zoho-oauth',
-        `width=${width},height=${height},left=${left},top=${top}`
-      );
-
-      // Listen for OAuth callback
-      const receiveMessage = async (event) => {
-        if (event.origin !== window.location.origin) return;
-        if (!event.data?.code) return;
-
-        window.removeEventListener('message', receiveMessage);
-        popup.close();
-
-        // Exchange code for tokens
-        setStatus('loading');
-        try {
-          const tokenRes = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/zoho/callback`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code: event.data.code }),
-          });
-
-          if (!tokenRes.ok) throw new Error('Zoho authentication failed');
-
-          const { accessToken, refreshToken, employee } = await tokenRes.json();
-
-          // Store auth data
-          localStorage.setItem('acs_auth', JSON.stringify({ accessToken, employee }));
-          localStorage.setItem('acs_refresh', refreshToken);
-
-          // Redirect to attendance
-          navigate('/portal/attendance');
-          window.location.reload(); // Reload to apply auth state
-        } catch (err) {
-          setStatus('error');
-          setErrorMsg(err.message || 'Zoho login failed');
-        }
-      };
-
-      window.addEventListener('message', receiveMessage);
+      // Redirect to Zoho OAuth
+      window.location.href = authUrl;
     } catch (err) {
       setStatus('error');
       setErrorMsg(err.message || 'Zoho OAuth not available');
