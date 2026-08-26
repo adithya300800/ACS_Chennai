@@ -54,4 +54,4 @@ jobs:
             PORT=3000
             FRONTEND_URL=https://adithyamohanavel.github.io
             WEBSITE_RUN_FROM_PACKAGE=0
-            APP_COMMAND_LINE=node ./src/index.js
+            APP_COMMAND_LINE=node ./backend/src/index.js
