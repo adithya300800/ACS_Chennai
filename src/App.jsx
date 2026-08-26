@@ -41,6 +41,7 @@ function App() {
       <ScrollToTop />
       <Routes>
         {/* Public site */}
+        <Route path="/portal/login" element={<PortalLogin />} />
         <Route
           path="/portal/*"
           element={
