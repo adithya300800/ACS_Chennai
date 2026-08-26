@@ -43,7 +43,7 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`ACS Portal API running on port ${PORT}`);
+  console.log(`ACS Portal API running on port ${PORT} [updated]`);
 });
 
 // Graceful shutdown
