@@ -102,7 +102,13 @@ router.post('/check-in', async (req, res) => {
       },
     });
 
-    res.status(201).json({ ...attendance, sessions: [session] });
+    // Return full attendance with all sessions
+    const fullAttendance = await prisma.attendance.findUnique({
+      where: { id: attendance.id },
+      include: { sessions: { orderBy: { checkIn: 'asc' } } },
+    });
+
+    res.status(201).json(fullAttendance);
   } catch (err) {
     console.error('Check-in error:', err);
     res.status(500).json({ error: 'Check-in failed' });
@@ -145,6 +151,7 @@ router.put('/check-out/:sessionId', async (req, res) => {
         checkOutLng: longitude,
         checkOutAddr: address || null,
       },
+      include: { attendance: { include: { sessions: { orderBy: { checkIn: 'asc' } } } } },
     });
 
     res.json(updated);
