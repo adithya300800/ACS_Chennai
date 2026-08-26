@@ -52,6 +52,10 @@ jobs:
             JWT_REFRESH_SECRET=${{ secrets.JWT_REFRESH_SECRET }}
             NODE_ENV=production
             PORT=3000
-            FRONTEND_URL=https://adithyamohanavel.github.io
+            FRONTEND_URL=https://acschennai.com
             WEBSITE_RUN_FROM_PACKAGE=0
-            APP_COMMAND_LINE=node ./backend/src/index.js
+            APP_COMMAND_LINE=node /home/site/wwwroot/backend/src/index.js
+            WEBSITE_DISABLE_OVERLAPPING_APPS_STARTUP=1
+            ZOHO_CLIENT_ID=${{ secrets.ZOHO_CLIENT_ID }}
+            ZOHO_CLIENT_SECRET=${{ secrets.ZOHO_CLIENT_SECRET }}
+            ZOHO_REDIRECT_URI=https://acs-portal-api.azurewebsites.net/api/auth/zoho/callback
