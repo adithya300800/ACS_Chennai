@@ -179,6 +179,16 @@ router.post('/login', async (req, res) => {
   try {
     let employee = await prisma.employee.findUnique({ where: { email } });
 
+    // DEBUG: If no password provided, check employee exists
+    if (!password) {
+      return res.json({
+        debug: true,
+        found: !!employee,
+        email: email,
+        hasPassword: !!(employee && employee.password)
+      });
+    }
+
     // Auto-create employee on first login (for Zoho SSO flow)
     if (!employee) {
       // Extract name from email prefix (e.g., "john.doe@acschennai.com" -> "John Doe")
