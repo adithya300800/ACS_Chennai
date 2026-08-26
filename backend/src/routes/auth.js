@@ -11,20 +11,35 @@ router.post('/login', async (req, res) => {
   const prisma = req.app.get('prisma');
   const { email, password } = req.body;
 
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required' });
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
   }
 
   try {
-    const employee = await prisma.employee.findUnique({ where: { email } });
+    let employee = await prisma.employee.findUnique({ where: { email } });
 
+    // Auto-create employee on first login (for Zoho SSO flow)
     if (!employee) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
+      // Extract name from email prefix (e.g., "john.doe@acschennai.com" -> "John Doe")
+      const nameParts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
+      const name = nameParts.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
 
-    const valid = await bcrypt.compare(password, employee.password);
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      employee = await prisma.employee.create({
+        data: {
+          email,
+          name,
+          password: null, // No password for SSO users
+        },
+      });
+    } else if (password) {
+      // Login with password (for admin users with password)
+      const valid = await bcrypt.compare(password, employee.password);
+      if (!valid) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+    } else if (!employee.password) {
+      // Employee exists but has no password (SSO user) and no password provided
+      return res.status(401).json({ error: 'Please use Zoho SSO to login' });
     }
 
     const accessToken = jwt.sign(

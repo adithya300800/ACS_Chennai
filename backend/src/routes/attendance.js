@@ -1,5 +1,6 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
@@ -29,6 +30,7 @@ router.get('/', async (req, res) => {
           lte: endDate,
         },
       },
+      include: { sessions: { orderBy: { checkIn: 'asc' } } },
       orderBy: { date: 'asc' },
     });
 
@@ -51,6 +53,7 @@ router.get('/today', async (req, res) => {
         employeeId: req.employeeId,
         date: today,
       },
+      include: { sessions: { orderBy: { checkIn: 'asc' } } },
     });
 
     res.json(record || null);
@@ -73,20 +76,25 @@ router.post('/check-in', async (req, res) => {
   today.setHours(0, 0, 0, 0);
 
   try {
-    // Check if already checked in today
-    const existing = await prisma.attendance.findFirst({
+    // Find or create attendance record for today
+    let attendance = await prisma.attendance.findFirst({
       where: { employeeId: req.employeeId, date: today },
     });
 
-    if (existing) {
-      return res.status(409).json({ error: 'Already checked in today', attendance: existing });
+    if (!attendance) {
+      attendance = await prisma.attendance.create({
+        data: {
+          employeeId: req.employeeId,
+          date: today,
+          status: 'Present',
+        },
+      });
     }
 
-    const record = await prisma.attendance.create({
+    // Create new session
+    const session = await prisma.attendanceSession.create({
       data: {
-        employeeId: req.employeeId,
-        date: today,
-        status: 'Present',
+        attendanceId: attendance.id,
         checkIn: new Date(),
         checkInLat: latitude,
         checkInLng: longitude,
@@ -94,17 +102,17 @@ router.post('/check-in', async (req, res) => {
       },
     });
 
-    res.status(201).json(record);
+    res.status(201).json({ ...attendance, sessions: [session] });
   } catch (err) {
     console.error('Check-in error:', err);
     res.status(500).json({ error: 'Check-in failed' });
   }
 });
 
-// PUT /api/attendance/check-out/:id
-router.put('/check-out/:id', async (req, res) => {
+// PUT /api/attendance/check-out/:sessionId
+router.put('/check-out/:sessionId', async (req, res) => {
   const prisma = req.app.get('prisma');
-  const { id } = req.params;
+  const { sessionId } = req.params;
   const { latitude, longitude, address } = req.body;
 
   if (!latitude || !longitude) {
@@ -112,22 +120,25 @@ router.put('/check-out/:id', async (req, res) => {
   }
 
   try {
-    const record = await prisma.attendance.findUnique({ where: { id } });
+    const session = await prisma.attendanceSession.findUnique({
+      where: { id: sessionId },
+      include: { attendance: true },
+    });
 
-    if (!record) {
-      return res.status(404).json({ error: 'Attendance record not found' });
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
     }
 
-    if (record.employeeId !== req.employeeId) {
+    if (session.attendance.employeeId !== req.employeeId) {
       return res.status(403).json({ error: 'Not authorized' });
     }
 
-    if (record.checkOut) {
-      return res.status(409).json({ error: 'Already checked out', attendance: record });
+    if (session.checkOut) {
+      return res.status(409).json({ error: 'Already checked out' });
     }
 
-    const updated = await prisma.attendance.update({
-      where: { id },
+    const updated = await prisma.attendanceSession.update({
+      where: { id: sessionId },
       data: {
         checkOut: new Date(),
         checkOutLat: latitude,
@@ -140,6 +151,44 @@ router.put('/check-out/:id', async (req, res) => {
   } catch (err) {
     console.error('Check-out error:', err);
     res.status(500).json({ error: 'Check-out failed' });
+  }
+});
+
+// GET /api/attendance/all - Admin only: get all employees attendance
+router.get('/all', async (req, res) => {
+  const prisma = req.app.get('prisma');
+  const { month } = req.query;
+
+  // Check if admin
+  const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
+  if (!employee || !employee.isAdmin) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+
+  if (!month) {
+    return res.status(400).json({ error: 'month query param required (YYYY-MM)' });
+  }
+
+  try {
+    const [year, monthNum] = month.split('-').map(Number);
+    const startDate = new Date(year, monthNum - 1, 1);
+    const endDate = new Date(year, monthNum, 0);
+
+    const records = await prisma.attendance.findMany({
+      where: {
+        date: { gte: startDate, lte: endDate },
+      },
+      include: {
+        employee: { select: { id: true, name: true, email: true, department: true } },
+        sessions: { orderBy: { checkIn: 'asc' } },
+      },
+      orderBy: [{ date: 'asc' }, { employee: { name: 'asc' } }],
+    });
+
+    res.json(records);
+  } catch (err) {
+    console.error('Admin attendance error:', err);
+    res.status(500).json({ error: 'Failed to fetch attendance' });
   }
 });
 
