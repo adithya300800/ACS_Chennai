@@ -12,7 +12,7 @@ const ZOHO_CLIENT_SECRET = process.env.ZOHO_CLIENT_SECRET;
 const ZOHO_REDIRECT_URI = process.env.ZOHO_REDIRECT_URI;
 const ZOHO_DOMAIN = process.env.ZOHO_DOMAIN || 'https://accounts.zoho.com';
 
-// POST /api/auth/zoho - Initiate Zoho OAuth
+// GET /api/auth/zoho - Initiate Zoho OAuth
 router.get('/zoho', (req, res) => {
   if (!ZOHO_CLIENT_ID || !ZOHO_REDIRECT_URI) {
     return res.status(503).json({ error: 'Zoho OAuth not configured' });
@@ -30,6 +30,21 @@ router.get('/zoho', (req, res) => {
     `access_type=offline`;
 
   res.json({ authUrl });
+});
+
+// GET /api/auth/zoho/callback - Zoho redirects here with code
+router.get('/zoho/callback', async (req, res) => {
+  const { code } = req.query;
+
+  if (!code) {
+    return res.send('<html><body><script>window.opener.postMessage({error: "No code received"}, "*"); window.close();</script><p>No authorization code received. Please close this window and try again.</p></body></html>');
+  }
+
+  // Send code to opener window and close
+  res.send(`<html><body><script>
+    window.opener.postMessage({ code: "${code}" }, "*");
+    setTimeout(function() { window.close(); }, 1000);
+  </script><p>Authentication successful! Closing...</p></body></html>`);
 });
 
 // POST /api/auth/zoho/callback - Exchange code for tokens and login
