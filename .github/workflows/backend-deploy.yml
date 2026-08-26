@@ -39,6 +39,13 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Set startup command
+        run: |
+          az webapp config set \
+            --name acs-portal-api \
+            --resource-group acs-portal-rg \
+            --startup-file "npm start"
+
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
