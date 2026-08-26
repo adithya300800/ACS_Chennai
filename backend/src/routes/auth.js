@@ -79,9 +79,9 @@ router.post('/zoho/callback', async (req, res) => {
     const tokens = await tokenRes.json();
     const { access_token, refresh_token } = tokens;
 
-    // Get user info from Zoho
-    const userRes = await fetch(`${ZOHO_DOMAIN}/oauth/userinfo`, {
-      headers: { Authorization: `Bearer ${access_token}` },
+    // Get user info from Zoho People API
+    const userRes = await fetch(`https://people.zoho.com/people/api/v1/user`, {
+      headers: { Authorization: `Zoho-oauthtoken ${access_token}` },
     });
 
     if (!userRes.ok) {
@@ -89,7 +89,7 @@ router.post('/zoho/callback', async (req, res) => {
     }
 
     const zohoUser = await userRes.json();
-    const email = zohoUser.email;
+    const email = zohoUser.email || zohoUser.Email || zohoUser.userEmail;
 
     if (!email) {
       return res.status(400).json({ error: 'Could not get email from Zoho' });
