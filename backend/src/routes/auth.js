@@ -166,35 +166,42 @@ router.post('/zoho/callback', async (req, res) => {
 });
 
 // POST /api/auth/login
-
-// POST /api/auth/login
 router.post('/login', async (req, res) => {
   const prisma = req.app.get('prisma');
   const { email, password } = req.body;
+
+  console.log('LOGIN_ATTEMPT', { email, hasPassword: !!password });
 
   if (!email) {
     return res.status(400).json({ error: 'Email is required' });
   }
 
+  let employee;
   try {
-    let employee = await prisma.employee.findUnique({ where: { email } });
+    employee = await prisma.employee.findUnique({ where: { email } });
+    console.log('EMPLOYEE_FOUND', { email, found: !!employee, hasStoredPassword: !!employee?.password });
+  } catch (err) {
+    console.error('DB_FIND_ERROR', err);
+    return res.status(500).json({ error: 'Database error: ' + err.message });
+  }
 
-    // DEBUG: If no password provided, check employee exists
-    if (!password) {
-      return res.json({
-        debug: true,
-        found: !!employee,
-        email: email,
-        hasPassword: !!(employee && employee.password)
-      });
-    }
+  // DEBUG: If no password provided, check employee exists
+  if (!password) {
+    return res.json({
+      debug: true,
+      found: !!employee,
+      email: email,
+      hasPassword: !!(employee && employee.password)
+    });
+  }
 
-    // Auto-create employee on first login (for Zoho SSO flow)
-    if (!employee) {
-      // Extract name from email prefix (e.g., "john.doe@acschennai.com" -> "John Doe")
-      const nameParts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
-      const name = nameParts.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+  // Auto-create employee on first login (for Zoho SSO flow)
+  if (!employee) {
+    // Extract name from email prefix (e.g., "john.doe@acschennai.com" -> "John Doe")
+    const nameParts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
+    const name = nameParts.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
 
+    try {
       employee = await prisma.employee.create({
         data: {
           email,
@@ -202,41 +209,47 @@ router.post('/login', async (req, res) => {
           password: null, // No password for SSO users
         },
       });
-    } else if (password) {
-      // Login with password (for admin users with password)
-      const valid = await bcrypt.compare(password, employee.password);
-      if (!valid) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
-    } else if (!employee.password) {
-      // Employee exists but has no password (SSO user) and no password provided
+      console.log('EMPLOYEE_CREATED', { email });
+    } catch (err) {
+      console.error('DB_CREATE_ERROR', err);
+      return res.status(500).json({ error: 'Database create error: ' + err.message });
+    }
+  } else if (password) {
+    // Login with password (for admin users with password)
+    if (!employee.password) {
       return res.status(401).json({ error: 'Please use Zoho SSO to login' });
     }
-
-    const accessToken = jwt.sign(
-      { employeeId: employee.id, email: employee.email },
-      JWT_SECRET,
-      { expiresIn: '8h' }
-    );
-
-    const refreshToken = jwt.sign(
-      { employeeId: employee.id },
-      JWT_REFRESH_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    // Don't send password back
-    const { password: _, ...employeeData } = employee;
-
-    res.json({
-      accessToken,
-      refreshToken,
-      employee: employeeData,
-    });
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ error: 'Login failed' });
+    const valid = await bcrypt.compare(password, employee.password);
+    if (!valid) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+  } else if (!employee.password) {
+    // Employee exists but has no password (SSO user) and no password provided
+    return res.status(401).json({ error: 'Please use Zoho SSO to login' });
   }
+
+  const accessToken = jwt.sign(
+    { employeeId: employee.id, email: employee.email },
+    JWT_SECRET,
+    { expiresIn: '8h' }
+  );
+
+  const refreshToken = jwt.sign(
+    { employeeId: employee.id },
+    JWT_REFRESH_SECRET,
+    { expiresIn: '7d' }
+  );
+
+  // Don't send password back
+  const { password: _, ...employeeData } = employee;
+
+  console.log('LOGIN_SUCCESS', { email, employeeId: employee.id });
+
+  res.json({
+    accessToken,
+    refreshToken,
+    employee: employeeData,
+  });
 });
 
 // POST /api/auth/refresh
