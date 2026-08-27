@@ -57,12 +57,14 @@ export default function Attendance() {
     });
   };
 
-  // Format location as coordinates with direction
-  const formatLocation = (lat, lng) => {
-    if (!lat || !lng || lat === 0 || lng === 0) return '';
-    const latDir = lat >= 0 ? 'N' : 'S';
-    const lngDir = lng >= 0 ? 'E' : 'W';
-    return `${Math.abs(lat).toFixed(4)}°${latDir}, ${Math.abs(lng).toFixed(4)}°${lngDir}`;
+  // Format date for display
+  const formatDate = (dateStr) => {
+    if (!dateStr) return '';
+    return new Date(dateStr).toLocaleDateString('en-IN', {
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short'
+    });
   };
 
   // Get embedded map URL for OpenStreetMap
@@ -94,7 +96,7 @@ export default function Attendance() {
     });
   };
 
-  // Handle check-in only (no checkout)
+  // Handle check-in only
   const handleCheckIn = async () => {
     setStatus('checking-in');
     setError('');
@@ -106,7 +108,10 @@ export default function Attendance() {
         const coords = await requestLocation();
         lat = coords.latitude;
         lng = coords.longitude;
-        addr = formatLocation(lat, lng);
+        // Format location as coordinates with direction
+        const latDir = lat >= 0 ? 'N' : 'S';
+        const lngDir = lng >= 0 ? 'E' : 'W';
+        addr = `${Math.abs(lat).toFixed(4)}°${latDir}, ${Math.abs(lng).toFixed(4)}°${lngDir}`;
       } catch {
         // Use default if geolocation fails
       }
@@ -121,34 +126,58 @@ export default function Attendance() {
     }
   };
 
-  // Get record for a specific date
-  const getRecordForDate = (day) => {
-    return monthRecords.find(r => {
-      const rDate = new Date(r.date);
-      return rDate.getDate() === day && rDate.getMonth() + 1 === parseInt(currentMonth.split('-')[1]);
-    });
+  // Normalize date to YYYY-MM-DD string in local timezone
+  const toDateString = (date) => {
+    const d = new Date(date);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
   };
 
   // Build calendar data
   const buildCalendar = () => {
     const [year, month] = currentMonth.split('-').map(Number);
+
+    // First day of month (0=Sun)
     const firstDay = new Date(year, month - 1, 1).getDay();
+    // Days in month
     const daysInMonth = new Date(year, month, 0).getDate();
 
-    const weeks = [];
-    let week = Array(firstDay).fill(null);
+    // Create a map of date strings to records
+    const recordMap = {};
+    monthRecords.forEach(r => {
+      const dateStr = toDateString(r.date);
+      if (!recordMap[dateStr] || r.sessions.length > 0) {
+        recordMap[dateStr] = r;
+      }
+    });
 
+    const weeks = [];
+    let week = [];
+
+    // Empty cells before first day
+    for (let i = 0; i < firstDay; i++) {
+      week.push(null);
+    }
+
+    // Days of the month
     for (let day = 1; day <= daysInMonth; day++) {
-      const record = getRecordForDate(day);
-      week.push({ day, record });
+      const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      const record = recordMap[dateStr];
+      week.push({ day, record, dateStr });
+
       if (week.length === 7) {
         weeks.push(week);
         week = [];
       }
     }
 
+    // Fill remaining cells
+    while (week.length > 0 && week.length < 7) {
+      week.push(null);
+    }
     if (week.length > 0) {
-      while (week.length < 7) week.push(null);
       weeks.push(week);
     }
 
@@ -158,7 +187,7 @@ export default function Attendance() {
   const weeks = buildCalendar();
   const monthLabel = new Date(currentMonth + '-01').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
   const today = new Date();
-  const isToday = (day) => today.getDate() === day && today.getMonth() + 1 === parseInt(currentMonth.split('-')[1]);
+  const todayDateStr = toDateString(today);
 
   return (
     <div className="attendance-page">
@@ -170,7 +199,7 @@ export default function Attendance() {
       {/* Check-in Card */}
       <div className="attendance-card">
         <div className="attendance-card-date">
-          {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+          {today.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
         </div>
 
         {error && (
@@ -194,7 +223,7 @@ export default function Attendance() {
                   <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" />
                 </svg>
               </span>
-              {status === 'checking-in' ? 'Checking In...' : 'Mark Attendance'}
+              {status === 'checking-in' ? 'Marking...' : 'Mark Attendance'}
             </button>
             <p className="attendance-action-hint">
               Your GPS location will be captured when you mark attendance
@@ -215,7 +244,7 @@ export default function Attendance() {
                 </svg>
                 Marked at {formatTime(activeSession.checkIn)}
               </div>
-              {activeSession.checkInAddr && (
+              {activeSession.checkInAddr && activeSession.checkInAddr !== 'Location unavailable' && (
                 <div className="attendance-checkin-loc">
                   <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
                     <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" />
@@ -266,19 +295,25 @@ export default function Attendance() {
             <div key={i} className="attendance-calendar-day-label">{d}</div>
           ))}
           {weeks.flat().map((item, i) => {
-            const hasRecord = item?.record?.sessions?.length > 0;
-            const isSelected = selectedDate?.date === item?.record?.date;
+            if (!item) {
+              return <div key={i} className="attendance-calendar-cell attendance-calendar-cell-empty" />;
+            }
+
+            const { day, record, dateStr } = item;
+            const hasRecord = record?.sessions?.length > 0;
+            const isToday = dateStr === todayDateStr;
+            const isSelected = selectedDate && toDateString(selectedDate.date) === dateStr;
 
             return (
               <div
                 key={i}
-                onClick={() => item?.record && setSelectedDate(item.record)}
-                className={`attendance-calendar-cell ${hasRecord ? 'has-record' : ''} ${isToday(item?.day) ? 'is-today' : ''} ${isSelected ? 'is-selected' : ''}`}
+                onClick={() => hasRecord && setSelectedDate(record)}
+                className={`attendance-calendar-cell ${hasRecord ? 'has-record' : ''} ${isToday ? 'is-today' : ''} ${isSelected ? 'is-selected' : ''}`}
               >
-                <span className="attendance-calendar-day-num">{item?.day || ''}</span>
+                <span className="attendance-calendar-day-num">{day}</span>
                 {hasRecord && (
                   <div className="attendance-calendar-checkin">
-                    {formatTime(item.record.sessions[0].checkIn)}
+                    {formatTime(record.sessions[0].checkIn)}
                   </div>
                 )}
               </div>
@@ -401,7 +436,6 @@ export default function Attendance() {
         }
         .attendance-btn-checkin:hover:not(:disabled) {
           background: #1D4ED8;
-          transform: translateY(-1px);
         }
         .attendance-btn-icon {
           display: flex;
@@ -482,7 +516,7 @@ export default function Attendance() {
         .attendance-calendar-grid {
           display: grid;
           grid-template-columns: repeat(7, 1fr);
-          gap: 0.5rem;
+          gap: 0.35rem;
         }
         .attendance-calendar-day-label {
           text-align: center;
@@ -498,32 +532,39 @@ export default function Attendance() {
           flex-direction: column;
           align-items: center;
           justify-content: center;
-          border-radius: 12px;
-          cursor: pointer;
-          transition: all 0.2s;
+          border-radius: 10px;
+          cursor: default;
           background: #f8fafc;
-          min-height: 60px;
+          min-height: 56px;
+          transition: all 0.2s;
         }
-        .attendance-calendar-cell:hover {
-          background: #f1f5f9;
-        }
-        .attendance-calendar-cell.is-today {
-          border: 2px solid var(--blue);
+        .attendance-calendar-cell-empty {
+          background: transparent;
         }
         .attendance-calendar-cell.has-record {
           background: #DCFCE7;
+          cursor: pointer;
         }
         .attendance-calendar-cell.has-record:hover {
           background: #bbf7d0;
         }
+        .attendance-calendar-cell.is-today {
+          border: 2px solid var(--blue);
+        }
+        .attendance-calendar-cell.is-today.has-record {
+          background: #bbf7d0;
+        }
         .attendance-calendar-cell.is-selected {
-          background: #dbeafe;
+          background: #dbeafe !important;
           border: 2px solid var(--blue);
         }
         .attendance-calendar-day-num {
-          font-size: 0.875rem;
+          font-size: 0.8rem;
           font-weight: 500;
           color: var(--navy);
+        }
+        .attendance-calendar-cell-empty .attendance-calendar-day-num {
+          visibility: hidden;
         }
         .attendance-calendar-checkin {
           font-size: 0.6rem;
