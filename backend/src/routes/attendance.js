@@ -63,7 +63,7 @@ router.get('/today', async (req, res) => {
   }
 });
 
-// POST /api/attendance/check-in
+// POST /api/attendance/check-in - validates lat/lng are provided
 router.post('/check-in', async (req, res) => {
   const prisma = req.app.get('prisma');
   const { latitude, longitude, address } = req.body;
