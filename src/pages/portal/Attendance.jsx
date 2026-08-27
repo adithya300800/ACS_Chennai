@@ -54,12 +54,13 @@ export default function Attendance() {
       }
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          setLocationStatus('granted');
-          setLocation({
+          const coords = {
             latitude: pos.coords.latitude,
             longitude: pos.coords.longitude,
-          });
-          resolve(location);
+          };
+          setLocationStatus('granted');
+          setLocation(coords);
+          resolve(coords);
         },
         (err) => {
           setLocationStatus('denied');
@@ -84,9 +85,9 @@ export default function Attendance() {
     try {
       let lat, lng, addr;
       try {
-        await requestLocation();
-        lat = location.latitude;
-        lng = location.longitude;
+        const coords = await requestLocation();
+        lat = coords.latitude;
+        lng = coords.longitude;
         addr = formatLocation(lat, lng);
       } catch {
         // Geolocation failed — use manual entry or defaults
@@ -120,9 +121,9 @@ export default function Attendance() {
     try {
       let lat, lng, addr;
       try {
-        await requestLocation();
-        lat = location.latitude;
-        lng = location.longitude;
+        const coords = await requestLocation();
+        lat = coords.latitude;
+        lng = coords.longitude;
         addr = formatLocation(lat, lng);
       } catch {
         addr = 'Location unavailable';
