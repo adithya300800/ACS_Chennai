@@ -74,15 +74,21 @@ export default function PortalLogin() {
     setStatus('loading');
     setErrorMsg('');
 
+    const apiUrl = import.meta.env.VITE_API_URL;
+    console.log('Zoho login clicked, API URL:', apiUrl);
+
     try {
       // Get Zoho OAuth URL
-      const res = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/zoho`);
-      if (!res.ok) throw new Error('Zoho OAuth not configured');
+      const res = await fetch(`${apiUrl}/api/auth/zoho`);
+      console.log('Zoho endpoint response status:', res.status);
+      if (!res.ok) throw new Error('Zoho OAuth not configured. API URL: ' + apiUrl);
       const { authUrl } = await res.json();
+      console.log('Redirecting to:', authUrl);
 
       // Redirect to Zoho OAuth
       window.location.href = authUrl;
     } catch (err) {
+      console.error('Zoho login error:', err);
       setStatus('error');
       setErrorMsg(err.message || 'Zoho OAuth not available');
     }
