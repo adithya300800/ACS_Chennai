@@ -68,7 +68,7 @@ router.post('/check-in', async (req, res) => {
   const prisma = req.app.get('prisma');
   const { latitude, longitude, address } = req.body;
 
-  if (latitude === undefined || latitude === null || longitude === undefined || longitude === null) {
+  if (!latitude || !longitude) {
     return res.status(400).json({ error: 'latitude and longitude are required' });
   }
 
@@ -121,7 +121,7 @@ router.put('/check-out/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
   const { latitude, longitude, address } = req.body;
 
-  if (latitude === undefined || latitude === null || longitude === undefined || longitude === null) {
+  if (!latitude || !longitude) {
     return res.status(400).json({ error: 'latitude and longitude are required' });
   }
 

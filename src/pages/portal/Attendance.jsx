@@ -43,7 +43,7 @@ export default function Attendance() {
     fetchMonth();
   }, [fetchToday, fetchMonth]);
 
-  // Request geolocation
+  // Request geolocation - tries fast (network) first, then accurate (GPS) if needed
   const requestLocation = () => {
     console.log('requestLocation called');
     return new Promise((resolve, reject) => {
@@ -54,9 +54,11 @@ export default function Attendance() {
         reject(new Error('Geolocation not supported'));
         return;
       }
+
+      // Try network-based location first (fast, ~1-2 seconds)
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          console.log('Geolocation success:', pos.coords);
+          console.log('Geolocation success (network):', pos.coords.latitude, pos.coords.longitude);
           const coords = {
             latitude: pos.coords.latitude,
             longitude: pos.coords.longitude,
@@ -66,11 +68,28 @@ export default function Attendance() {
           resolve(coords);
         },
         (err) => {
-          console.log('Geolocation error:', err.message);
-          setLocationStatus('denied');
-          reject(err);
+          console.log('Geolocation network failed, trying GPS:', err.message);
+          // Try GPS (slower but more accurate)
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              console.log('Geolocation success (GPS):', pos.coords.latitude, pos.coords.longitude);
+              const coords = {
+                latitude: pos.coords.latitude,
+                longitude: pos.coords.longitude,
+              };
+              setLocationStatus('granted');
+              setLocation(coords);
+              resolve(coords);
+            },
+            (gpsErr) => {
+              console.log('Geolocation GPS failed:', gpsErr.message);
+              setLocationStatus('denied');
+              reject(new Error('Unable to get location. Please enable location services.'));
+            },
+            { enableHighAccuracy: true, timeout: 60000 }
+          );
         },
-        { enableHighAccuracy: false, timeout: 30000 }
+        { enableHighAccuracy: false, timeout: 10000 }
       );
     });
   };
