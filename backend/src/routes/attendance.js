@@ -19,8 +19,9 @@ router.get('/', async (req, res) => {
 
   try {
     const [year, monthNum] = month.split('-').map(Number);
-    const startDate = new Date(year, monthNum - 1, 1);
-    const endDate = new Date(year, monthNum, 0);
+    // Use UTC dates for consistency
+    const startDate = new Date(Date.UTC(year, monthNum - 1, 1));
+    const endDate = new Date(Date.UTC(year, monthNum, 0, 23, 59, 59, 999));
 
     const records = await prisma.attendance.findMany({
       where: {
@@ -44,8 +45,9 @@ router.get('/', async (req, res) => {
 // GET /api/attendance/today
 router.get('/today', async (req, res) => {
   const prisma = req.app.get('prisma');
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  // Use UTC date to match frontend
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 
   try {
     const record = await prisma.attendance.findFirst({
@@ -66,14 +68,21 @@ router.get('/today', async (req, res) => {
 // POST /api/attendance/check-in - validates lat/lng are provided
 router.post('/check-in', async (req, res) => {
   const prisma = req.app.get('prisma');
-  const { latitude, longitude, address } = req.body;
+  const { latitude, longitude, address, date } = req.body;
 
   if (!latitude || !longitude) {
     return res.status(400).json({ error: 'latitude and longitude are required' });
   }
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  // Use provided date or current date - parse YYYY-MM-DD and create UTC midnight
+  let today;
+  if (date) {
+    const [year, month, day] = date.split('-').map(Number);
+    today = new Date(Date.UTC(year, month - 1, day));
+  } else {
+    const now = new Date();
+    today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  }
 
   try {
     // Find or create attendance record for today
@@ -91,7 +100,7 @@ router.post('/check-in', async (req, res) => {
       });
     }
 
-    // Create new session
+    // Create new session with current UTC timestamp
     const session = await prisma.attendanceSession.create({
       data: {
         attendanceId: attendance.id,

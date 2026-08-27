@@ -131,7 +131,11 @@ export default function Attendance() {
         // Use default if geolocation fails
       }
 
-      const data = await api.post('/attendance/check-in', { latitude: lat, longitude: lng, address: addr }, accessToken);
+      // Send local date in YYYY-MM-DD format
+      const todayLocal = new Date();
+      const localDate = `${todayLocal.getFullYear()}-${String(todayLocal.getMonth() + 1).padStart(2, '0')}-${String(todayLocal.getDate()).padStart(2, '0')}`;
+
+      const data = await api.post('/attendance/check-in', { latitude: lat, longitude: lng, address: addr, date: localDate }, accessToken);
       setTodayRecord(data);
       setStatus('idle');
       fetchMonth();
