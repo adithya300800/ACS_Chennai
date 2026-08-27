@@ -45,15 +45,18 @@ export default function Attendance() {
 
   // Request geolocation
   const requestLocation = () => {
+    console.log('requestLocation called');
     return new Promise((resolve, reject) => {
       setLocationStatus('requesting');
       if (!navigator.geolocation) {
+        console.log('Geolocation not supported');
         setLocationStatus('denied');
         reject(new Error('Geolocation not supported'));
         return;
       }
       navigator.geolocation.getCurrentPosition(
         (pos) => {
+          console.log('Geolocation success:', pos.coords);
           const coords = {
             latitude: pos.coords.latitude,
             longitude: pos.coords.longitude,
@@ -63,6 +66,7 @@ export default function Attendance() {
           resolve(coords);
         },
         (err) => {
+          console.log('Geolocation error:', err.message);
           setLocationStatus('denied');
           reject(err);
         },
@@ -79,17 +83,21 @@ export default function Attendance() {
 
   // Handle check-in
   const handleCheckIn = async () => {
+    console.log('handleCheckIn called, status:', status);
     setStatus('checking-in');
     setError('');
 
     try {
       let lat, lng, addr;
       try {
+        console.log('Requesting location...');
         const coords = await requestLocation();
+        console.log('Got coords:', coords);
         lat = coords.latitude;
         lng = coords.longitude;
         addr = formatLocation(lat, lng);
-      } catch {
+      } catch (err) {
+        console.log('Geolocation error:', err.message);
         // Geolocation failed — use manual entry or defaults
         if (showManual && manualAddr.trim()) {
           addr = manualAddr.trim();
@@ -102,11 +110,14 @@ export default function Attendance() {
         }
       }
 
+      console.log('Check-in with lat:', lat, 'lng:', lng, 'addr:', addr);
       const data = await api.post('/attendance/check-in', { latitude: lat, longitude: lng, address: addr }, accessToken);
+      console.log('Check-in success:', data);
       setTodayRecord(data);
       setStatus('idle');
       fetchMonth();
     } catch (err) {
+      console.error('Check-in error:', err);
       setStatus('error');
       setError(err.message || 'Check-in failed');
     }
