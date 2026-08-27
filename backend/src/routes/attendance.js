@@ -1,27 +1,58 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
 const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
 
+// Helper: Get UTC start and end of a local date (YYYY-MM format)
+function getMonthRange(yearMonth) {
+  const [year, month] = yearMonth.split('-').map(Number);
+  const startDate = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+  const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+  return { startDate, endDate };
+}
+
+// Helper: Get today's date at UTC midnight
+function getTodayUTC() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+}
+
+// Helper: Parse YYYY-MM-DD string to UTC midnight
+function parseLocalDate(dateStr) {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+// Helper: Get date string YYYY-MM-DD from Date object (local timezone)
+function toLocalDateString(date) {
+  const d = new Date(date);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+// Helper: Get UTC date for today (matches frontend's local date)
+function getTodayForEmployee() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+}
+
 // All routes require auth
 router.use(requireAuth);
 
-// GET /api/attendance?month=2025-08
+// GET /api/attendance?month=YYYY-MM
 router.get('/', async (req, res) => {
   const prisma = req.app.get('prisma');
   const { month } = req.query;
 
-  if (!month) {
+  if (!month || !/^\d{4}-\d{2}$/.test(month)) {
     return res.status(400).json({ error: 'month query param required (YYYY-MM)' });
   }
 
   try {
-    const [year, monthNum] = month.split('-').map(Number);
-    // Use UTC dates for consistency
-    const startDate = new Date(Date.UTC(year, monthNum - 1, 1));
-    const endDate = new Date(Date.UTC(year, monthNum, 0, 23, 59, 59, 999));
+    const { startDate, endDate } = getMonthRange(month);
 
     const records = await prisma.attendance.findMany({
       where: {
@@ -35,7 +66,18 @@ router.get('/', async (req, res) => {
       orderBy: { date: 'asc' },
     });
 
-    res.json(records);
+    // Transform dates to local timezone strings for frontend
+    const transformed = records.map(r => ({
+      ...r,
+      date: toLocalDateString(r.date),
+      sessions: r.sessions.map(s => ({
+        ...s,
+        checkIn: s.checkIn ? s.checkIn.toISOString() : null,
+        checkOut: s.checkOut ? s.checkOut.toISOString() : null,
+      })),
+    }));
+
+    res.json(transformed);
   } catch (err) {
     console.error('Attendance list error:', err);
     res.status(500).json({ error: 'Failed to fetch attendance' });
@@ -45,9 +87,7 @@ router.get('/', async (req, res) => {
 // GET /api/attendance/today
 router.get('/today', async (req, res) => {
   const prisma = req.app.get('prisma');
-  // Use UTC date to match frontend
-  const now = new Date();
-  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const today = getTodayForEmployee();
 
   try {
     const record = await prisma.attendance.findFirst({
@@ -58,53 +98,61 @@ router.get('/today', async (req, res) => {
       include: { sessions: { orderBy: { checkIn: 'asc' } } },
     });
 
-    res.json(record || null);
+    if (!record) {
+      return res.json(null);
+    }
+
+    // Transform dates to local timezone strings
+    const transformed = {
+      ...record,
+      date: toLocalDateString(record.date),
+      sessions: record.sessions.map(s => ({
+        ...s,
+        checkIn: s.checkIn ? s.checkIn.toISOString() : null,
+        checkOut: s.checkOut ? s.checkOut.toISOString() : null,
+      })),
+    };
+
+    res.json(transformed);
   } catch (err) {
     console.error('Today attendance error:', err);
     res.status(500).json({ error: 'Failed to fetch today attendance' });
   }
 });
 
-// POST /api/attendance/check-in - validates lat/lng are provided
+// POST /api/attendance/check-in
 router.post('/check-in', async (req, res) => {
   const prisma = req.app.get('prisma');
-  const { latitude, longitude, address, date } = req.body;
+  const { latitude, longitude, address } = req.body;
 
-  if (!latitude || !longitude) {
+  if (latitude === undefined || latitude === null || longitude === undefined || longitude === null) {
     return res.status(400).json({ error: 'latitude and longitude are required' });
   }
 
-  // Use provided date or current date - parse YYYY-MM-DD and create UTC midnight
-  let today;
-  if (date) {
-    const [year, month, day] = date.split('-').map(Number);
-    today = new Date(Date.UTC(year, month - 1, day));
-  } else {
-    const now = new Date();
-    today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  }
+  // Use employee's local date for attendance record
+  const attendanceDate = getTodayForEmployee();
 
   try {
     // Find or create attendance record for today
     let attendance = await prisma.attendance.findFirst({
-      where: { employeeId: req.employeeId, date: today },
+      where: { employeeId: req.employeeId, date: attendanceDate },
     });
 
     if (!attendance) {
       attendance = await prisma.attendance.create({
         data: {
           employeeId: req.employeeId,
-          date: today,
+          date: attendanceDate,
           status: 'Present',
         },
       });
     }
 
-    // Create new session with current UTC timestamp
+    // Create new session
     const session = await prisma.attendanceSession.create({
       data: {
         attendanceId: attendance.id,
-        checkIn: new Date(),
+        checkIn: new Date(), // Store current timestamp in UTC
         checkInLat: latitude,
         checkInLng: longitude,
         checkInAddr: address || null,
@@ -117,7 +165,18 @@ router.post('/check-in', async (req, res) => {
       include: { sessions: { orderBy: { checkIn: 'asc' } } },
     });
 
-    res.status(201).json(fullAttendance);
+    // Transform for frontend
+    const transformed = {
+      ...fullAttendance,
+      date: toLocalDateString(fullAttendance.date),
+      sessions: fullAttendance.sessions.map(s => ({
+        ...s,
+        checkIn: s.checkIn ? s.checkIn.toISOString() : null,
+        checkOut: s.checkOut ? s.checkOut.toISOString() : null,
+      })),
+    };
+
+    res.status(201).json(transformed);
   } catch (err) {
     console.error('Check-in error:', err);
     res.status(500).json({ error: 'Check-in failed' });
@@ -130,7 +189,7 @@ router.put('/check-out/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
   const { latitude, longitude, address } = req.body;
 
-  if (!latitude || !longitude) {
+  if (latitude === undefined || latitude === null || longitude === undefined || longitude === null) {
     return res.status(400).json({ error: 'latitude and longitude are required' });
   }
 
@@ -163,7 +222,23 @@ router.put('/check-out/:sessionId', async (req, res) => {
       include: { attendance: { include: { sessions: { orderBy: { checkIn: 'asc' } } } } },
     });
 
-    res.json(updated);
+    // Transform for frontend
+    const transformed = {
+      ...updated,
+      checkIn: updated.checkIn ? updated.checkIn.toISOString() : null,
+      checkOut: updated.checkOut ? updated.checkOut.toISOString() : null,
+      attendance: {
+        ...updated.attendance,
+        date: toLocalDateString(updated.attendance.date),
+        sessions: updated.attendance.sessions.map(s => ({
+          ...s,
+          checkIn: s.checkIn ? s.checkIn.toISOString() : null,
+          checkOut: s.checkOut ? s.checkOut.toISOString() : null,
+        })),
+      },
+    };
+
+    res.json(transformed);
   } catch (err) {
     console.error('Check-out error:', err);
     res.status(500).json({ error: 'Check-out failed' });
@@ -181,14 +256,12 @@ router.get('/all', async (req, res) => {
     return res.status(403).json({ error: 'Admin access required' });
   }
 
-  if (!month) {
+  if (!month || !/^\d{4}-\d{2}$/.test(month)) {
     return res.status(400).json({ error: 'month query param required (YYYY-MM)' });
   }
 
   try {
-    const [year, monthNum] = month.split('-').map(Number);
-    const startDate = new Date(year, monthNum - 1, 1);
-    const endDate = new Date(year, monthNum, 0);
+    const { startDate, endDate } = getMonthRange(month);
 
     const records = await prisma.attendance.findMany({
       where: {
@@ -201,7 +274,18 @@ router.get('/all', async (req, res) => {
       orderBy: [{ date: 'asc' }, { employee: { name: 'asc' } }],
     });
 
-    res.json(records);
+    // Transform dates for frontend
+    const transformed = records.map(r => ({
+      ...r,
+      date: toLocalDateString(r.date),
+      sessions: r.sessions.map(s => ({
+        ...s,
+        checkIn: s.checkIn ? s.checkIn.toISOString() : null,
+        checkOut: s.checkOut ? s.checkOut.toISOString() : null,
+      })),
+    }));
+
+    res.json(transformed);
   } catch (err) {
     console.error('Admin attendance error:', err);
     res.status(500).json({ error: 'Failed to fetch attendance' });
