@@ -70,7 +70,7 @@ export default function Attendance() {
           setLocationStatus('denied');
           reject(err);
         },
-        { enableHighAccuracy: true, timeout: 10000 }
+        { enableHighAccuracy: false, timeout: 30000 }
       );
     });
   };
