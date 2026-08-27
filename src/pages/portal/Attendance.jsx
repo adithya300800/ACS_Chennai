@@ -10,12 +10,16 @@ export default function Attendance() {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
   });
-  const [status, setStatus] = useState('idle'); // idle | loading | checking-in | checking-out | error
-  const [locationStatus, setLocationStatus] = useState(''); // '' | 'requesting' | 'granted' | 'denied'
-  const [location, setLocation] = useState(null);
+  const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
-  const [manualAddr, setManualAddr] = useState('');
-  const [showManual, setShowManual] = useState(false);
+
+  // Get active (open) session from today's record
+  const getActiveSession = () => {
+    if (!todayRecord?.sessions) return null;
+    return todayRecord.sessions.find(s => !s.checkOut) || null;
+  };
+
+  const activeSession = getActiveSession();
 
   // Fetch today's attendance
   const fetchToday = useCallback(async () => {
@@ -23,7 +27,6 @@ export default function Attendance() {
       const data = await api.get('/attendance/today', accessToken);
       setTodayRecord(data);
     } catch {
-      // No record yet today — that's fine
       setTodayRecord(null);
     }
   }, [accessToken]);
@@ -43,130 +46,104 @@ export default function Attendance() {
     fetchMonth();
   }, [fetchToday, fetchMonth]);
 
-  // Request geolocation - tries fast (network) first, then accurate (GPS) if needed
+  // Format time in user's timezone
+  const formatTime = (dateStr) => {
+    if (!dateStr) return '';
+    return new Date(dateStr).toLocaleTimeString('en-IN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    });
+  };
+
+  // Format location as coordinates
+  const formatLocation = (lat, lng) => {
+    if (!lat || !lng) return '';
+    const latDir = lat >= 0 ? 'N' : 'S';
+    const lngDir = lng >= 0 ? 'E' : 'W';
+    return `${Math.abs(lat).toFixed(4)}°${latDir}, ${Math.abs(lng).toFixed(4)}°${lngDir}`;
+  };
+
+  // Get embedded map URL for OpenStreetMap
+  const getMapUrl = (lat, lng) => {
+    if (!lat || !lng || lat === 0 || lng === 0) return null;
+    return `https://www.openstreetmap.org/export/embed.html?bbox=${lng - 0.01},${lat - 0.01},${lng + 0.01},${lat + 0.01}&layer=mapnik&marker=${lat},${lng}`;
+  };
+
+  // Request geolocation
   const requestLocation = () => {
-    console.log('requestLocation called');
     return new Promise((resolve, reject) => {
-      setLocationStatus('requesting');
       if (!navigator.geolocation) {
-        console.log('Geolocation not supported');
-        setLocationStatus('denied');
         reject(new Error('Geolocation not supported'));
         return;
       }
 
-      // Try network-based location first (fast, ~1-2 seconds)
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          console.log('Geolocation success (network):', pos.coords.latitude, pos.coords.longitude);
-          const coords = {
+          resolve({
             latitude: pos.coords.latitude,
             longitude: pos.coords.longitude,
-          };
-          setLocationStatus('granted');
-          setLocation(coords);
-          resolve(coords);
+          });
         },
         (err) => {
-          console.log('Geolocation network failed, trying GPS:', err.message);
-          // Try GPS (slower but more accurate)
-          navigator.geolocation.getCurrentPosition(
-            (pos) => {
-              console.log('Geolocation success (GPS):', pos.coords.latitude, pos.coords.longitude);
-              const coords = {
-                latitude: pos.coords.latitude,
-                longitude: pos.coords.longitude,
-              };
-              setLocationStatus('granted');
-              setLocation(coords);
-              resolve(coords);
-            },
-            (gpsErr) => {
-              console.log('Geolocation GPS failed:', gpsErr.message);
-              setLocationStatus('denied');
-              reject(new Error('Unable to get location. Please enable location services.'));
-            },
-            { enableHighAccuracy: true, timeout: 60000 }
-          );
+          reject(new Error('Unable to get location'));
         },
-        { enableHighAccuracy: false, timeout: 10000 }
+        { enableHighAccuracy: false, timeout: 15000 }
       );
     });
   };
 
-  // Reverse geocode (simple: just show lat/lng as string — no external API needed)
-  const formatLocation = (lat, lng) => {
-    if (!lat || !lng) return '';
-    return `${parseFloat(lat).toFixed(4)}°N, ${parseFloat(lng).toFixed(4)}°E`;
-  };
-
   // Handle check-in
   const handleCheckIn = async () => {
-    console.log('handleCheckIn called, status:', status);
     setStatus('checking-in');
     setError('');
 
     try {
-      let lat, lng, addr;
-      try {
-        console.log('Requesting location...');
-        const coords = await requestLocation();
-        console.log('Got coords:', coords);
-        lat = coords.latitude;
-        lng = coords.longitude;
-        addr = formatLocation(lat, lng);
-      } catch (err) {
-        console.log('Geolocation error:', err.message);
-        // Geolocation failed — use manual entry or defaults
-        if (showManual && manualAddr.trim()) {
-          addr = manualAddr.trim();
-          lat = 0;
-          lng = 0;
-        } else {
-          addr = 'Location unavailable';
-          lat = 0;
-          lng = 0;
-        }
-      }
+      let lat = 0, lng = 0, addr = 'Location unavailable';
 
-      console.log('Check-in with lat:', lat, 'lng:', lng, 'addr:', addr);
-      const data = await api.post('/attendance/check-in', { latitude: lat, longitude: lng, address: addr }, accessToken);
-      console.log('Check-in success:', data);
-      setTodayRecord(data);
-      setStatus('idle');
-      fetchMonth();
-    } catch (err) {
-      console.error('Check-in error:', err);
-      setStatus('error');
-      setError(err.message || 'Check-in failed');
-    }
-  };
-
-  // Handle check-out
-  const handleCheckOut = async () => {
-    if (!todayRecord?.id) return;
-    setStatus('checking-out');
-    setError('');
-
-    try {
-      let lat, lng, addr;
       try {
         const coords = await requestLocation();
         lat = coords.latitude;
         lng = coords.longitude;
         addr = formatLocation(lat, lng);
       } catch {
-        addr = 'Location unavailable';
-        lat = 0;
-        lng = 0;
+        // Use default if geolocation fails
       }
 
-      const data = await api.put(`/attendance/check-out/${todayRecord.id}`, { latitude: lat, longitude: lng, address: addr }, accessToken);
+      const data = await api.post('/attendance/check-in', { latitude: lat, longitude: lng, address: addr }, accessToken);
       setTodayRecord(data);
       setStatus('idle');
       fetchMonth();
     } catch (err) {
-      setStatus('error');
+      setStatus('idle');
+      setError(err.message || 'Check-in failed');
+    }
+  };
+
+  // Handle check-out
+  const handleCheckOut = async () => {
+    if (!activeSession?.id) return;
+    setStatus('checking-out');
+    setError('');
+
+    try {
+      let lat = 0, lng = 0, addr = 'Location unavailable';
+
+      try {
+        const coords = await requestLocation();
+        lat = coords.latitude;
+        lng = coords.longitude;
+        addr = formatLocation(lat, lng);
+      } catch {
+        // Use default if geolocation fails
+      }
+
+      const data = await api.put(`/attendance/check-out/${activeSession.id}`, { latitude: lat, longitude: lng, address: addr }, accessToken);
+      setTodayRecord(data);
+      setStatus('idle');
+      fetchMonth();
+    } catch (err) {
+      setStatus('idle');
       setError(err.message || 'Check-out failed');
     }
   };
@@ -174,7 +151,7 @@ export default function Attendance() {
   // Build calendar data
   const buildCalendar = () => {
     const [year, month] = currentMonth.split('-').map(Number);
-    const firstDay = new Date(year, month - 1, 1).getDay(); // 0=Sun
+    const firstDay = new Date(year, month - 1, 1).getDay();
     const daysInMonth = new Date(year, month, 0).getDate();
 
     const recordMap = {};
@@ -205,9 +182,6 @@ export default function Attendance() {
   const weeks = buildCalendar();
   const monthLabel = new Date(currentMonth + '-01').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
 
-  const isCheckedIn = !!todayRecord?.checkIn;
-  const isCheckedOut = !!todayRecord?.checkOut;
-
   return (
     <div className="attendance-page">
       <div className="attendance-page-header">
@@ -230,8 +204,8 @@ export default function Attendance() {
           </div>
         )}
 
-        {!isCheckedIn ? (
-          // Not checked in yet
+        {!activeSession ? (
+          // Not checked in - show Check In button
           <div className="attendance-action">
             <button
               className="attendance-btn attendance-btn-checkin"
@@ -249,25 +223,43 @@ export default function Attendance() {
               Your GPS location will be captured when you check in
             </p>
           </div>
-        ) : !isCheckedOut ? (
-          // Checked in but not out
+        ) : (
+          // Checked in - show status with check-out
           <div className="attendance-status">
             <div className="attendance-checkin-info">
               <div className="attendance-checkin-time">
                 <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
                   <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
                 </svg>
-                Checked in at {new Date(todayRecord.checkIn).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+                Checked in at {formatTime(activeSession.checkIn)}
               </div>
-              {todayRecord.checkInAddr && (
+              {activeSession.checkInAddr && activeSession.checkInAddr !== 'Location unavailable' && (
                 <div className="attendance-checkin-loc">
                   <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
                     <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" />
                   </svg>
-                  {todayRecord.checkInAddr}
+                  {activeSession.checkInAddr}
                 </div>
               )}
             </div>
+
+            {/* Mini Map */}
+            {activeSession.checkInLat && activeSession.checkInLng && (
+              <div className="attendance-map-mini">
+                <iframe
+                  title="Check-in location"
+                  width="100%"
+                  height="150"
+                  frameBorder="0"
+                  scrolling="no"
+                  marginHeight="0"
+                  marginWidth="0"
+                  src={getMapUrl(parseFloat(activeSession.checkInLat), parseFloat(activeSession.checkInLng))}
+                  style={{ border: 0, borderRadius: '8px' }}
+                />
+              </div>
+            )}
+
             <button
               className="attendance-btn attendance-btn-checkout"
               onClick={handleCheckOut}
@@ -281,85 +273,223 @@ export default function Attendance() {
               {status === 'checking-out' ? 'Checking Out...' : 'Check Out'}
             </button>
           </div>
-        ) : (
-          // Fully checked in and out
-          <div className="attendance-completed">
-            <div className="attendance-completed-badge">
-              <svg width="20" height="20" fill="none" stroke="#16A34A" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-                <path d="M20 6L9 17l-5-5" />
-              </svg>
-              Attendance Complete
-            </div>
-            <div className="attendance-times">
-              <div>
-                <span className="attendance-time-label">In</span>
-                <span className="attendance-time-val">{new Date(todayRecord.checkIn).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</span>
-              </div>
-              <div>
-                <span className="attendance-time-label">Out</span>
-                <span className="attendance-time-val">{new Date(todayRecord.checkOut).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</span>
-              </div>
-            </div>
-          </div>
         )}
       </div>
 
       {/* Calendar */}
       <div className="attendance-calendar">
         <div className="attendance-calendar-header">
-          <button
-            className="attendance-cal-nav"
-            onClick={() => {
-              const [y, m] = currentMonth.split('-').map(Number);
-              const d = new Date(y, m - 2, 1);
-              setCurrentMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
-            }}
-          >
-            <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6" /></svg>
+          <button onClick={() => {
+            const [y, m] = currentMonth.split('-').map(Number);
+            const prev = new Date(y, m - 2, 1);
+            setCurrentMonth(`${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`);
+          }} className="attendance-calendar-nav">
+            ‹
           </button>
-          <span className="attendance-cal-month">{monthLabel}</span>
-          <button
-            className="attendance-cal-nav"
-            onClick={() => {
-              const [y, m] = currentMonth.split('-').map(Number);
-              const d = new Date(y, m, 1);
-              setCurrentMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
-            }}
-          >
-            <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6" /></svg>
+          <span className="attendance-calendar-month">{monthLabel}</span>
+          <button onClick={() => {
+            const [y, m] = currentMonth.split('-').map(Number);
+            const next = new Date(y, m, 1);
+            setCurrentMonth(`${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`);
+          }} className="attendance-calendar-nav">
+            ›
           </button>
         </div>
 
-        <div className="attendance-cal-grid">
+        <div className="attendance-calendar-grid">
           {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => (
-            <div key={i} className="attendance-cal-day-header">{d}</div>
+            <div key={i} className="attendance-calendar-day-label">{d}</div>
           ))}
-          {weeks.flat().map((cell, i) => {
-            if (!cell) return <div key={`empty-${i}`} className="attendance-cal-cell empty" />;
-            const { day, record } = cell;
-            const isToday = new Date().getDate() === day &&
-              new Date().getMonth() + 1 === parseInt(currentMonth.split('-')[1]) &&
-              new Date().getFullYear() === parseInt(currentMonth.split('-')[0]);
-            const isPresent = record?.checkIn;
-            const isAbsent = !record && !isToday;
-
-            return (
-              <div
-                key={day}
-                className={`attendance-cal-cell ${isToday ? 'today' : ''} ${isPresent ? 'present' : ''} ${isAbsent ? 'absent' : ''}`}
-              >
-                <span className="attendance-cal-num">{day}</span>
-                {isPresent && <span className="attendance-cal-dot" />}
-              </div>
-            );
-          })}
-        </div>
-
-        <div className="attendance-cal-legend">
-          <span><span className="legend present" /> Present</span>
-          <span><span className="legend absent" /> Absent/No record</span>
+          {weeks.flat().map((item, i) => (
+            <div key={i} className={`attendance-calendar-cell ${item?.record ? 'attendance-calendar-cell-active' : ''}`}>
+              {item?.day || ''}
+              {item?.record && (
+                <div className="attendance-calendar-dot present" title="Present" />
+              )}
+            </div>
+          ))}
         </div>
       </div>
+
+      <style>{`
+        .attendance-page {
+          padding: 1.5rem;
+          max-width: 600px;
+          margin: 0 auto;
+        }
+        .attendance-page-header {
+          margin-bottom: 1.5rem;
+        }
+        .attendance-page-title {
+          font-size: 1.5rem;
+          font-weight: 600;
+          color: var(--dark);
+          margin: 0 0 0.25rem 0;
+        }
+        .attendance-page-sub {
+          color: var(--steel);
+          font-size: 0.875rem;
+          margin: 0;
+        }
+        .attendance-card {
+          background: white;
+          border-radius: 16px;
+          padding: 1.5rem;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+          margin-bottom: 1.5rem;
+        }
+        .attendance-card-date {
+          font-size: 0.875rem;
+          color: var(--steel);
+          margin-bottom: 1rem;
+        }
+        .attendance-error {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          color: #DC2626;
+          font-size: 0.875rem;
+          margin-bottom: 1rem;
+          padding: 0.75rem;
+          background: #FEF2F2;
+          border-radius: 8px;
+        }
+        .attendance-action {
+          text-align: center;
+          padding: 1rem 0;
+        }
+        .attendance-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.5rem;
+          padding: 1rem 2rem;
+          border-radius: 12px;
+          font-size: 1rem;
+          font-weight: 600;
+          border: none;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+        .attendance-btn:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+        .attendance-btn-checkin {
+          background: var(--blue);
+          color: white;
+        }
+        .attendance-btn-checkin:hover:not(:disabled) {
+          background: #1D4ED8;
+        }
+        .attendance-btn-checkout {
+          background: var(--green);
+          color: white;
+          width: 100%;
+          justify-content: center;
+        }
+        .attendance-btn-checkout:hover:not(:disabled) {
+          background: #15803D;
+        }
+        .attendance-btn-icon {
+          display: flex;
+        }
+        .attendance-action-hint {
+          font-size: 0.75rem;
+          color: var(--steel);
+          margin-top: 0.75rem;
+        }
+        .attendance-status {
+          display: flex;
+          flex-direction: column;
+          gap: 1rem;
+        }
+        .attendance-checkin-info {
+          display: flex;
+          flex-direction: column;
+          gap: 0.5rem;
+        }
+        .attendance-checkin-time {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          font-size: 1rem;
+          font-weight: 500;
+          color: var(--dark);
+        }
+        .attendance-checkin-loc {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          font-size: 0.875rem;
+          color: var(--steel);
+        }
+        .attendance-map-mini {
+          border-radius: 8px;
+          overflow: hidden;
+          background: #f0f0f0;
+        }
+        .attendance-calendar {
+          background: white;
+          border-radius: 16px;
+          padding: 1.5rem;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .attendance-calendar-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 1rem;
+        }
+        .attendance-calendar-nav {
+          background: none;
+          border: none;
+          font-size: 1.5rem;
+          cursor: pointer;
+          color: var(--blue);
+          padding: 0.5rem;
+        }
+        .attendance-calendar-month {
+          font-weight: 600;
+          color: var(--dark);
+        }
+        .attendance-calendar-grid {
+          display: grid;
+          grid-template-columns: repeat(7, 1fr);
+          gap: 0.25rem;
+        }
+        .attendance-calendar-day-label {
+          text-align: center;
+          font-size: 0.75rem;
+          font-weight: 600;
+          color: var(--steel);
+          padding: 0.5rem;
+        }
+        .attendance-calendar-cell {
+          text-align: center;
+          font-size: 0.875rem;
+          padding: 0.5rem;
+          border-radius: 8px;
+          min-height: 36px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          position: relative;
+        }
+        .attendance-calendar-cell-active {
+          background: #EFF6FF;
+        }
+        .attendance-calendar-dot {
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+          position: absolute;
+          bottom: 4px;
+        }
+        .attendance-calendar-dot.present {
+          background: var(--green);
+        }
+      `}</style>
     </div>
   );
 }

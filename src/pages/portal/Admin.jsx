@@ -39,7 +39,7 @@ export default function Admin() {
   };
 
   const formatDate = (d) => new Date(d).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
-  const formatTime = (d) => d ? new Date(d).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '—';
+  const formatTime = (d) => d ? new Date(d).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : '—';
 
   // Group by employee
   const byEmployee = records.reduce((acc, r) => {
@@ -94,58 +94,48 @@ export default function Admin() {
                 <thead>
                   <tr style={{ color: 'var(--steel)', textAlign: 'left' }}>
                     <th style={{ padding: '0.5rem' }}>Date</th>
-                    <th style={{ padding: '0.5rem' }}>Sessions</th>
                     <th style={{ padding: '0.5rem' }}>First In</th>
                     <th style={{ padding: '0.5rem' }}>Last Out</th>
-                    <th style={{ padding: '0.5rem' }}>Total Sessions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {emp.records.map((rec) => (
-                    <tr key={rec.id} style={{ borderTop: '1px solid #f0f0f0' }}>
-                      <td style={{ padding: '0.5rem' }}>{formatDate(rec.date)}</td>
-                      <td style={{ padding: '0.5rem' }}>
-                        {rec.sessions.length > 0 ? (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-                            {rec.sessions.map((s) => (
-                              <div key={s.id} style={{ fontSize: '0.8rem', display: 'flex', gap: '0.5rem' }}>
-                                <span style={{ color: '#16a34a' }}>{formatTime(s.checkIn)}</span>
-                                <span style={{ color: 'var(--steel)' }}>→</span>
-                                <span style={{ color: '#dc2626' }}>{formatTime(s.checkOut)}</span>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <span style={{ color: 'var(--steel)' }}>No sessions</span>
-                        )}
-                      </td>
-                      <td style={{ padding: '0.5rem' }}>
-                        {rec.sessions[0] ? (
-                          <span style={{ fontSize: '0.8rem' }}>
-                            {formatTime(rec.sessions[0].checkIn)}
-                            {rec.sessions[0].checkInAddr && (
-                              <span style={{ display: 'block', color: 'var(--steel)', fontSize: '0.75rem' }}>
-                                📍 {rec.sessions[0].checkInAddr}
-                              </span>
-                            )}
+                  {emp.records.map((rec) => {
+                    const firstSession = rec.sessions[0];
+                    const lastSession = rec.sessions.length > 0 ? rec.sessions[rec.sessions.length - 1] : null;
+                    const isComplete = lastSession?.checkOut;
+
+                    return (
+                      <tr key={rec.id} style={{ borderTop: '1px solid #f0f0f0' }}>
+                        <td style={{ padding: '0.5rem' }}>
+                          <span style={{ fontWeight: 500 }}>{formatDate(rec.date)}</span>
+                        </td>
+                        <td style={{ padding: '0.5rem' }}>
+                          <span style={{ color: isComplete ? 'var(--dark)' : 'var(--steel)' }}>
+                            {formatTime(firstSession?.checkIn)}
                           </span>
-                        ) : '—'}
-                      </td>
-                      <td style={{ padding: '0.5rem' }}>
-                        {rec.sessions.length > 0 && rec.sessions[rec.sessions.length - 1].checkOut ? (
-                          <span style={{ fontSize: '0.8rem' }}>
-                            {formatTime(rec.sessions[rec.sessions.length - 1].checkOut)}
-                            {rec.sessions[rec.sessions.length - 1].checkOutAddr && (
-                              <span style={{ display: 'block', color: 'var(--steel)', fontSize: '0.75rem' }}>
-                                📍 {rec.sessions[rec.sessions.length - 1].checkOutAddr}
-                              </span>
-                            )}
-                          </span>
-                        ) : '—'}
-                      </td>
-                      <td style={{ padding: '0.5rem', textAlign: 'center' }}>{rec.sessions.length}</td>
-                    </tr>
-                  ))}
+                          {firstSession?.checkInAddr && (
+                            <span style={{ display: 'block', color: 'var(--steel)', fontSize: '0.75rem' }}>
+                              📍 {firstSession.checkInAddr}
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ padding: '0.5rem' }}>
+                          {lastSession?.checkOut ? (
+                            <span style={{ color: 'var(--dark)' }}>
+                              {formatTime(lastSession.checkOut)}
+                            </span>
+                          ) : (
+                            <span style={{ color: '#f59e0b' }}>Open</span>
+                          )}
+                          {lastSession?.checkOutAddr && lastSession.checkOut && (
+                            <span style={{ display: 'block', color: 'var(--steel)', fontSize: '0.75rem' }}>
+                              📍 {lastSession.checkOutAddr}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
