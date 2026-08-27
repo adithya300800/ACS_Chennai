@@ -185,7 +185,8 @@ export default function Attendance() {
   };
 
   const weeks = buildCalendar();
-  const monthLabel = new Date(currentMonth + '-01').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const [calYear, calMonth] = currentMonth.split('-').map(Number);
+  const monthLabel = new Date(calYear, calMonth - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
   const today = new Date();
   const todayDateStr = toDateString(today);
 
