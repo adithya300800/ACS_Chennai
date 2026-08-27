@@ -47,6 +47,21 @@ export default function Attendance() {
     fetchMonth();
   }, [fetchToday, fetchMonth]);
 
+  // Merge today's record into month records if it's for current month
+  useEffect(() => {
+    if (!todayRecord) return;
+    const todayStr = toDateString(todayRecord.date);
+    const [year, month] = currentMonth.split('-').map(Number);
+    const todayDate = new Date(todayStr);
+    if (todayDate.getFullYear() === year && todayDate.getMonth() + 1 === month) {
+      setMonthRecords(prev => {
+        const exists = prev.some(r => r.id === todayRecord.id);
+        if (exists) return prev;
+        return [...prev, todayRecord];
+      });
+    }
+  }, [todayRecord, currentMonth]);
+
   // Format time in user's timezone
   const formatTime = (dateStr) => {
     if (!dateStr) return '';
