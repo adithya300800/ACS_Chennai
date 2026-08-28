@@ -5,18 +5,34 @@ import { api } from '../../lib/api.js';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
 
+const WORK_TYPE_OPTIONS = [
+  { value: 'MATERIAL_RECEIPT', label: 'Material Receipt & Inspection' },
+  { value: 'QUALITY_TESTING', label: 'Quality & Testing' },
+  { value: 'SITE_INSPECTION', label: 'Site Inspection' },
+  { value: 'EXCEPTIONS_SAFETY', label: 'Exceptions & Safety' },
+];
+
 export default function DprSubmit() {
   const { accessToken } = useAuth();
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
 
+  // Auto-set date to user's local timezone (no manual selection)
+  const getLocalDate = () => {
+    const now = new Date();
+    const offset = now.getTimezoneOffset();
+    const local = new Date(now.getTime() - offset * 60000);
+    return local.toISOString().split('T')[0];
+  };
+
   const [form, setForm] = useState({
     projectName: '',
     location: '',
-    reportDate: new Date().toISOString().split('T')[0],
+    reportDate: getLocalDate(),
     weather: 'Sunny',
     temperature: '',
     contractor: '',
+    workType: 'MATERIAL_RECEIPT',
   });
   const [photos, setPhotos] = useState([]);
   const [notes, setNotes] = useState('');
@@ -110,6 +126,7 @@ export default function DprSubmit() {
           weather: form.weather,
           temperature: form.temperature,
           contractor: form.contractor,
+          workType: form.workType,
           status: submitStatus,
           photos: photos.map(({ ulid, container, filename, contentType, sizeBytes, caption, location, takenAt }) => ({
             ulid, container, filename, contentType, sizeBytes, caption, location, takenAt,
@@ -133,16 +150,25 @@ export default function DprSubmit() {
         {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
 
         <div className="dpr-form">
-          {/* Project & Date */}
+          {/* Project & Work Type */}
           <div className="form-row">
             <div className="form-group" style={{ flex: 2 }}>
               <label htmlFor="projectName">Project Name *</label>
               <input id="projectName" name="projectName" className="form-input" value={form.projectName} onChange={handleChange} placeholder="e.g. Metro Station Phase 2" />
             </div>
             <div className="form-group" style={{ flex: 1 }}>
-              <label htmlFor="reportDate">Date *</label>
-              <input id="reportDate" type="date" name="reportDate" className="form-input" value={form.reportDate} onChange={handleChange} />
+              <label htmlFor="workType">Work Type *</label>
+              <select id="workType" name="workType" className="form-input" value={form.workType} onChange={handleChange}>
+                {WORK_TYPE_OPTIONS.map((w) => <option key={w.value} value={w.value}>{w.label}</option>)}
+              </select>
             </div>
+          </div>
+
+          {/* Auto-set Date (read-only) */}
+          <div className="form-group">
+            <label htmlFor="reportDate">Report Date</label>
+            <input id="reportDate" type="date" name="reportDate" className="form-input" value={form.reportDate} readOnly style={{ background: '#f1f5f9', cursor: 'default' }} />
+            <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>Automatically set to your local date</span>
           </div>
 
           {/* Location */}

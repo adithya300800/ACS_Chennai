@@ -93,7 +93,7 @@ router.post('/confirm-upload', async (req, res) => {
 // ─── POST /api/dpr ────────────────────────────────────────────────────────────
 router.post('/', async (req, res) => {
   const prisma = getPrisma(req);
-  const { projectName, location, reportDate, weather, temperature, contractor, notes, status, photos = [] } = req.body;
+  const { projectName, location, reportDate, weather, temperature, contractor, workType, notes, status, photos = [] } = req.body;
 
   if (!projectName || !location || !reportDate) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'projectName, location, reportDate required' });
@@ -102,6 +102,11 @@ router.post('/', async (req, res) => {
   const validStatuses = ['DRAFT', 'SUBMITTED'];
   if (status && !validStatuses.includes(status)) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid status' });
+  }
+
+  const validWorkTypes = ['MATERIAL_RECEIPT', 'QUALITY_TESTING', 'SITE_INSPECTION', 'EXCEPTIONS_SAFETY'];
+  if (workType && !validWorkTypes.includes(workType)) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid workType' });
   }
 
   try {
@@ -117,6 +122,7 @@ router.post('/', async (req, res) => {
         weather: weather || null,
         temperature: temperature || null,
         contractor: contractor || null,
+        workType: workType || 'MATERIAL_RECEIPT',
         notes: notes || null,
         status: status || 'DRAFT',
         submittedById: req.employeeId,
