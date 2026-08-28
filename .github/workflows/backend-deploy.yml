@@ -44,21 +44,29 @@ jobs:
         with:
           app-name: acs-portal-api
           slot-name: production
-          runtime: NODE:22-lts
           package: .
-          app-settings: >
-            DATABASE_URL=${{ secrets.DATABASE_URL }}
-            JWT_SECRET=${{ secrets.JWT_SECRET }}
-            JWT_REFRESH_SECRET=${{ secrets.JWT_REFRESH_SECRET }}
-            AZURE_STORAGE_ACCOUNT_NAME=${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }}
-            AZURE_STORAGE_ACCOUNT_KEY=${{ secrets.AZURE_STORAGE_ACCOUNT_KEY }}
-            NODE_ENV=production
-            PORT=3000
-            FRONTEND_URL=https://acschennai.com
-            WEBSITE_RUN_FROM_PACKAGE=0
-            # Azure Storage for DPR module
-            APP_COMMAND_LINE=node /home/site/wwwroot/src/index.js
-            WEBSITE_DISABLE_OVERLAPPING_APPS_STARTUP=1
-            ZOHO_CLIENT_ID=${{ secrets.ZOHO_CLIENT_ID }}
-            ZOHO_CLIENT_SECRET=${{ secrets.ZOHO_CLIENT_SECRET }}
-            ZOHO_REDIRECT_URI=https://acs-portal-api.azurewebsites.net/api/auth/zoho/callback
+
+      - name: Set App Settings
+        run: |
+          az webapp config appsettings set \
+            --resource-group acs-portal-rg \
+            --name acs-portal-api \
+            --settings \
+              DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+              JWT_SECRET="${{ secrets.JWT_SECRET }}" \
+              JWT_REFRESH_SECRET="${{ secrets.JWT_REFRESH_SECRET }}" \
+              AZURE_STORAGE_ACCOUNT_NAME="${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }}" \
+              AZURE_STORAGE_ACCOUNT_KEY="${{ secrets.AZURE_STORAGE_ACCOUNT_KEY }}" \
+              NODE_ENV=production \
+              PORT=3000 \
+              FRONTEND_URL=https://acschennai.com \
+              WEBSITE_RUN_FROM_PACKAGE=0 \
+              APP_COMMAND_LINE="node /home/site/wwwroot/src/index.js" \
+              WEBSITE_DISABLE_OVERLAPPING_APPS_STARTUP=1 \
+              ZOHO_CLIENT_ID="${{ secrets.ZOHO_CLIENT_ID }}" \
+              ZOHO_CLIENT_SECRET="${{ secrets.ZOHO_CLIENT_SECRET }}" \
+              ZOHO_REDIRECT_URI=https://acs-portal-api.azurewebsites.net/api/auth/zoho/callback
+
+      - name: Restart Web App
+        run: |
+          az webapp restart --resource-group acs-portal-rg --name acs-portal-api
