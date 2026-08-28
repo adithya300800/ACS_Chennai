@@ -70,6 +70,8 @@ jobs:
               FRONTEND_URL=https://acschennai.com \
               WEBSITE_RUN_FROM_PACKAGE=0 \
               ALWAYS_ON=1 \
+              SCM_DO_BUILD_DURING_DEPLOYMENT=true \
+              WEBSITE_ENABLE_SERVICE_SIDE_BUILDS=true \
               ZOHO_CLIENT_ID="${{ secrets.ZOHO_CLIENT_ID }}" \
               ZOHO_CLIENT_SECRET="${{ secrets.ZOHO_CLIENT_SECRET }}" \
               ZOHO_REDIRECT_URI=https://acs-portal-api.azurewebsites.net/api/auth/zoho/callback

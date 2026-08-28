@@ -20,6 +20,14 @@ echo "[startup] NODE_ENV=$NODE_ENV"
 echo "[startup] Cleaning old files..."
 rm -rf /home/site/wwwroot/tmp 2>/dev/null || true
 
+# Fallback: run npm install if node_modules is missing (handles cases where
+# SCM_DO_BUILD_DURING_DEPLOYMENT was false and Oryx skipped the build)
+if [ ! -d "/home/site/wwwroot/node_modules" ]; then
+  echo "[startup] node_modules missing — running npm install..."
+  cd /home/site/wwwroot
+  npm install --omit=dev 2>/dev/null || npm install
+fi
+
 echo "[startup] Running Prisma migrations..."
 cd /home/site/wwwroot
 npx prisma migrate deploy --schema /home/site/wwwroot/prisma/schema.prisma 2>/dev/null || true
