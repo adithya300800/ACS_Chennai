@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: Arial, sans-serif; font-size: 12px; color: #1f2937; }
+
+  .header { border-bottom: 2px solid #0258D8; padding-bottom: 12px; margin-bottom: 16px; }
+  .header-title { font-size: 18px; font-weight: bold; color: #0258D8; }
+  .header-sub { font-size: 11px; color: #6b7280; margin-top: 2px; }
+
+  .status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 10px;
+    font-weight: bold;
+    color: white;
+    background-color: {{statusColor dpr.status}};
+  }
+
+  .meta-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .meta-item { background: #f3f4f6; padding: 6px 8px; border-radius: 4px; }
+  .meta-label { font-size: 9px; color: #6b7280; text-transform: uppercase; }
+  .meta-value { font-size: 11px; font-weight: bold; margin-top: 1px; }
+
+  .section { margin-bottom: 16px; }
+  .section-title { font-size: 11px; font-weight: bold; color: #0258D8; text-transform: uppercase; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; margin-bottom: 8px; }
+
+  .photos-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .photo-card { border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden; }
+  .photo-placeholder { background: #f9fafb; height: 120px; display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 10px; }
+  .photo-caption { padding: 6px 8px; font-size: 10px; color: #374151; }
+  .photo-meta { font-size: 9px; color: #9ca3af; }
+
+  .signatures { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 24px; }
+  .sig-box { border-top: 1px solid #1f2937; padding-top: 4px; }
+  .sig-label { font-size: 9px; color: #6b7280; }
+  .sig-name { font-size: 11px; font-weight: bold; margin-top: 2px; }
+  .sig-date { font-size: 10px; color: #374151; margin-top: 2px; }
+
+  .footer { margin-top: 16px; padding-top: 8px; border-top: 1px solid #e5e7eb; font-size: 9px; color: #9ca3af; display: flex; justify-content: space-between; }
+</style>
+</head>
+<body style="padding: 20px 15px;">
+
+<!-- Header -->
+<div class="header">
+  <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+    <div>
+      <div class="header-title">DAILY PROGRESS REPORT</div>
+      <div class="header-sub">ACS Chennai — PMC Operations</div>
+    </div>
+    <div style="text-align: right;">
+      <div class="status-badge">{{statusLabel dpr.status}}</div>
+      <div style="font-size: 10px; color: #6b7280; margin-top: 4px;">DPR ID: {{dpr.id}}</div>
+    </div>
+  </div>
+  <div style="margin-top: 10px; font-size: 14px; font-weight: bold;">{{dpr.projectName}}</div>
+  <div style="font-size: 11px; color: #374151; margin-top: 2px;">Date: {{formatDate dpr.reportDate}}</div>
+</div>
+
+<!-- Meta Grid -->
+<div class="meta-grid">
+  <div class="meta-item">
+    <div class="meta-label">Weather</div>
+    <div class="meta-value">{{dpr.weather}}</div>
+  </div>
+  <div class="meta-item">
+    <div class="meta-label">Temperature</div>
+    <div class="meta-value">{{dpr.temperature}}</div>
+  </div>
+  <div class="meta-item">
+    <div class="meta-label">Location</div>
+    <div class="meta-value">{{dpr.location}}</div>
+  </div>
+  <div class="meta-item">
+    <div class="meta-label">Contractor</div>
+    <div class="meta-value">{{dpr.contractor}}</div>
+  </div>
+</div>
+
+<!-- Photos -->
+{{#if dpr.photos.length}}
+<div class="section">
+  <div class="section-title">Site Photos ({{dpr.photos.length}})</div>
+  <div class="photos-grid">
+    {{#each dpr.photos}}
+    <div class="photo-card">
+      <div class="photo-placeholder">[Photo: {{filename}}]</div>
+      <div class="photo-caption">
+        {{#if caption}}{{caption}}{{else}}No caption{{/if}}
+      </div>
+      {{#if location}}<div class="photo-meta">{{location}}{{/if}}{{#if takenAt}} — {{formatDateTime takenAt}}{{/if}}</div>
+    </div>
+    {{/each}}
+  </div>
+</div>
+{{/if}}
+
+<!-- Signatures -->
+<div class="signatures">
+  <div class="sig-box">
+    <div class="sig-label">SUBMITTED BY</div>
+    <div class="sig-name">{{dpr.submittedBy.name}}</div>
+    <div class="sig-date">{{#if dpr.submittedAt}}{{formatDateTime dpr.submittedAt}}{{else}}Pending{{/if}}</div>
+  </div>
+  <div class="sig-box">
+    <div class="sig-label">REVIEWED BY</div>
+    <div class="sig-name">{{#if dpr.reviewedBy}}{{dpr.reviewedBy.name}}{{else}}Pending{{/if}}</div>
+    <div class="sig-date">{{#if dpr.reviewedAt}}{{formatDateTime dpr.reviewedAt}}{{else}}Pending{{/if}}</div>
+  </div>
+  <div class="sig-box">
+    <div class="sig-label">APPROVED BY</div>
+    <div class="sig-name">{{#if dpr.approvedBy}}{{dpr.approvedBy.name}}{{else}}Pending{{/if}}</div>
+    <div class="sig-date">{{#if dpr.approvedAt}}{{formatDateTime dpr.approvedAt}}{{else}}Pending{{/if}}</div>
+  </div>
+</div>
+
+<!-- Footer -->
+<div class="footer">
+  <span>Generated: {{formatDateTime generatedAt}}</span>
+  <span>DPR ID: {{dpr.id}}</span>
+  <span>ACS Chennai PMC Portal</span>
+</div>
+
+</body>
+</html>

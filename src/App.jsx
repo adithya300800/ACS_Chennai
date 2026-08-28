@@ -12,6 +12,9 @@ import Contact from './pages/Contact.jsx';
 import PortalLogin from './pages/PortalLogin.jsx';
 import Attendance from './pages/portal/Attendance.jsx';
 import Admin from './pages/portal/Admin.jsx';
+import DprSubmit from './pages/portal/DprSubmit.jsx';
+import DprList from './pages/portal/DprList.jsx';
+import DprDashboard from './pages/admin/DprDashboard.jsx';
 
 function App() {
   const location = useLocation();
@@ -53,6 +56,9 @@ function App() {
         >
           <Route path="attendance" element={<Attendance />} />
           <Route path="admin" element={<Admin />} />
+          <Route path="dpr/submit" element={<DprSubmit />} />
+          <Route path="dpr/my" element={<DprList />} />
+          <Route path="admin/dpr" element={<DprDashboard />} />
           <Route path="leave" element={<ComingSoon name="Leave Management" />} />
           <Route path="training" element={<ComingSoon name="Training" />} />
           <Route path="assets" element={<ComingSoon name="Assets" />} />

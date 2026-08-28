@@ -93,7 +93,7 @@ export default function Admin() {
     <div className="admin-page">
       {/* Header */}
       <div className="admin-header">
-        <div className="header-content">
+        <div>
           <h1 className="header-title">Attendance Dashboard</h1>
           <p className="header-subtitle">Monitor all employees' attendance</p>
         </div>
@@ -153,7 +153,11 @@ export default function Admin() {
                   <div className="employee-meta">
                     <span className="employee-dept">{emp.department || 'No dept'}</span>
                     <span className="employee-days">{daysWorked} days</span>
-                    <button className="expand-btn">
+                    <button
+                      className="expand-btn"
+                      aria-label={isExpanded ? 'Collapse record' : 'Expand record'}
+                      aria-expanded={isExpanded}
+                    >
                       {isExpanded ? '▲' : '▼'}
                     </button>
                   </div>
@@ -203,7 +207,7 @@ export default function Admin() {
                 <h3 className="modal-title">{selectedRecord.employee.name}</h3>
                 <p className="modal-subtitle">{formatFullDate(selectedRecord.date)}</p>
               </div>
-              <button className="modal-close" onClick={() => setSelectedRecord(null)}>×</button>
+              <button className="modal-close" aria-label="Close modal" onClick={() => setSelectedRecord(null)}>×</button>
             </div>
             <div className="modal-body">
               {selectedRecord.sessions.map((session, i) => (
@@ -222,7 +226,10 @@ export default function Admin() {
                     )}
                   </div>
                   {session.checkInAddr && (
-                    <div className="session-addr">📍 {session.checkInAddr}</div>
+                    <div className="session-addr">
+                      <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{verticalAlign:'middle',marginRight:'4px'}}><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                      {session.checkInAddr}
+                    </div>
                   )}
                   {session.checkInLat && session.checkInLng && getMapUrl(parseFloat(session.checkInLat), parseFloat(session.checkInLng)) && (
                     <div className="session-map">
@@ -243,306 +250,6 @@ export default function Admin() {
           </div>
         </div>
       )}
-
-      <style>{`
-        .admin-page {
-          min-height: 100vh;
-          background: #f8fafc;
-          padding: 1rem;
-          padding-bottom: 2rem;
-        }
-        .admin-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
-          margin-bottom: 1.5rem;
-          gap: 1rem;
-          flex-wrap: wrap;
-        }
-        .header-title {
-          font-size: 1.5rem;
-          font-weight: 600;
-          color: var(--navy, #1e293b);
-          margin: 0;
-        }
-        .header-subtitle {
-          font-size: 0.875rem;
-          color: var(--steel, #64748b);
-          margin: 0.25rem 0 0;
-        }
-        .month-input {
-          padding: 0.5rem 1rem;
-          border-radius: 8px;
-          border: 1px solid #e5e7eb;
-          font-size: 0.875rem;
-          background: white;
-        }
-        .loading-state {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 0.75rem;
-          padding: 3rem;
-          color: var(--steel, #64748b);
-        }
-        .spinner {
-          width: 24px;
-          height: 24px;
-          border: 2px solid #e5e7eb;
-          border-top-color: var(--blue, #2563eb);
-          border-radius: 50%;
-          animation: spin 0.8s linear infinite;
-        }
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
-        .error-banner {
-          padding: 1rem;
-          background: #fef2f2;
-          color: #dc2626;
-          border-radius: 10px;
-          text-align: center;
-          margin-bottom: 1rem;
-        }
-        .empty-state {
-          text-align: center;
-          padding: 3rem;
-          color: var(--steel, #64748b);
-        }
-        .empty-state svg {
-          margin-bottom: 1rem;
-          opacity: 0.5;
-        }
-        .employee-list {
-          display: flex;
-          flex-direction: column;
-          gap: 1rem;
-        }
-        .employee-card {
-          background: white;
-          border-radius: 12px;
-          overflow: hidden;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }
-        .employee-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 1rem;
-          cursor: pointer;
-        }
-        .employee-info {
-          display: flex;
-          align-items: center;
-          gap: 0.75rem;
-        }
-        .employee-avatar {
-          width: 40px;
-          height: 40px;
-          border-radius: 50%;
-          background: var(--blue, #2563eb);
-          color: white;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-weight: 600;
-          font-size: 1rem;
-        }
-        .employee-details {
-          min-width: 0;
-        }
-        .employee-name {
-          margin: 0;
-          font-size: 0.95rem;
-          font-weight: 600;
-          color: var(--navy, #1e293b);
-        }
-        .employee-email {
-          margin: 0;
-          font-size: 0.8rem;
-          color: var(--steel, #64748b);
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          max-width: 180px;
-        }
-        .employee-meta {
-          display: flex;
-          align-items: center;
-          gap: 0.75rem;
-        }
-        .employee-dept {
-          font-size: 0.75rem;
-          color: var(--steel, #64748b);
-          display: none;
-        }
-        .employee-days {
-          font-size: 0.75rem;
-          font-weight: 600;
-          color: var(--green, #16a34a);
-          background: #dcfce7;
-          padding: 0.25rem 0.5rem;
-          border-radius: 4px;
-        }
-        .expand-btn {
-          background: none;
-          border: none;
-          font-size: 0.75rem;
-          color: var(--steel, #64748b);
-          cursor: pointer;
-          padding: 0.25rem;
-        }
-        .employee-records {
-          border-top: 1px solid #e5e7eb;
-        }
-        .records-header {
-          display: grid;
-          grid-template-columns: 1fr 1fr 80px;
-          padding: 0.75rem 1rem;
-          font-size: 0.7rem;
-          font-weight: 600;
-          color: var(--steel, #64748b);
-          text-transform: uppercase;
-          background: #f8fafc;
-        }
-        .record-row {
-          display: grid;
-          grid-template-columns: 1fr 1fr 80px;
-          padding: 0.75rem 1rem;
-          border-top: 1px solid #f1f5f9;
-          cursor: pointer;
-          font-size: 0.875rem;
-        }
-        .record-row:hover {
-          background: #f8fafc;
-        }
-        .record-date {
-          font-weight: 500;
-          color: var(--navy, #1e293b);
-        }
-        .record-checkin {
-          color: var(--navy, #1e293b);
-        }
-        .record-status {
-          font-size: 0.75rem;
-          font-weight: 600;
-          padding: 0.2rem 0.5rem;
-          border-radius: 4px;
-          text-align: center;
-        }
-        .status-open {
-          background: #fef3c7;
-          color: #d97706;
-        }
-        .status-complete {
-          background: #dcfce7;
-          color: #16a34a;
-        }
-        .modal-overlay {
-          position: fixed;
-          inset: 0;
-          background: rgba(0,0,0,0.5);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          z-index: 1000;
-          padding: 1rem;
-        }
-        .modal {
-          background: white;
-          border-radius: 16px;
-          width: 100%;
-          max-width: 440px;
-          max-height: 80vh;
-          overflow-y: auto;
-        }
-        .modal-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
-          padding: 1.25rem;
-          border-bottom: 1px solid #e5e7eb;
-        }
-        .modal-title {
-          margin: 0;
-          font-size: 1rem;
-          font-weight: 600;
-          color: var(--navy, #1e293b);
-        }
-        .modal-subtitle {
-          margin: 0.25rem 0 0;
-          font-size: 0.875rem;
-          color: var(--steel, #64748b);
-        }
-        .modal-close {
-          background: none;
-          border: none;
-          font-size: 1.5rem;
-          cursor: pointer;
-          color: var(--steel, #64748b);
-          padding: 0;
-          line-height: 1;
-        }
-        .modal-body {
-          padding: 1.25rem;
-        }
-        .session-card {
-          padding: 1rem;
-          background: #f8fafc;
-          border-radius: 12px;
-          margin-bottom: 0.75rem;
-        }
-        .session-title {
-          font-size: 0.75rem;
-          font-weight: 600;
-          color: var(--steel, #64748b);
-          margin-bottom: 0.5rem;
-        }
-        .session-times {
-          display: flex;
-          gap: 1.5rem;
-        }
-        .session-time-item {
-          display: flex;
-          flex-direction: column;
-        }
-        .time-label {
-          font-size: 0.7rem;
-          color: var(--steel, #64748b);
-        }
-        .time-value {
-          font-size: 0.9rem;
-          font-weight: 600;
-          color: var(--navy, #1e293b);
-        }
-        .session-addr {
-          font-size: 0.8rem;
-          color: var(--steel, #64748b);
-          margin-top: 0.5rem;
-        }
-        .session-map {
-          margin-top: 0.75rem;
-          border-radius: 8px;
-          overflow: hidden;
-          background: #e5e7eb;
-        }
-        @media (max-width: 480px) {
-          .admin-header {
-            flex-direction: column;
-          }
-          .employee-email {
-            max-width: 140px;
-          }
-          .employee-dept {
-            display: none !important;
-          }
-          .records-header,
-          .record-row {
-            grid-template-columns: 1fr 1fr 60px;
-            font-size: 0.8rem;
-          }
-        }
-      `}</style>
     </div>
   );
 }

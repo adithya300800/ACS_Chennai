@@ -1,10 +1,22 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
 
 export default function Header() {
   const { pathname } = useLocation();
   const { isAuthenticated } = useAuth();
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  const navLinks = [
+    { to: "/", label: "Home" },
+    { to: "/about", label: "About" },
+    { to: "/projects", label: "Projects" },
+    { to: "/contact", label: "Contact" },
+    ...(isAuthenticated
+      ? [{ to: "/portal/attendance", label: "My Portal" }]
+      : [{ to: "/portal/login", label: "Employee Portal" }]),
+  ];
+
   return (
     <header>
       <div className="container">
@@ -16,18 +28,31 @@ export default function Header() {
           </div>
           ACS Chennai
         </Link>
-        <nav>
-          <Link to="/" className={pathname === "/" ? "active" : ""}>Home</Link>
-          <Link to="/about" className={pathname === "/about" ? "active" : ""}>About</Link>
-          <Link to="/projects" className={pathname === "/projects" ? "active" : ""}>Projects</Link>
-          <Link to="/contact" className={pathname === "/contact" ? "active" : ""}>Contact</Link>
-          {isAuthenticated ? (
-            <Link to="/portal/attendance" className={pathname.startsWith('/portal') ? 'active' : ''}>My Portal</Link>
-          ) : (
-            <Link to="/portal/login" className={pathname.startsWith('/portal') ? 'active' : ''}>Employee Portal</Link>
-          )}
-          <Link to="/contact" className="nav-cta">Get a Quote</Link>
+        <nav className={mobileOpen ? 'mobile-open' : ''}>
+          {navLinks.map(({ to, label }) => (
+            <Link
+              key={to}
+              to={to}
+              className={pathname === to ? "active" : ""}
+              onClick={() => setMobileOpen(false)}
+            >
+              {label}
+            </Link>
+          ))}
+          <Link to="/contact" className="nav-cta" onClick={() => setMobileOpen(false)}>Get a Quote</Link>
         </nav>
+        <button
+          className="mobile-menu-toggle"
+          aria-label="Toggle menu"
+          aria-expanded={mobileOpen}
+          onClick={() => setMobileOpen(o => !o)}
+        >
+          <svg width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            {mobileOpen
+              ? <path d="M18 6L6 18M6 6l12 12" />
+              : <path d="M3 12h18M3 6h18M3 18h18" />}
+          </svg>
+        </button>
       </div>
     </header>
   );

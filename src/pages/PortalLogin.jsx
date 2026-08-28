@@ -168,7 +168,7 @@ export default function PortalLogin() {
           type="button"
           onClick={handleZohoLogin}
           className="btn btn-primary"
-          style={{ width: '100%', justifyContent: 'center', padding: '0.85rem', marginBottom: '1rem', background: '#0258D8' }}
+          style={{ width: '100%', justifyContent: 'center', padding: '0.85rem', marginBottom: '1rem' }}
           disabled={status === 'loading'}
         >
           <svg width="20" height="20" viewBox="0 0 24 24" fill="white" style={{ marginRight: '0.5rem' }}>
@@ -205,7 +205,7 @@ export default function PortalLogin() {
               name="password"
               type="password"
               className="form-input"
-              placeholder="••••••••"
+              placeholder="Enter your password"
               value={form.password}
               onChange={handleChange}
               autoComplete="current-password"

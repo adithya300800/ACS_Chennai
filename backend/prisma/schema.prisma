@@ -11,49 +11,144 @@ datasource db {
 }
 
 model Employee {
-  id               String       @id @default(uuid())
-  email            String       @unique
+  id               String         @id @default(uuid())
+  email            String         @unique
   password         String?
   name             String
   designation      String?
   department       String?
-  isAdmin         Boolean      @default(false) @map("is_admin")
-  zohoAccessToken  String?      @map("zoho_access_token")
-  zohoRefreshToken String?      @map("zoho_refresh_token")
-  createdAt        DateTime     @default(now()) @map("created_at")
-  updatedAt        DateTime     @updatedAt @map("updated_at")
+  isAdmin          Boolean        @default(false) @map("is_admin")
+  zohoAccessToken  String?        @map("zoho_access_token")
+  zohoRefreshToken String?        @map("zoho_refresh_token")
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
   attendance       Attendance[]
+  dprSubmitted     DPR[]          @relation("DPRSubmitter")
+  dprReviewed      DPR[]          @relation("DPRReviewer")
+  dprApproved      DPR[]          @relation("DPRApprover")
+  notifications    Notification[]
 
   @@map("employees")
 }
 
 model Attendance {
-  id           String    @id @default(uuid())
-  employeeId   String    @map("employee_id")
-  date         DateTime  @db.Date
-  status       String    @default("Present")
-  notes        String?
-  createdAt    DateTime  @default(now()) @map("created_at")
-  employee     Employee  @relation(fields: [employeeId], references: [id])
-  sessions     AttendanceSession[]
+  id         String              @id @default(uuid())
+  employeeId String              @map("employee_id")
+  date       DateTime            @db.Date
+  status     String              @default("Present")
+  notes      String?
+  createdAt  DateTime            @default(now()) @map("created_at")
+  employee   Employee            @relation(fields: [employeeId], references: [id])
+  sessions   AttendanceSession[]
 
   @@unique([employeeId, date])
   @@map("attendance")
 }
 
 model AttendanceSession {
-  id           String      @id @default(uuid())
-  attendanceId String      @map("attendance_id")
-  checkIn      DateTime    @map("check_in")
-  checkInLat   Decimal?    @map("check_in_lat")  @db.Decimal(10, 7)
-  checkInLng   Decimal?    @map("check_in_lng")  @db.Decimal(10, 7)
-  checkInAddr  String?     @map("check_in_addr")
-  checkOut     DateTime?   @map("check_out")
-  checkOutLat  Decimal?    @map("check_out_lat") @db.Decimal(10, 7)
-  checkOutLng  Decimal?    @map("check_out_lng") @db.Decimal(10, 7)
-  checkOutAddr String?     @map("check_out_addr")
-  createdAt    DateTime    @default(now()) @map("created_at")
-  attendance   Attendance  @relation(fields: [attendanceId], references: [id])
+  id           String     @id @default(uuid())
+  attendanceId String     @map("attendance_id")
+  checkIn      DateTime   @map("check_in")
+  checkInLat   Decimal?   @map("check_in_lat") @db.Decimal(10, 7)
+  checkInLng   Decimal?   @map("check_in_lng") @db.Decimal(10, 7)
+  checkInAddr  String?    @map("check_in_addr")
+  checkOut     DateTime?  @map("check_out")
+  checkOutLat  Decimal?   @map("check_out_lat") @db.Decimal(10, 7)
+  checkOutLng  Decimal?   @map("check_out_lng") @db.Decimal(10, 7)
+  checkOutAddr String?    @map("check_out_addr")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  attendance   Attendance @relation(fields: [attendanceId], references: [id])
 
   @@map("attendance_sessions")
+}
+
+// ─────────────────────────────────────────────
+// DPR Module
+// ─────────────────────────────────────────────
+
+enum DPRStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+}
+
+model DPR {
+  id            String    @id @default(uuid())
+  projectName   String
+  location      String
+  reportDate    DateTime  @db.Date
+  weather       String?
+  temperature   String?
+  contractor    String?
+  status        DPRStatus @default(DRAFT)
+  version       Int       @default(1)
+  submittedById String    @map("submitted_by_id")
+  reviewedById  String?   @map("reviewed_by_id")
+  approvedById  String?   @map("approved_by_id")
+  submittedAt   DateTime? @map("submitted_at")
+  reviewedAt    DateTime? @map("reviewed_at")
+  approvedAt    DateTime? @map("approved_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  submittedBy   Employee       @relation("DPRSubmitter", fields: [submittedById], references: [id])
+  reviewedBy    Employee?      @relation("DPRReviewer", fields: [reviewedById], references: [id])
+  approvedBy    Employee?      @relation("DPRApprover", fields: [approvedById], references: [id])
+  photos        DPRPhoto[]
+  revisions     DPRRevision[]
+  notifications Notification[]
+
+  @@unique([submittedById, reportDate])
+  @@index([reportDate, id])
+  @@map("dpr")
+}
+
+model DPRPhoto {
+  id          String    @id @default(uuid())
+  dprId       String    @map("dpr_id")
+  ulid        String
+  container   String
+  filename    String
+  contentType String    @map("content_type")
+  sizeBytes   Int       @map("size_bytes")
+  caption     String?
+  location    String?
+  takenAt     DateTime? @map("taken_at")
+  uploadedAt  DateTime  @default(now()) @map("uploaded_at")
+
+  dpr DPR @relation(fields: [dprId], references: [id], onDelete: Cascade)
+
+  @@map("dpr_photo")
+}
+
+model DPRRevision {
+  id          String   @id @default(uuid())
+  dprId       String   @map("dpr_id")
+  version     Int
+  snapshot    Json
+  changedAt   DateTime @default(now()) @map("changed_at")
+  changedById String   @map("changed_by_id")
+
+  dpr DPR @relation(fields: [dprId], references: [id], onDelete: Cascade)
+
+  @@unique([dprId, version])
+  @@map("dpr_revision")
+}
+
+model Notification {
+  id         String   @id @default(uuid())
+  employeeId String   @map("employee_id")
+  type       String
+  dprId      String?  @map("dpr_id")
+  message    String
+  isRead     Boolean  @default(false) @map("is_read")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+  dpr      DPR?     @relation(fields: [dprId], references: [id])
+
+  @@index([employeeId, createdAt])
+  @@map("notification")
 }

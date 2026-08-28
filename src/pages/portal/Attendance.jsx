@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
 
@@ -73,6 +73,15 @@ export default function Attendance() {
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
   const [selectedRecord, setSelectedRecord] = useState(null);
+  const modalRef = useRef(null);
+  const closeButtonRef = useRef(null);
+
+  // Focus trap for modal
+  useEffect(() => {
+    if (selectedRecord && closeButtonRef.current) {
+      closeButtonRef.current.focus();
+    }
+  }, [selectedRecord]);
 
   // Parse month for display
   const [calYear, calMonth] = currentMonth.split('-').map(Number);
@@ -87,7 +96,8 @@ export default function Attendance() {
   // Fetch today's attendance
   const fetchToday = useCallback(async () => {
     try {
-      const data = await api.get('/attendance/today', accessToken);
+      const localDate = toDateString(new Date());
+      const data = await api.get(`/attendance/today?localDate=${localDate}`, accessToken);
       setTodayRecord(data);
     } catch {
       setTodayRecord(null);
@@ -122,21 +132,33 @@ export default function Attendance() {
     }
   }, [todayRecord, currentMonth]);
 
-  // Request geolocation
+  // Request geolocation with retry
   const requestLocation = () => {
     return new Promise((resolve, reject) => {
       if (!navigator.geolocation) {
         reject(new Error('Geolocation not supported'));
         return;
       }
-      navigator.geolocation.getCurrentPosition(
-        (pos) => resolve({
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-        }),
-        (err) => reject(new Error('Unable to get location')),
-        { enableHighAccuracy: false, timeout: 15000 }
-      );
+
+      const tryGetLocation = (attempt) => {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => resolve({
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+          }),
+          (err) => {
+            // Allow up to 2 retries for timeout/PERMISSION_DENIED errors
+            if (attempt < 2 && (err.code === err.TIMEOUT || err.code === err.PERMISSION_DENIED)) {
+              tryGetLocation(attempt + 1);
+            } else {
+              reject(new Error('Unable to get location'));
+            }
+          },
+          { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 }
+        );
+      };
+
+      tryGetLocation(1);
     });
   };
 
@@ -212,17 +234,17 @@ export default function Attendance() {
   return (
     <div className="attendance-page">
       {/* Header */}
-      <div className="page-header">
-        <h1 className="page-title">Attendance</h1>
-        <p className="page-subtitle">Mark your daily attendance with location</p>
+      <div className="attendance-page-header">
+        <h1 className="attendance-page-title">Attendance</h1>
+        <p className="attendance-page-sub">Mark your daily attendance with location</p>
       </div>
 
       {/* Today's Card */}
-      <div className="card today-card">
-        <div className="card-date">{formatFullDate(todayDateStr)}</div>
+      <div className="attendance-card">
+        <div className="attendance-card-date">{formatFullDate(todayDateStr)}</div>
 
         {error && (
-          <div className="error-banner">
+          <div className="attendance-error">
             <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
               <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
             </svg>
@@ -231,9 +253,9 @@ export default function Attendance() {
         )}
 
         {!hasOpenSession ? (
-          <div className="action-section">
+          <div className="attendance-action">
             <button
-              className="btn btn-primary btn-lg btn-block"
+              className="attendance-btn attendance-btn-checkin"
               onClick={handleCheckIn}
               disabled={status === 'checking-in'}
             >
@@ -244,44 +266,46 @@ export default function Attendance() {
                 </>
               ) : (
                 <>
-                  <svg width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" />
-                  </svg>
+                  <span className="attendance-btn-icon">
+                    <svg width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" />
+                    </svg>
+                  </span>
                   Mark Attendance
                 </>
               )}
             </button>
-            <p className="hint-text">GPS location will be captured automatically</p>
+            <p className="attendance-action-hint">GPS location will be captured automatically</p>
           </div>
         ) : (
-          <div className="marked-section">
-            <div className="success-badge">
+          <div className="attendance-completed">
+            <div className="attendance-completed-badge">
               <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
                 <path d="M20 6L9 17l-5-5" />
               </svg>
               Attendance Marked
             </div>
 
-            <div className="attendance-detail">
-              <div className="detail-row">
+            <div className="attendance-checkin-info">
+              <div className="attendance-checkin-time">
                 <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                   <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
                 </svg>
-                <span>Marked at {formatTime(todayRecord.sessions[todayRecord.sessions.length - 1].checkIn)}</span>
+                Marked at {formatTime(todayRecord.sessions[todayRecord.sessions.length - 1].checkIn)}
               </div>
               {todayRecord.sessions[todayRecord.sessions.length - 1].checkInAddr && (
-                <div className="detail-row">
-                  <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <div className="attendance-checkin-loc">
+                  <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                     <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" />
                   </svg>
-                  <span>{todayRecord.sessions[todayRecord.sessions.length - 1].checkInAddr}</span>
+                  {todayRecord.sessions[todayRecord.sessions.length - 1].checkInAddr}
                 </div>
               )}
             </div>
 
             {/* Map */}
             {todayRecord.sessions[todayRecord.sessions.length - 1].checkInLat && (
-              <div className="map-container">
+              <div style={{ marginTop: '1rem', borderRadius: '12px', overflow: 'hidden' }}>
                 <iframe
                   title="Your location"
                   width="100%"
@@ -301,10 +325,11 @@ export default function Attendance() {
       </div>
 
       {/* Calendar */}
-      <div className="card calendar-card">
-        <div className="calendar-header">
+      <div className="attendance-calendar">
+        <div className="attendance-calendar-header">
           <button
-            className="btn-icon"
+            className="attendance-cal-nav"
+            aria-label="Previous month"
             onClick={() => {
               const prev = new Date(calYear, calMonth - 2, 1);
               setCurrentMonth(`${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`);
@@ -312,9 +337,10 @@ export default function Attendance() {
           >
             ‹
           </button>
-          <span className="calendar-month-label">{monthLabel}</span>
+          <span className="attendance-cal-month">{monthLabel}</span>
           <button
-            className="btn-icon"
+            className="attendance-cal-nav"
+            aria-label="Next month"
             onClick={() => {
               const next = new Date(calYear, calMonth, 1);
               setCurrentMonth(`${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`);
@@ -324,12 +350,12 @@ export default function Attendance() {
           </button>
         </div>
 
-        <div className="calendar-grid">
+        <div className="attendance-cal-grid">
           {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
-            <div key={d} className="calendar-day-label">{d}</div>
+            <div key={d} className="attendance-cal-day-header">{d}</div>
           ))}
           {weeks.flat().map((item, i) => {
-            if (!item) return <div key={i} className="calendar-cell calendar-cell-empty" />;
+            if (!item) return <div key={i} className="attendance-cal-cell empty" />;
 
             const { day, dateStr, record } = item;
             const hasRecord = record?.sessions?.length > 0;
@@ -338,28 +364,29 @@ export default function Attendance() {
             return (
               <div
                 key={i}
-                className={`calendar-cell ${hasRecord ? 'calendar-cell-marked' : ''} ${isToday ? 'calendar-cell-today' : ''}`}
+                className={`attendance-cal-cell ${hasRecord ? 'present' : ''} ${isToday ? 'today' : ''}`}
                 onClick={() => hasRecord && setSelectedRecord(record)}
               >
-                <span className="calendar-day-num">{day}</span>
-                {hasRecord && (
-                  <span className="calendar-checkin-time">
-                    {formatTime(record.sessions[0].checkIn)}
-                  </span>
-                )}
+                <span className="attendance-cal-num">{day}</span>
+                {hasRecord && <span className="attendance-cal-dot" />}
               </div>
             );
           })}
+        </div>
+
+        <div className="attendance-cal-legend">
+          <span className="legend"><span className="legend-dot" style={{background:'rgba(22,163,74,0.15)'}}></span> Present</span>
+          <span className="legend"><span className="legend-dot" style={{background:'rgba(0,102,255,0.08)'}}></span> Today</span>
         </div>
       </div>
 
       {/* Date Detail Modal */}
       {selectedRecord && (
-        <div className="modal-overlay" onClick={() => setSelectedRecord(null)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-overlay" onClick={() => setSelectedRecord(null)} role="dialog" aria-modal="true" aria-labelledby="modal-title">
+          <div className="modal" ref={modalRef} onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <h3>{formatFullDate(selectedRecord.date)}</h3>
-              <button className="btn-icon modal-close" onClick={() => setSelectedRecord(null)}>×</button>
+              <h3 id="modal-title">{formatFullDate(selectedRecord.date)}</h3>
+              <button ref={closeButtonRef} className="btn-icon modal-close" aria-label="Close modal" onClick={() => setSelectedRecord(null)}>×</button>
             </div>
 
             <div className="modal-body">
@@ -367,13 +394,19 @@ export default function Attendance() {
                 <div key={session.id} className="session-item">
                   <div className="session-header">Session {i + 1}</div>
                   <div className="session-detail">
-                    <span className="session-time">🕐 {formatTime(session.checkIn)}</span>
+                    <span className="session-time">
+                      <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{verticalAlign:'middle',marginRight:'4px'}}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                      {formatTime(session.checkIn)}
+                    </span>
                     {session.checkOut && (
                       <span className="session-time"> → {formatTime(session.checkOut)}</span>
                     )}
                   </div>
                   {session.checkInAddr && (
-                    <div className="session-addr">📍 {session.checkInAddr}</div>
+                    <div className="session-addr">
+                      <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{verticalAlign:'middle',marginRight:'4px'}}><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                      {session.checkInAddr}
+                    </div>
                   )}
                   {session.checkInLat && (
                     <div className="session-map">
@@ -394,294 +427,6 @@ export default function Attendance() {
           </div>
         </div>
       )}
-
-      <style>{`
-        .attendance-page {
-          min-height: 100vh;
-          background: #f8fafc;
-          padding: 1rem;
-          padding-bottom: 2rem;
-        }
-        .page-header {
-          margin-bottom: 1rem;
-        }
-        .page-title {
-          font-size: 1.5rem;
-          font-weight: 600;
-          color: var(--navy, #1e293b);
-          margin: 0;
-        }
-        .page-subtitle {
-          font-size: 0.875rem;
-          color: var(--steel, #64748b);
-          margin: 0.25rem 0 0;
-        }
-        .card {
-          background: white;
-          border-radius: 16px;
-          padding: 1.25rem;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-          margin-bottom: 1rem;
-        }
-        .card-date {
-          font-size: 0.875rem;
-          color: var(--steel, #64748b);
-          margin-bottom: 1rem;
-        }
-        .error-banner {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          color: #dc2626;
-          font-size: 0.875rem;
-          padding: 0.75rem;
-          background: #fef2f2;
-          border-radius: 8px;
-          margin-bottom: 1rem;
-        }
-        .action-section {
-          text-align: center;
-          padding: 0.5rem 0;
-        }
-        .btn {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          gap: 0.5rem;
-          padding: 0.75rem 1.5rem;
-          border-radius: 10px;
-          font-size: 1rem;
-          font-weight: 600;
-          border: none;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-        .btn:disabled {
-          opacity: 0.6;
-          cursor: not-allowed;
-        }
-        .btn-primary {
-          background: var(--blue, #2563eb);
-          color: white;
-        }
-        .btn-primary:hover:not(:disabled) {
-          background: #1d4ed8;
-        }
-        .btn-lg {
-          padding: 1rem 2rem;
-          font-size: 1.1rem;
-        }
-        .btn-block {
-          width: 100%;
-        }
-        .btn-icon {
-          background: #f1f5f9;
-          border: none;
-          font-size: 1.25rem;
-          cursor: pointer;
-          color: var(--blue, #2563eb);
-          padding: 0.5rem 1rem;
-          border-radius: 8px;
-        }
-        .spinner {
-          width: 18px;
-          height: 18px;
-          border: 2px solid rgba(255,255,255,0.3);
-          border-top-color: white;
-          border-radius: 50%;
-          animation: spin 0.8s linear infinite;
-        }
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
-        .hint-text {
-          font-size: 0.75rem;
-          color: var(--steel, #64748b);
-          margin-top: 0.75rem;
-        }
-        .marked-section {
-          text-align: center;
-        }
-        .success-badge {
-          display: inline-flex;
-          align-items: center;
-          gap: 0.5rem;
-          padding: 0.5rem 1rem;
-          background: #dcfce7;
-          color: #16a34a;
-          border-radius: 20px;
-          font-size: 0.875rem;
-          font-weight: 600;
-          margin-bottom: 1rem;
-        }
-        .attendance-detail {
-          text-align: left;
-          padding: 0.75rem;
-          background: #f8fafc;
-          border-radius: 10px;
-        }
-        .detail-row {
-          display: flex;
-          align-items: center;
-          gap: 0.5rem;
-          font-size: 0.875rem;
-          color: var(--navy, #1e293b);
-          padding: 0.25rem 0;
-        }
-        .map-container {
-          margin-top: 1rem;
-          border-radius: 12px;
-          overflow: hidden;
-          background: #e5e7eb;
-        }
-        .calendar-card {
-          padding: 1rem;
-        }
-        .calendar-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 1rem;
-        }
-        .calendar-month-label {
-          font-weight: 600;
-          color: var(--navy, #1e293b);
-        }
-        .calendar-grid {
-          display: grid;
-          grid-template-columns: repeat(7, 1fr);
-          gap: 0.35rem;
-        }
-        .calendar-day-label {
-          text-align: center;
-          font-size: 0.7rem;
-          font-weight: 600;
-          color: var(--steel, #64748b);
-          padding: 0.5rem 0;
-          text-transform: uppercase;
-        }
-        .calendar-cell {
-          aspect-ratio: 1;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          border-radius: 10px;
-          background: #f8fafc;
-          min-height: 50px;
-          cursor: default;
-        }
-        .calendar-cell-empty {
-          background: transparent;
-        }
-        .calendar-cell-marked {
-          background: #dcfce7;
-          cursor: pointer;
-        }
-        .calendar-cell-marked:hover {
-          background: #bbf7d0;
-        }
-        .calendar-cell-today {
-          border: 2px solid var(--blue, #2563eb);
-        }
-        .calendar-cell-today.marked {
-          background: #bbf7d0;
-        }
-        .calendar-day-num {
-          font-size: 0.8rem;
-          font-weight: 500;
-          color: var(--navy, #1e293b);
-        }
-        .calendar-checkin-time {
-          font-size: 0.55rem;
-          color: #16a34a;
-          font-weight: 600;
-        }
-        .modal-overlay {
-          position: fixed;
-          inset: 0;
-          background: rgba(0,0,0,0.5);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          z-index: 1000;
-          padding: 1rem;
-        }
-        .modal {
-          background: white;
-          border-radius: 16px;
-          width: 100%;
-          max-width: 420px;
-          max-height: 80vh;
-          overflow-y: auto;
-        }
-        .modal-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 1.25rem;
-          border-bottom: 1px solid #e5e7eb;
-        }
-        .modal-header h3 {
-          margin: 0;
-          font-size: 1rem;
-          color: var(--navy, #1e293b);
-        }
-        .modal-close {
-          font-size: 1.5rem;
-          background: none;
-          padding: 0;
-        }
-        .modal-body {
-          padding: 1.25rem;
-        }
-        .session-item {
-          padding: 1rem;
-          background: #f8fafc;
-          border-radius: 12px;
-          margin-bottom: 0.75rem;
-        }
-        .session-header {
-          font-size: 0.75rem;
-          font-weight: 600;
-          color: var(--steel, #64748b);
-          margin-bottom: 0.5rem;
-        }
-        .session-detail {
-          font-size: 0.9rem;
-          font-weight: 500;
-          color: var(--navy, #1e293b);
-        }
-        .session-addr {
-          font-size: 0.8rem;
-          color: var(--steel, #64748b);
-          margin-top: 0.25rem;
-        }
-        .session-map {
-          margin-top: 0.75rem;
-          border-radius: 8px;
-          overflow: hidden;
-          background: #e5e7eb;
-        }
-        @media (max-width: 480px) {
-          .attendance-page {
-            padding: 0.75rem;
-          }
-          .card {
-            padding: 1rem;
-            border-radius: 12px;
-          }
-          .calendar-cell {
-            min-height: 44px;
-          }
-          .calendar-day-num {
-            font-size: 0.75rem;
-          }
-          .calendar-checkin-time {
-            font-size: 0.5rem;
-          }
-        }
-      `}</style>
     </div>
   );
 }

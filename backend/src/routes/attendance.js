@@ -1,8 +1,6 @@
 const express = require('express');
-const jwt = require('jsonwebtoken');
 const router = express.Router();
-
-const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+const { requireAuth } = require('../middleware/auth');
 
 // Helper: Get UTC start and end of a local date (YYYY-MM format)
 function getMonthRange(yearMonth) {
@@ -26,6 +24,12 @@ function toLocalDateString(date) {
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+// Helper: Get today's UTC date for attendance record (uses server time)
+function getTodayUTCDate() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
 // All routes require auth
@@ -73,16 +77,25 @@ router.get('/', async (req, res) => {
   }
 });
 
-// GET /api/attendance/today
+// GET /api/attendance/today?localDate=YYYY-MM-DD
 router.get('/today', async (req, res) => {
   const prisma = req.app.get('prisma');
-  const today = getTodayForEmployee();
+  const { localDate } = req.query;
+
+  // Use frontend-provided local date if available, otherwise fall back to server UTC date
+  let attendanceDate;
+  if (localDate && /^\d{4}-\d{2}-\d{2}$/.test(localDate)) {
+    const [year, month, day] = localDate.split('-').map(Number);
+    attendanceDate = new Date(Date.UTC(year, month - 1, day));
+  } else {
+    attendanceDate = getTodayUTCDate();
+  }
 
   try {
     const record = await prisma.attendance.findFirst({
       where: {
         employeeId: req.employeeId,
-        date: today,
+        date: attendanceDate,
       },
       include: { sessions: { orderBy: { checkIn: 'asc' } } },
     });
@@ -310,25 +323,5 @@ router.get('/all', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch attendance' });
   }
 });
-
-// Middleware: require auth
-function requireAuth(req, res, next) {
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Authorization required' });
-  }
-
-  const token = authHeader.slice(7);
-
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.employeeId = decoded.employeeId;
-    req.email = decoded.email;
-    next();
-  } catch (err) {
-    return res.status(401).json({ error: 'Invalid or expired token' });
-  }
-}
 
 module.exports = router;

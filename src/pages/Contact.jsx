@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Resend } from 'resend';
+import { api } from '../lib/api.js';
 
 export default function Contact() {
   const [form, setForm] = useState({
@@ -16,39 +16,18 @@ export default function Contact() {
     setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-
-    const apiKey = import.meta.env.VITE_RESEND_API_KEY;
-    if (!apiKey) {
-      console.error('Resend API key not configured');
-      setStatus('error');
-      return;
-    }
-
-    const resend = new Resend(apiKey);
     setStatus('loading');
 
-    resend.emails.send({
-      from: 'info@acschennai.com',
-      to: 'info@acschennai.com',
-      subject: `Project Enquiry${form.projectType ? ` — ${form.projectType}` : ''} from ${form.name}`,
-      html: `<h2>New Project Enquiry</h2>
-<p><strong>Name:</strong> ${form.name}</p>
-<p><strong>Company:</strong> ${form.company || 'N/A'}</p>
-<p><strong>Email:</strong> ${form.email}</p>
-<p><strong>Phone:</strong> ${form.phone || 'N/A'}</p>
-<p><strong>Project Type:</strong> ${form.projectType || 'Not specified'}</p>
-<hr />
-<p><strong>Message:</strong></p>
-<p>${form.message.replace(/\n/g, '<br/>')}</p>`,
-    }).then(() => {
+    try {
+      await api.post('/contact', form);
       setStatus('success');
       setForm({ name: '', company: '', email: '', phone: '', projectType: '', message: '' });
-    }).catch((err) => {
-      console.error('Resend error:', err);
+    } catch (err) {
+      console.error('Contact error:', err);
       setStatus('error');
-    });
+    }
   };
 
   return (

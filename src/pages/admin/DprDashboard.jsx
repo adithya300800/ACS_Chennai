@@ -1,0 +1,279 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { useAuth } from '../../contexts/AuthContext.jsx';
+import { api } from '../../lib/api.js';
+
+function StatusBadge({ status }) {
+  const cls = {
+    DRAFT: 'dpr-status-draft',
+    SUBMITTED: 'dpr-status-submitted',
+    UNDER_REVIEW: 'dpr-status-review',
+    APPROVED: 'dpr-status-approved',
+    REJECTED: 'dpr-status-rejected',
+  }[status] || 'dpr-status-draft';
+  const label = {
+    DRAFT: 'Draft',
+    SUBMITTED: 'Submitted',
+    UNDER_REVIEW: 'Under Review',
+    APPROVED: 'Approved',
+    REJECTED: 'Rejected',
+  }[status] || status;
+  return <span className={`dpr-status-badge ${cls}`}>{label}</span>;
+}
+
+function StatCard({ number, label, color }) {
+  return (
+    <div className="dpr-stat-card">
+      <div className="dpr-stat-number" style={color ? { color } : {}}>{number}</div>
+      <div className="dpr-stat-label">{label}</div>
+    </div>
+  );
+}
+
+export default function DprDashboard() {
+  const { accessToken, employee } = useAuth();
+  const [dprs, setDprs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [reviewing, setReviewing] = useState(null); // id of DPR being reviewed
+  const [adminNotes, setAdminNotes] = useState('');
+  const [actionLoading, setActionLoading] = useState('');
+  const [filter, setFilter] = useState('SUBMITTED');
+  const [stats, setStats] = useState({ today: 0, pending: 0, approvedWeek: 0, total: 0 });
+
+  const loadDprs = useCallback(async () => {
+    try {
+      const data = await api.getDprs({ status: filter }, accessToken);
+      return data.dprs || [];
+    } catch (err) {
+      throw err;
+    }
+  }, [accessToken, filter]);
+
+  const loadAll = useCallback(async () => {
+    setLoading(true);
+    try {
+      // Load pending count and today's count in parallel
+      const [pendingData, todayData, weekData] = await Promise.all([
+        api.getDprs({ status: 'SUBMITTED' }, accessToken),
+        api.getDprs({ status: 'UNDER_REVIEW' }, accessToken),
+        api.getDprs({ status: 'APPROVED' }, accessToken),
+      ]);
+
+      setStats({
+        today: (pendingData.dprs || []).length,
+        pending: (todayData.dprs || []).length,
+        approvedWeek: (weekData.dprs || []).length,
+        total: (pendingData.dprs || []).length + (todayData.dprs || []).length,
+      });
+
+      const items = await loadDprs();
+      setDprs(items);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [accessToken, filter, loadDprs]);
+
+  useEffect(() => {
+    loadAll();
+  }, [filter]);
+
+  const handleReview = async (dprId, action) => {
+    setActionLoading(action);
+    try {
+      await api.reviewDpr(dprId, { corrections: {}, adminNotes }, accessToken);
+      setReviewing(null);
+      setAdminNotes('');
+      await loadAll();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setActionLoading('');
+    }
+  };
+
+  if (!employee?.isAdmin) {
+    return (
+      <div className="dpr-page">
+        <div className="dpr-card" style={{ textAlign: 'center', padding: '3rem' }}>
+          <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>🔒</div>
+          <h2 style={{ color: 'var(--navy)', marginBottom: '0.5rem' }}>Admin Access Required</h2>
+          <p style={{ color: 'var(--steel)' }}>You need admin privileges to access the DPR Dashboard.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="dpr-page">
+      <div className="dpr-page-header">
+        <h1 className="dpr-page-title">DPR Dashboard</h1>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          {['SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'].map(s => (
+            <button
+              key={s}
+              className={`btn btn-sm ${filter === s ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setFilter(s)}
+            >
+              {s === 'UNDER_REVIEW' ? 'Under Review' : s.charAt(0) + s.slice(1).toLowerCase()}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div className="dpr-dashboard-stats">
+        <StatCard number={stats.today} label="Submitted Today" />
+        <StatCard number={stats.pending} label="Pending Review" color="#f59e0b" />
+        <StatCard number={stats.approvedWeek} label="Approved" color="#22c55e" />
+        <StatCard number={stats.total} label="Total Active" />
+      </div>
+
+      {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
+
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--steel)' }}>
+          <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>⏳</div>
+          Loading...
+        </div>
+      ) : dprs.length === 0 ? (
+        <div className="dpr-list-empty">
+          <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>✅</div>
+          <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", color: 'var(--navy)', marginBottom: '0.5rem' }}>No DPRs</h3>
+          <p style={{ color: 'var(--steel)' }}>
+            {filter === 'SUBMITTED' ? 'No DPRs awaiting review.' : `No ${filter.toLowerCase().replace('_', ' ')} DPRs.`}
+          </p>
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem' }}>
+          {dprs.map(dpr => (
+            <div key={dpr.id} className="dpr-card">
+              <div className="dpr-card-header">
+                <div>
+                  <h3 className="dpr-card-title">{dpr.projectName}</h3>
+                  <div className="dpr-card-meta" style={{ marginTop: '0.5rem' }}>
+                    <span>📍 {dpr.location}</span>
+                    <span>📅 {new Date(dpr.reportDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                  </div>
+                </div>
+                <StatusBadge status={dpr.status} />
+              </div>
+
+              {/* Meta grid */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                {dpr.weather && (
+                  <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
+                    <span style={{ fontWeight: 500 }}>Weather:</span> {dpr.weather}
+                  </div>
+                )}
+                {dpr.temperature && (
+                  <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
+                    <span style={{ fontWeight: 500 }}>Temp:</span> {dpr.temperature}
+                  </div>
+                )}
+                {dpr.contractor && (
+                  <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
+                    <span style={{ fontWeight: 500 }}>Contractor:</span> {dpr.contractor}
+                  </div>
+                )}
+                <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
+                  <span style={{ fontWeight: 500 }}>Photos:</span> {dpr.photos?.length || 0}
+                </div>
+              </div>
+
+              {/* Submitter */}
+              {dpr.submittedBy && (
+                <div style={{ fontSize: '0.8rem', color: 'var(--steel)', marginBottom: '0.75rem' }}>
+                  <span style={{ fontWeight: 500 }}>Submitted by:</span> {dpr.submittedBy.name}
+                  {dpr.submittedAt && (
+                    <span> · {new Date(dpr.submittedAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+                  )}
+                </div>
+              )}
+
+              {/* Photo thumbnails */}
+              {dpr.photos?.length > 0 && (
+                <div style={{ display: 'flex', gap: '0.375rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
+                  {dpr.photos.slice(0, 4).map(photo => (
+                    <div key={photo.id} style={{ width: 48, height: 48, borderRadius: 6, background: '#f1f5f9', overflow: 'hidden', flexShrink: 0 }}>
+                      <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.6rem', color: '#94a3b8' }}>
+                        📷
+                      </div>
+                    </div>
+                  ))}
+                  {dpr.photos.length > 4 && (
+                    <div style={{ width: 48, height: 48, borderRadius: 6, background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', color: 'var(--steel)' }}>
+                      +{dpr.photos.length - 4}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Review actions */}
+              {(dpr.status === 'SUBMITTED' || dpr.status === 'UNDER_REVIEW') && (
+                <div className="dpr-review-actions">
+                  {reviewing === dpr.id ? (
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                      <input
+                        className="form-input"
+                        placeholder="Admin notes (optional)"
+                        value={adminNotes}
+                        onChange={e => setAdminNotes(e.target.value)}
+                        style={{ fontSize: '0.85rem', padding: '0.5rem' }}
+                      />
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <button
+                          className="btn btn-success btn-sm"
+                          onClick={() => handleReview(dpr.id, 'approve')}
+                          disabled={!!actionLoading}
+                          style={{ flex: 1 }}
+                        >
+                          {actionLoading === 'approve' ? '...' : '✓ Approve'}
+                        </button>
+                        <button
+                          className="btn btn-danger btn-sm"
+                          onClick={() => handleReview(dpr.id, 'reject')}
+                          disabled={!!actionLoading}
+                          style={{ flex: 1 }}
+                        >
+                          {actionLoading === 'reject' ? '...' : '✗ Reject'}
+                        </button>
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => { setReviewing(null); setAdminNotes(''); }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={() => setReviewing(dpr.id)}
+                      style={{ flex: 1 }}
+                    >
+                      Review
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {dpr.status === 'APPROVED' && (
+                <div style={{ textAlign: 'center', padding: '0.5rem', background: '#dcfce7', borderRadius: 6, color: '#16a34a', fontSize: '0.85rem', fontWeight: 500 }}>
+                  ✓ Approved
+                </div>
+              )}
+
+              {dpr.status === 'REJECTED' && (
+                <div style={{ textAlign: 'center', padding: '0.5rem', background: '#fee2e2', borderRadius: 6, color: '#dc2626', fontSize: '0.85rem', fontWeight: 500 }}>
+                  ✗ Rejected
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

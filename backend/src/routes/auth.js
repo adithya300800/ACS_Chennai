@@ -2,9 +2,16 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const router = express.Router();
+const { requireAuth } = require('../middleware/auth');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
-const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'change-me-refresh-in-production';
+// Fail fast if secrets are not set in production
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
+
+if (process.env.NODE_ENV === 'production') {
+  if (!JWT_SECRET) throw new Error('JWT_SECRET environment variable must be set');
+  if (!JWT_REFRESH_SECRET) throw new Error('JWT_REFRESH_SECRET environment variable must be set');
+}
 
 // Zoho OAuth config
 const ZOHO_CLIENT_ID = process.env.ZOHO_CLIENT_ID;
@@ -12,14 +19,31 @@ const ZOHO_CLIENT_SECRET = process.env.ZOHO_CLIENT_SECRET;
 const ZOHO_REDIRECT_URI = process.env.ZOHO_REDIRECT_URI;
 const ZOHO_DOMAIN = process.env.ZOHO_DOMAIN || 'https://accounts.zoho.com';
 
+// In-memory store for OAuth state (for CSRF protection)
+// In production, use Redis or database
+const oauthStateStore = new Map();
+
+const STATE_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
+
 // GET /api/auth/zoho - Initiate Zoho OAuth
 router.get('/zoho', (req, res) => {
   if (!ZOHO_CLIENT_ID || !ZOHO_REDIRECT_URI) {
     return res.status(503).json({ error: 'Zoho OAuth not configured' });
   }
 
+  // Clean up expired states
+  const now = Date.now();
+  for (const [key, value] of oauthStateStore.entries()) {
+    if (now - value.timestamp > STATE_EXPIRY_MS) {
+      oauthStateStore.delete(key);
+    }
+  }
+
   const scopes = 'openid profile email';
-  const state = Math.random().toString(36).substring(7);
+  const state = Math.random().toString(36).substring(7) + Date.now().toString(36);
+
+  // Store state with timestamp
+  oauthStateStore.set(state, { timestamp: now });
 
   const authUrl = `${ZOHO_DOMAIN}/oauth/v2/auth?` +
     `response_type=code&` +
@@ -34,7 +58,7 @@ router.get('/zoho', (req, res) => {
 
 // GET /api/auth/zoho/callback - Zoho redirects here with code
 router.get('/zoho/callback', async (req, res) => {
-  const { code } = req.query;
+  const { code, state } = req.query;
 
   if (!code) {
     // Send HTML that reports error via postMessage and closes
@@ -45,6 +69,19 @@ router.get('/zoho/callback', async (req, res) => {
       window.close();
     </script><p>No code received. Please close this window and try again.</p></body></html>`);
   }
+
+  // Validate state for CSRF protection
+  if (!state || !oauthStateStore.has(state)) {
+    return res.send(`<!DOCTYPE html><html><body><script>
+      if (window.opener) {
+        window.opener.postMessage({ type: 'zoho-oauth-error', error: 'invalid_state' }, window.location.origin);
+      }
+      window.close();
+    </script><p>Invalid OAuth state. Please try again.</p></body></html>`);
+  }
+
+  // Remove used state
+  oauthStateStore.delete(state);
 
   // Exchange code for tokens
   try {
@@ -301,14 +338,9 @@ router.post('/login', async (req, res) => {
     return res.status(500).json({ error: 'Database error: ' + err.message });
   }
 
-  // DEBUG: If no password provided, check employee exists
+  // Require password for login
   if (!password) {
-    return res.json({
-      debug: true,
-      found: !!employee,
-      email: email,
-      hasPassword: !!(employee && employee.password)
-    });
+    return res.status(400).json({ error: 'Password is required' });
   }
 
   // Auto-create employee on first login (for Zoho SSO flow)
@@ -428,25 +460,4 @@ router.get('/me', requireAuth, async (req, res) => {
   }
 });
 
-// Middleware: require auth
-function requireAuth(req, res, next) {
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Authorization required' });
-  }
-
-  const token = authHeader.slice(7);
-
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.employeeId = decoded.employeeId;
-    req.email = decoded.email;
-    next();
-  } catch (err) {
-    return res.status(401).json({ error: 'Invalid or expired token' });
-  }
-}
-
 module.exports = router;
-// Zoho OAuth trigger

@@ -6,6 +6,8 @@ const { PrismaClient } = require('@prisma/client');
 
 const authRoutes = require('./routes/auth');
 const attendanceRoutes = require('./routes/attendance');
+const contactRoutes = require('./routes/contact');
+const dprRoutes = require('./routes/dpr');
 
 const app = express();
 const prisma = new PrismaClient();
@@ -30,6 +32,8 @@ app.get('/health', (req, res) => {
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/attendance', attendanceRoutes);
+app.use('/api/contact', contactRoutes);
+app.use('/api/dpr', dprRoutes);
 
 // 404 handler
 app.use((req, res) => {
