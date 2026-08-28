@@ -43,7 +43,6 @@ jobs:
         uses: azure/webapps-deploy@v3
         with:
           app-name: acs-portal-api
-          slot-name: production
           package: .
 
       - name: Set App Settings
@@ -51,7 +50,6 @@ jobs:
           az webapp config appsettings set \
             --resource-group acs-portal-rg \
             --name acs-portal-api \
-            --slot production \
             --settings \
               DATABASE_URL="${{ secrets.DATABASE_URL }}" \
               JWT_SECRET="${{ secrets.JWT_SECRET }}" \
