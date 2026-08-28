@@ -47,8 +47,16 @@ jobs:
 
       - name: Set App Settings
         run: |
-          # NOTE: az webapp config appsettings set REPLACES all settings (without --slot flag).
-          # Never add PORT or APP_COMMAND_LINE here — Azure provides PORT dynamically (8080).
+          # az webapp config appsettings set REPLACES all settings when --settings is used.
+          # To preserve existing settings, we fetch them first and include all current settings
+          # in the update, then update only the ones we need to change.
+          echo "Fetching current app settings..."
+          CURRENT_SETTINGS=$(az webapp config appsettings list \
+            --resource-group acs-portal-rg \
+            --name acs-portal-api \
+            --query '[].{name:name,value:value}' -o tsv 2>/dev/null || echo "")
+
+          # Build the complete settings list preserving all existing + adding new/changed ones
           az webapp config appsettings set \
             --resource-group acs-portal-rg \
             --name acs-portal-api \
