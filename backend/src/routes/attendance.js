@@ -7,36 +7,25 @@ const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
 // Helper: Get UTC start and end of a local date (YYYY-MM format)
 function getMonthRange(yearMonth) {
   const [year, month] = yearMonth.split('-').map(Number);
+  // Convert local date to UTC range for database query
   const startDate = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
   const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
   return { startDate, endDate };
 }
 
-// Helper: Get today's date at UTC midnight
-function getTodayUTC() {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-}
-
-// Helper: Parse YYYY-MM-DD string to UTC midnight
+// Helper: Parse YYYY-MM-DD string to UTC midnight for storage
 function parseLocalDate(dateStr) {
   const [year, month, day] = dateStr.split('-').map(Number);
   return new Date(Date.UTC(year, month - 1, day));
 }
 
-// Helper: Get date string YYYY-MM-DD from Date object (local timezone)
+// Helper: Get date string YYYY-MM-DD from Date object (local timezone for display)
 function toLocalDateString(date) {
   const d = new Date(date);
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
-}
-
-// Helper: Get UTC date for today (matches frontend's local date)
-function getTodayForEmployee() {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
 // All routes require auth
@@ -123,14 +112,39 @@ router.get('/today', async (req, res) => {
 // POST /api/attendance/check-in
 router.post('/check-in', async (req, res) => {
   const prisma = req.app.get('prisma');
-  const { latitude, longitude, address } = req.body;
+  const { latitude, longitude, address, localDateTime } = req.body;
 
   if (latitude === undefined || latitude === null || longitude === undefined || longitude === null) {
     return res.status(400).json({ error: 'latitude and longitude are required' });
   }
 
-  // Use employee's local date for attendance record
-  const attendanceDate = getTodayForEmployee();
+  // Reject 0,0 coordinates (invalid location)
+  if (latitude === 0 && longitude === 0) {
+    return res.status(400).json({ error: 'Invalid location coordinates' });
+  }
+
+  // Use employee's local datetime (sent from frontend) to derive:
+  // 1. Attendance record date (local date)
+  // 2. checkIn timestamp (local time converted to UTC for storage)
+  let attendanceDate;
+  let checkInTime;
+
+  if (localDateTime) {
+    // Parse the local datetime and convert to UTC for storage
+    const localDate = new Date(localDateTime);
+    checkInTime = localDate; // Store local time as-is, but in UTC context
+
+    // Extract date components for attendance record (local date)
+    const year = localDate.getFullYear();
+    const month = localDate.getMonth();
+    const day = localDate.getDate();
+    attendanceDate = new Date(Date.UTC(year, month, day));
+  } else {
+    // Fallback: use current UTC
+    const now = new Date();
+    attendanceDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    checkInTime = now;
+  }
 
   try {
     // Find or create attendance record for today
@@ -148,11 +162,11 @@ router.post('/check-in', async (req, res) => {
       });
     }
 
-    // Create new session
+    // Create new session with employee's local time
     const session = await prisma.attendanceSession.create({
       data: {
         attendanceId: attendance.id,
-        checkIn: new Date(), // Store current timestamp in UTC
+        checkIn: checkInTime,
         checkInLat: latitude,
         checkInLng: longitude,
         checkInAddr: address || null,
@@ -191,6 +205,11 @@ router.put('/check-out/:sessionId', async (req, res) => {
 
   if (latitude === undefined || latitude === null || longitude === undefined || longitude === null) {
     return res.status(400).json({ error: 'latitude and longitude are required' });
+  }
+
+  // Reject 0,0 coordinates (invalid location)
+  if (latitude === 0 && longitude === 0) {
+    return res.status(400).json({ error: 'Invalid location coordinates' });
   }
 
   try {

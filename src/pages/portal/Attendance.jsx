@@ -2,20 +2,26 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
 
-// Format date string to local display
+// Format date string to local display (handles both YYYY-MM-DD and ISO strings)
 const formatDate = (dateStr) => {
   if (!dateStr) return '';
-  return new Date(dateStr).toLocaleDateString('en-IN', {
+  // If it's a YYYY-MM-DD string, parse it as local date to avoid UTC offset issues
+  // Use the date string directly to construct local date
+  const [year, month, day] = dateStr.split('T')[0].split('-').map(Number);
+  const localDate = new Date(year, month - 1, day);
+  return localDate.toLocaleDateString('en-IN', {
     weekday: 'short',
     day: 'numeric',
     month: 'short'
   });
 };
 
-// Format full date for modal
+// Format full date for modal (handles both YYYY-MM-DD and ISO strings)
 const formatFullDate = (dateStr) => {
   if (!dateStr) return '';
-  return new Date(dateStr).toLocaleDateString('en-IN', {
+  const [year, month, day] = dateStr.split('T')[0].split('-').map(Number);
+  const localDate = new Date(year, month - 1, day);
+  return localDate.toLocaleDateString('en-IN', {
     weekday: 'long',
     day: 'numeric',
     month: 'long',
@@ -23,7 +29,7 @@ const formatFullDate = (dateStr) => {
   });
 };
 
-// Format time in 12-hour format
+// Format time in 12-hour format (from ISO string)
 const formatTime = (dateStr) => {
   if (!dateStr) return '';
   return new Date(dateStr).toLocaleTimeString('en-IN', {
@@ -33,7 +39,7 @@ const formatTime = (dateStr) => {
   });
 };
 
-// Convert Date to YYYY-MM-DD local string
+// Convert Date to YYYY-MM-DD local string (for calendar matching)
 const toDateString = (date) => {
   const d = new Date(date);
   const year = d.getFullYear();
@@ -151,10 +157,14 @@ export default function Attendance() {
     }
 
     try {
+      // Get employee's local datetime (ISO string in local timezone)
+      const localDateTime = new Date().toISOString();
+
       const data = await api.post('/attendance/check-in', {
         latitude: lat,
         longitude: lng,
-        address: addr
+        address: addr,
+        localDateTime
       }, accessToken);
       setTodayRecord(data);
       setStatus('idle');

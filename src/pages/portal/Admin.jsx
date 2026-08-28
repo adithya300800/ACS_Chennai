@@ -4,7 +4,10 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 
 const formatDate = (dateStr) => {
   if (!dateStr) return '';
-  return new Date(dateStr).toLocaleDateString('en-IN', {
+  // Handle both YYYY-MM-DD and ISO strings
+  const [year, month, day] = dateStr.split('T')[0].split('-').map(Number);
+  const localDate = new Date(year, month - 1, day);
+  return localDate.toLocaleDateString('en-IN', {
     weekday: 'short',
     day: 'numeric',
     month: 'short'
@@ -13,7 +16,10 @@ const formatDate = (dateStr) => {
 
 const formatFullDate = (dateStr) => {
   if (!dateStr) return '';
-  return new Date(dateStr).toLocaleDateString('en-IN', {
+  // Handle both YYYY-MM-DD and ISO strings
+  const [year, month, day] = dateStr.split('T')[0].split('-').map(Number);
+  const localDate = new Date(year, month - 1, day);
+  return localDate.toLocaleDateString('en-IN', {
     weekday: 'long',
     day: 'numeric',
     month: 'long',
@@ -157,13 +163,12 @@ export default function Admin() {
                   <div className="employee-records">
                     <div className="records-header">
                       <span>Date</span>
-                      <span>Check-in</span>
-                      <span>Status</span>
+                      <span>First Check-in</span>
+                      <span>Check-ins</span>
                     </div>
                     {emp.records.map((rec) => {
                       const firstSession = rec.sessions[0];
-                      const lastSession = rec.sessions.length > 0 ? rec.sessions[rec.sessions.length - 1] : null;
-                      const isOpen = !lastSession?.checkOut;
+                      const sessionCount = rec.sessions.length;
 
                       return (
                         <div
@@ -175,8 +180,8 @@ export default function Admin() {
                           <span className="record-checkin">
                             {firstSession ? formatTime(firstSession.checkIn) : '—'}
                           </span>
-                          <span className={`record-status ${isOpen ? 'status-open' : 'status-complete'}`}>
-                            {isOpen ? 'Open' : 'Complete'}
+                          <span className="record-status status-complete">
+                            {sessionCount} {sessionCount === 1 ? 'check-in' : 'check-ins'}
                           </span>
                         </div>
                       );
