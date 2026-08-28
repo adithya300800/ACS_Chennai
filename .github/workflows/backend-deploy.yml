@@ -51,6 +51,7 @@ jobs:
           az webapp config appsettings set \
             --resource-group acs-portal-rg \
             --name acs-portal-api \
+            --slot production \
             --settings \
               DATABASE_URL="${{ secrets.DATABASE_URL }}" \
               JWT_SECRET="${{ secrets.JWT_SECRET }}" \
