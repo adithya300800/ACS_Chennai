@@ -82,7 +82,7 @@ model DPR {
   weather       String?
   temperature   String?
   contractor    String?
-  workType      String    @default('MATERIAL_RECEIPT')
+  workType      String    @default("MATERIAL_RECEIPT")
   notes         String?
   status        DPRStatus @default(DRAFT)
   version       Int       @default(1)
