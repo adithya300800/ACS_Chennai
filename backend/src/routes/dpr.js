@@ -380,7 +380,24 @@ router.post('/:id/review', async (req, res) => {
 });
 
 // ─── GET /api/dpr/notifications (SSE) ─────────────────────────────────────
+// Note: SSE uses ?token= query param instead of Authorization header (EventSource limitation)
 router.get('/notifications', async (req, res) => {
+  // Support token via query param for SSE (EventSource can't set headers)
+  let employeeId = req.employeeId;
+  if (!employeeId && req.query.token) {
+    try {
+      const jwt = require('jsonwebtoken');
+      const { getJwtSecret } = require('../middleware/auth');
+      const decoded = jwt.verify(req.query.token, getJwtSecret());
+      employeeId = decoded.employeeId;
+    } catch {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+  }
+  if (!employeeId) {
+    return res.status(401).json({ error: 'Authorization required' });
+  }
+
   const { lastNotificationId } = req.query;
 
   res.setHeader('Content-Type', 'text/event-stream');
@@ -392,11 +409,11 @@ router.get('/notifications', async (req, res) => {
   res.write(`event: connected\ndata: ${JSON.stringify({ connected: true })}\n\n`);
 
   // Add this connection to the set
-  if (!sseConnections.has(req.employeeId)) {
-    sseConnections.set(req.employeeId, new Set());
+  if (!sseConnections.has(employeeId)) {
+    sseConnections.set(employeeId, new Set());
   }
   const connection = { res, lastNotificationId: lastNotificationId || '0' };
-  sseConnections.get(req.employeeId).add(connection);
+  sseConnections.get(employeeId).add(connection);
 
   // Send heartbeat every 30s
   const heartbeat = setInterval(() => {
@@ -405,10 +422,10 @@ router.get('/notifications', async (req, res) => {
 
   req.on('close', () => {
     clearInterval(heartbeat);
-    const conns = sseConnections.get(req.employeeId);
+    const conns = sseConnections.get(employeeId);
     if (conns) {
       conns.delete(connection);
-      if (conns.size === 0) sseConnections.delete(req.employeeId);
+      if (conns.size === 0) sseConnections.delete(employeeId);
     }
   });
 });

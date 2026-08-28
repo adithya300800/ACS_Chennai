@@ -15,10 +15,24 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(helmet());
-app.use(cors({
+
+// CORS — must come before routes so preflight OPTIONS is handled before auth
+const corsOptions = {
   origin: process.env.FRONTEND_URL || '*',
   credentials: true,
-}));
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
+app.use(cors(corsOptions));
+
+// Explicit OPTIONS handler for all /api/* routes (auth runs after CORS on real requests)
+app.use('/api', (req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
+
 app.use(express.json());
 
 // Make prisma available to routes
