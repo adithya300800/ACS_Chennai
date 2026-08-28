@@ -30,7 +30,14 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json());
+app.use((req, res, next) => {
+  express.json()(req, res, (err) => {
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+      return res.status(400).json({ error: 'Bad Request', message: 'Invalid JSON in request body' });
+    }
+    next(err);
+  });
+});
 
 app.set('prisma', prisma);
 
