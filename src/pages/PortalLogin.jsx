@@ -85,8 +85,49 @@ export default function PortalLogin() {
       const { authUrl } = await res.json();
       console.log('Redirecting to:', authUrl);
 
-      // Redirect to Zoho OAuth
-      window.location.href = authUrl;
+      // Use popup window for OAuth (less likely to be blocked as suspicious)
+      const width = 600;
+      const height = 700;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+      const popup = window.open(
+        authUrl,
+        'ZohoOAuth',
+        `width=${width},height=${height},left=${left},top=${top},scrollbars=yes`
+      );
+
+      if (!popup) {
+        // Fallback to redirect if popup blocked
+        window.location.href = authUrl;
+        return;
+      }
+
+      // Listen for OAuth callback via postMessage
+      const handleMessage = (event) => {
+        if (event.origin !== apiUrl) return;
+        if (event.data.type === 'zoho-oauth-success') {
+          window.removeEventListener('message', handleMessage);
+          popup.close();
+
+          // Store auth data
+          localStorage.setItem('acs_auth', JSON.stringify({
+            accessToken: event.data.accessToken,
+            employee: event.data.employee
+          }));
+          localStorage.setItem('acs_refresh', event.data.refreshToken);
+
+          // Reload to apply auth state
+          window.location.hash = '#/portal/attendance';
+          window.location.reload();
+        } else if (event.data.type === 'zoho-oauth-error') {
+          window.removeEventListener('message', handleMessage);
+          popup.close();
+          setStatus('error');
+          setErrorMsg(event.data.error || 'Zoho login failed');
+        }
+      };
+      window.addEventListener('message', handleMessage);
+
     } catch (err) {
       console.error('Zoho login error:', err);
       setStatus('error');

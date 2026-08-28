@@ -37,11 +37,127 @@ router.get('/zoho/callback', async (req, res) => {
   const { code } = req.query;
 
   if (!code) {
-    return res.redirect(`${process.env.FRONTEND_URL}/#/portal/login?error=no_code`);
+    // Send HTML that reports error via postMessage and closes
+    return res.send(`<!DOCTYPE html><html><body><script>
+      if (window.opener) {
+        window.opener.postMessage({ type: 'zoho-oauth-error', error: 'no_code' }, window.location.origin);
+      }
+      window.close();
+    </script><p>No code received. Please close this window and try again.</p></body></html>`);
   }
 
-  // Redirect to frontend with code
-  res.redirect(`${process.env.FRONTEND_URL}/#/portal/login?code=${code}`);
+  // Exchange code for tokens
+  try {
+    const tokenRes = await fetch(`${ZOHO_DOMAIN}/oauth/v2/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: ZOHO_CLIENT_ID,
+        client_secret: ZOHO_CLIENT_SECRET,
+        redirect_uri: ZOHO_REDIRECT_URI,
+        code,
+      }),
+    });
+
+    if (!tokenRes.ok) {
+      const errText = await tokenRes.text();
+      return res.send(`<!DOCTYPE html><html><body><script>
+        if (window.opener) {
+          window.opener.postMessage({ type: 'zoho-oauth-error', error: 'token exchange failed' }, window.location.origin);
+        }
+        window.close();
+      </script><p>Authentication failed. Please close and try again.</p></body></html>`);
+    }
+
+    const tokens = await tokenRes.json();
+    const { access_token, refresh_token } = tokens;
+
+    // Get user info
+    let email = null;
+    if (tokens.id_token) {
+      try {
+        const idTokenParts = tokens.id_token.split('.');
+        const idPayload = JSON.parse(Buffer.from(idTokenParts[1], 'base64').toString());
+        email = idPayload.email;
+      } catch (e) {}
+    }
+
+    if (!email) {
+      return res.send(`<!DOCTYPE html><html><body><script>
+        if (window.opener) {
+          window.opener.postMessage({ type: 'zoho-oauth-error', error: 'no email' }, window.location.origin);
+        }
+        window.close();
+      </script><p>Could not get email from Zoho. Please close and try again.</p></body></html>`);
+    }
+
+    const prisma = req.app.get('prisma');
+
+    // Find or create employee
+    let employee = await prisma.employee.findUnique({ where: { email } });
+
+    if (!employee) {
+      const nameParts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
+      const name = nameParts.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+
+      employee = await prisma.employee.create({
+        data: {
+          email,
+          name,
+          zohoAccessToken: access_token,
+          zohoRefreshToken: refresh_token,
+        },
+      });
+    } else {
+      employee = await prisma.employee.update({
+        where: { email },
+        data: {
+          zohoAccessToken: access_token,
+          zohoRefreshToken: refresh_token,
+        },
+      });
+    }
+
+    // Generate JWT
+    const jwtToken = jwt.sign(
+      { employeeId: employee.id, email: employee.email },
+      JWT_SECRET,
+      { expiresIn: '8h' }
+    );
+
+    const refreshToken = jwt.sign(
+      { employeeId: employee.id },
+      JWT_REFRESH_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    const { password: _, ...employeeData } = employee;
+
+    // Send success via postMessage and close
+    const responseData = JSON.stringify({
+      type: 'zoho-oauth-success',
+      accessToken: jwtToken,
+      refreshToken,
+      employee: employeeData,
+    });
+
+    res.send(`<!DOCTYPE html><html><body><script>
+      if (window.opener) {
+        window.opener.postMessage(${responseData}, window.location.origin);
+      }
+      window.close();
+    </script><p>Login successful! Please close this window.</p></body></html>`);
+
+  } catch (err) {
+    console.error('Zoho callback error:', err);
+    res.send(`<!DOCTYPE html><html><body><script>
+      if (window.opener) {
+        window.opener.postMessage({ type: 'zoho-oauth-error', error: 'server error' }, window.location.origin);
+      }
+      window.close();
+    </script><p>Server error. Please close and try again.</p></body></html>`);
+  }
 });
 
 // POST /api/auth/zoho/callback - Exchange code for tokens and login
