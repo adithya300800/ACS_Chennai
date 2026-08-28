@@ -73,10 +73,9 @@ export default function NotificationBell() {
       eventSourceRef.current = null;
     }
 
-    const url = `${API_BASE}/api/dpr/notifications`;
-    const es = new EventSource(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    // Note: EventSource doesn't support custom headers — token passed via query param
+    const url = `${API_BASE}/api/dpr/notifications?token=${encodeURIComponent(accessToken)}`;
+    const es = new EventSource(url);
 
     es.onopen = () => {
       setConnected(true);
