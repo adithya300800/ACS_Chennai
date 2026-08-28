@@ -17,6 +17,7 @@ const PORT = (process.env.PORT && process.env.PORT !== '') ? process.env.PORT : 
 app.use(helmet());
 
 // CORS — manual headers to avoid cors package issues on Azure
+// Fix deployed: 2026-08-28
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   const allowedOrigin = process.env.FRONTEND_URL || '*';
