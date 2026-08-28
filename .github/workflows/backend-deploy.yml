@@ -43,7 +43,7 @@ jobs:
         uses: azure/webapps-deploy@v3
         with:
           app-name: acs-portal-api
-          package: .
+          package: ./backend
 
       - name: Set App Settings
         run: |
