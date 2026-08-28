@@ -11,7 +11,7 @@ const dprRoutes = require('./routes/dpr');
 
 const app = express();
 const prisma = new PrismaClient();
-const PORT = process.env.PORT || 3000;
+const PORT = (process.env.PORT && process.env.PORT !== '') ? process.env.PORT : 8080;
 
 // Middleware
 app.use(helmet());
@@ -25,7 +25,6 @@ app.use((req, res, next) => {
     (allowedOrigin === '*' || origin === allowedOrigin || origin.endsWith('.acschennai.com') || origin === 'https://acschennai.com');
   if (validOrigin) {
     res.setHeader('Access-Control-Allow-Origin', origin);
-  }
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
