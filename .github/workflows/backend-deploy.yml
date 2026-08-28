@@ -56,6 +56,7 @@ jobs:
             PORT=3000
             FRONTEND_URL=https://acschennai.com
             WEBSITE_RUN_FROM_PACKAGE=0
+            # Azure Storage for DPR module
             APP_COMMAND_LINE=node /home/site/wwwroot/src/index.js
             WEBSITE_DISABLE_OVERLAPPING_APPS_STARTUP=1
             ZOHO_CLIENT_ID=${{ secrets.ZOHO_CLIENT_ID }}
