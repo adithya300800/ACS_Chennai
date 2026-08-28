@@ -47,6 +47,8 @@ jobs:
 
       - name: Set App Settings
         run: |
+          # NOTE: az webapp config appsettings set REPLACES all settings (without --slot flag).
+          # Never add PORT or APP_COMMAND_LINE here — Azure provides PORT dynamically (8080).
           az webapp config appsettings set \
             --resource-group acs-portal-rg \
             --name acs-portal-api \
@@ -60,6 +62,7 @@ jobs:
               FRONTEND_URL=https://acschennai.com \
               WEBSITE_RUN_FROM_PACKAGE=0 \
               WEBSITE_DISABLE_OVERLAPPING_APPS_STARTUP=1 \
+              ALWAYS_ON=1 \
               ZOHO_CLIENT_ID="${{ secrets.ZOHO_CLIENT_ID }}" \
               ZOHO_CLIENT_SECRET="${{ secrets.ZOHO_CLIENT_SECRET }}" \
               ZOHO_REDIRECT_URI=https://acs-portal-api.azurewebsites.net/api/auth/zoho/callback
