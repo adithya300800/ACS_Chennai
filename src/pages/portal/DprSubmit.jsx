@@ -1,29 +1,24 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
+import DprWorkEntryAdder from './DprWorkEntryAdder.jsx';
+import { SUB_WORK_TYPE_OPTIONS } from './DprWorkTypes.jsx';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
 
-const WORK_TYPE_OPTIONS = [
-  { value: 'MATERIAL_RECEIPT', label: 'Material Receipt & Inspection' },
-  { value: 'QUALITY_TESTING', label: 'Quality & Testing' },
-  { value: 'SITE_INSPECTION', label: 'Site Inspection' },
-  { value: 'EXCEPTIONS_SAFETY', label: 'Exceptions & Safety' },
-];
+// Auto-set date to user's local timezone (no manual selection)
+const getLocalDate = () => {
+  const now = new Date();
+  const offset = now.getTimezoneOffset();
+  const local = new Date(now.getTime() - offset * 60000);
+  return local.toISOString().split('T')[0];
+};
 
 export default function DprSubmit() {
   const { accessToken } = useAuth();
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
-
-  // Auto-set date to user's local timezone (no manual selection)
-  const getLocalDate = () => {
-    const now = new Date();
-    const offset = now.getTimezoneOffset();
-    const local = new Date(now.getTime() - offset * 60000);
-    return local.toISOString().split('T')[0];
-  };
 
   const [form, setForm] = useState({
     projectName: '',
@@ -32,13 +27,12 @@ export default function DprSubmit() {
     weather: 'Sunny',
     temperature: '',
     contractor: '',
-    workType: 'MATERIAL_RECEIPT',
   });
   const [photos, setPhotos] = useState([]);
+  const [workEntries, setWorkEntries] = useState([]);
   const [notes, setNotes] = useState('');
   const [status, setStatus] = useState('idle'); // idle | uploading | submitting | error
   const [error, setError] = useState('');
-
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -68,17 +62,12 @@ export default function DprSubmit() {
     const newPhotos = [];
     for (const file of valid) {
       try {
-        // Step 1: Get SAS URL
         const { sasUrl, ulid } = await api.getDprSasUrl(file.name, file.type, 'dpr-photos', accessToken);
-
-        // Step 2: PUT directly to blob
         await fetch(sasUrl, {
           method: 'PUT',
           headers: { 'Content-Type': file.type },
           body: file,
         });
-
-        // Step 3: Confirm upload
         await api.confirmUpload(ulid, 'dpr-photos', file.name, file.type, file.size, accessToken);
 
         newPhotos.push({
@@ -90,7 +79,7 @@ export default function DprSubmit() {
           caption: '',
           location: '',
           takenAt: new Date().toISOString(),
-          file, // for preview only
+          file,
           previewUrl: URL.createObjectURL(file),
         });
       } catch (err) {
@@ -109,9 +98,26 @@ export default function DprSubmit() {
     handleFiles(e.dataTransfer.files);
   };
 
+  const handleAddWorkEntry = (entry) => {
+    setWorkEntries((prev) => [...prev, entry]);
+  };
+
+  const handleRemoveWorkEntry = (idx) => {
+    setWorkEntries((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const getWorkEntryLabel = (workType) => {
+    const found = SUB_WORK_TYPE_OPTIONS.find((s) => s.value === workType);
+    return found ? found.label : workType;
+  };
+
   const handleSubmit = async (submitStatus) => {
     if (!form.projectName || !form.location || !form.reportDate) {
       setError('Project name, location, and date are required');
+      return;
+    }
+    if (workEntries.length === 0) {
+      setError('Please add at least one work entry before submitting');
       return;
     }
     setStatus('submitting');
@@ -126,12 +132,12 @@ export default function DprSubmit() {
           weather: form.weather,
           temperature: form.temperature,
           contractor: form.contractor,
-          workType: form.workType,
+          notes: notes || null,
           status: submitStatus,
           photos: photos.map(({ ulid, container, filename, contentType, sizeBytes, caption, location, takenAt }) => ({
             ulid, container, filename, contentType, sizeBytes, caption, location, takenAt,
           })),
-          ...(notes ? { notes } : {}),
+          workEntries: workEntries.map(({ workType, data, addedAt }) => ({ workType, data, addedAt })),
         },
         accessToken
       );
@@ -150,25 +156,17 @@ export default function DprSubmit() {
         {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
 
         <div className="dpr-form">
-          {/* Project & Work Type */}
+          {/* Project & Auto Date */}
           <div className="form-row">
             <div className="form-group" style={{ flex: 2 }}>
               <label htmlFor="projectName">Project Name *</label>
               <input id="projectName" name="projectName" className="form-input" value={form.projectName} onChange={handleChange} placeholder="e.g. Metro Station Phase 2" />
             </div>
             <div className="form-group" style={{ flex: 1 }}>
-              <label htmlFor="workType">Work Type *</label>
-              <select id="workType" name="workType" className="form-input" value={form.workType} onChange={handleChange}>
-                {WORK_TYPE_OPTIONS.map((w) => <option key={w.value} value={w.value}>{w.label}</option>)}
-              </select>
+              <label htmlFor="reportDate">Report Date</label>
+              <input id="reportDate" type="date" name="reportDate" className="form-input" value={form.reportDate} readOnly style={{ background: '#f1f5f9', cursor: 'default' }} />
+              <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>Auto-set to your local date</span>
             </div>
-          </div>
-
-          {/* Auto-set Date (read-only) */}
-          <div className="form-group">
-            <label htmlFor="reportDate">Report Date</label>
-            <input id="reportDate" type="date" name="reportDate" className="form-input" value={form.reportDate} readOnly style={{ background: '#f1f5f9', cursor: 'default' }} />
-            <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>Automatically set to your local date</span>
           </div>
 
           {/* Location */}
@@ -210,6 +208,35 @@ export default function DprSubmit() {
             />
           </div>
 
+          {/* Work Entries Section */}
+          <div className="form-group">
+            <label>Work Entries *</label>
+            {workEntries.length > 0 && (
+              <div className="work-entries-list">
+                {workEntries.map((entry, idx) => (
+                  <div key={idx} className={`work-entry-card ${entry.data.overallStatus === 'Fail' || entry.data.result === 'Fail' || entry.data.overallStatus === 'Unapproved' ? 'entry-critical' : ''}`}>
+                    <div className="work-entry-card-header">
+                      <span className="work-entry-card-title">{getWorkEntryLabel(entry.workType)}</span>
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => handleRemoveWorkEntry(idx)}>×</button>
+                    </div>
+                    <div className="work-entry-card-body">
+                      {Object.entries(entry.data).slice(0, 4).map(([key, val]) => (
+                        <div key={key} className="work-entry-card-field">
+                          <span className="work-entry-card-label">{key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase())}:</span>
+                          <span className="work-entry-card-value">{Array.isArray(val) ? val.join(', ') : String(val)}</span>
+                        </div>
+                      ))}
+                      {Object.keys(entry.data).length > 4 && (
+                        <span className="work-entry-card-more">+ {Object.keys(entry.data).length - 4} more fields</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <DprWorkEntryAdder onAdd={handleAddWorkEntry} />
+          </div>
+
           {/* Photo Upload */}
           <div className="form-group">
             <label>Site Photos (max 10)</label>
@@ -225,7 +252,6 @@ export default function DprSubmit() {
             </div>
             <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" multiple style={{ display: 'none' }} onChange={(e) => handleFiles(e.target.files)} />
 
-            {/* Photo Grid */}
             {photos.length > 0 && (
               <div className="photo-grid">
                 {photos.map((photo, idx) => (

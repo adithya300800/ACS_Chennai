@@ -84,6 +84,7 @@ model DPR {
   contractor    String?
   workType      String    @default("MATERIAL_RECEIPT")
   notes         String?
+  workEntries   Json?
   status        DPRStatus @default(DRAFT)
   version       Int       @default(1)
   submittedById String    @map("submitted_by_id")

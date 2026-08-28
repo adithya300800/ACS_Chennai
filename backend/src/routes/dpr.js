@@ -93,7 +93,7 @@ router.post('/confirm-upload', async (req, res) => {
 // ─── POST /api/dpr ────────────────────────────────────────────────────────────
 router.post('/', async (req, res) => {
   const prisma = getPrisma(req);
-  const { projectName, location, reportDate, weather, temperature, contractor, workType, notes, status, photos = [] } = req.body;
+  const { projectName, location, reportDate, weather, temperature, contractor, workType, notes, workEntries, status, photos = [] } = req.body;
 
   if (!projectName || !location || !reportDate) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'projectName, location, reportDate required' });
@@ -124,6 +124,7 @@ router.post('/', async (req, res) => {
         contractor: contractor || null,
         workType: workType || 'MATERIAL_RECEIPT',
         notes: notes || null,
+        workEntries: workEntries || null,
         status: status || 'DRAFT',
         submittedById: req.employeeId,
         submittedAt: new Date(),
