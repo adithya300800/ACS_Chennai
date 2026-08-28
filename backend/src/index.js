@@ -16,17 +16,20 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(helmet());
 
-// CORS — must come before routes so preflight OPTIONS is handled before auth
-const corsOptions = {
-  origin: process.env.FRONTEND_URL || '*',
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-};
-app.use(cors(corsOptions));
-
-// Explicit OPTIONS handler for all /api/* routes (auth runs after CORS on real requests)
-app.use('/api', (req, res, next) => {
+// CORS — manual headers to avoid cors package issues on Azure
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const allowedOrigin = process.env.FRONTEND_URL || '*';
+  // Only set if origin matches or is same domain
+  const validOrigin = origin &&
+    (allowedOrigin === '*' || origin === allowedOrigin || origin.endsWith('.acschennai.com') || origin === 'https://acschennai.com');
+  if (validOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
   }
