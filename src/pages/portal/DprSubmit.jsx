@@ -19,30 +19,10 @@ export default function DprSubmit() {
     contractor: '',
   });
   const [photos, setPhotos] = useState([]);
-  const [gps, setGps] = useState(null);
-  const [status, setStatus] = useState('idle'); // idle | locating | uploading | submitting | error
+  const [notes, setNotes] = useState('');
+  const [status, setStatus] = useState('idle'); // idle | uploading | submitting | error
   const [error, setError] = useState('');
-  const [locError, setLocError] = useState('');
 
-  const captureGps = useCallback(() => {
-    if (!navigator.geolocation) {
-      setLocError('Geolocation not supported');
-      return;
-    }
-    setStatus('locating');
-    setLocError('');
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setGps({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-        setStatus('idle');
-      },
-      (err) => {
-        setLocError(err.message);
-        setStatus('idle');
-      },
-      { enableHighAccuracy: true, timeout: 20000 }
-    );
-  }, []);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -134,7 +114,7 @@ export default function DprSubmit() {
           photos: photos.map(({ ulid, container, filename, contentType, sizeBytes, caption, location, takenAt }) => ({
             ulid, container, filename, contentType, sizeBytes, caption, location, takenAt,
           })),
-          ...(gps ? { gpsLat: gps.lat, gpsLng: gps.lng } : {}),
+          ...(notes ? { notes } : {}),
         },
         accessToken
       );
@@ -189,13 +169,19 @@ export default function DprSubmit() {
             </div>
           </div>
 
-          {/* GPS */}
+          {/* Notes */}
           <div className="form-group">
-            <label>GPS Location</label>
-            <button type="button" className="btn btn-secondary" onClick={captureGps} disabled={status === 'locating'}>
-              {status === 'locating' ? 'Getting location...' : gps ? `Lat: ${gps.lat.toFixed(5)}, Lng: ${gps.lng.toFixed(5)}` : 'Capture GPS'}
-            </button>
-            {locError && <p className="field-error">{locError}</p>}
+            <label htmlFor="notes">Notes / Comments <span style={{ fontWeight: 400, color: 'var(--steel)' }}>(optional)</span></label>
+            <textarea
+              id="notes"
+              name="notes"
+              className="form-input"
+              rows={3}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Additional observations, remarks, or issues noted on site..."
+              style={{ resize: 'vertical', minHeight: '80px' }}
+            />
           </div>
 
           {/* Photo Upload */}
