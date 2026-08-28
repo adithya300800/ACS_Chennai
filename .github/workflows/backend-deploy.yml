@@ -63,6 +63,7 @@ jobs:
               WEBSITE_RUN_FROM_PACKAGE=0 \
               WEBSITE_DISABLE_OVERLAPPING_APPS_STARTUP=1 \
               ALWAYS_ON=1 \
+              SCM_DO_BUILD_DURING_DEPLOYMENT=false \
               ZOHO_CLIENT_ID="${{ secrets.ZOHO_CLIENT_ID }}" \
               ZOHO_CLIENT_SECRET="${{ secrets.ZOHO_CLIENT_SECRET }}" \
               ZOHO_REDIRECT_URI=https://acs-portal-api.azurewebsites.net/api/auth/zoho/callback
