@@ -31,6 +31,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Round-7: gate deploys on the existing test suite. A failed test now
+      # blocks the Azure deploy instead of going to production and breaking
+      # for users. Tests run against an in-memory setup (no DB needed) and
+      # finish in <30s — cheap insurance against shipping regressions.
+      - name: Run tests
+        run: npm test
+
       - name: Generate Prisma Client
         run: npx prisma generate
 

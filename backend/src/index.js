@@ -1,4 +1,11 @@
 require('dotenv').config();
+// express-async-errors monkey-patches Express 4 to forward rejected promises
+// from async route handlers into the global error middleware. Without it,
+// 23 of 24 async handlers (attendance.js, auth.js, contact.js, dpr.js) would
+// silently turn DB errors into unhandledRejections, never reaching the
+// Prisma-error mapper at the bottom of this file. MUST be required before
+// any route module is loaded.
+require('express-async-errors');
 const express = require('express');
 const helmet = require('helmet');
 const { PrismaClient } = require('@prisma/client');
@@ -28,15 +35,28 @@ if (process.env.NODE_ENV === 'production' && ALLOWED_ORIGINS.length === 0) {
 }
 
 app.disable('x-powered-by');
-app.use(helmet({ contentSecurityPolicy: false })); // API only; tighten later if HTML routes appear
+// Round-7: enable full helmet defaults (CSP, HSTS, X-Frame-Options,
+// X-Content-Type-Options, Referrer-Policy, etc). The previous config
+// disabled CSP entirely because we assumed an API doesn't render HTML —
+// but helmet's defaults are still valuable (HSTS prevents SSL-stripping
+// MITM, X-Content-Type-Options prevents MIME sniffing on the JSON
+// responses, X-Frame-Options prevents clickjacking on error pages if any
+// HTML slips through). The default CSP `default-src 'self'` is fine for
+// a JSON-only API — there are no inline scripts or external assets.
+app.use(helmet());
 
-// CORS — manual headers, exact origin allowlist
+// CORS — manual headers, exact origin allowlist.
+// Round-7: trimmed methods to what this API actually uses. Audited the
+// routes: only GET, POST, PUT are mounted (no DELETE or PATCH handlers).
+// Listing unused methods gives browsers no extra capability but makes
+// intent fuzzing easier (e.g. an attacker probing for DELETE endpoints
+// knows the server's CORS policy explicitly allows it).
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Max-Age', '300');
@@ -47,9 +67,17 @@ app.use((req, res, next) => {
   next();
 });
 
-// Body parser with explicit per-route size limits applied via per-route options below.
-// Default 100kb is fine for most endpoints; auth/contact use a tighter limit.
-app.use(express.json({ limit: '1mb' }));
+// Body parser — per-route mounts instead of a global default. Round-7 fix:
+// the previous global `express.json({ limit: '1mb' })` made the tighter
+// per-route limits (32kb auth, 16kb contact) no-ops, because Express 4's
+// json middleware skips re-parsing once the body is populated. Now the
+// default body-parser limit is 16kb applied globally, and the DPR mount
+// (which legitimately needs larger photo-metadata payloads) opts in to 1mb.
+//
+// Mount order matters: parser must be before the route handler.
+const defaultBodyLimit = '16kb';
+const dprBodyLimit = '1mb';
+app.use(express.json({ limit: defaultBodyLimit }));
 
 app.set('prisma', prisma);
 
@@ -115,11 +143,13 @@ app.get('/ready', async (req, res) => {
 // even if their payload would otherwise be parsed/rejected.
 app.use('/api/auth/login', loginLimiter);
 app.use('/api/auth/refresh', refreshLimiter);
-app.use('/api/auth', express.json({ limit: '32kb' }), authRoutes);
+app.use('/api/auth', authRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/dpr/sas-url', sasLimiter);
-app.use('/api/dpr', dprRoutes);
-app.use('/api/contact', contactLimiter, express.json({ limit: '16kb' }), contactRoutes);
+// DPR mount opts in to a 1mb body limit (work entries + photo metadata
+// payloads can legitimately exceed the 16kb default).
+app.use('/api/dpr', express.json({ limit: dprBodyLimit }), dprRoutes);
+app.use('/api/contact', contactLimiter, contactRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });

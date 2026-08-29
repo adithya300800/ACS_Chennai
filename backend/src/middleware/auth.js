@@ -3,15 +3,24 @@ const jwt = require('jsonwebtoken');
 const MIN_SECRET_LENGTH = 32; // 256 bits — protects against brute-force / low-entropy secrets
 
 const getJwtSecret = () => {
+  // SECURITY (round-7): require a real secret in EVERY environment. The previous
+  // design returned a published string `'change-me-in-development-only-not-for-production'`
+  // whenever NODE_ENV !== 'production'. A single misconfiguration (e.g.
+  // 'Production' vs 'production') would silently downgrade to a public constant
+  // and allow forged tokens. Now we throw if the env var is missing or short,
+  // unconditionally. Local dev must set JWT_SECRET too — use .env.example.
   const secret = process.env.JWT_SECRET;
   if (!secret) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('JWT_SECRET environment variable must be set');
-    }
-    return 'change-me-in-development-only-not-for-production';
+    throw new Error(
+      'JWT_SECRET environment variable must be set. ' +
+      'Generate with: openssl rand -base64 64'
+    );
   }
   if (secret.length < MIN_SECRET_LENGTH) {
-    throw new Error(`JWT_SECRET must be at least ${MIN_SECRET_LENGTH} characters (got ${secret.length}). Generate with: openssl rand -base64 64`);
+    throw new Error(
+      `JWT_SECRET must be at least ${MIN_SECRET_LENGTH} characters (got ${secret.length}). ` +
+      'Generate with: openssl rand -base64 64'
+    );
   }
   return secret;
 };
@@ -24,14 +33,14 @@ function secret() {
   return _secret;
 }
 
-// Module-load validation in production
-if (process.env.NODE_ENV === 'production') {
-  try {
-    secret();
-  } catch (e) {
-    console.error('[auth.js] FATAL:', e.message);
-    throw e;
-  }
+// Module-load validation in ALL environments (no NODE_ENV escape hatch).
+try {
+  secret();
+} catch (e) {
+  // Log so local devs see the error in their terminal; re-throw so the process
+  // crashes immediately rather than booting with a forged-token-friendly state.
+  console.error('[auth.js] FATAL:', e.message);
+  throw e;
 }
 
 /**

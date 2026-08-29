@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import { useToast } from '../contexts/ToastContext.jsx';
+import { api } from '../lib/api.js';
 
 export default function PortalLogin() {
   const { login, setAuthData } = useAuth();
@@ -52,14 +53,12 @@ export default function PortalLogin() {
       setStatus('loading');
       setErrorMsg('');
 
-      fetch(`${import.meta.env.VITE_API_URL}/api/auth/zoho/callback`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code }),
-      })
-        .then((res) => res.json())
+      // Round-7: route through api.js so the Zoho callback POST inherits
+      // the timeout wrapper (raw fetch could hang indefinitely if Azure
+      // slot-swapped mid-OAuth). Throws ApiError on failure with structured
+      // message + code.
+      api.postZohoCallback(code)
         .then((data) => {
-          if (data.error) throw new Error(data.error);
           setAuthData(data.accessToken, data.employee, data.refreshToken);
           // SPA navigation — preserves any draft state and avoids a full reload
           navigate('/portal/attendance', { replace: true });
@@ -100,12 +99,9 @@ export default function PortalLogin() {
     setStatus('loading');
     setErrorMsg('');
 
-    const apiUrl = import.meta.env.VITE_API_URL;
-
     try {
-      const res = await fetch(`${apiUrl}/api/auth/zoho`);
-      if (!res.ok) throw new Error('Zoho OAuth not configured. API URL: ' + apiUrl);
-      const { authUrl } = await res.json();
+      // Round-7: use api.js so this inherits the 30s timeout wrapper.
+      const { authUrl } = await api.getZohoAuthUrl();
 
       const width = 600;
       const height = 700;
@@ -123,12 +119,16 @@ export default function PortalLogin() {
       }
 
       const handleMessage = (event) => {
-        if (event.origin !== apiUrl) return;
+        // Note: apiUrl was previously read here; we now derive from
+        // window.location.origin for the popup parent — this is the
+        // frontend origin (acschennai.com) and the message arrives from
+        // the backend (acs-portal-api.azurewebsites.net) via the
+        // postMessage call. Trust only the configured backend origin.
+        const expectedBackendOrigin = new URL(import.meta.env.VITE_API_URL || window.location.origin).origin;
+        if (event.origin !== expectedBackendOrigin) return;
         if (event.data.type === 'zoho-oauth-success') {
           window.removeEventListener('message', handleMessage);
           popup.close();
-          // SPA navigation via AuthContext — keeps any draft state alive
-          // and avoids losing scroll position / focus.
           setAuthData(event.data.accessToken, event.data.employee, event.data.refreshToken);
           try {
             Object.keys(sessionStorage).forEach((k) => {

@@ -42,6 +42,9 @@ model Attendance {
   sessions   AttendanceSession[]
 
   @@unique([employeeId, date])
+  // Round-7: admin attendance dashboard queries by month (`WHERE date BETWEEN ...`)
+  // without this index the dashboard hits a sequential scan once the table grows.
+  @@index([date])
   @@map("attendance")
 }
 
@@ -123,6 +126,11 @@ model DPRPhoto {
 
   dpr DPR @relation(fields: [dprId], references: [id], onDelete: Cascade)
 
+  // Round-7: dprId used in every DPR detail query (joins) — without this
+  // index each GET /api/dpr/:id hits a seq scan on dpr_photo. ulid is
+  // queried by the orphan-blob cleanup job and by PATCH confirm-upload.
+  @@index([dprId])
+  @@index([ulid])
   @@map("dpr_photo")
 }
 
@@ -137,6 +145,9 @@ model DPRRevision {
   dpr DPR @relation(fields: [dprId], references: [id], onDelete: Cascade)
 
   @@unique([dprId, version])
+  // Round-7: revision list reads by dprId + ordering by changedAt; without
+  // this index the audit trail read on /api/dpr/:id history hits a seq scan.
+  @@index([dprId, changedAt])
   @@map("dpr_revision")
 }
 
@@ -153,5 +164,7 @@ model Notification {
   dpr      DPR?     @relation(fields: [dprId], references: [id])
 
   @@index([employeeId, createdAt])
+  // Round-7: dpr relation is included in many read queries; index for joins.
+  @@index([dprId])
   @@map("notification")
 }

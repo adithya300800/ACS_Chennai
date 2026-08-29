@@ -29,6 +29,13 @@ jobs:
           cache: 'npm'
       - name: Install dependencies
         run: npm ci
+      # Round-7: gate frontend deploys on the existing test suite (api.js,
+      # ErrorBoundary, auth context, blob upload, attendance). A failed
+      # test now blocks GitHub Pages instead of pushing a regression to
+      # users. Tests run from repo root using the root jest config which
+      # pulls in the backend setup file for auth/pii env seeding.
+      - name: Run tests
+        run: npm test
       - name: Build
         run: |
           export NODE_OPTIONS=--max-old-space-size=4096

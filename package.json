@@ -32,6 +32,9 @@
   },
   "jest": {
     "testEnvironment": "jsdom",
+    "setupFiles": [
+      "<rootDir>/backend/__tests__/jest.setup.js"
+    ],
     "setupFilesAfterEnv": [
       "<rootDir>/jest.setup.js"
     ],
@@ -48,7 +51,8 @@
     },
     "testPathIgnorePatterns": [
       "/node_modules/",
-      "e2e.test.js"
+      "e2e.test.js",
+      "<rootDir>/backend/__tests__/jest.setup.js"
     ]
   }
 }

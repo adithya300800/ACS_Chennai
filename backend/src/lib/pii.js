@@ -15,10 +15,21 @@ const crypto = require('crypto');
 let _salt;
 function salt() {
   if (!_salt) {
-    _salt = process.env.PII_LOG_SALT
-      || (process.env.NODE_ENV === 'production'
-            ? crypto.randomBytes(16).toString('hex')
-            : 'dev-only-salt-not-for-production');
+    // SECURITY (round-7): require a real salt in EVERY environment. The previous
+    // fallback `'dev-only-salt-not-for-production'` was a public constant — an
+    // attacker who scrapes Azure Log Stream could rainbow-table hashIdentifier()
+    // outputs back to plaintext emails using the published salt. In production
+    // we additionally required no missing-salt check (randomBytes was generated
+    // per-process), which silently invalidates log correlation across restarts.
+    // Now: throw if the env var is missing, always.
+    const envSalt = process.env.PII_LOG_SALT;
+    if (!envSalt) {
+      throw new Error(
+        'PII_LOG_SALT environment variable must be set. ' +
+        'Generate with: openssl rand -hex 32'
+      );
+    }
+    _salt = envSalt;
   }
   return _salt;
 }

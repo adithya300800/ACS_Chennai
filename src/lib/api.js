@@ -187,4 +187,11 @@ export const api = {
   // Single-use SSE ticket — replaces ?token= JWT-in-URL (Code Reviewer P2-2)
   getNotificationTicket: (token) =>
     api.post('/dpr/notifications/ticket', {}, token),
+
+  // Zoho OAuth — public endpoints (no auth token).
+  // Round-7: these previously used raw fetch() in PortalLogin, bypassing
+  // the timeout wrapper and 401 handling. They return the parsed JSON
+  // directly; the caller handles the OAuth popup lifecycle.
+  getZohoAuthUrl: () => api.get('/auth/zoho'),
+  postZohoCallback: (code) => api.post('/auth/zoho/callback', { code }),
 };

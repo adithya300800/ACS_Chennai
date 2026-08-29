@@ -627,63 +627,111 @@ router.put('/:id', async (req, res) => {
 });
 
 // ─── POST /api/dpr/:id/review ───────────────────────────────────────────────
+// ─── Admin state-machine helpers (round-7 hardening) ──────────────────────────
+//
+// Three fixes baked into the helpers below:
+//
+//   1. ATOMICITY: revision-snapshot + status-update + owner-notification run
+//      inside prisma.$transaction so a DB blip can't leave a partial state.
+//   2. RACE-SAFETY: the status update is CONDITIONAL on the status+version
+//      we read; if a concurrent admin click or user edit changed it, Prisma
+//      throws P2025 which we translate to 409 VERSION_CONFLICT.
+//   3. STATE MACHINE: explicit allowed-source-status sets prevent silent
+//      REJECTED → APPROVED transitions (which previously broke the audit
+//      trail when a stale admin view re-clicked "Approve" on a re-loaded row).
+//
+// SSE emitNotification stays OUTSIDE the transaction — SSE is a side effect,
+// not a DB write; firing it inside the txn would couple the listener's
+// delivery to the DB commit.
+//
+// Admin status is taken from the JWT (req.isAdmin), set by requireAuth.
+// requireAdmin middleware would also gate this, but we keep inline checks
+// so the route still reads self-evidently.
+
+const APPROVABLE_FROM = new Set(['DRAFT', 'SUBMITTED', 'UNDER_REVIEW']);
+const REVIEWABLE_FROM = new Set(['DRAFT', 'SUBMITTED', 'UNDER_REVIEW']);
+const REJECTABLE_FROM = new Set(['DRAFT', 'SUBMITTED', 'UNDER_REVIEW']);
+
+const DPR_INCLUDE = {
+  photos: true,
+  submittedBy: { select: { id: true, name: true, email: true } },
+};
+
+const formatReportDate = (d) => {
+  // Defensive: reportDate may deserialize as Date or "YYYY-MM-DD" string
+  // depending on Prisma client version + column type.
+  if (d instanceof Date) return d.toISOString().split('T')[0];
+  return String(d);
+};
+
 router.post('/:id/review', async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
-  const { corrections, adminNotes } = req.body;
+  const { adminNotes } = req.body || {};
 
-  // Admin check
-  const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
-  if (!employee || !employee.isAdmin) {
+  if (!req.isAdmin) {
     return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
   }
 
-  const dpr = await prisma.dPR.findUnique({
-    where: { id },
-    include: { photos: true, submittedBy: true },
-  });
-  if (!dpr) {
-    return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
-  }
-
   try {
-    // Create revision snapshot
-    await prisma.dPRRevision.create({
-      data: {
-        dprId: id,
-        version: dpr.version,
-        snapshot: dpr,
-        changedById: req.employeeId,
-      },
-    });
-
-    // Update DPR status to UNDER_REVIEW
-    const updated = await prisma.dPR.update({
+    const dpr = await prisma.dPR.findUnique({
       where: { id },
-      data: {
-        status: 'UNDER_REVIEW',
-        reviewedById: req.employeeId,
-        reviewedAt: new Date(),
-        version: { increment: 1 },
-      },
-      include: {
-        photos: true,
-        submittedBy: { select: { id: true, name: true, email: true } },
-        reviewedBy: { select: { id: true, name: true, email: true } },
-      },
+      include: DPR_INCLUDE,
+    });
+    if (!dpr) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
+    }
+
+    if (!REVIEWABLE_FROM.has(dpr.status)) {
+      return res.status(409).json({
+        error: 'INVALID_TRANSITION',
+        message: `Cannot move DPR from ${dpr.status} to UNDER_REVIEW`,
+        code: 'INVALID_TRANSITION',
+      });
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const conditionalUpdate = await tx.dPR.update({
+        where: { id, status: dpr.status, version: dpr.version },
+        data: {
+          status: 'UNDER_REVIEW',
+          reviewedById: req.employeeId,
+          reviewedAt: new Date(),
+          version: { increment: 1 },
+        },
+      });
+      // If the WHERE didn't match, P2025 fires; we map it to VERSION_CONFLICT.
+      if (!conditionalUpdate) throw Object.assign(new Error('version conflict'), { code: 'P2025' });
+
+      await tx.dPRRevision.create({
+        data: {
+          dprId: id,
+          version: dpr.version,
+          snapshot: dpr,
+          changedById: req.employeeId,
+        },
+      });
+
+      const notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was reviewed. ${adminNotes || ''}`.trim();
+      await tx.notification.create({
+        data: {
+          employeeId: dpr.submittedById,
+          type: 'DPR_REVIEWED',
+          dprId: id,
+          message: notifMessage,
+        },
+      });
+
+      return tx.dPR.findUnique({
+        where: { id },
+        include: {
+          photos: true,
+          submittedBy: { select: { id: true, name: true, email: true } },
+          reviewedBy: { select: { id: true, name: true, email: true } },
+        },
+      });
     });
 
-    // Create notification for DPR owner
-    await prisma.notification.create({
-      data: {
-        employeeId: dpr.submittedById,
-        type: 'DPR_REVIEWED',
-        dprId: id,
-        message: `Your DPR for ${dpr.projectName} on ${dpr.reportDate.toISOString().split('T')[0]} was reviewed by ${employee.name}. ${adminNotes || ''}`.trim(),
-      },
-    });
-
-    // Emit SSE notification
     emitNotification(dpr.submittedById, 'notification', {
       id: Date.now(),
       type: 'DPR_REVIEWED',
@@ -699,6 +747,12 @@ router.post('/:id/review', async (req, res) => {
       prismaCode: err.code,
       message: err.message?.split('\n')[0],
     });
+    if (err.code === 'P2025') {
+      return res.status(409).json({
+        error: 'DPR was modified by another action. Please refresh and try again.',
+        code: 'VERSION_CONFLICT',
+      });
+    }
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to review DPR' });
@@ -712,54 +766,66 @@ router.post('/:id/approve', async (req, res) => {
   const { id } = req.params;
   const { adminNotes } = req.body || {};
 
-  const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
-  if (!employee || !employee.isAdmin) {
+  if (!req.isAdmin) {
     return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
   }
 
-  const dpr = await prisma.dPR.findUnique({
-    where: { id },
-    include: { photos: true, submittedBy: true },
-  });
-  if (!dpr) return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
-
-  if (dpr.status === 'APPROVED') {
-    return res.status(409).json({ error: 'ALREADY_APPROVED', message: 'DPR is already approved' });
-  }
-
   try {
-    // Snapshot the pre-approval state for audit trail
-    await prisma.dPRRevision.create({
-      data: {
-        dprId: id,
-        version: dpr.version,
-        snapshot: dpr,
-        changedById: req.employeeId,
-      },
-    });
-
-    const updated = await prisma.dPR.update({
+    const dpr = await prisma.dPR.findUnique({
       where: { id },
-      data: {
-        status: 'APPROVED',
-        approvedById: req.employeeId,
-        approvedAt: new Date(),
-        version: { increment: 1 },
-      },
-      include: {
-        photos: true,
-        submittedBy: { select: { id: true, name: true, email: true } },
-        approvedBy: { select: { id: true, name: true, email: true } },
-      },
+      include: DPR_INCLUDE,
     });
+    if (!dpr) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
+    }
 
-    await prisma.notification.create({
-      data: {
-        employeeId: dpr.submittedById,
-        type: 'DPR_APPROVED',
-        dprId: id,
-        message: `Your DPR for ${dpr.projectName} on ${dpr.reportDate.toISOString().split('T')[0]} was approved by ${employee.name}. ${adminNotes || ''}`.trim(),
-      },
+    if (!APPROVABLE_FROM.has(dpr.status)) {
+      return res.status(409).json({
+        error: 'INVALID_TRANSITION',
+        message: `Cannot approve a DPR in status ${dpr.status}`,
+        code: 'INVALID_TRANSITION',
+      });
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const conditionalUpdate = await tx.dPR.update({
+        where: { id, status: dpr.status, version: dpr.version },
+        data: {
+          status: 'APPROVED',
+          approvedById: req.employeeId,
+          approvedAt: new Date(),
+          version: { increment: 1 },
+        },
+      });
+      if (!conditionalUpdate) throw Object.assign(new Error('version conflict'), { code: 'P2025' });
+
+      await tx.dPRRevision.create({
+        data: {
+          dprId: id,
+          version: dpr.version,
+          snapshot: dpr,
+          changedById: req.employeeId,
+        },
+      });
+
+      const notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was approved. ${adminNotes || ''}`.trim();
+      await tx.notification.create({
+        data: {
+          employeeId: dpr.submittedById,
+          type: 'DPR_APPROVED',
+          dprId: id,
+          message: notifMessage,
+        },
+      });
+
+      return tx.dPR.findUnique({
+        where: { id },
+        include: {
+          photos: true,
+          submittedBy: { select: { id: true, name: true, email: true } },
+          approvedBy: { select: { id: true, name: true, email: true } },
+        },
+      });
     });
 
     emitNotification(dpr.submittedById, 'notification', {
@@ -777,6 +843,12 @@ router.post('/:id/approve', async (req, res) => {
       prismaCode: err.code,
       message: err.message?.split('\n')[0],
     });
+    if (err.code === 'P2025') {
+      return res.status(409).json({
+        error: 'DPR was modified by another action. Please refresh and try again.',
+        code: 'VERSION_CONFLICT',
+      });
+    }
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to approve DPR' });
@@ -784,8 +856,8 @@ router.post('/:id/approve', async (req, res) => {
 });
 
 // ─── POST /api/dpr/:id/reject ────────────────────────────────────────────────
-// Terminal state: any -> REJECTED. Admin only. Requires a reason so the owner
-// knows what to fix (Codebase Architect #33 — UI was a lie).
+// Terminal state: DRAFT|SUBMITTED|UNDER_REVIEW -> REJECTED. Admin only.
+// Requires a reason so the owner knows what to fix.
 router.post('/:id/reject', async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
@@ -797,73 +869,99 @@ router.post('/:id/reject', async (req, res) => {
   if (reason.length > 1000) {
     return res.status(400).json({ error: 'REASON_TOO_LONG', message: 'Reason must be <= 1000 chars' });
   }
+  if (adminNotes && typeof adminNotes === 'string' && adminNotes.length > 2000) {
+    return res.status(400).json({ error: 'NOTES_TOO_LONG', message: 'adminNotes must be <= 2000 chars' });
+  }
 
-  const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
-  if (!employee || !employee.isAdmin) {
+  if (!req.isAdmin) {
     return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
   }
 
-  const dpr = await prisma.dPR.findUnique({
-    where: { id },
-    include: { photos: true, submittedBy: true },
-  });
-  if (!dpr) return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
-
-  if (dpr.status === 'REJECTED') {
-    return res.status(409).json({ error: 'ALREADY_REJECTED', message: 'DPR is already rejected' });
-  }
-
   try {
-    await prisma.dPRRevision.create({
-      data: {
-        dprId: id,
-        version: dpr.version,
-        snapshot: dpr,
-        changedById: req.employeeId,
-      },
-    });
-
-    const updated = await prisma.dPR.update({
+    const dpr = await prisma.dPR.findUnique({
       where: { id },
-      data: {
-        status: 'REJECTED',
-        reviewedById: req.employeeId,
-        reviewedAt: new Date(),
-        version: { increment: 1 },
-      },
-      include: {
-        photos: true,
-        submittedBy: { select: { id: true, name: true, email: true } },
-        reviewedBy: { select: { id: true, name: true, email: true } },
-      },
+      include: DPR_INCLUDE,
+    });
+    if (!dpr) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
+    }
+
+    if (!REJECTABLE_FROM.has(dpr.status)) {
+      return res.status(409).json({
+        error: 'INVALID_TRANSITION',
+        message: `Cannot reject a DPR in status ${dpr.status}`,
+        code: 'INVALID_TRANSITION',
+      });
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const conditionalUpdate = await tx.dPR.update({
+        where: { id, status: dpr.status, version: dpr.version },
+        data: {
+          status: 'REJECTED',
+          reviewedById: req.employeeId,
+          reviewedAt: new Date(),
+          version: { increment: 1 },
+        },
+      });
+      if (!conditionalUpdate) throw Object.assign(new Error('version conflict'), { code: 'P2025' });
+
+      await tx.dPRRevision.create({
+        data: {
+          dprId: id,
+          version: dpr.version,
+          snapshot: dpr,
+          changedById: req.employeeId,
+        },
+      });
+
+      const combinedNotes = [reason.trim(), adminNotes].filter(Boolean).join('\n\n');
+      const notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was rejected: ${reason.trim()}${adminNotes ? `\n${adminNotes}` : ''}`.trim();
+      await tx.notification.create({
+        data: {
+          employeeId: dpr.submittedById,
+          type: 'DPR_REJECTED',
+          dprId: id,
+          message: notifMessage,
+        },
+      });
+
+      const result = await tx.dPR.findUnique({
+        where: { id },
+        include: {
+          photos: true,
+          submittedBy: { select: { id: true, name: true, email: true } },
+          reviewedBy: { select: { id: true, name: true, email: true } },
+        },
+      });
+      // Attach the combined notes for the response so the admin UI doesn't
+      // need a separate fetch.
+      return { ...result, _combinedNotes: combinedNotes };
     });
 
-    const combinedNotes = [reason.trim(), adminNotes].filter(Boolean).join('\n\n');
-    await prisma.notification.create({
-      data: {
-        employeeId: dpr.submittedById,
-        type: 'DPR_REJECTED',
-        dprId: id,
-        message: `Your DPR for ${dpr.projectName} on ${dpr.reportDate.toISOString().split('T')[0]} was rejected by ${employee.name}: ${reason.trim()}${adminNotes ? `\n${adminNotes}` : ''}`.trim(),
-      },
-    });
-
+    const { _combinedNotes, ...dprForClient } = updated;
     emitNotification(dpr.submittedById, 'notification', {
       id: Date.now(),
       type: 'DPR_REJECTED',
       dprId: id,
       message: `Your DPR for ${dpr.projectName} was rejected`,
-      reason: combinedNotes,
+      reason: _combinedNotes,
       createdAt: new Date().toISOString(),
     });
 
-    res.json(updated);
+    res.json(dprForClient);
   } catch (err) {
     console.error('DPR reject error', {
       employeeHash: hashIdentifier(req.employeeId),
       prismaCode: err.code,
       message: err.message?.split('\n')[0],
     });
+    if (err.code === 'P2025') {
+      return res.status(409).json({
+        error: 'DPR was modified by another action. Please refresh and try again.',
+        code: 'VERSION_CONFLICT',
+      });
+    }
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to reject DPR' });
@@ -894,36 +992,20 @@ router.put('/notifications/read-all', async (req, res) => {
 });
 
 // ─── POST /api/dpr/:id/pdf ──────────────────────────────────────────────────
-router.post('/:id/pdf', async (req, res) => {
-  const prisma = getPrisma(req);
-  const { id } = req.params;
-
-  const dpr = await prisma.dPR.findUnique({
-    where: { id },
-    include: {
-      photos: true,
-      submittedBy: { select: { name: true, email: true } },
-      reviewedBy: { select: { name: true } },
-      approvedBy: { select: { name: true } },
-    },
-  });
-
-  if (!dpr) {
-    return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
-  }
-
-  // Auth check
-  const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
-  const isAdmin = employee && employee.isAdmin;
-  if (dpr.submittedById !== req.employeeId && !isAdmin) {
-    return res.status(403).json({ error: 'FORBIDDEN', message: 'Not authorized' });
-  }
-
-  // In production: render Handlebars template + Puppeteer -> PDF buffer -> upload to blob
-  // For now, return a placeholder response
-  res.json({
-    pdfUrl: `/api/dpr/pdf-placeholder/${id}`,
-    message: 'PDF generation not yet configured - requires Azure Blob + Puppeteer setup',
+// Round-7: PDF generation is not yet implemented — the previous handler did a
+// full DPR fetch + auth check then returned a placeholder JSON. That's
+// misleading (200 OK suggests success) and wastes a DB roundtrip. Return
+// 501 Not Implemented per RFC 7231 §6.6.2. Auth middleware has already run
+// upstream (`requireAuth`), so we don't need to re-check permissions here —
+// a logged-in user hitting this gets a clear "not built yet" signal.
+//
+// When PDF generation is built, replace this with the real handler.
+router.post('/:id/pdf', (req, res) => {
+  res.status(501).json({
+    error: 'NOT_IMPLEMENTED',
+    code: 'PDF_GENERATION_PENDING',
+    message: 'PDF generation is not yet implemented. ' +
+             'See backend/src/lib/pdfGenerator.js for the planned integration.',
   });
 });
 

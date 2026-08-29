@@ -4,26 +4,23 @@ const rateLimit = require('express-rate-limit');
  * Rate-limit policy — defense in depth against brute force, account
  * enumeration, and email bombing (AppSec #8).
  *
- * Keying: per-IP by default. When `trust proxy` is on (it is, in index.js),
- * `req.ip` reflects the connecting client. We also provide an explicit
- * keyGenerator that prefers X-Forwarded-For's first IP if present, so the
- * limiter behaves identically whether or not Azure's load balancer rewrites
- * the connection source.
+ * Keying: per-IP via `req.ip`. Express resolves req.ip from the trusted proxy
+ * chain set in index.js (`app.set('trust proxy', 1)`), so the leftmost
+ * X-Forwarded-For entry IS the client when the request comes through Azure's
+ * load balancer — but the trust is gated by the `trust proxy` setting, not
+ * by attacker-controlled headers. (Round-7 fix: dropped the previous custom
+ * keyGenerator that read XFF directly, which let any caller spoof their IP
+ * by setting their own XFF header.)
+ *
+ * validate.trustProxy makes express-rate-limit v7 refuse to start if
+ * `trust proxy` is misconfigured — catches deployment drift.
  *
  * In-memory store: per-process. Behind multiple App Service instances the
  * per-instance bucket is the unit of enforcement. For an employee-portal
  * scale this is acceptable; if we ever scale out, switch to a Redis store.
  */
 
-function ipKey(req) {
-  // Prefer the first hop in X-Forwarded-For if present (Azure App Service
-  // sets this); fall back to req.ip which Express computes from the socket.
-  const xff = req.headers['x-forwarded-for'];
-  if (typeof xff === 'string' && xff.length > 0) {
-    return xff.split(',')[0].trim();
-  }
-  return req.ip || req.connection?.remoteAddress || 'unknown';
-}
+const ipKey = (req) => req.ip || 'unknown';
 
 // 5 attempts / minute / IP — login
 const loginLimiter = rateLimit({
@@ -32,6 +29,7 @@ const loginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: ipKey,
+  validate: { trustProxy: true },
   message: { error: 'Too many login attempts. Please wait a minute and try again.' },
 });
 
@@ -43,6 +41,7 @@ const refreshLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: ipKey,
+  validate: { trustProxy: true },
   message: { error: 'Too many refresh attempts. Please slow down.' },
 });
 
@@ -53,6 +52,7 @@ const contactLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: ipKey,
+  validate: { trustProxy: true },
   message: { error: 'Too many submissions. Please try again later.' },
 });
 
@@ -64,6 +64,7 @@ const sasLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: ipKey,
+  validate: { trustProxy: true },
   message: { error: 'Too many upload requests. Please slow down.' },
 });
 

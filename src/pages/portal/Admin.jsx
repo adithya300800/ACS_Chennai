@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { api } from '../../lib/api.js';
 
 const formatDate = (dateStr) => {
   if (!dateStr) return '';
@@ -54,30 +55,31 @@ export default function Admin() {
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [expandedEmployee, setExpandedEmployee] = useState(null);
 
+  const fetchAttendance = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      // Round-7: route through api.js so this fetch inherits the timeout
+      // wrapper, the 401 auto-refresh, and the auth:logout dispatch on
+      // TOKEN_INVALID. The previous raw fetch would hang on a server stall,
+      // surface raw "Failed to fetch" on auth expiry, and bypass the
+      // single-fire logout dispatch entirely.
+      const data = await api.get(`/attendance/all?month=${month}`, accessToken);
+      setRecords(data);
+    } catch (err) {
+      setError(err.message || 'Failed to load attendance data');
+    } finally {
+      setLoading(false);
+    }
+  }, [month, accessToken]);
+
   useEffect(() => {
     if (!employee?.isAdmin) {
       navigate('/portal/attendance');
       return;
     }
     fetchAttendance();
-  }, [month]);
-
-  const fetchAttendance = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const res = await fetch(`${import.meta.env.VITE_API_URL}/api/attendance/all?month=${month}`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-      if (!res.ok) throw new Error('Failed to fetch');
-      const data = await res.json();
-      setRecords(data);
-    } catch (err) {
-      setError('Failed to load attendance data');
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [month, accessToken, employee?.isAdmin, navigate, fetchAttendance]);
 
   // Group by employee
   const byEmployee = records.reduce((acc, r) => {
