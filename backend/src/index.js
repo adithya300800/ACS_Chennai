@@ -14,6 +14,7 @@ const authRoutes = require('./routes/auth');
 const attendanceRoutes = require('./routes/attendance');
 const dprRoutes = require('./routes/dpr');
 const contactRoutes = require('./routes/contact');
+const diagRoutes = require('./routes/diag'); // Round-8: temporary diagnostic endpoint
 const { loginLimiter, refreshLimiter, contactLimiter, sasLimiter } = require('./middleware/rateLimit');
 
 const app = express();
@@ -150,6 +151,9 @@ app.use('/api/dpr/sas-url', sasLimiter);
 // payloads can legitimately exceed the 16kb default).
 app.use('/api/dpr', express.json({ limit: dprBodyLimit }), dprRoutes);
 app.use('/api/contact', contactLimiter, contactRoutes);
+// Round-8 TEMPORARY: diagnostic endpoint to introspect deployed DB schema.
+// Mounted AFTER the body-parsers so it can read raw body. DELETE after F5/F6 resolved.
+app.use('/api/diag', diagRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
