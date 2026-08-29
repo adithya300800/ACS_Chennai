@@ -25,7 +25,7 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
-          cache-dependency-path: backend/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -34,7 +34,7 @@ jobs:
         run: npm test
 
       - name: Push Prisma schema to Supabase
-        run: npx prisma db push --schema=backend/prisma/schema.prisma --skip-generate --accept-data-loss
+        run: npx prisma db push --schema=prisma/schema.prisma --skip-generate --accept-data-loss
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
