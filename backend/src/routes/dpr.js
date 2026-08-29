@@ -2,7 +2,9 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
-const { generateULID, generateUploadSASUrl, generateReadSASUrl, verifyBlobExists } = require('../lib/blobStorage');
+const { generateULID, generateUploadSASUrl, generateReadSASUrl, verifyBlobExists, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
+const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
+const { hashIdentifier } = require('../lib/pii');
 
 // In-memory pending uploads (ulid -> { employeeId, container, filename })
 const pendingUploads = new Map();
@@ -221,7 +223,11 @@ router.post('/confirm-upload', async (req, res) => {
       return res.status(400).json({ error: 'SIZE_MISMATCH', message: 'Uploaded size does not match declared size' });
     }
   } catch (err) {
-    console.error('Blob verification failed:', err);
+    console.error('Blob verification failed', {
+      employeeHash: hashIdentifier(req.employeeId),
+      container, ulid,
+      errMessage: err.message?.split('\n')[0],
+    });
     return res.status(502).json({ error: 'BLOB_VERIFICATION_FAILED', message: 'Could not verify upload' });
   }
 
@@ -233,31 +239,83 @@ router.post('/confirm-upload', async (req, res) => {
 // ─── POST /api/dpr ────────────────────────────────────────────────────────────
 router.post('/', async (req, res) => {
   const prisma = getPrisma(req);
-  const { projectName, location, reportDate, weather, temperature, contractor, workType, notes, workEntries, status, photos = [] } = req.body;
+  const {
+    projectName, location, reportDate, weather, temperature,
+    contractor, workType, notes, workEntries, status, photos = [],
+  } = req.body || {};
 
-  if (!projectName || !location || !reportDate) {
+  // typeof guards (Code Reviewer P1-2): reject non-string types before they
+  // reach Prisma where they would cause opaque 500s.
+  if (typeof projectName !== 'string' || !projectName.trim() ||
+      typeof location !== 'string' || !location.trim() ||
+      typeof reportDate !== 'string') {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'projectName, location, reportDate required' });
   }
 
+  // Length caps (P1-3) — keep the database tidy, prevent abuse
+  const MAX = { projectName: 200, location: 200, weather: 80, temperature: 20, contractor: 200, notes: 5000 };
+  for (const [k, cap] of Object.entries(MAX)) {
+    if (req.body[k] != null && typeof req.body[k] === 'string' && req.body[k].length > cap) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: `${k} exceeds ${cap} chars` });
+    }
+  }
+
   const validStatuses = ['DRAFT', 'SUBMITTED'];
-  if (status && !validStatuses.includes(status)) {
+  if (status !== undefined && !validStatuses.includes(status)) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid status' });
   }
 
   const validWorkTypes = ['MATERIAL_RECEIPT', 'QUALITY_TESTING', 'SITE_INSPECTION', 'EXCEPTIONS_SAFETY'];
-  if (workType && !validWorkTypes.includes(workType)) {
+  if (workType !== undefined && !validWorkTypes.includes(workType)) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid workType' });
   }
 
-  try {
-    // Parse reportDate
-    const [year, month, day] = reportDate.split('-').map(Number);
-    const dateUTC = new Date(Date.UTC(year, month - 1, day));
+  // Strict date validation (P0-4) — silent rollover for 2026-02-30 etc.
+  const dateParsed = parseStrictISODate(reportDate);
+  if (!dateParsed.ok) {
+    return res.status(400).json({ error: 'INVALID_REPORT_DATE', message: 'reportDate must be a valid YYYY-MM-DD date' });
+  }
+  const dateUTC = dateParsed.date;
 
+  // Photos validation (P1-5). Server-side enforcement of every constraint
+  // that /sas-url already enforces — the POST handler used to trust the
+  // client, which is an IDOR vector (P0-2).
+  const allowedContainers = ['dpr-photos', 'dpr-documents'];
+  if (!Array.isArray(photos) || photos.length > 50) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'photos must be an array (max 50)' });
+  }
+  for (let i = 0; i < photos.length; i++) {
+    const p = photos[i];
+    if (!p || typeof p !== 'object') {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}] must be an object` });
+    }
+    if (typeof p.ulid !== 'string' || !/^[0-9A-HJKMNP-TV-Z]{26}$/i.test(p.ulid)) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}].ulid invalid` });
+    }
+    if (!allowedContainers.includes(p.container)) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}].container invalid` });
+    }
+    if (!CONTENT_TYPE_EXT[p.contentType]) {
+      return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: `photos[${i}].contentType invalid` });
+    }
+    const sb = Number(p.sizeBytes);
+    if (!Number.isFinite(sb) || sb <= 0 || sb > 10 * 1024 * 1024) {
+      return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `photos[${i}].sizeBytes must be 1..${10 * 1024 * 1024}` });
+    }
+    if (typeof p.filename !== 'string' || p.filename.length > 255 || p.filename.includes('\0') || p.filename.includes('..')) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}].filename invalid` });
+    }
+    if (p.takenAt !== undefined && p.takenAt !== null) {
+      const td = parseISODateTime(p.takenAt);
+      if (td === null) return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}].takenAt invalid` });
+    }
+  }
+
+  try {
     const dpr = await prisma.dPR.create({
       data: {
-        projectName,
-        location,
+        projectName: projectName.trim(),
+        location: location.trim(),
         reportDate: dateUTC,
         weather: weather || null,
         temperature: temperature || null,
@@ -267,7 +325,8 @@ router.post('/', async (req, res) => {
         workEntries: workEntries || null,
         status: status || 'DRAFT',
         submittedById: req.employeeId,
-        submittedAt: new Date(),
+        // P2-3: DRAFT saves don't have a submittedAt timestamp
+        submittedAt: status === 'SUBMITTED' ? new Date() : null,
         photos: {
           create: photos.map(p => ({
             ulid: p.ulid,
@@ -289,11 +348,26 @@ router.post('/', async (req, res) => {
 
     res.status(201).json(dpr);
   } catch (err) {
-    console.error('DPR create error:', err);
-    if (err.code === 'P2002') {
-      return res.status(409).json({ error: 'DPR already exists for this date', code: 'DUPLICATE_DPR' });
+    // Log the Prisma error code + meta only — never the full request body
+    // (P1-7). Then map the error to a meaningful HTTP status (P1-1).
+    console.error('DPR create error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      meta: err.meta,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) {
+      // Specialize the duplicate message for the DPR case
+      if (mapped.code === 'DUPLICATE') {
+        return res.status(409).json({
+          error: 'DPR already exists for this date',
+          code: 'DUPLICATE_DPR',
+        });
+      }
+      return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     }
-    res.status(500).json({ error: 'Failed to create DPR' });
+    res.status(500).json({ error: 'Failed to create DPR', requestId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` });
   }
 });
 
@@ -311,14 +385,14 @@ router.get('/', async (req, res) => {
     try {
       const decoded = Buffer.from(cursor, 'base64').toString();
       const [cDate, cId] = decoded.split('|');
-      const parsedDate = new Date(cDate);
-      if (!cId || isNaN(parsedDate.getTime())) {
+      const dp = parseStrictISODate(cDate);
+      if (!cId || !dp.ok) {
         return res.status(400).json({ error: 'INVALID_CURSOR', message: 'Cursor is malformed or expired' });
       }
       cursorWhere = {
         OR: [
-          { reportDate: { lt: parsedDate } },
-          { reportDate: parsedDate, id: { lt: cId } },
+          { reportDate: { lt: dp.date } },
+          { reportDate: dp.date, id: { lt: cId } },
         ],
       };
     } catch (e) {
@@ -326,20 +400,26 @@ router.get('/', async (req, res) => {
     }
   }
 
-  // Validate date-range filters (used by frontend list UI)
+  // Validate date-range filters (used by frontend list UI). Accept either
+  // YYYY-MM-DD (parsed as a date) or a full ISO timestamp.
   const dateFilter = {};
+  const parseFilterDate = (v) => {
+    if (!v) return null;
+    // Try strict YYYY-MM-DD first
+    const strict = parseStrictISODate(v);
+    if (strict.ok) return strict.date;
+    // Fall back to full ISO datetime
+    const dt = new Date(v);
+    return isNaN(dt.getTime()) ? null : dt;
+  };
   if (from) {
-    const d = new Date(from);
-    if (isNaN(d.getTime())) {
-      return res.status(400).json({ error: 'INVALID_FROM', message: 'from must be an ISO date' });
-    }
+    const d = parseFilterDate(from);
+    if (!d) return res.status(400).json({ error: 'INVALID_FROM', message: 'from must be a valid ISO date' });
     dateFilter.gte = d;
   }
   if (to) {
-    const d = new Date(to);
-    if (isNaN(d.getTime())) {
-      return res.status(400).json({ error: 'INVALID_TO', message: 'to must be an ISO date' });
-    }
+    const d = parseFilterDate(to);
+    if (!d) return res.status(400).json({ error: 'INVALID_TO', message: 'to must be a valid ISO date' });
     dateFilter.lte = d;
   }
 
@@ -380,7 +460,9 @@ router.get('/', async (req, res) => {
     res.setHeader('X-Has-More', hasMore ? 'true' : 'false');
     res.json({ dprs: items, nextCursor });
   } catch (err) {
-    console.error('DPR list error:', err);
+    console.error('DPR list error', { prismaCode: err.code, message: err.message?.split('\n')[0] });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to fetch DPRs' });
   }
 });
@@ -416,15 +498,26 @@ router.get('/:id', async (req, res) => {
       return res.status(403).json({ error: 'FORBIDDEN', message: 'Not authorized' });
     }
 
-    // Generate read SAS URLs for photos
+    // Generate read SAS URLs for photos. P2-1: derive the blob extension
+    // from the validated contentType (not the user-supplied filename which
+    // may have the wrong case or no extension at all — leading to 404s on
+    // the image fetch).
     const photosWithUrls = await Promise.all(dpr.photos.map(async p => {
-      const { sasUrl } = await generateReadSASUrl(p.container, `${p.ulid}.${p.filename.split('.').pop()}`);
+      const ext = CONTENT_TYPE_EXT[p.contentType];
+      const blobName = ext ? `${p.ulid}.${ext}` : p.ulid;
+      const { sasUrl } = await generateReadSASUrl(p.container, blobName);
       return { ...p, readUrl: sasUrl };
     }));
 
     res.json({ ...dpr, photos: photosWithUrls });
   } catch (err) {
-    console.error('DPR get error:', err);
+    console.error('DPR get error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to fetch DPR' });
   }
 });
@@ -433,10 +526,43 @@ router.get('/:id', async (req, res) => {
 router.put('/:id', async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
-  const { version, ...fields } = req.body;
+  const { version, ...fields } = req.body || {};
 
-  if (version === undefined) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'version required for optimistic locking' });
+  // Strict version check
+  if (!Number.isInteger(version) || version < 1) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'version must be a positive integer' });
+  }
+
+  // P0-1 PUT mass-assignment IDOR: explicit allowlist. A client must NOT be
+  // able to set submittedById (transfer ownership), status, reviewedById,
+  // approvedById, or any of the audit timestamps via PUT. Status transitions
+  // go through /review, /approve, /reject endpoints only.
+  const ALLOWED_UPDATE_FIELDS = [
+    'projectName', 'location', 'reportDate', 'weather', 'temperature',
+    'contractor', 'workType', 'notes', 'workEntries',
+  ];
+  const unknown = Object.keys(fields).filter(k => !ALLOWED_UPDATE_FIELDS.includes(k));
+  if (unknown.length) {
+    return res.status(400).json({
+      error: 'UNKNOWN_FIELDS',
+      message: `Fields not allowed: ${unknown.join(', ')}`,
+      fields: unknown,
+    });
+  }
+
+  // Length caps on the allowed fields too
+  const MAX = { projectName: 200, location: 200, weather: 80, temperature: 20, contractor: 200, notes: 5000 };
+  for (const [k, cap] of Object.entries(MAX)) {
+    if (fields[k] != null && typeof fields[k] === 'string' && fields[k].length > cap) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: `${k} exceeds ${cap} chars` });
+    }
+  }
+
+  // reportDate must be strict YYYY-MM-DD if present
+  if (fields.reportDate !== undefined) {
+    const dp = parseStrictISODate(fields.reportDate);
+    if (!dp.ok) return res.status(400).json({ error: 'INVALID_REPORT_DATE', message: 'reportDate must be YYYY-MM-DD' });
+    fields.reportDate = dp.date;
   }
 
   // Only owner can update
@@ -464,10 +590,20 @@ router.put('/:id', async (req, res) => {
 
     res.json(updated);
   } catch (err) {
-    if (err.code === 'P2025') {
-      return res.status(409).json({ error: 'VERSION_CONFLICT', message: 'DPR was modified by another request' });
+    // PII redaction (P1-7) — log Prisma code only
+    console.error('DPR update error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) {
+      if (mapped.code === 'NOT_FOUND') {
+        // P2025 from the version-conditional update → conflict
+        return res.status(409).json({ error: 'VERSION_CONFLICT', code: 'VERSION_CONFLICT' });
+      }
+      return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     }
-    console.error('DPR update error:', err);
     res.status(500).json({ error: 'Failed to update DPR' });
   }
 });
@@ -540,7 +676,13 @@ router.post('/:id/review', async (req, res) => {
 
     res.json(updated);
   } catch (err) {
-    console.error('DPR review error:', err);
+    console.error('DPR review error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to review DPR' });
   }
 });
@@ -612,7 +754,13 @@ router.post('/:id/approve', async (req, res) => {
 
     res.json(updated);
   } catch (err) {
-    console.error('DPR approve error:', err);
+    console.error('DPR approve error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to approve DPR' });
   }
 });
@@ -693,7 +841,13 @@ router.post('/:id/reject', async (req, res) => {
 
     res.json(updated);
   } catch (err) {
-    console.error('DPR reject error:', err);
+    console.error('DPR reject error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to reject DPR' });
   }
 });
@@ -710,7 +864,13 @@ router.put('/notifications/read-all', async (req, res) => {
 
     res.json({ updated: result.count });
   } catch (err) {
-    console.error('Mark read error:', err);
+    console.error('Mark read error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to mark notifications read' });
   }
 });
