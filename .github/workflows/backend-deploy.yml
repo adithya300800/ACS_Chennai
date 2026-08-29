@@ -41,6 +41,21 @@ jobs:
       - name: Generate Prisma Client
         run: npx prisma generate
 
+      # Round-8: ensure the production DB schema matches the deployed Prisma
+      # client BEFORE we deploy the new code. Without this, the deployed
+      # Prisma client can drift from the production DB schema — e.g. columns
+      # added to schema.prisma after the last deploy are absent in prod, so
+      # every query against that table returns 500. The Azure App Service
+      # appCommandLine is empty (default `npm start`), so startup.sh is
+      # never run and db push never happens at container startup either.
+      # Doing it here is the only reliable place to keep schema in sync.
+      - name: Apply Prisma schema to production DB
+        run: |
+          echo "Running prisma db push against production DATABASE_URL..."
+          npx prisma db push --accept-data-loss=false --schema prisma/schema.prisma
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
       - name: Login to Azure
         uses: azure/login@v2
         with:
