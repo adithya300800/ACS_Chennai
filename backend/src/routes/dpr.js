@@ -41,23 +41,41 @@ router.post('/notifications/ticket', requireAuth, (req, res) => {
   res.json({ ticket, expiresIn: TICKET_TTL_MS / 1000 });
 });
 
-// SSE /notifications route — auth via ticket ONLY (no JWT in URL).
+// SSE /notifications route — auth via ticket (preferred) OR legacy ?token=.
+// The token path is a temporary fallback for the live frontend bundle which
+// hasn't been migrated to the ticket flow yet. It logs a deprecation
+// warning on every connect so we know when to drop it.
+// TODO(frontend): migrate to ticket pattern, then remove the token branch.
 router.get('/notifications', async (req, res) => {
-  const { ticket, lastNotificationId } = req.query;
+  const { ticket, token, lastNotificationId } = req.query;
 
-  if (!ticket) {
-    return res.status(401).json({ error: 'Ticket required' });
-  }
+  let employeeId = null;
 
-  const entry = sseTickets.get(ticket);
-  if (!entry || entry.expiresAt <= Date.now()) {
+  if (ticket) {
+    // Preferred path — opaque ticket from POST /api/dpr/notifications/ticket
+    const entry = sseTickets.get(ticket);
+    if (!entry || entry.expiresAt <= Date.now()) {
+      sseTickets.delete(ticket);
+      return res.status(401).json({ error: 'Invalid or expired ticket' });
+    }
+    // Single-use: delete immediately so the ticket can't be replayed.
     sseTickets.delete(ticket);
-    return res.status(401).json({ error: 'Invalid or expired ticket' });
+    employeeId = entry.employeeId;
+  } else if (token) {
+    // LEGACY FALLBACK — JWT in URL. Works for the current frontend bundle but
+    // leaks JWTs to proxies/CDNs. Will be removed once the frontend migrates.
+    console.warn('[sse] legacy ?token= auth used — frontend has not migrated to ticket pattern yet');
+    try {
+      const jwt = require('jsonwebtoken');
+      const { getJwtSecret } = require('../middleware/auth');
+      const decoded = jwt.verify(token, getJwtSecret(), { algorithms: ['HS256'] });
+      employeeId = decoded.employeeId;
+    } catch {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+  } else {
+    return res.status(401).json({ error: 'Ticket or token required' });
   }
-
-  // Single-use: delete immediately so the ticket can't be replayed.
-  sseTickets.delete(ticket);
-  const employeeId = entry.employeeId;
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');

@@ -37,12 +37,15 @@ const ALLOWED_EMAIL_DOMAINS = (process.env.ALLOWED_EMAIL_DOMAINS
   : ['acschennai.com']
 );
 
-// Sign access (8h) and refresh (7d) tokens. Returns { accessToken, refreshToken }.
+// Sign access (24h) and refresh (7d) tokens. Returns { accessToken, refreshToken }.
+// Access token is 24h so a single workday doesn't trigger expiry mid-upload. The
+// real defence against expiry is the frontend's auto-refresh interceptor — once
+// that's in place we can shorten this back to ~1h.
 function signTokens(employee) {
   const accessToken = jwt.sign(
     { employeeId: employee.id, email: employee.email, isAdmin: !!employee.isAdmin },
     JWT_SECRET,
-    { algorithm: 'HS256', expiresIn: '8h' }
+    { algorithm: 'HS256', expiresIn: '24h' }
   );
   const refreshToken = jwt.sign(
     { employeeId: employee.id },
@@ -370,7 +373,7 @@ router.post('/refresh', async (req, res) => {
     const accessToken = jwt.sign(
       { employeeId: employee.id, email: employee.email, isAdmin: !!employee.isAdmin },
       JWT_SECRET,
-      { algorithm: 'HS256', expiresIn: '8h' }
+      { algorithm: 'HS256', expiresIn: '24h' }
     );
     res.json({ accessToken });
   } catch (err) {
