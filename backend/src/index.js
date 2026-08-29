@@ -127,19 +127,45 @@ app.use((req, res) => {
 
 app.use((err, req, res, next) => {
   const requestId = req.headers['x-request-id'] || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  console.error(`[err ${requestId}]`, err.message);
+  // Map known Prisma error codes to the right HTTP response so the
+  // client gets actionable 4xx instead of a generic 500.
+  let status = 500;
+  let body = { error: 'Internal server error', requestId };
+  if (err && typeof err.code === 'string') {
+    if (err.code === 'P2003') { status = 400; body = { error: 'Referenced record does not exist', code: 'FK_VIOLATION', requestId }; }
+    else if (err.code === 'P2009') { status = 400; body = { error: 'Database rejected the input', code: 'VALIDATION_FAILED', requestId }; }
+    else if (err.code === 'P2025') { status = 404; body = { error: 'Record not found', code: 'NOT_FOUND', requestId }; }
+    else if (['P1001','P1002','P1017','P2024'].includes(err.code)) { status = 503; body = { error: 'Database temporarily unavailable', code: 'DB_UNAVAILABLE', requestId }; }
+  }
+  console.error(`[err ${requestId}]`, {
+    path: req.path,
+    method: req.method,
+    status,
+    code: err?.code,
+    name: err?.name,
+    message: err?.message?.split('\n')[0],
+  });
   if (process.env.NODE_ENV !== 'production') {
     console.error(err.stack);
   }
-  res.status(500).json({ error: 'Internal server error', requestId });
+  res.status(status).json(body);
 });
 
 // ─── Process error handlers (Node 22 default: terminate on unhandled rejection) ──
 process.on('unhandledRejection', (reason) => {
-  console.error('[unhandledRejection]', reason);
+  // Structured so we can filter for Prisma codes specifically.
+  console.error('[unhandledRejection]', {
+    code: reason?.code,
+    name: reason?.name,
+    message: reason?.message?.split('\n')[0],
+  });
 });
 process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException]', err);
+  console.error('[uncaughtException]', {
+    code: err?.code,
+    name: err?.name,
+    message: err?.message?.split('\n')[0],
+  });
   // Best-effort shutdown
   prisma.$disconnect().catch(() => {}).finally(() => process.exit(1));
 });

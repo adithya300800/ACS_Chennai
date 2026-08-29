@@ -16,12 +16,25 @@ export default function PortalLogin() {
   // Surface "session expired" navigation state from AuthContext's logout
   // listener as a friendly toast instead of letting the user wonder why
   // they got bounced back to login.
+  //
+  // We also dedupe by reason in sessionStorage — if multiple parallel
+  // 401s somehow still cause a navigate with the same reason (e.g. on
+  // a slow network), the toast pushes once per session-per-reason rather
+  // than once per navigate call (Aug 29 2026 user report).
   useEffect(() => {
-    if (location.state?.reason) {
-      toast.push('Your session has expired. Please sign in again.', 'warning', 5000);
-      // Clear the state so it doesn't fire again on refresh
-      window.history.replaceState({}, document.title);
-    }
+    const reason = location.state?.reason;
+    if (!reason) return;
+    const dedupeKey = `acs_logout_toast_${reason}`;
+    try {
+      if (sessionStorage.getItem(dedupeKey)) {
+        window.history.replaceState({}, document.title);
+        return;
+      }
+      sessionStorage.setItem(dedupeKey, '1');
+    } catch {}
+    toast.push('Your session has expired. Please sign in again.', 'warning', 5000);
+    // Clear the state so it doesn't fire again on refresh
+    window.history.replaceState({}, document.title);
   }, [location.state, toast]);
 
   // Check for OAuth code in URL on mount
@@ -69,6 +82,13 @@ export default function PortalLogin() {
 
     try {
       await login(form.email, form.password);
+      // Clear dedupe keys for the new session — so a future session-expiry
+      // toast can fire again.
+      try {
+        Object.keys(sessionStorage).forEach((k) => {
+          if (k.startsWith('acs_logout_toast_')) sessionStorage.removeItem(k);
+        });
+      } catch {}
       navigate('/portal/attendance');
     } catch (err) {
       setStatus('error');
@@ -110,6 +130,11 @@ export default function PortalLogin() {
           // SPA navigation via AuthContext — keeps any draft state alive
           // and avoids losing scroll position / focus.
           setAuthData(event.data.accessToken, event.data.employee, event.data.refreshToken);
+          try {
+            Object.keys(sessionStorage).forEach((k) => {
+              if (k.startsWith('acs_logout_toast_')) sessionStorage.removeItem(k);
+            });
+          } catch {}
           navigate('/portal/attendance', { replace: true });
         } else if (event.data.type === 'zoho-oauth-error') {
           window.removeEventListener('message', handleMessage);

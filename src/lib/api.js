@@ -12,6 +12,21 @@ export class ApiError extends Error {
 // /api/auth/refresh call goes out — every other caller awaits the same promise.
 let refreshingPromise = null;
 
+// Single-fire logout: once we decide the session is dead (TOKEN_INVALID,
+// refresh failed, or no token at all), we dispatch auth:logout exactly
+// ONCE per page lifetime. Without this, every parallel 401 in flight
+// would each dispatch its own auth:logout, which fires the listener N
+// times → N navigate() calls → the toast in PortalLogin stacks up to
+// "cancerous" levels (user report, Aug 29 2026).
+let logoutDispatched = false;
+function dispatchLogoutOnce(reason) {
+  if (logoutDispatched) return;
+  logoutDispatched = true;
+  window.dispatchEvent(new CustomEvent('auth:logout', { detail: { reason } }));
+  // Reset on the next tick so a fresh login session can fire again.
+  setTimeout(() => { logoutDispatched = false; }, 0);
+}
+
 function doRefresh() {
   const refresh = localStorage.getItem('acs_refresh');
   if (!refresh) {
@@ -83,17 +98,18 @@ async function request(method, path, body, token, { _retried } = {}) {
         return request(method, path, body, newToken, { _retried: true });
       } catch (refreshErr) {
         // Refresh itself failed — fall through to the normal error path
-        // but tell the app to log out.
-        window.dispatchEvent(new CustomEvent('auth:logout', { detail: { reason: 'refresh_failed' } }));
+        // but tell the app to log out (single-fire to avoid toast spam).
+        dispatchLogoutOnce('refresh_failed');
         throw new ApiError('Session expired. Please sign in again.', 401, data.code);
       }
     }
 
     // No refresh path (or already retried) — tell the app to log out on truly
     // invalid/missing tokens so the user sees a friendly redirect instead of
-    // a raw "TOKEN_INVALID" string.
+    // a raw "TOKEN_INVALID" string. Single-fire so multiple parallel 401s
+    // don't stack toasts (Aug 29 2026 user report).
     if (res.status === 401 && (data.code === 'TOKEN_INVALID' || !token)) {
-      window.dispatchEvent(new CustomEvent('auth:logout', { detail: { reason: data.code || 'no_token' } }));
+      dispatchLogoutOnce(data.code || 'no_token');
     }
 
     throw new ApiError(data.error || 'Request failed', res.status, data.code);

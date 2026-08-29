@@ -31,6 +31,13 @@ export function AuthProvider({ children }) {
   // dispatches this event so we can clear local state and bounce the user to
   // the login page with a friendly "session expired" hint, instead of
   // showing them a raw error string.
+  //
+  // Belt-and-suspenders idempotency: the api.js interceptor already dedupes
+  // auth:logout via a single-fire flag, but NotificationBell SSE and other
+  // background tasks could still race. Guard here too so we don't navigate
+  // repeatedly or fire the PortalLogin toast multiple times (Aug 29 2026
+  // user report: "session expired notification cancerously multiple times").
+  const loggingOutRef = useRef(false);
   useEffect(() => {
     const handler = (e) => {
       const reason = e.detail?.reason;
@@ -38,9 +45,10 @@ export function AuthProvider({ children }) {
       // an infinite navigation loop on /portal/login.
       const hash = window.location.hash || '';
       if (hash.includes('/portal/login')) return;
+      if (loggingOutRef.current) return;
+      loggingOutRef.current = true;
 
-      // Clear auth state. Using logout() rather than firing another
-      // auth:logout — the listener will be a no-op.
+      // Clear auth state.
       localStorage.removeItem('acs_auth');
       localStorage.removeItem('acs_refresh');
       setAccessToken(null);
@@ -55,6 +63,8 @@ export function AuthProvider({ children }) {
         } else {
           window.location.hash = '#/portal/login';
         }
+        // Reset on the next tick so a fresh login session can fire again.
+        setTimeout(() => { loggingOutRef.current = false; }, 0);
       }, 0);
     };
     window.addEventListener('auth:logout', handler);

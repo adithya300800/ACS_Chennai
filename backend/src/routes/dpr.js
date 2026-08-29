@@ -6,6 +6,15 @@ const { generateULID, generateUploadSASUrl, generateReadSASUrl, verifyBlobExists
 const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
 
+// Tiny asyncHandler so unhandled rejections in async route handlers reach
+// the global error handler instead of hanging the request or crashing the
+// process. Express 4 doesn't auto-catch async errors without it. We can't
+// add express-async-errors as a dep in this round, so this local wrapper
+// does the same job for the routes we touch.
+function asyncHandler(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
 // In-memory pending uploads (ulid -> { employeeId, container, filename })
 const pendingUploads = new Map();
 
@@ -372,7 +381,7 @@ router.post('/', async (req, res) => {
 });
 
 // ─── GET /api/dpr ─────────────────────────────────────────────────────────────
-router.get('/', async (req, res) => {
+router.get('/', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const { cursor, limit = '20', status: statusFilter, from, to, my } = req.query;
 
@@ -423,22 +432,23 @@ router.get('/', async (req, res) => {
     dateFilter.lte = d;
   }
 
-  // Check if admin
-  const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
-  const isAdmin = employee && employee.isAdmin;
-
-  // `my=true` forces ownership filter even for admins; otherwise non-admins
-  // are always restricted to their own DPRs.
-  const restrictToSelf = !isAdmin || my === 'true';
-
-  const where = {
-    ...(restrictToSelf ? { submittedById: req.employeeId } : {}),
-    ...(statusFilter ? { status: statusFilter } : {}),
-    ...(Object.keys(dateFilter).length ? { reportDate: dateFilter } : {}),
-    ...(cursor ? cursorWhere : {}),
-  };
-
   try {
+    // Check if admin (moved inside try/catch so DB errors here don't become
+    // unhandled rejections — Code Reviewer P0-2).
+    const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
+    const isAdmin = employee && employee.isAdmin;
+
+    // `my=true` forces ownership filter even for admins; otherwise non-admins
+    // are always restricted to their own DPRs.
+    const restrictToSelf = !isAdmin || my === 'true';
+
+    const where = {
+      ...(restrictToSelf ? { submittedById: req.employeeId } : {}),
+      ...(statusFilter ? { status: statusFilter } : {}),
+      ...(Object.keys(dateFilter).length ? { reportDate: dateFilter } : {}),
+      ...(cursor ? cursorWhere : {}),
+    };
+
     const dprs = await prisma.dPR.findMany({
       where,
       include: {
@@ -452,8 +462,16 @@ router.get('/', async (req, res) => {
     const hasMore = dprs.length > take;
     const items = hasMore ? dprs.slice(0, -1) : dprs;
     const lastItem = items[items.length - 1];
-    const nextCursor = hasMore && lastItem
-      ? Buffer.from(`${lastItem.reportDate.toISOString()}|${lastItem.id}`).toString('base64')
+    // reportDate is @db.Date in Postgres — Prisma sometimes returns it as
+    // a "YYYY-MM-DD" string rather than a JS Date (depends on column type
+    // and Prisma client version). Coerce defensively so cursor building
+    // doesn't throw "reportDate.toISOString is not a function" and turn a
+    // >20-row result set into a 500 (Code Reviewer P2-3).
+    const lastDate = lastItem && (lastItem.reportDate instanceof Date
+      ? lastItem.reportDate
+      : new Date(lastItem.reportDate));
+    const nextCursor = hasMore && lastItem && lastDate && !isNaN(lastDate.getTime())
+      ? Buffer.from(`${lastDate.toISOString()}|${lastItem.id}`).toString('base64')
       : null;
 
     res.setHeader('X-Total-Count', items.length);
@@ -465,7 +483,7 @@ router.get('/', async (req, res) => {
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to fetch DPRs' });
   }
-});
+}));
 
 // ─── GET /api/dpr/:id ────────────────────────────────────────────────────────
 router.get('/:id', async (req, res) => {

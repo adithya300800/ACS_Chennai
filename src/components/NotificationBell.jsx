@@ -191,7 +191,25 @@ export default function NotificationBell() {
     reconnectAttemptRef.current = 0;
     setConnectionLost(false);
     connectSSE();
+    // If the api interceptor decides the session is dead (TOKEN_INVALID /
+    // refresh failed), it fires auth:logout. We don't want the bell to
+    // keep reconnecting forever in that case — close the SSE and surface
+    // a "session ended" state. The Retry button is a manual opt-in.
+    const onLogout = () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      setConnected(false);
+      setConnectionLost(true);
+    };
+    window.addEventListener('auth:logout', onLogout);
     return () => {
+      window.removeEventListener('auth:logout', onLogout);
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;

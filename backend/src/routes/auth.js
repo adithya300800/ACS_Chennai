@@ -67,8 +67,11 @@ function sanitizeEmployee(employee) {
   return safe;
 }
 
-// GET /api/auth/zoho - Initiate Zoho OAuth
-router.get('/zoho', (req, res) => {
+// POST /api/auth/zoho - Initiate Zoho OAuth. Frontend's PortalLogin.jsx
+// calls POST (it has no body to send, but POST avoids the auth URL leaking
+// through browser history and any CDN cache). Returns { authUrl } for the
+// popup window to navigate to.
+router.post('/zoho', (req, res) => {
   if (!ZOHO_CLIENT_ID || !ZOHO_REDIRECT_URI) {
     return res.status(503).json({ error: 'Zoho OAuth not configured' });
   }
