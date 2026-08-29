@@ -376,7 +376,16 @@ router.post('/', async (req, res) => {
       }
       return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     }
-    res.status(500).json({ error: 'Failed to create DPR', requestId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` });
+    // Round-8 DEBUG: include the error message in the response so we can see
+    // what's failing. DELETE after F5/F6 root cause identified.
+    res.status(500).json({
+      error: 'Failed to create DPR',
+      debugMessage: err.message?.split('\n')?.slice(0, 3),
+      debugCode: err.code,
+      debugMeta: err.meta,
+      debugName: err.name,
+      requestId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    });
   }
 });
 
