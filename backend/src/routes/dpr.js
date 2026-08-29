@@ -380,7 +380,7 @@ router.post('/', async (req, res) => {
     // what's failing. DELETE after F5/F6 root cause identified.
     res.status(500).json({
       error: 'Failed to create DPR',
-      debugMessage: err.message?.split('\n')?.slice(0, 3),
+      debugMessage: err.message?.split('\n'),
       debugCode: err.code,
       debugMeta: err.meta,
       debugName: err.name,
