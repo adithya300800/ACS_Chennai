@@ -47,20 +47,30 @@ jobs:
 
       - name: Set App Settings
         run: |
-          # az webapp config appsettings set REPLACES all settings when --settings is used.
-          # To preserve existing settings, we fetch them first and include all current settings
-          # in the update, then update only the ones we need to change.
+          # Merge strategy:
+          # 1. Fetch all CURRENT app settings (preserves any non-listed keys like RESEND_API_KEY, VITE_API_URL, etc.)
+          # 2. Override with values from GitHub Secrets / this workflow
+          # 3. Apply the merged list with az webapp config appsettings set
           echo "Fetching current app settings..."
-          CURRENT_SETTINGS=$(az webapp config appsettings list \
+          # Build PRESERVED_SETTINGS as KEY=VALUE pairs from existing settings
+          PRESERVED_SETTINGS=()
+          while IFS=$'\t' read -r key value; do
+            [ -z "$key" ] && continue
+            # Skip keys that we will override below
+            case "$key" in
+              DATABASE_URL|JWT_SECRET|JWT_REFRESH_SECRET|AZURE_STORAGE_ACCOUNT_NAME|AZURE_STORAGE_ACCOUNT_KEY|NODE_ENV|FRONTEND_URL|WEBSITE_RUN_FROM_PACKAGE|ALWAYS_ON|SCM_DO_BUILD_DURING_DEPLOYMENT|WEBSITE_ENABLE_SERVICE_SIDE_BUILDS|ZOHO_CLIENT_ID|ZOHO_CLIENT_SECRET|ZOHO_REDIRECT_URI|DEPLOY_SHA|DEPLOY_TIME) continue ;;
+            esac
+            PRESERVED_SETTINGS+=("$key=$value")
+          done < <(az webapp config appsettings list \
             --resource-group acs-portal-rg \
             --name acs-portal-api \
-            --query '[].{name:name,value:value}' -o tsv 2>/dev/null || echo "")
+            --query '[].{name:name,value:value}' -o tsv 2>/dev/null)
 
-          # Build the complete settings list preserving all existing + adding new/changed ones
           az webapp config appsettings set \
             --resource-group acs-portal-rg \
             --name acs-portal-api \
             --settings \
+              "${PRESERVED_SETTINGS[@]}" \
               DATABASE_URL="${{ secrets.DATABASE_URL }}" \
               JWT_SECRET="${{ secrets.JWT_SECRET }}" \
               JWT_REFRESH_SECRET="${{ secrets.JWT_REFRESH_SECRET }}" \
