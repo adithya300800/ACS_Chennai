@@ -1,9 +1,18 @@
 /**
- * PDF Generator for DPR module
- * Requires: puppeteer, handlebars
+ * PDF Generator for DPR module.
+ *
+ * NOTE: Puppeteer is NOT used in production because Azure App Service Linux does
+ * not ship the system libraries Puppeteer's bundled Chromium requires. PDF
+ * generation is currently a placeholder; the DPR `/pdf` route returns a
+ * `pdfUrl` pointing to a placeholder endpoint.
+ *
+ * To enable real PDF generation, choose ONE of:
+ *  1. Migrate to `pdfkit` or `@react-pdf/renderer` (pure-JS, no Chromium)
+ *  2. Run PDF generation in a separate Azure Function / Container App with a
+ *     Puppeteer-compatible base image
+ *  3. Use Azure's "Convert HTML to PDF" service
  */
 
-const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
 const Handlebars = require('handlebars');
@@ -14,6 +23,9 @@ let templateCache = null;
 
 async function getTemplate() {
   if (!templateCache) {
+    if (!fs.existsSync(TEMPLATE_PATH)) {
+      throw new Error(`DPR PDF template not found at ${TEMPLATE_PATH}`);
+    }
     const templateContent = fs.readFileSync(TEMPLATE_PATH, 'utf-8');
     templateCache = Handlebars.compile(templateContent);
   }
@@ -21,39 +33,32 @@ async function getTemplate() {
 }
 
 /**
- * Generate PDF buffer for a DPR
+ * Render a DPR to its HTML representation using the Handlebars template.
+ * Returns a Buffer of HTML bytes — not a PDF — until a PDF backend is wired up.
+ *
  * @param {object} dpr - DPR record with photos, submittedBy, etc.
  * @param {object} options
- * @returns {Promise<Buffer>} PDF buffer
+ * @returns {Promise<{ html: Buffer, format: 'html' }>}
  */
-async function generateDPRPdf(dpr, options = {}) {
+async function generateDPRHtml(dpr, options = {}) {
   const template = await getTemplate();
-
   const html = template({
     dpr,
     generatedAt: new Date().toISOString(),
     ...options,
   });
+  return { html: Buffer.from(html, 'utf-8'), format: 'html' };
+}
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
-
-  try {
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-
-    const buffer = await page.pdf({
-      format: 'A4',
-      printBackground: true,
-      margin: { top: '20mm', bottom: '20mm', left: '15mm', right: '15mm' },
-    });
-
-    return Buffer.from(buffer);
-  } finally {
-    await browser.close();
-  }
+/**
+ * Generate PDF buffer for a DPR. Currently throws — wire up a backend (see file
+ * header) before calling.
+ */
+async function generateDPRPdf(_dpr, _options = {}) {
+  throw new Error(
+    'PDF generation is disabled. Wire up pdfkit / @react-pdf/renderer or an external ' +
+    'service before calling generateDPRPdf.'
+  );
 }
 
 /**
@@ -93,4 +98,4 @@ Handlebars.registerHelper('statusColor', function (status) {
   return colors[status] || '#6b7280';
 });
 
-module.exports = { generateDPRPdf };
+module.exports = { generateDPRPdf, generateDPRHtml };

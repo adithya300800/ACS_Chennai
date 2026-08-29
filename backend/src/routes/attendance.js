@@ -131,9 +131,28 @@ router.post('/check-in', async (req, res) => {
     return res.status(400).json({ error: 'latitude and longitude are required' });
   }
 
-  // Reject 0,0 coordinates (invalid location)
-  if (latitude === 0 && longitude === 0) {
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return res.status(400).json({ error: 'Coordinates must be numeric' });
+  }
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return res.status(400).json({ error: 'Coordinates out of range' });
+  }
+  // Reject 0,0 coordinates (null island — invalid location)
+  if (lat === 0 && lng === 0) {
     return res.status(400).json({ error: 'Invalid location coordinates' });
+  }
+
+  // Cap client-supplied timestamp drift at ±15 minutes to prevent back/future-dating
+  if (localDateTime) {
+    const ts = new Date(localDateTime);
+    if (!Number.isNaN(ts.getTime())) {
+      const driftMs = Math.abs(ts.getTime() - Date.now());
+      if (driftMs > 15 * 60 * 1000) {
+        return res.status(400).json({ error: 'Check-in timestamp drift too large (max 15 minutes)' });
+      }
+    }
   }
 
   // Use employee's local datetime (sent from frontend) to derive:
@@ -220,8 +239,15 @@ router.put('/check-out/:sessionId', async (req, res) => {
     return res.status(400).json({ error: 'latitude and longitude are required' });
   }
 
-  // Reject 0,0 coordinates (invalid location)
-  if (latitude === 0 && longitude === 0) {
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return res.status(400).json({ error: 'Coordinates must be numeric' });
+  }
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return res.status(400).json({ error: 'Coordinates out of range' });
+  }
+  if (lat === 0 && lng === 0) {
     return res.status(400).json({ error: 'Invalid location coordinates' });
   }
 

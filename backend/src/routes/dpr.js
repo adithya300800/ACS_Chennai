@@ -83,7 +83,6 @@ function getPrisma(req) {
 
 // ─── POST /api/dpr/sas-url ────────────────────────────────────────────────────
 router.post('/sas-url', async (req, res) => {
-  const prisma = getPrisma(req);
   const { filename, contentType, container } = req.body;
 
   if (!filename || !contentType || !container) {
@@ -101,21 +100,31 @@ router.post('/sas-url', async (req, res) => {
   }
 
   const ulid = generateULID();
-  const ext = filename.split('.').pop() || 'jpg';
-  const blobName = `${ulid}.${ext}`;
 
-  // Generate real SAS URL
-  const { sasUrl, ulid: generatedUlid, blobPath, expiresAt } = await generateUploadSASUrl(container, blobName, contentType);
+  // Generate real SAS URL. Blob is scoped under `${employeeId}/${ulid}.${ext}`
+  // so a leaked SAS cannot cross tenants. Extension is derived from validated
+  // contentType — NEVER from the user-supplied filename.
+  const { sasUrl, blobPath, expiresAt } = await generateUploadSASUrl(
+    container,
+    req.employeeId,
+    ulid,
+    contentType
+  );
 
-  // Store pending upload
-  pendingUploads.set(generatedUlid, {
+  // Track pending upload for owner-scoped lookup on confirm
+  pendingUploads.set(`${req.employeeId}:${ulid}`, {
     employeeId: req.employeeId,
     container,
     filename,
     contentType,
   });
 
-  res.json({ sasUrl, ulid: generatedUlid, blobPath, expiresAt });
+  // Auto-expire pending uploads after 20 min (SAS is 15 min) to bound memory
+  setTimeout(() => {
+    pendingUploads.delete(`${req.employeeId}:${ulid}`);
+  }, 20 * 60 * 1000).unref();
+
+  res.json({ sasUrl, ulid, blobPath, expiresAt });
 });
 
 // ─── POST /api/dpr/confirm-upload ──────────────────────────────────────────
@@ -126,16 +135,44 @@ router.post('/confirm-upload', async (req, res) => {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'All fields required' });
   }
 
-  const pending = pendingUploads.get(ulid);
+  const MAX_PHOTO_SIZE = 10 * 1024 * 1024; // 10 MB
+  if (sizeBytes <= 0 || sizeBytes > MAX_PHOTO_SIZE) {
+    return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `Photo must be 1 byte – ${MAX_PHOTO_SIZE} bytes` });
+  }
+
+  const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+  if (!allowedTypes.includes(contentType)) {
+    return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: 'Only image/jpeg, image/png, image/webp allowed' });
+  }
+
+  const pendingKey = `${req.employeeId}:${ulid}`;
+  const pending = pendingUploads.get(pendingKey);
   if (!pending || pending.employeeId !== req.employeeId) {
     return res.status(404).json({ error: 'BLOB_NOT_FOUND', message: 'Upload not found or unauthorized' });
   }
 
-  // In production: call GetBlobProperties to verify blob exists with matching content-type
-  // const props = await containerClient.getBlobClient(blobName).getProperties();
-  // if (props.contentType !== contentType) throw new Error('Content type mismatch');
+  // Server-side blob verification — derive the same scoped blob name and
+  // confirm the bytes actually landed with the claimed size + content-type.
+  try {
+    const ext = require('../lib/blobStorage').CONTENT_TYPE_EXT[contentType];
+    const blobName = `${req.employeeId}/${ulid}.${ext}`;
+    const props = await verifyBlobExists(container, blobName);
+    if (!props.exists) {
+      return res.status(404).json({ error: 'BLOB_NOT_UPLOADED', message: 'Photo bytes not found in storage' });
+    }
+    if (props.contentType && props.contentType !== contentType) {
+      return res.status(400).json({ error: 'CONTENT_TYPE_MISMATCH', message: 'Uploaded content-type does not match request' });
+    }
+    if (Math.abs((props.contentLength || 0) - sizeBytes) > 1024) {
+      // 1 KB tolerance for chunked-upload finalization
+      return res.status(400).json({ error: 'SIZE_MISMATCH', message: 'Uploaded size does not match declared size' });
+    }
+  } catch (err) {
+    console.error('Blob verification failed:', err);
+    return res.status(502).json({ error: 'BLOB_VERIFICATION_FAILED', message: 'Could not verify upload' });
+  }
 
-  pendingUploads.delete(ulid);
+  pendingUploads.delete(pendingKey);
 
   res.json({ verified: true });
 });

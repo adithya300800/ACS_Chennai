@@ -1,0 +1,276 @@
+openapi: 3.0.3
+info:
+  title: ACS Chennai Portal API
+  description: Backend API for ACS Chennai employee portal (auth, attendance)
+  version: 1.0.0
+  contact:
+    name: ACS Chennai
+    url: https://acschennai.com
+servers:
+  - url: https://acsportal-backend.azurewebsites.net
+    description: Azure production
+  - url: http://localhost:8080
+    description: Local development
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        timestamp:
+          type: string
+          format: date-time
+    AuthUrlResponse:
+      type: object
+      properties:
+        authUrl:
+          type: string
+          format: uri
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+    AuthResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        employee:
+          type: object
+          properties:
+            id:
+              type: string
+            email:
+              type: string
+            name:
+              type: string
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+    AttendanceRecord:
+      type: object
+      properties:
+        id:
+          type: string
+        employeeId:
+          type: string
+        date:
+          type: string
+          format: date
+        checkIn:
+          type: string
+          format: date-time
+          nullable: true
+        checkOut:
+          type: string
+          format: date-time
+          nullable: true
+        sessions:
+          type: array
+          items:
+            type: object
+    CheckInRequest:
+      type: object
+      properties:
+        localDate:
+          type: string
+          format: date
+          description: YYYY-MM-DD
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/auth/zoho:
+    get:
+      summary: Initiate Zoho OAuth flow
+      tags: [Auth]
+      security: []
+      responses:
+        '200':
+          description: OAuth URL generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthUrlResponse'
+        '503':
+          description: Zoho OAuth not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/auth/zoho/callback:
+    get:
+      summary: Zoho OAuth callback
+      tags: [Auth]
+      security: []
+      parameters:
+        - in: query
+          name: code
+          schema:
+            type: string
+        - in: query
+          name: state
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OAuth callback handled (HTML)
+        '400':
+          description: Invalid OAuth state
+
+  /api/auth/login:
+    post:
+      summary: Login with email and password
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          description: Invalid credentials
+
+  /api/auth/refresh:
+    post:
+      summary: Refresh access token
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+
+  /api/auth/logout:
+    post:
+      summary: Logout and invalidate refresh token
+      tags: [Auth]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Logged out
+
+  /api/attendance:
+    get:
+      summary: Get attendance for a month
+      tags: [Attendance]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: month
+          required: true
+          schema:
+            type: string
+            example: "2026-08"
+      responses:
+        '200':
+          description: Attendance records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AttendanceRecord'
+        '400':
+          description: Missing/invalid month
+
+  /api/attendance/today:
+    get:
+      summary: Get today's attendance
+      tags: [Attendance]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: localDate
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Today's record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttendanceRecord'
+
+  /api/attendance/checkin:
+    post:
+      summary: Check in for the day
+      tags: [Attendance]
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckInRequest'
+      responses:
+        '200':
+          description: Checked in
+
+  /api/attendance/checkout:
+    post:
+      summary: Check out
+      tags: [Attendance]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Checked out

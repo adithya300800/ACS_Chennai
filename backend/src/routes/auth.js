@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
 
@@ -11,6 +12,9 @@ const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
 if (process.env.NODE_ENV === 'production') {
   if (!JWT_SECRET) throw new Error('JWT_SECRET environment variable must be set');
   if (!JWT_REFRESH_SECRET) throw new Error('JWT_REFRESH_SECRET environment variable must be set');
+  if (JWT_SECRET.length < 32) throw new Error('JWT_SECRET must be >= 32 chars');
+  if (JWT_REFRESH_SECRET.length < 32) throw new Error('JWT_REFRESH_SECRET must be >= 32 chars');
+  if (JWT_SECRET === JWT_REFRESH_SECRET) throw new Error('JWT_SECRET and JWT_REFRESH_SECRET must differ');
 }
 
 // Zoho OAuth config
@@ -19,11 +23,45 @@ const ZOHO_CLIENT_SECRET = process.env.ZOHO_CLIENT_SECRET;
 const ZOHO_REDIRECT_URI = process.env.ZOHO_REDIRECT_URI;
 const ZOHO_DOMAIN = process.env.ZOHO_DOMAIN || 'https://accounts.zoho.com';
 
-// In-memory store for OAuth state (for CSRF protection)
-// In production, use Redis or database
+// OAuth state store: in-memory with TTL. NOTE: lost on restart — see P3 finding.
+// For multi-instance deployments move to Redis.
 const oauthStateStore = new Map();
+const STATE_TTL_MS = 10 * 60 * 1000;
+const STATE_TTL_SECONDS = STATE_TTL_MS / 1000;
 
-const STATE_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
+// Email-domain allowlist for self-provisioning (Zoho-verified emails only).
+// Adjust as needed; defaults to the customer domain + common test domains.
+const ALLOWED_EMAIL_DOMAINS = (process.env.ALLOWED_EMAIL_DOMAINS
+  ? process.env.ALLOWED_EMAIL_DOMAINS.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+  : ['acschennai.com']
+);
+
+// Sign access (8h) and refresh (7d) tokens. Returns { accessToken, refreshToken }.
+function signTokens(employee) {
+  const accessToken = jwt.sign(
+    { employeeId: employee.id, email: employee.email, isAdmin: !!employee.isAdmin },
+    JWT_SECRET,
+    { algorithm: 'HS256', expiresIn: '8h' }
+  );
+  const refreshToken = jwt.sign(
+    { employeeId: employee.id },
+    JWT_REFRESH_SECRET,
+    { algorithm: 'HS256', expiresIn: '7d' }
+  );
+  return { accessToken, refreshToken };
+}
+
+// Strip sensitive fields before returning employee to client.
+// IMPORTANT: also strip zohoAccessToken / zohoRefreshToken (AppSec #11).
+function sanitizeEmployee(employee) {
+  const {
+    password,
+    zohoAccessToken,
+    zohoRefreshToken,
+    ...safe
+  } = employee;
+  return safe;
+}
 
 // GET /api/auth/zoho - Initiate Zoho OAuth
 router.get('/zoho', (req, res) => {
@@ -31,20 +69,19 @@ router.get('/zoho', (req, res) => {
     return res.status(503).json({ error: 'Zoho OAuth not configured' });
   }
 
-  // Clean up expired states
+  // Prune expired state entries (cheap; happens once per /zoho start).
   const now = Date.now();
   for (const [key, value] of oauthStateStore.entries()) {
-    if (now - value.timestamp > STATE_EXPIRY_MS) {
+    if (now - value.timestamp > STATE_TTL_MS) {
       oauthStateStore.delete(key);
     }
   }
 
-  const scopes = 'openid profile email';
-  const state = Math.random().toString(36).substring(7) + Date.now().toString(36);
-
-  // Store state with timestamp
+  // Cryptographically random state (AppSec #6)
+  const state = crypto.randomBytes(32).toString('base64url');
   oauthStateStore.set(state, { timestamp: now });
 
+  const scopes = 'openid profile email';
   const authUrl = `${ZOHO_DOMAIN}/oauth/v2/auth?` +
     `response_type=code&` +
     `client_id=${ZOHO_CLIENT_ID}&` +
@@ -56,34 +93,129 @@ router.get('/zoho', (req, res) => {
   res.json({ authUrl });
 });
 
-// GET /api/auth/zoho/callback - Zoho redirects here with code
+// GET /api/auth/zoho/callback - Zoho redirects here with code (popup-window flow)
 router.get('/zoho/callback', async (req, res) => {
   const { code, state } = req.query;
 
-  if (!code) {
-    // Send HTML that reports error via postMessage and closes
-    return res.send(`<!DOCTYPE html><html><body><script>
-      if (window.opener) {
-        window.opener.postMessage({ type: 'zoho-oauth-error', error: 'no_code' }, window.location.origin);
-      }
-      window.close();
-    </script><p>No code received. Please close this window and try again.</p></body></html>`);
-  }
+  const errorHtml = (errorCode) => `<!DOCTYPE html><html><body><script>
+    if (window.opener) {
+      window.opener.postMessage({ type: 'zoho-oauth-error', error: '${errorCode}' }, window.location.origin);
+    }
+    window.close();
+  </script><p>Login failed (${errorCode}). Please close this window and try again.</p></body></html>`;
+
+  if (!code) return res.send(errorHtml('no_code'));
 
   // Validate state for CSRF protection
   if (!state || !oauthStateStore.has(state)) {
-    return res.send(`<!DOCTYPE html><html><body><script>
+    return res.send(errorHtml('invalid_state'));
+  }
+  oauthStateStore.delete(state); // one-time use
+
+  try {
+    const tokenRes = await fetch(`${ZOHO_DOMAIN}/oauth/v2/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: ZOHO_CLIENT_ID,
+        client_secret: ZOHO_CLIENT_SECRET,
+        redirect_uri: ZOHO_REDIRECT_URI,
+        code,
+      }),
+    });
+
+    if (!tokenRes.ok) {
+      console.error('[zoho] token exchange failed', tokenRes.status);
+      return res.send(errorHtml('token_exchange_failed'));
+    }
+
+    const tokens = await tokenRes.json();
+    const { access_token, refresh_token } = tokens;
+
+    // Get email from id_token (openid scope guarantees this)
+    let email = null;
+    if (tokens.id_token) {
+      try {
+        const idTokenParts = tokens.id_token.split('.');
+        const idPayload = JSON.parse(Buffer.from(idTokenParts[1], 'base64url').toString());
+        email = idPayload.email;
+      } catch (e) { /* fall through */ }
+    }
+
+    if (!email) return res.send(errorHtml('no_email'));
+    email = email.toLowerCase();
+
+    // Email-domain allowlist (AppSec #20)
+    const domain = email.split('@')[1];
+    if (!domain || !ALLOWED_EMAIL_DOMAINS.includes(domain)) {
+      console.warn('[zoho] signup blocked — domain not allowlisted', { email, domain });
+      return res.send(errorHtml('domain_not_allowed'));
+    }
+
+    const prisma = req.app.get('prisma');
+
+    // Find or create employee (Zoho-verified emails only)
+    let employee = await prisma.employee.findUnique({ where: { email } });
+    if (!employee) {
+      const nameParts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
+      const name = nameParts.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+      employee = await prisma.employee.create({
+        data: {
+          email,
+          name,
+          zohoAccessToken: access_token,
+          zohoRefreshToken: refresh_token,
+        },
+      });
+    } else {
+      employee = await prisma.employee.update({
+        where: { email },
+        data: {
+          zohoAccessToken: access_token,
+          zohoRefreshToken: refresh_token,
+        },
+      });
+    }
+
+    const { accessToken, refreshToken } = signTokens(employee);
+    const employeeData = sanitizeEmployee(employee);
+
+    const responseData = JSON.stringify({
+      type: 'zoho-oauth-success',
+      accessToken,
+      refreshToken,
+      employee: employeeData,
+    });
+
+    res.send(`<!DOCTYPE html><html><body><script>
       if (window.opener) {
-        window.opener.postMessage({ type: 'zoho-oauth-error', error: 'invalid_state' }, window.location.origin);
+        window.opener.postMessage(${responseData}, window.location.origin);
       }
       window.close();
-    </script><p>Invalid OAuth state. Please try again.</p></body></html>`);
+    </script><p>Login successful! Please close this window.</p></body></html>`);
+  } catch (err) {
+    console.error('[zoho] callback error', err);
+    res.send(errorHtml('server_error'));
+  }
+});
+
+// POST /api/auth/zoho/callback - Same flow but for SPAs that handle the OAuth
+// code themselves (no popup). REQUIRES state for CSRF protection (AppSec #5).
+router.post('/zoho/callback', async (req, res) => {
+  const { code, state } = req.body;
+
+  if (!code) return res.status(400).json({ error: 'Authorization code required' });
+
+  if (!state || !oauthStateStore.has(state)) {
+    return res.status(400).json({ error: 'Invalid or missing OAuth state', code: 'INVALID_STATE' });
+  }
+  oauthStateStore.delete(state); // one-time use
+
+  if (!ZOHO_CLIENT_ID || !ZOHO_CLIENT_SECRET || !ZOHO_REDIRECT_URI) {
+    return res.status(503).json({ error: 'Zoho OAuth not configured' });
   }
 
-  // Remove used state
-  oauthStateStore.delete(state);
-
-  // Exchange code for tokens
   try {
     const tokenRes = await fetch(`${ZOHO_DOMAIN}/oauth/v2/token`, {
       method: 'POST',
@@ -99,180 +231,48 @@ router.get('/zoho/callback', async (req, res) => {
 
     if (!tokenRes.ok) {
       const errText = await tokenRes.text();
-      return res.send(`<!DOCTYPE html><html><body><script>
-        if (window.opener) {
-          window.opener.postMessage({ type: 'zoho-oauth-error', error: 'token exchange failed' }, window.location.origin);
-        }
-        window.close();
-      </script><p>Authentication failed. Please close and try again.</p></body></html>`);
-    }
-
-    const tokens = await tokenRes.json();
-    const { access_token, refresh_token } = tokens;
-
-    // Get user info
-    let email = null;
-    if (tokens.id_token) {
-      try {
-        const idTokenParts = tokens.id_token.split('.');
-        const idPayload = JSON.parse(Buffer.from(idTokenParts[1], 'base64').toString());
-        email = idPayload.email;
-      } catch (e) {}
-    }
-
-    if (!email) {
-      return res.send(`<!DOCTYPE html><html><body><script>
-        if (window.opener) {
-          window.opener.postMessage({ type: 'zoho-oauth-error', error: 'no email' }, window.location.origin);
-        }
-        window.close();
-      </script><p>Could not get email from Zoho. Please close and try again.</p></body></html>`);
-    }
-
-    const prisma = req.app.get('prisma');
-
-    // Find or create employee
-    let employee = await prisma.employee.findUnique({ where: { email } });
-
-    if (!employee) {
-      const nameParts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
-      const name = nameParts.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
-
-      employee = await prisma.employee.create({
-        data: {
-          email,
-          name,
-          zohoAccessToken: access_token,
-          zohoRefreshToken: refresh_token,
-        },
-      });
-    } else {
-      employee = await prisma.employee.update({
-        where: { email },
-        data: {
-          zohoAccessToken: access_token,
-          zohoRefreshToken: refresh_token,
-        },
-      });
-    }
-
-    // Generate JWT
-    const jwtToken = jwt.sign(
-      { employeeId: employee.id, email: employee.email },
-      JWT_SECRET,
-      { expiresIn: '8h' }
-    );
-
-    const refreshToken = jwt.sign(
-      { employeeId: employee.id },
-      JWT_REFRESH_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    const { password: _, ...employeeData } = employee;
-
-    // Send success via postMessage and close
-    const responseData = JSON.stringify({
-      type: 'zoho-oauth-success',
-      accessToken: jwtToken,
-      refreshToken,
-      employee: employeeData,
-    });
-
-    res.send(`<!DOCTYPE html><html><body><script>
-      if (window.opener) {
-        window.opener.postMessage(${responseData}, window.location.origin);
-      }
-      window.close();
-    </script><p>Login successful! Please close this window.</p></body></html>`);
-
-  } catch (err) {
-    console.error('Zoho callback error:', err);
-    res.send(`<!DOCTYPE html><html><body><script>
-      if (window.opener) {
-        window.opener.postMessage({ type: 'zoho-oauth-error', error: 'server error' }, window.location.origin);
-      }
-      window.close();
-    </script><p>Server error. Please close and try again.</p></body></html>`);
-  }
-});
-
-// POST /api/auth/zoho/callback - Exchange code for tokens and login
-router.post('/zoho/callback', async (req, res) => {
-  const { code } = req.body;
-
-  if (!code) {
-    return res.status(400).json({ error: 'Authorization code required' });
-  }
-
-  if (!ZOHO_CLIENT_ID || !ZOHO_CLIENT_SECRET || !ZOHO_REDIRECT_URI) {
-    return res.status(503).json({ error: 'Zoho OAuth not configured' });
-  }
-
-  try {
-    // Exchange code for tokens
-    const tokenRes = await fetch(`${ZOHO_DOMAIN}/oauth/v2/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        client_id: ZOHO_CLIENT_ID,
-        client_secret: ZOHO_CLIENT_SECRET,
-        redirect_uri: ZOHO_REDIRECT_URI,
-        code,
-      }),
-    });
-
-    if (!tokenRes.ok) {
-      const err = await tokenRes.text();
-      console.error('Zoho token error:', err);
+      console.error('[zoho] POST token exchange failed', tokenRes.status, errText.slice(0, 200));
       return res.status(401).json({ error: 'Failed to authenticate with Zoho' });
     }
 
     const tokens = await tokenRes.json();
     const { access_token, refresh_token } = tokens;
 
-    // Get user info from Zoho - try multiple endpoints
+    // Email lookup — try the corrected Zoho Accounts userinfo endpoint first.
     let email = null;
-
-    // Try Zoho Connect userinfo endpoint
     try {
-      const connectRes = await fetch(`https://connect.zoho.comapi/v1/userinfo`, {
+      const userRes = await fetch(`${ZOHO_DOMAIN}/oauth/user/info`, {
         headers: { Authorization: `Zoho-oauthtoken ${access_token}` },
       });
-      if (connectRes.ok) {
-        const data = await connectRes.json();
-        email = data.email;
+      if (userRes.ok) {
+        const data = await userRes.json();
+        email = (data.Email || data.email || '').toLowerCase();
       }
-    } catch (e) {}
+    } catch (e) { /* fall through */ }
 
-    // If not found, try parsing from ID token (if using openid scope)
     if (!email && tokens.id_token) {
       try {
         const idTokenParts = tokens.id_token.split('.');
-        const idPayload = JSON.parse(atob(idTokenParts[1]));
-        email = idPayload.email;
-      } catch (e) {}
+        const idPayload = JSON.parse(Buffer.from(idTokenParts[1], 'base64url').toString());
+        email = (idPayload.email || '').toLowerCase();
+      } catch (e) { /* fall through */ }
     }
 
-    // If still no email, return error
     if (!email) {
       return res.status(400).json({ error: 'Could not determine email from Zoho. Please ensure your Zoho account has an email address.' });
     }
 
-    if (!email) {
-      return res.status(400).json({ error: 'Could not get email from Zoho' });
+    const domain = email.split('@')[1];
+    if (!domain || !ALLOWED_EMAIL_DOMAINS.includes(domain)) {
+      return res.status(403).json({ error: 'Email domain not permitted' });
     }
 
     const prisma = req.app.get('prisma');
 
-    // Find or create employee
     let employee = await prisma.employee.findUnique({ where: { email } });
-
     if (!employee) {
       const nameParts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
       const name = nameParts.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
-
       employee = await prisma.employee.create({
         data: {
           email,
@@ -282,7 +282,6 @@ router.post('/zoho/callback', async (req, res) => {
         },
       });
     } else {
-      // Update tokens
       employee = await prisma.employee.update({
         where: { email },
         data: {
@@ -292,143 +291,89 @@ router.post('/zoho/callback', async (req, res) => {
       });
     }
 
-    // Generate JWT
-    const jwtToken = jwt.sign(
-      { employeeId: employee.id, email: employee.email },
-      JWT_SECRET,
-      { expiresIn: '8h' }
-    );
-
-    const refreshToken = jwt.sign(
-      { employeeId: employee.id },
-      JWT_REFRESH_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    const { password: _, ...employeeData } = employee;
+    const { accessToken, refreshToken } = signTokens(employee);
 
     res.json({
-      accessToken: jwtToken,
+      accessToken,
       refreshToken,
-      employee: employeeData,
+      employee: sanitizeEmployee(employee),
     });
   } catch (err) {
-    console.error('Zoho OAuth error:', err);
+    console.error('[zoho] POST callback error', err);
     res.status(500).json({ error: 'Zoho authentication failed' });
   }
 });
 
 // POST /api/auth/login
+// Password-based login ONLY for existing employees. NO auto-provisioning
+// (AppSec #1). Auto-provisioning is reserved for the Zoho OAuth flow above,
+// where the email is verified by Zoho.
 router.post('/login', async (req, res) => {
   const prisma = req.app.get('prisma');
   const { email, password } = req.body;
 
-  console.log('LOGIN_ATTEMPT', { email, hasPassword: !!password });
-
-  if (!email) {
-    return res.status(400).json({ error: 'Email is required' });
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
   }
+
+  const normalizedEmail = String(email).toLowerCase().trim();
 
   let employee;
   try {
-    employee = await prisma.employee.findUnique({ where: { email } });
-    console.log('EMPLOYEE_FOUND', { email, found: !!employee, hasStoredPassword: !!employee?.password });
+    employee = await prisma.employee.findUnique({ where: { email: normalizedEmail } });
   } catch (err) {
-    console.error('DB_FIND_ERROR', err);
-    return res.status(500).json({ error: 'Database error: ' + err.message });
+    console.error('[login] DB error', err.message);
+    return res.status(500).json({ error: 'Database error' });
   }
 
-  // Require password for login
-  if (!password) {
-    return res.status(400).json({ error: 'Password is required' });
+  // Use the same generic message whether the user doesn't exist OR the password
+  // is wrong — prevents account enumeration via the login endpoint.
+  const GENERIC_INVALID = { error: 'Invalid credentials' };
+
+  if (!employee || !employee.password) {
+    // Still hash a dummy password to balance timing roughly.
+    await bcrypt.compare(password, '$2a$10$CwTycUXWue0Thq9StjUM0uJ8hZ4Pf0dXJ1q3hWXz9eP1qSfvCv4Rq').catch(() => {});
+    return res.status(401).json(GENERIC_INVALID);
   }
 
-  // Auto-create employee on first login (for Zoho SSO flow)
-  if (!employee) {
-    // Extract name from email prefix (e.g., "john.doe@acschennai.com" -> "John Doe")
-    const nameParts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
-    const name = nameParts.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+  const valid = await bcrypt.compare(password, employee.password);
+  if (!valid) return res.status(401).json(GENERIC_INVALID);
 
-    try {
-      employee = await prisma.employee.create({
-        data: {
-          email,
-          name,
-          password: null, // No password for SSO users
-        },
-      });
-      console.log('EMPLOYEE_CREATED', { email });
-    } catch (err) {
-      console.error('DB_CREATE_ERROR', err);
-      return res.status(500).json({ error: 'Database create error: ' + err.message });
-    }
-  } else if (password) {
-    // Login with password (for admin users with password)
-    if (!employee.password) {
-      return res.status(401).json({ error: 'Please use Zoho SSO to login' });
-    }
-    const valid = await bcrypt.compare(password, employee.password);
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-  } else if (!employee.password) {
-    // Employee exists but has no password (SSO user) and no password provided
-    return res.status(401).json({ error: 'Please use Zoho SSO to login' });
-  }
-
-  const accessToken = jwt.sign(
-    { employeeId: employee.id, email: employee.email },
-    JWT_SECRET,
-    { expiresIn: '8h' }
-  );
-
-  const refreshToken = jwt.sign(
-    { employeeId: employee.id },
-    JWT_REFRESH_SECRET,
-    { expiresIn: '7d' }
-  );
-
-  // Don't send password back
-  const { password: _, ...employeeData } = employee;
-
-  console.log('LOGIN_SUCCESS', { email, employeeId: employee.id });
-
+  const { accessToken, refreshToken } = signTokens(employee);
   res.json({
     accessToken,
     refreshToken,
-    employee: employeeData,
+    employee: sanitizeEmployee(employee),
   });
 });
 
 // POST /api/auth/refresh
+// Pin HS256. Verify the employee still exists.
 router.post('/refresh', async (req, res) => {
   const { refreshToken } = req.body;
-
-  if (!refreshToken) {
-    return res.status(400).json({ error: 'Refresh token required' });
-  }
+  if (!refreshToken) return res.status(400).json({ error: 'Refresh token required' });
 
   try {
-    const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
+    const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET, { algorithms: ['HS256'] });
     const prisma = req.app.get('prisma');
 
     const employee = await prisma.employee.findUnique({
       where: { id: decoded.employeeId },
+      select: { id: true, email: true, isAdmin: true },
     });
-
-    if (!employee) {
-      return res.status(401).json({ error: 'Employee not found' });
-    }
+    if (!employee) return res.status(401).json({ error: 'Employee not found' });
 
     const accessToken = jwt.sign(
-      { employeeId: employee.id, email: employee.email },
+      { employeeId: employee.id, email: employee.email, isAdmin: !!employee.isAdmin },
       JWT_SECRET,
-      { expiresIn: '8h' }
+      { algorithm: 'HS256', expiresIn: '8h' }
     );
-
     res.json({ accessToken });
   } catch (err) {
-    res.status(401).json({ error: 'Invalid refresh token' });
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Refresh token expired', code: 'REFRESH_EXPIRED' });
+    }
+    res.status(401).json({ error: 'Invalid refresh token', code: 'REFRESH_INVALID' });
   }
 });
 
@@ -445,17 +390,15 @@ router.get('/me', requireAuth, async (req, res) => {
         name: true,
         designation: true,
         department: true,
+        isAdmin: true,
         createdAt: true,
       },
     });
 
-    if (!employee) {
-      return res.status(404).json({ error: 'Employee not found' });
-    }
-
+    if (!employee) return res.status(404).json({ error: 'Employee not found' });
     res.json(employee);
   } catch (err) {
-    console.error('Me error:', err);
+    console.error('[me] error', err);
     res.status(500).json({ error: 'Failed to fetch profile' });
   }
 });
