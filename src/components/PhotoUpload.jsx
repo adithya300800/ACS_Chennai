@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import { api } from '../lib/api.js';
+import { uploadBlob } from '../lib/blobUpload.js';
 import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../lib/constants.js';
 
 const ACCEPTED_TYPES = ACCEPTED_PHOTO_TYPES;
@@ -187,25 +188,13 @@ export default function PhotoUpload({ dprId, onPhotosChange, initialPhotos = [] 
 
       updateItem(item.id, { ulid, status: 'uploading' });
 
-      // Step 2: PUT to blob with progress
-      await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.upload.addEventListener('progress', (e) => {
-          if (e.lengthComputable) {
-            updateItem(item.id, { progress: Math.round((e.loaded / e.total) * 100) });
-          }
-        });
-        xhr.addEventListener('load', () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve();
-          } else {
-            reject(new Error('Upload failed'));
-          }
-        });
-        xhr.addEventListener('error', () => reject(new Error('Network error')));
-        xhr.open('PUT', sasUrl);
-        xhr.setRequestHeader('Content-Type', item.contentType);
-        xhr.send(item.file);
+      // Step 2: PUT to blob with progress + 60s timeout. Previously this was
+      // an inline XHR with no xhr.timeout, so a hung Azure upload left the
+      // progress bar stuck at 0% forever (Aug 29 2026 user report). The
+      // helper enforces a 60s ceiling and surfaces a clean error.
+      await uploadBlob(sasUrl, item.file, {
+        contentType: item.contentType,
+        onProgress: (pct) => updateItem(item.id, { progress: pct }),
       });
 
       // Step 3: Confirm upload

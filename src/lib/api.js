@@ -1,10 +1,44 @@
-const API_BASE = import.meta.env.VITE_API_URL || '';
+// API base URL. Reads from src/lib/env.js — a tiny wrapper around
+// import.meta.env so this file can be required in Jest (CJS) without
+// hitting SyntaxError on `import.meta` (see package.json moduleNameMapper).
+import { VITE_API_URL } from './env.js';
+const API_BASE = VITE_API_URL;
+
+// Default request timeout. The browser's native fetch() has no timeout — if
+// the server hangs (Azure slot swap mid-request, Prisma connection-pool
+// warm-up after restart, transient Front-Door cold path, etc.) the call
+// would sit pending indefinitely and the UI would stay stuck on
+// "Submitting..." / "Marking..." / "Uploading..." forever (Aug 29 2026 user
+// report: three independent "stuck forever" symptoms on DPR submit, attendance
+// check-in, and photo upload). Aborting at 30s gives the user a clear
+// timeout error instead of a frozen button.
+const DEFAULT_TIMEOUT_MS = 30_000;
+const REFRESH_TIMEOUT_MS = 15_000; // shorter — refresh is on the auth hot path
 
 export class ApiError extends Error {
   constructor(message, status, code) {
     super(message);
     this.status = status;
     this.code = code;
+  }
+}
+
+// fetch() with an AbortController timeout. Always throws an ApiError on
+// failure (timeout, network down, DNS failure) so callers can treat the
+// error shape uniformly. The 'TIMEOUT' code lets the UI distinguish "the
+// server is slow" from "the server is down" if it wants to.
+async function fetchWithTimeout(url, opts = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      throw new ApiError('Request timed out — please try again.', 0, 'TIMEOUT');
+    }
+    throw new ApiError('Network error — is the server running?', 0, 'NETWORK_ERROR');
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -32,11 +66,11 @@ function doRefresh() {
   if (!refresh) {
     return Promise.reject(new ApiError('No refresh token', 401, 'NO_REFRESH_TOKEN'));
   }
-  return fetch(`${API_BASE}/api/auth/refresh`, {
+  return fetchWithTimeout(`${API_BASE}/api/auth/refresh`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refreshToken: refresh }),
-  })
+  }, REFRESH_TIMEOUT_MS)
     .then(async (res) => {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new ApiError(data.error || 'Refresh failed', res.status, data.code);
@@ -73,9 +107,10 @@ async function request(method, path, body, token, { _retried } = {}) {
 
   let res;
   try {
-    res = await fetch(`${API_BASE}/api${path}`, opts);
+    res = await fetchWithTimeout(`${API_BASE}/api${path}`, opts, DEFAULT_TIMEOUT_MS);
   } catch (err) {
-    throw new ApiError('Network error — is the server running?', 0, 'NETWORK_ERROR');
+    // fetchWithTimeout already throws ApiError for timeout / network failures.
+    throw err;
   }
 
   const data = await res.json().catch(() => ({}));

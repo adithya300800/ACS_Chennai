@@ -136,14 +136,26 @@ async function generateReadSASUrl(containerName, blobName) {
 /**
  * Verify a blob exists and return its properties (size, content-type, lastModified).
  * Throws if blob is missing.
+ *
+ * Hard 8s timeout via AbortSignal so a stuck Azure Storage call cannot pin
+ * the Express request indefinitely. The @azure/storage-blob v12 client
+ * has no default request timeout (Backend Architect agent diagnosis, Aug
+ * 29 2026) — without this, an Azure-side stall would hold the request open
+ * until the platform's own connection drop (~2 min) and surface to the
+ * client as a 504 / hang.
  */
+const VERIFY_BLOB_TIMEOUT_MS = 8_000;
+
 async function verifyBlobExists(containerName, blobName) {
   const client = getClient();
   const containerClient = client.getContainerClient(containerName);
   const blobClient = containerClient.getBlobClient(blobName);
 
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(() => abortController.abort(), VERIFY_BLOB_TIMEOUT_MS);
+
   try {
-    const props = await blobClient.getProperties();
+    const props = await blobClient.getProperties({ abortSignal: abortController.signal });
     return {
       exists: true,
       contentType: props.contentType,
@@ -151,10 +163,15 @@ async function verifyBlobExists(containerName, blobName) {
       lastModified: props.lastModified,
     };
   } catch (err) {
+    if (err && (err.name === 'AbortError' || err.code === 'ABORT_ERR')) {
+      throw new Error(`Blob verification timed out after ${VERIFY_BLOB_TIMEOUT_MS}ms`);
+    }
     if (err.statusCode === 404) {
       return { exists: false };
     }
     throw err;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

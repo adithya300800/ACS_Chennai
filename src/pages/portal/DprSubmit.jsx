@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { uploadBlob } from '../../lib/blobUpload.js';
 import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../../lib/constants.js';
 import DprWorkEntryAdder from './DprWorkEntryAdder.jsx';
 import { SUB_WORK_TYPE_OPTIONS } from './DprWorkTypes.jsx';
@@ -170,12 +171,15 @@ export default function DprSubmit() {
 
       try {
         const { sasUrl, ulid } = await api.getDprSasUrl(file.name, file.type, 'dpr-photos', accessToken);
-        updateUploadStatus(tempId, { status: 'uploading', progress: 50 });
+        updateUploadStatus(tempId, { status: 'uploading', progress: 0 });
 
-        await fetch(sasUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': file.type },
-          body: file,
+        // PUT to blob with real progress + 60s timeout. Previously a raw
+        // fetch() with no timeout and no progress — the bar would jump
+        // 0% → 50% → 100% and would never resolve if Azure hung (Aug 29
+        // 2026 user report: "uploading photo struck forever at 0%").
+        await uploadBlob(sasUrl, file, {
+          contentType: file.type,
+          onProgress: (pct) => updateUploadStatus(tempId, { status: 'uploading', progress: pct }),
         });
 
         await api.confirmUpload(ulid, 'dpr-photos', file.name, file.type, file.size, accessToken);
