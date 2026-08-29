@@ -7,6 +7,7 @@ const authRoutes = require('./routes/auth');
 const attendanceRoutes = require('./routes/attendance');
 const dprRoutes = require('./routes/dpr');
 const contactRoutes = require('./routes/contact');
+const { loginLimiter, refreshLimiter, contactLimiter, sasLimiter } = require('./middleware/rateLimit');
 
 const app = express();
 const prisma = new PrismaClient();
@@ -54,14 +55,31 @@ app.set('prisma', prisma);
 
 // ─── Health & readiness ──────────────────────────────────────────────────────
 // /health is the liveness probe (lightweight — never depends on downstreams).
-// /ready is the readiness probe — verifies the app can actually serve traffic
-// (Prisma + Azure Blob reachable). Use /ready for Azure App Service probes.
+// Deliberately returns only {status, timestamp}. Deploy metadata (SHA, time)
+// is exposed only on /version, which requires an internal token — public
+// attackers don't need to know which commit is running.
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
+  });
+});
+
+// /version is for ops/SRE dashboards. Requires the X-Internal-Token header to
+// match INTERNAL_API_TOKEN env var (set via Azure App Setting). 404 when unset.
+app.get('/version', (req, res) => {
+  const expected = process.env.INTERNAL_API_TOKEN;
+  if (!expected) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  if (req.headers['x-internal-token'] !== expected) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  res.json({
+    status: 'ok',
     deploySha: process.env.DEPLOY_SHA || 'unknown',
     deployTime: process.env.DEPLOY_TIME || 'unknown',
+    nodeEnv: process.env.NODE_ENV,
   });
 });
 
@@ -93,10 +111,15 @@ app.get('/ready', async (req, res) => {
 });
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
+// Auth: rate-limit per-IP BEFORE routing so abusive callers hit the limiter
+// even if their payload would otherwise be parsed/rejected.
+app.use('/api/auth/login', loginLimiter);
+app.use('/api/auth/refresh', refreshLimiter);
 app.use('/api/auth', express.json({ limit: '32kb' }), authRoutes);
 app.use('/api/attendance', attendanceRoutes);
+app.use('/api/dpr/sas-url', sasLimiter);
 app.use('/api/dpr', dprRoutes);
-app.use('/api/contact', express.json({ limit: '16kb' }), contactRoutes);
+app.use('/api/contact', contactLimiter, express.json({ limit: '16kb' }), contactRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });

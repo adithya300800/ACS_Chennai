@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
 const { generateULID, generateUploadSASUrl, generateReadSASUrl, verifyBlobExists } = require('../lib/blobStorage');
@@ -9,29 +10,59 @@ const pendingUploads = new Map();
 // SSE connections per employee
 const sseConnections = new Map(); // employeeId -> Set<{res, lastNotificationId}>
 
-// SSE /notifications route — before auth middleware (handles its own token auth)
-router.get('/notifications', async (req, res) => {
-  // Support token via query param for SSE (EventSource can't set headers)
-  let employeeId = req.employeeId;
-  if (!employeeId && req.query.token) {
-    try {
-      const jwt = require('jsonwebtoken');
-      const { getJwtSecret } = require('../middleware/auth');
-      const decoded = jwt.verify(req.query.token, getJwtSecret());
-      employeeId = decoded.employeeId;
-    } catch {
-      return res.status(401).json({ error: 'Invalid token' });
-    }
+// SSE ticket store — replaces the previous ?token= query-string auth.
+// JWTs in URLs are dangerous because they end up in proxy/CDN access logs,
+// browser history, and server-side request logs (AppSec #9). Instead the
+// client first calls POST /api/dpr/notifications/ticket (authenticated via
+// Bearer header), receives a short-lived opaque ticket, then opens the SSE
+// stream with ?ticket=... — proxies only ever see the ticket.
+const sseTickets = new Map(); // ticket -> { employeeId, expiresAt }
+const TICKET_TTL_MS = 60 * 1000; // 60 seconds — enough for the EventSource to connect
+
+function pruneTickets() {
+  const now = Date.now();
+  for (const [k, v] of sseTickets.entries()) {
+    if (v.expiresAt <= now) sseTickets.delete(k);
   }
-  if (!employeeId) {
-    return res.status(401).json({ error: 'Authorization required' });
+}
+function createTicket(employeeId) {
+  pruneTickets();
+  const ticket = crypto.randomBytes(32).toString('base64url');
+  sseTickets.set(ticket, { employeeId, expiresAt: Date.now() + TICKET_TTL_MS });
+  // Auto-expire after TTL
+  setTimeout(() => sseTickets.delete(ticket), TICKET_TTL_MS).unref();
+  return ticket;
+}
+
+// POST /api/dpr/notifications/ticket — must be authenticated via Bearer header.
+// Returns a single-use 60-second ticket for opening an SSE stream.
+router.post('/notifications/ticket', requireAuth, (req, res) => {
+  const ticket = createTicket(req.employeeId);
+  res.json({ ticket, expiresIn: TICKET_TTL_MS / 1000 });
+});
+
+// SSE /notifications route — auth via ticket ONLY (no JWT in URL).
+router.get('/notifications', async (req, res) => {
+  const { ticket, lastNotificationId } = req.query;
+
+  if (!ticket) {
+    return res.status(401).json({ error: 'Ticket required' });
   }
 
-  const { lastNotificationId } = req.query;
+  const entry = sseTickets.get(ticket);
+  if (!entry || entry.expiresAt <= Date.now()) {
+    sseTickets.delete(ticket);
+    return res.status(401).json({ error: 'Invalid or expired ticket' });
+  }
+
+  // Single-use: delete immediately so the ticket can't be replayed.
+  sseTickets.delete(ticket);
+  const employeeId = entry.employeeId;
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable nginx buffering if behind a proxy
   res.flushHeaders();
 
   // Send initial connection ack
@@ -46,7 +77,11 @@ router.get('/notifications', async (req, res) => {
 
   // Send heartbeat every 30s
   const heartbeat = setInterval(() => {
-    res.write(`event: heartbeat\ndata: ${JSON.stringify({ ts: new Date().toISOString() })}\n\n`);
+    try {
+      res.write(`event: heartbeat\ndata: ${JSON.stringify({ ts: new Date().toISOString() })}\n\n`);
+    } catch (e) {
+      // connection closed
+    }
   }, 30000);
 
   req.on('close', () => {
@@ -247,34 +282,61 @@ router.post('/', async (req, res) => {
 // ─── GET /api/dpr ─────────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   const prisma = getPrisma(req);
-  const { cursor, limit = '20', status: statusFilter } = req.query;
+  const { cursor, limit = '20', status: statusFilter, from, to, my } = req.query;
 
   const take = Math.min(parseInt(limit) || 20, 100);
-  let skip = 0;
-  let cursorWhere = {};
 
+  // Validate cursor: base64(reportDate|id). Reject malformed cursors instead
+  // of letting `new Date('garbage')` produce Invalid Date and crash the query.
+  let cursorWhere = {};
   if (cursor) {
-    // cursor format: base64(reportDate|id)
     try {
-      const [cDate, cId] = Buffer.from(cursor, 'base64').toString().split('|');
+      const decoded = Buffer.from(cursor, 'base64').toString();
+      const [cDate, cId] = decoded.split('|');
+      const parsedDate = new Date(cDate);
+      if (!cId || isNaN(parsedDate.getTime())) {
+        return res.status(400).json({ error: 'INVALID_CURSOR', message: 'Cursor is malformed or expired' });
+      }
       cursorWhere = {
         OR: [
-          { reportDate: { lt: new Date(cDate) } },
-          { reportDate: new Date(cDate), id: { lt: cId } },
+          { reportDate: { lt: parsedDate } },
+          { reportDate: parsedDate, id: { lt: cId } },
         ],
       };
     } catch (e) {
-      // Invalid cursor format
+      return res.status(400).json({ error: 'INVALID_CURSOR', message: 'Cursor could not be decoded' });
     }
+  }
+
+  // Validate date-range filters (used by frontend list UI)
+  const dateFilter = {};
+  if (from) {
+    const d = new Date(from);
+    if (isNaN(d.getTime())) {
+      return res.status(400).json({ error: 'INVALID_FROM', message: 'from must be an ISO date' });
+    }
+    dateFilter.gte = d;
+  }
+  if (to) {
+    const d = new Date(to);
+    if (isNaN(d.getTime())) {
+      return res.status(400).json({ error: 'INVALID_TO', message: 'to must be an ISO date' });
+    }
+    dateFilter.lte = d;
   }
 
   // Check if admin
   const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
   const isAdmin = employee && employee.isAdmin;
 
+  // `my=true` forces ownership filter even for admins; otherwise non-admins
+  // are always restricted to their own DPRs.
+  const restrictToSelf = !isAdmin || my === 'true';
+
   const where = {
-    ...(isAdmin ? {} : { submittedById: req.employeeId }),
+    ...(restrictToSelf ? { submittedById: req.employeeId } : {}),
     ...(statusFilter ? { status: statusFilter } : {}),
+    ...(Object.keys(dateFilter).length ? { reportDate: dateFilter } : {}),
     ...(cursor ? cursorWhere : {}),
   };
 
@@ -287,7 +349,6 @@ router.get('/', async (req, res) => {
       },
       orderBy: [{ reportDate: 'desc' }, { id: 'desc' }],
       take: take + 1,
-      skip,
     });
 
     const hasMore = dprs.length > take;
@@ -463,6 +524,159 @@ router.post('/:id/review', async (req, res) => {
   } catch (err) {
     console.error('DPR review error:', err);
     res.status(500).json({ error: 'Failed to review DPR' });
+  }
+});
+
+// ─── POST /api/dpr/:id/approve ───────────────────────────────────────────────
+// Terminal state: DRAFT|SUBMITTED|UNDER_REVIEW -> APPROVED. Admin only.
+router.post('/:id/approve', async (req, res) => {
+  const prisma = getPrisma(req);
+  const { id } = req.params;
+  const { adminNotes } = req.body || {};
+
+  const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
+  if (!employee || !employee.isAdmin) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
+  }
+
+  const dpr = await prisma.dPR.findUnique({
+    where: { id },
+    include: { photos: true, submittedBy: true },
+  });
+  if (!dpr) return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
+
+  if (dpr.status === 'APPROVED') {
+    return res.status(409).json({ error: 'ALREADY_APPROVED', message: 'DPR is already approved' });
+  }
+
+  try {
+    // Snapshot the pre-approval state for audit trail
+    await prisma.dPRRevision.create({
+      data: {
+        dprId: id,
+        version: dpr.version,
+        snapshot: dpr,
+        changedById: req.employeeId,
+      },
+    });
+
+    const updated = await prisma.dPR.update({
+      where: { id },
+      data: {
+        status: 'APPROVED',
+        approvedById: req.employeeId,
+        approvedAt: new Date(),
+        version: { increment: 1 },
+      },
+      include: {
+        photos: true,
+        submittedBy: { select: { id: true, name: true, email: true } },
+        approvedBy: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    await prisma.notification.create({
+      data: {
+        employeeId: dpr.submittedById,
+        type: 'DPR_APPROVED',
+        dprId: id,
+        message: `Your DPR for ${dpr.projectName} on ${dpr.reportDate.toISOString().split('T')[0]} was approved by ${employee.name}. ${adminNotes || ''}`.trim(),
+      },
+    });
+
+    emitNotification(dpr.submittedById, 'notification', {
+      id: Date.now(),
+      type: 'DPR_APPROVED',
+      dprId: id,
+      message: `Your DPR for ${dpr.projectName} was approved`,
+      createdAt: new Date().toISOString(),
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error('DPR approve error:', err);
+    res.status(500).json({ error: 'Failed to approve DPR' });
+  }
+});
+
+// ─── POST /api/dpr/:id/reject ────────────────────────────────────────────────
+// Terminal state: any -> REJECTED. Admin only. Requires a reason so the owner
+// knows what to fix (Codebase Architect #33 — UI was a lie).
+router.post('/:id/reject', async (req, res) => {
+  const prisma = getPrisma(req);
+  const { id } = req.params;
+  const { reason, adminNotes } = req.body || {};
+
+  if (!reason || typeof reason !== 'string' || !reason.trim()) {
+    return res.status(400).json({ error: 'REASON_REQUIRED', message: 'A reason is required to reject a DPR' });
+  }
+  if (reason.length > 1000) {
+    return res.status(400).json({ error: 'REASON_TOO_LONG', message: 'Reason must be <= 1000 chars' });
+  }
+
+  const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
+  if (!employee || !employee.isAdmin) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
+  }
+
+  const dpr = await prisma.dPR.findUnique({
+    where: { id },
+    include: { photos: true, submittedBy: true },
+  });
+  if (!dpr) return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
+
+  if (dpr.status === 'REJECTED') {
+    return res.status(409).json({ error: 'ALREADY_REJECTED', message: 'DPR is already rejected' });
+  }
+
+  try {
+    await prisma.dPRRevision.create({
+      data: {
+        dprId: id,
+        version: dpr.version,
+        snapshot: dpr,
+        changedById: req.employeeId,
+      },
+    });
+
+    const updated = await prisma.dPR.update({
+      where: { id },
+      data: {
+        status: 'REJECTED',
+        reviewedById: req.employeeId,
+        reviewedAt: new Date(),
+        version: { increment: 1 },
+      },
+      include: {
+        photos: true,
+        submittedBy: { select: { id: true, name: true, email: true } },
+        reviewedBy: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    const combinedNotes = [reason.trim(), adminNotes].filter(Boolean).join('\n\n');
+    await prisma.notification.create({
+      data: {
+        employeeId: dpr.submittedById,
+        type: 'DPR_REJECTED',
+        dprId: id,
+        message: `Your DPR for ${dpr.projectName} on ${dpr.reportDate.toISOString().split('T')[0]} was rejected by ${employee.name}: ${reason.trim()}${adminNotes ? `\n${adminNotes}` : ''}`.trim(),
+      },
+    });
+
+    emitNotification(dpr.submittedById, 'notification', {
+      id: Date.now(),
+      type: 'DPR_REJECTED',
+      dprId: id,
+      message: `Your DPR for ${dpr.projectName} was rejected`,
+      reason: combinedNotes,
+      createdAt: new Date().toISOString(),
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error('DPR reject error:', err);
+    res.status(500).json({ error: 'Failed to reject DPR' });
   }
 });
 

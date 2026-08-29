@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
+const { hashIdentifier } = require('../lib/pii');
 
 // Fail fast if secrets are not set in production
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -149,7 +150,7 @@ router.get('/zoho/callback', async (req, res) => {
     // Email-domain allowlist (AppSec #20)
     const domain = email.split('@')[1];
     if (!domain || !ALLOWED_EMAIL_DOMAINS.includes(domain)) {
-      console.warn('[zoho] signup blocked — domain not allowlisted', { email, domain });
+      console.warn('[zoho] signup blocked — domain not allowlisted', { emailHash: hashIdentifier(email), domain });
       return res.send(errorHtml('domain_not_allowed'));
     }
 
@@ -168,6 +169,7 @@ router.get('/zoho/callback', async (req, res) => {
           zohoRefreshToken: refresh_token,
         },
       });
+      console.log('[zoho] new employee provisioned', { employeeId: employee.id, emailHash: hashIdentifier(email) });
     } else {
       employee = await prisma.employee.update({
         where: { email },
@@ -264,6 +266,7 @@ router.post('/zoho/callback', async (req, res) => {
 
     const domain = email.split('@')[1];
     if (!domain || !ALLOWED_EMAIL_DOMAINS.includes(domain)) {
+      console.warn('[zoho] POST signup blocked — domain not allowlisted', { emailHash: hashIdentifier(email), domain });
       return res.status(403).json({ error: 'Email domain not permitted' });
     }
 
@@ -281,6 +284,7 @@ router.post('/zoho/callback', async (req, res) => {
           zohoRefreshToken: refresh_token,
         },
       });
+      console.log('[zoho] new employee provisioned (POST flow)', { employeeId: employee.id, emailHash: hashIdentifier(email) });
     } else {
       employee = await prisma.employee.update({
         where: { email },
