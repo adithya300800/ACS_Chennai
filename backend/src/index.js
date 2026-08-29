@@ -43,7 +43,12 @@ app.use((req, res, next) => {
 app.set('prisma', prisma);
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    deploySha: process.env.DEPLOY_SHA || 'unknown',
+    deployTime: process.env.DEPLOY_TIME || 'unknown',
+  });
 });
 
 app.use('/api/auth', authRoutes);

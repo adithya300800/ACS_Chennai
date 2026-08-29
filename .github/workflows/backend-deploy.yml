@@ -80,6 +80,27 @@ jobs:
         run: |
           az webapp restart --resource-group acs-portal-rg --name acs-portal-api
 
+      - name: Stamp deploy SHA + time
+        run: |
+          az webapp config appsettings set \
+            --resource-group acs-portal-rg \
+            --name acs-portal-api \
+            --settings \
+              DEPLOY_SHA="${{ github.sha }}" \
+              DEPLOY_TIME="$(date -u +%FT%TZ)"
+
+      - name: Smoke test deployed app
+        run: |
+          HEALTH=$(curl -sf -o /dev/null -w "%{http_code}" https://acs-portal-api.azurewebsites.net/health || echo "000")
+          DPR_SAS=$(curl -s -o /dev/null -w "%{http_code}" -X POST https://acs-portal-api.azurewebsites.net/api/dpr/sas-url || echo "000")
+          DPR_NOTIF=$(curl -s -o /dev/null -w "%{http_code}" "https://acs-portal-api.azurewebsites.net/api/dpr/notifications" || echo "000")
+          echo "Health=$HEALTH DPR_SAS=$DPR_SAS DPR_NOTIF=$DPR_NOTIF"
+          # /health must return 200; dpr routes must return 401 (auth required), NOT 404 (route missing)
+          if [ "$HEALTH" != "200" ] || [ "$DPR_SAS" != "401" ] || [ "$DPR_NOTIF" != "401" ]; then
+            echo "::error::Smoke test failed - expected health=200 dpr=401 (route mounted)"
+            exit 1
+          fi
+
       # Note: CORS verification is done via Claude Code live testing (curl via direct IP).
       # GitHub Actions runner cannot reach Azure App Service due to network restrictions.
       # After deployment, manually verify with:
