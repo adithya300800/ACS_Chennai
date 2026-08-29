@@ -76,4 +76,44 @@ router.post('/schema', requireAuth, async (req, res) => {
   }
 });
 
+// Round-8 (debug): POST /api/diag/dpr-create — runs the exact prisma.dPR.create
+// the production handler does and returns the underlying error verbatim so we
+// can see why POST /api/dpr 500s even after the schema push.
+// DELETE after F5/F6 root cause identified.
+router.post('/dpr-create', requireAuth, async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ error: 'Admin only' });
+  const prisma = req.app.get('prisma') || new PrismaClient();
+  const body = req.body || {};
+  try {
+    const dpr = await prisma.dPR.create({
+      data: {
+        projectName: body.projectName || 'diag-test',
+        location: body.location || 'diag-loc',
+        reportDate: body.reportDate ? new Date(body.reportDate) : new Date('2026-08-29'),
+        weather: body.weather ?? null,
+        temperature: body.temperature ?? null,
+        contractor: body.contractor ?? null,
+        workType: body.workType ?? 'MATERIAL_RECEIPT',
+        notes: body.notes ?? null,
+        workEntries: body.workEntries ?? null,
+        status: body.status ?? 'DRAFT',
+        version: body.version ?? 1,
+        submittedById: req.employeeId,
+        submittedAt: body.status === 'SUBMITTED' ? new Date() : null,
+      },
+    });
+    res.json({ ok: true, id: dpr.id });
+  } catch (err) {
+    res.status(500).json({
+      error: 'prisma.dPR.create failed',
+      code: err.code,
+      name: err.name,
+      meta: err.meta,
+      message: err.message?.split('\n')?.slice(0, 3),
+      stack: err.stack?.split('\n')?.slice(0, 10),
+      requestId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    });
+  }
+});
+
 module.exports = router;
