@@ -161,7 +161,13 @@ app.use((err, req, res, next) => {
   // client gets actionable 4xx instead of a generic 500.
   let status = 500;
   let body = { error: 'Internal server error', requestId };
-  if (err && typeof err.code === 'string') {
+  // Round-8 (F1): body-parser SyntaxError → 400 instead of 500. The previous
+  // catch-all surfaced `not-json{` as 500, which masked the actual cause
+  // (malformed JSON from the client) and made it look like a server bug.
+  if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError) && err.status === 400) {
+    status = 400;
+    body = { error: 'Malformed JSON body', code: 'INVALID_JSON', requestId };
+  } else if (err && typeof err.code === 'string') {
     if (err.code === 'P2003') { status = 400; body = { error: 'Referenced record does not exist', code: 'FK_VIOLATION', requestId }; }
     else if (err.code === 'P2009') { status = 400; body = { error: 'Database rejected the input', code: 'VALIDATION_FAILED', requestId }; }
     else if (err.code === 'P2025') { status = 404; body = { error: 'Record not found', code: 'NOT_FOUND', requestId }; }

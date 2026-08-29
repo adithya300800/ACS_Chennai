@@ -11,6 +11,8 @@ export NODE_ENV="production"
 : "${DATABASE_URL:?DATABASE_URL must be set}"
 : "${JWT_SECRET:?JWT_SECRET must be set}"
 : "${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET must be set}"
+# Round-7 fail-fast: PII_LOG_SALT is required at module load by pii.js
+: "${PII_LOG_SALT:?PII_LOG_SALT must be set}"
 
 # Storage: at least one of (connection string) OR (account name + key) is required.
 if [ -z "${AZURE_STORAGE_CONNECTION_STRING:-}" ]; then
@@ -46,9 +48,15 @@ if [ ! -d "/home/site/wwwroot/node_modules" ]; then
   npm install --omit=dev 2>/dev/null || npm install
 fi
 
-echo "[startup] Running Prisma migrations..."
+echo "[startup] Running Prisma db push..."
 cd /home/site/wwwroot
-npx prisma migrate deploy --schema /home/site/wwwroot/prisma/schema.prisma
+# Use `db push` (not `migrate deploy`) because this project does not use
+# migration files — schema is the single source of truth. `db push` makes
+# additive changes (new columns, new indexes) without dropping data, and
+# errors out if the local schema would require destructive changes. Round-8
+# confirmed this was the fix for F5/F6 (POST /api/dpr and admin queue 500s
+# caused by deployed DB schema drifting from the deployed Prisma client).
+npx prisma db push --accept-data-loss=false --schema /home/site/wwwroot/prisma/schema.prisma
 
 echo "[startup] Starting Node.js on PORT $PORT..."
 exec node /home/site/wwwroot/src/index.js
