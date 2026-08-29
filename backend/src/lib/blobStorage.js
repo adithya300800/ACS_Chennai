@@ -1,61 +1,53 @@
 /**
- * Azure Blob Storage helpers for DPR module
+ * Cloudflare R2 Storage helpers for DPR module
+ * Uses AWS S3-compatible API (@aws-sdk/client-s3)
  *
- * Supports two authentication modes (prefer #2):
- *   1. AZURE_STORAGE_CONNECTION_STRING (single connection string — easier dev setup)
- *   2. AZURE_STORAGE_ACCOUNT_NAME + AZURE_STORAGE_ACCOUNT_KEY (SharedKey — production-safe;
- *      can be swapped for DefaultAzureCredential / managed identity later)
+ * R2 is S3-compatible — we use standard AWS SDK calls.
+ * Env vars:
+ *   R2_ACCOUNT_ID      — Cloudflare account ID (used as endpoint)
+ *   R2_ACCESS_KEY_ID  — R2 Access Key ID
+ *   R2_SECRET_ACCESS_KEY — R2 Secret Access Key
  */
-const { BlobServiceClient, StorageSharedKeyCredential } = require('@azure/storage-blob');
+const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { randomBytes } = require('crypto');
 
-let blobServiceClient = null;
+let s3Client = null;
 
 function getClient() {
-  if (blobServiceClient) return blobServiceClient;
+  if (s3Client) return s3Client;
 
-  const connStr = process.env.AZURE_STORAGE_CONNECTION_STRING;
-  const accountName = process.env.AZURE_STORAGE_ACCOUNT_NAME;
-  const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
+  const accountId = process.env.R2_ACCOUNT_ID;
+  const accessKeyId = process.env.R2_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
 
-  if (connStr) {
-    blobServiceClient = BlobServiceClient.fromConnectionString(connStr);
-    return blobServiceClient;
-  }
-
-  if (accountName && accountKey) {
-    const credential = new StorageSharedKeyCredential(accountName, accountKey);
-    blobServiceClient = new BlobServiceClient(
-      `https://${accountName}.blob.core.windows.net`,
-      credential
+  if (!accountId || !accessKeyId || !secretAccessKey) {
+    throw new Error(
+      'R2 Storage not configured: set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY'
     );
-    return blobServiceClient;
   }
 
-  throw new Error(
-    'Azure Storage not configured: set AZURE_STORAGE_CONNECTION_STRING or ' +
-      '(AZURE_STORAGE_ACCOUNT_NAME + AZURE_STORAGE_ACCOUNT_KEY)'
-  );
+  s3Client = new S3Client({
+    region: 'auto',
+    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+    credentials: {
+      accessKeyId,
+      secretAccessKey,
+    },
+  });
+
+  return s3Client;
 }
 
 /**
  * Generate a ULID-like 128-bit identifier (26-char Crockford base32).
- * Uses cryptographic randomness so ULIDs are unpredictable to attackers
- * trying to enumerate blob names.
  */
 function generateULID() {
-  // 48-bit timestamp (ms) + 80-bit randomness
   const ts = Date.now().toString(36).toUpperCase().padStart(10, '0');
   const rand = randomBytes(10).toString('hex').toUpperCase();
   return (ts + rand).slice(0, 26);
 }
 
-/**
- * Map a validated MIME type to its safe file extension.
- * The extension comes ONLY from the validated contentType — never from
- * the user-supplied filename — to prevent stored-XSS via crafted extensions
- * like `.php` or `.html` landing in our blob namespace.
- */
 const CONTENT_TYPE_EXT = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
@@ -63,110 +55,81 @@ const CONTENT_TYPE_EXT = {
 };
 
 /**
- * Generate SAS URL for uploading a blob.
- *
- * Security hardening:
- *  - Permissions are 'cw' ONLY (create + write). No read, no delete, no list,
- *    no immutability. A leaked SAS cannot enumerate, read, or destroy blobs.
- *  - Blob name is scoped under `${employeeId}/${ulid}.${ext}` so a leaked SAS
- *    for one user can never overwrite or affect another user's uploads.
- *  - 15-minute expiry.
- *
- * @param {string} containerName    'dpr-photos' or 'dpr-documents'
- * @param {string} employeeId       Owning employee — used for blob-path isolation
- * @param {string} ulid             Unique blob ID (returned to caller)
- * @param {string} contentType      Must be in CONTENT_TYPE_EXT
+ * Generate a presigned PUT URL for direct browser-to-R2 upload (15 min expiry).
+ * Permissions: 'cw' (create + write) — no read, no delete.
  */
 async function generateUploadSASUrl(containerName, employeeId, ulid, contentType) {
   const ext = CONTENT_TYPE_EXT[contentType];
   if (!ext) throw new Error(`Unsupported content type: ${contentType}`);
 
   const client = getClient();
-  const containerClient = client.getContainerClient(containerName);
   const blobName = `${employeeId}/${ulid}.${ext}`;
-  const blockBlobClient = containerClient.getBlockBlobClient(blobName);
 
-  const expiresOn = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+  const command = new PutObjectCommand({
+    Bucket: containerName,
+    Key: blobName,
+    ContentType: contentType,
+  });
 
-  const sasOptions = {
-    containerName,
-    blobName,
-    permissions: 'cw', // create + write ONLY — no read, delete, list, process, tag
-    expiresOn,
-    startsOn: new Date(Date.now() - 60 * 1000), // 1-minute clock-skew tolerance
-    contentType,
-  };
-
-  const sasToken = blockBlobClient.generateBlobSASQueryToken(sasOptions);
-  const sasUrl = `${blockBlobClient.url}?${sasToken}`;
+  // getSignedUrl from @aws-sdk/s3-request-presigner generates an S3-style
+  // presigned URL that R2 accepts. Expiry is in seconds.
+  const sasUrl = await getSignedUrl(client, command, { expiresIn: 900 }); // 15 min
 
   return {
     sasUrl,
     ulid,
     blobPath: blobName,
-    expiresAt: expiresOn.toISOString(),
+    expiresAt: new Date(Date.now() + 900 * 1000).toISOString(),
   };
 }
 
 /**
- * Generate a read-only SAS URL for a single blob (24-hour expiry).
- * Read SAS is longer-lived than upload so users can revisit their DPRs the
- * same day without re-fetching SAS tokens; after 24h a refresh is required.
+ * Generate a presigned GET URL for reading a blob (24-hour expiry).
  */
 async function generateReadSASUrl(containerName, blobName) {
   const client = getClient();
-  const containerClient = client.getContainerClient(containerName);
-  const blockBlobClient = containerClient.getBlockBlobClient(blobName);
 
-  const expiresOn = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+  const command = new GetObjectCommand({
+    Bucket: containerName,
+    Key: blobName,
+  });
 
-  const sasOptions = {
-    containerName,
-    blobName,
-    permissions: 'r', // read-only
-    expiresOn,
+  const sasUrl = await getSignedUrl(client, command, { expiresIn: 86400 }); // 24 hours
+
+  return {
+    sasUrl,
+    expiresAt: new Date(Date.now() + 86400 * 1000).toISOString(),
   };
-
-  const sasToken = blockBlobClient.generateBlobSASQueryToken(sasOptions);
-  const sasUrl = `${blockBlobClient.url}?${sasToken}`;
-
-  return { sasUrl, expiresAt: expiresOn.toISOString() };
 }
 
 /**
- * Verify a blob exists and return its properties (size, content-type, lastModified).
- * Throws if blob is missing.
- *
- * Hard 8s timeout via AbortSignal so a stuck Azure Storage call cannot pin
- * the Express request indefinitely. The @azure/storage-blob v12 client
- * has no default request timeout (Backend Architect agent diagnosis, Aug
- * 29 2026) — without this, an Azure-side stall would hold the request open
- * until the platform's own connection drop (~2 min) and surface to the
- * client as a 504 / hang.
+ * Verify a blob exists by fetching its HEAD metadata (8s timeout).
  */
 const VERIFY_BLOB_TIMEOUT_MS = 8_000;
 
 async function verifyBlobExists(containerName, blobName) {
   const client = getClient();
-  const containerClient = client.getContainerClient(containerName);
-  const blobClient = containerClient.getBlobClient(blobName);
 
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => abortController.abort(), VERIFY_BLOB_TIMEOUT_MS);
 
   try {
-    const props = await blobClient.getProperties({ abortSignal: abortController.signal });
+    const props = await client.send(
+      new HeadObjectCommand({ Bucket: containerName, Key: blobName }),
+      { abortSignal: abortController.signal }
+    );
     return {
       exists: true,
-      contentType: props.contentType,
-      contentLength: props.contentLength,
-      lastModified: props.lastModified,
+      contentType: props.ContentType,
+      contentLength: props.ContentLength,
+      lastModified: props.LastModified,
     };
   } catch (err) {
-    if (err && (err.name === 'AbortError' || err.code === 'ABORT_ERR')) {
-      throw new Error(`Blob verification timed out after ${VERIFY_BLOB_TIMEOUT_MS}ms`);
+    if (err.name === 'AbortError' || err.$metadata?.httpStatusCode === 403) {
+      // R2 returns 403 for missing blobs on presigned-path buckets
+      return { exists: false };
     }
-    if (err.statusCode === 404) {
+    if (err.$metadata?.httpStatusCode === 404) {
       return { exists: false };
     }
     throw err;
@@ -176,29 +139,30 @@ async function verifyBlobExists(containerName, blobName) {
 }
 
 /**
- * Upload a buffer directly to blob (used for server-side PDF generation).
+ * Upload a buffer directly to R2 (server-side PDF generation).
  */
 async function uploadBufferToBlob(containerName, blobName, buffer, contentType) {
   const client = getClient();
-  const containerClient = client.getContainerClient(containerName);
-  const blockBlobClient = containerClient.getBlockBlobClient(blobName);
 
-  await blockBlobClient.uploadData(buffer, {
-    blobHTTPHeaders: { blobContentType: contentType },
-  });
+  await client.send(
+    new PutObjectCommand({
+      Bucket: containerName,
+      Key: blobName,
+      Body: buffer,
+      ContentType: contentType,
+    })
+  );
 
   const readUrl = await generateReadSASUrl(containerName, blobName);
   return { url: readUrl.sasUrl };
 }
 
 /**
- * Delete a blob (used by server-side cleanup paths).
+ * Delete a blob.
  */
 async function deleteBlob(containerName, blobName) {
   const client = getClient();
-  const containerClient = client.getContainerClient(containerName);
-  const blobClient = containerClient.getBlobClient(blobName);
-  await blobClient.delete();
+  await client.send(new DeleteObjectCommand({ Bucket: containerName, Key: blobName }));
 }
 
 module.exports = {

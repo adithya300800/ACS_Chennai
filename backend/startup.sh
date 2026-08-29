@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Azure provides PORT dynamically — do NOT hardcode
+# PORT is provided by the platform dynamically
 export PORT=${PORT:-8080}
 export NODE_ENV="production"
 
@@ -14,17 +14,17 @@ export NODE_ENV="production"
 # Round-7 fail-fast: PII_LOG_SALT is required at module load by pii.js
 : "${PII_LOG_SALT:?PII_LOG_SALT must be set}"
 
-# Storage: at least one of (connection string) OR (account name + key) is required.
-if [ -z "${AZURE_STORAGE_CONNECTION_STRING:-}" ]; then
-  : "${AZURE_STORAGE_ACCOUNT_NAME:?AZURE_STORAGE_ACCOUNT_NAME or AZURE_STORAGE_CONNECTION_STRING must be set}"
-  : "${AZURE_STORAGE_ACCOUNT_KEY:?AZURE_STORAGE_ACCOUNT_KEY or AZURE_STORAGE_CONNECTION_STRING must be set}"
+# Storage: at least one of (connection string) OR (account id + key) is required.
+if [ -z "${R2_CONNECTION_STRING:-}" ]; then
+  : "${R2_ACCOUNT_ID:?R2_ACCOUNT_ID or R2_CONNECTION_STRING must be set}"
+  : "${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID or R2_CONNECTION_STRING must be set}"
 fi
 
 # Re-export the (now-validated) values so child processes inherit them.
 export DATABASE_URL JWT_SECRET JWT_REFRESH_SECRET
-export AZURE_STORAGE_CONNECTION_STRING="${AZURE_STORAGE_CONNECTION_STRING:-}"
-export AZURE_STORAGE_ACCOUNT_NAME="${AZURE_STORAGE_ACCOUNT_NAME:-}"
-export AZURE_STORAGE_ACCOUNT_KEY="${AZURE_STORAGE_ACCOUNT_KEY:-}"
+export R2_CONNECTION_STRING="${R2_CONNECTION_STRING:-}"
+export R2_ACCOUNT_ID="${R2_ACCOUNT_ID:-}"
+export R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID:-}"
 export FRONTEND_URL="${FRONTEND_URL:-}"
 export ZOHO_CLIENT_ID="${ZOHO_CLIENT_ID:-}"
 export ZOHO_CLIENT_SECRET="${ZOHO_CLIENT_SECRET:-}"
@@ -34,7 +34,7 @@ export RESEND_API_KEY="${RESEND_API_KEY:-}"
 
 echo "[startup] ACS Portal API starting..."
 echo "[startup] PORT=$PORT NODE_ENV=$NODE_ENV"
-echo "[startup] Storage mode: $([ -n "$AZURE_STORAGE_CONNECTION_STRING" ] && echo 'connection-string' || echo 'shared-key')"
+echo "[startup] Storage mode: $([ -n "$R2_CONNECTION_STRING" ] && echo 'connection-string' || echo 'shared-key')"
 echo "[startup] Allowed origins: $ALLOWED_ORIGINS"
 
 echo "[startup] Cleaning old tmp..."

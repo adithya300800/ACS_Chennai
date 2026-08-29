@@ -1,4 +1,4 @@
-name: Deploy Backend to Azure
+name: Deploy Backend to Render
 
 on:
   push:
@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   deploy:
@@ -31,112 +30,24 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Round-7: gate deploys on the existing test suite. A failed test now
-      # blocks the Azure deploy instead of going to production and breaking
-      # for users. Tests run against an in-memory setup (no DB needed) and
-      # finish in <30s — cheap insurance against shipping regressions.
       - name: Run tests
         run: npm test
 
-      - name: Generate Prisma Client
-        run: npx prisma generate
-
-      # Round-8: ensure the production DB schema matches the deployed Prisma
-      # client BEFORE we deploy the new code. Without this, the deployed
-      # Prisma client can drift from the production DB schema — e.g. columns
-      # added to schema.prisma after the last deploy are absent in prod, so
-      # every query against that table returns 500. The Azure App Service
-      # appCommandLine is empty (default `npm start`), so startup.sh is
-      # never run and db push never happens at container startup either.
-      # Doing it here is the only reliable place to keep schema in sync.
-      - name: Apply Prisma schema to production DB
+      - name: Trigger Render Deploy
         run: |
-          echo "Running prisma db push against production DATABASE_URL..."
-          npx prisma db push --accept-data-loss=false --schema prisma/schema.prisma
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-
-      - name: Login to Azure
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Deploy to Azure Web App
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: acs-portal-api
-          package: ./backend
-
-      - name: Set App Settings
-        run: |
-          # Merge strategy:
-          # 1. Fetch all CURRENT app settings (preserves any non-listed keys like RESEND_API_KEY, VITE_API_URL, etc.)
-          # 2. Override with values from GitHub Secrets / this workflow
-          # 3. Apply the merged list with az webapp config appsettings set
-          echo "Fetching current app settings..."
-          # Build PRESERVED_SETTINGS as KEY=VALUE pairs from existing settings
-          PRESERVED_SETTINGS=()
-          while IFS=$'\t' read -r key value; do
-            [ -z "$key" ] && continue
-            # Skip keys that we will override below
-            case "$key" in
-              DATABASE_URL|JWT_SECRET|JWT_REFRESH_SECRET|PII_LOG_SALT|AZURE_STORAGE_ACCOUNT_NAME|AZURE_STORAGE_ACCOUNT_KEY|AZURE_STORAGE_CONNECTION_STRING|NODE_ENV|FRONTEND_URL|ALLOWED_ORIGINS|ALLOWED_EMAIL_DOMAINS|WEBSITE_RUN_FROM_PACKAGE|ALWAYS_ON|SCM_DO_BUILD_DURING_DEPLOYMENT|WEBSITE_ENABLE_SERVICE_SIDE_BUILDS|ZOHO_CLIENT_ID|ZOHO_CLIENT_SECRET|ZOHO_REDIRECT_URI|ZOHO_DOMAIN|RESEND_API_KEY|DEPLOY_SHA|DEPLOY_TIME) continue ;;
-            esac
-            PRESERVED_SETTINGS+=("$key=$value")
-          done < <(az webapp config appsettings list \
-            --resource-group acs-portal-rg \
-            --name acs-portal-api \
-            --query '[].{name:name,value:value}' -o tsv 2>/dev/null)
-
-          # Single merged appsettings call — preserves existing keys, applies overrides,
-          # AND stamps DEPLOY_SHA / DEPLOY_TIME. Never run a second bare
-          # `az webapp config appsettings set --settings X=Y` because per Azure CLI
-          # behavior it REPLACES the entire settings array with just those keys.
-          az webapp config appsettings set \
-            --resource-group acs-portal-rg \
-            --name acs-portal-api \
-            --settings \
-              "${PRESERVED_SETTINGS[@]}" \
-              DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-              JWT_SECRET="${{ secrets.JWT_SECRET }}" \
-              JWT_REFRESH_SECRET="${{ secrets.JWT_REFRESH_SECRET }}" \
-              PII_LOG_SALT="${{ secrets.PII_LOG_SALT }}" \
-              AZURE_STORAGE_ACCOUNT_NAME="${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }}" \
-              AZURE_STORAGE_ACCOUNT_KEY="${{ secrets.AZURE_STORAGE_ACCOUNT_KEY }}" \
-              NODE_ENV=production \
-              FRONTEND_URL=https://acschennai.com \
-              ALLOWED_ORIGINS=https://acschennai.com \
-              ALLOWED_EMAIL_DOMAINS=acschennai.com \
-              WEBSITE_RUN_FROM_PACKAGE=0 \
-              ALWAYS_ON=1 \
-              SCM_DO_BUILD_DURING_DEPLOYMENT=true \
-              WEBSITE_ENABLE_SERVICE_SIDE_BUILDS=true \
-              ZOHO_CLIENT_ID="${{ secrets.ZOHO_CLIENT_ID }}" \
-              ZOHO_CLIENT_SECRET="${{ secrets.ZOHO_CLIENT_SECRET }}" \
-              ZOHO_REDIRECT_URI=https://acs-portal-api.azurewebsites.net/api/auth/zoho/callback \
-              ZOHO_DOMAIN=https://accounts.zoho.com \
-              RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
-              DEPLOY_SHA="${{ github.sha }}" \
-              DEPLOY_TIME="$(date -u +%FT%TZ)"
-
-      - name: Restart Web App
-        run: |
-          az webapp restart --resource-group acs-portal-rg --name acs-portal-api
+          curl -X POST https://api.render.com/v1/services/srv-da9jvkhf2nfc73fpq230/deploys \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"clearCache":true,"branch":"add-react-website"}'
 
       - name: Smoke test deployed app
         run: |
-          HEALTH=$(curl -sf -o /dev/null -w "%{http_code}" https://acs-portal-api.azurewebsites.net/health || echo "000")
-          DPR_SAS=$(curl -s -o /dev/null -w "%{http_code}" -X POST https://acs-portal-api.azurewebsites.net/api/dpr/sas-url || echo "000")
-          DPR_NOTIF=$(curl -s -o /dev/null -w "%{http_code}" "https://acs-portal-api.azurewebsites.net/api/dpr/notifications" || echo "000")
+          HEALTH=$(curl -sf -o /dev/null -w "%{http_code}" https://acs-chennai.onrender.com/health || echo "000")
+          DPR_SAS=$(curl -s -o /dev/null -w "%{http_code}" -X POST https://acs-chennai.onrender.com/api/dpr/sas-url || echo "000")
+          DPR_NOTIF=$(curl -s -o /dev/null -w "%{http_code}" "https://acs-chennai.onrender.com/api/dpr/notifications" || echo "000")
           echo "Health=$HEALTH DPR_SAS=$DPR_SAS DPR_NOTIF=$DPR_NOTIF"
           # /health must return 200; dpr routes must return 401 (auth required), NOT 404 (route missing)
           if [ "$HEALTH" != "200" ] || [ "$DPR_SAS" != "401" ] || [ "$DPR_NOTIF" != "401" ]; then
             echo "::error::Smoke test failed - expected health=200 dpr=401 (route mounted)"
             exit 1
           fi
-
-      # Note: CORS verification is done via Claude Code live testing (curl via direct IP).
-      # GitHub Actions runner cannot reach Azure App Service due to network restrictions.
-      # After deployment, manually verify with:
-      # curl -s -D - -H "Origin: https://acschennai.com" -H "Access-Control-Request-Method: GET" \
-      #   -H "Host: acs-portal-api.azurewebsites.net" -X OPTIONS http://<azure-ip>/api/attendance
