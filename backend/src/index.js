@@ -5,6 +5,7 @@ const { PrismaClient } = require('@prisma/client');
 
 const authRoutes = require('./routes/auth');
 const attendanceRoutes = require('./routes/attendance');
+const dprRoutes = require('./routes/dpr');
 
 const app = express();
 const prisma = new PrismaClient();
@@ -47,6 +48,7 @@ app.get('/health', (req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/attendance', attendanceRoutes);
+app.use('/api/dpr', dprRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
