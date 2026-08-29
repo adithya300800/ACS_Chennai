@@ -1,14 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
+import { useToast } from '../contexts/ToastContext.jsx';
 
 export default function PortalLogin() {
-  const { login } = useAuth();
+  const { login, setAuthData } = useAuth();
+  const toast = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
   const [form, setForm] = useState({ email: '', password: '' });
   const [status, setStatus] = useState('idle'); // idle | loading | error
   const [errorMsg, setErrorMsg] = useState('');
+
+  // Surface "session expired" navigation state from AuthContext's logout
+  // listener as a friendly toast instead of letting the user wonder why
+  // they got bounced back to login.
+  useEffect(() => {
+    if (location.state?.reason) {
+      toast.push('Your session has expired. Please sign in again.', 'warning', 5000);
+      // Clear the state so it doesn't fire again on refresh
+      window.history.replaceState({}, document.title);
+    }
+  }, [location.state, toast]);
 
   // Check for OAuth code in URL on mount
   useEffect(() => {
@@ -33,24 +47,16 @@ export default function PortalLogin() {
         .then((res) => res.json())
         .then((data) => {
           if (data.error) throw new Error(data.error);
-
-          // Store auth data
-          localStorage.setItem('acs_auth', JSON.stringify({
-            accessToken: data.accessToken,
-            employee: data.employee
-          }));
-          localStorage.setItem('acs_refresh', data.refreshToken);
-
-          // Reload to apply auth state
-          window.location.hash = '#/portal/attendance';
-          window.location.reload();
+          setAuthData(data.accessToken, data.employee, data.refreshToken);
+          // SPA navigation — preserves any draft state and avoids a full reload
+          navigate('/portal/attendance', { replace: true });
         })
         .catch((err) => {
           setStatus('error');
           setErrorMsg(err.message || 'Zoho login failed');
         });
     }
-  }, [searchParams]);
+  }, [searchParams, navigate, setAuthData]);
 
   const handleChange = (e) => {
     setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
@@ -75,17 +81,12 @@ export default function PortalLogin() {
     setErrorMsg('');
 
     const apiUrl = import.meta.env.VITE_API_URL;
-    console.log('Zoho login clicked, API URL:', apiUrl);
 
     try {
-      // Get Zoho OAuth URL
       const res = await fetch(`${apiUrl}/api/auth/zoho`);
-      console.log('Zoho endpoint response status:', res.status);
       if (!res.ok) throw new Error('Zoho OAuth not configured. API URL: ' + apiUrl);
       const { authUrl } = await res.json();
-      console.log('Redirecting to:', authUrl);
 
-      // Use popup window for OAuth (less likely to be blocked as suspicious)
       const width = 600;
       const height = 700;
       const left = window.screenX + (window.outerWidth - width) / 2;
@@ -97,28 +98,19 @@ export default function PortalLogin() {
       );
 
       if (!popup) {
-        // Fallback to redirect if popup blocked
         window.location.href = authUrl;
         return;
       }
 
-      // Listen for OAuth callback via postMessage
       const handleMessage = (event) => {
         if (event.origin !== apiUrl) return;
         if (event.data.type === 'zoho-oauth-success') {
           window.removeEventListener('message', handleMessage);
           popup.close();
-
-          // Store auth data
-          localStorage.setItem('acs_auth', JSON.stringify({
-            accessToken: event.data.accessToken,
-            employee: event.data.employee
-          }));
-          localStorage.setItem('acs_refresh', event.data.refreshToken);
-
-          // Reload to apply auth state
-          window.location.hash = '#/portal/attendance';
-          window.location.reload();
+          // SPA navigation via AuthContext — keeps any draft state alive
+          // and avoids losing scroll position / focus.
+          setAuthData(event.data.accessToken, event.data.employee, event.data.refreshToken);
+          navigate('/portal/attendance', { replace: true });
         } else if (event.data.type === 'zoho-oauth-error') {
           window.removeEventListener('message', handleMessage);
           popup.close();
@@ -129,7 +121,6 @@ export default function PortalLogin() {
       window.addEventListener('message', handleMessage);
 
     } catch (err) {
-      console.error('Zoho login error:', err);
       setStatus('error');
       setErrorMsg(err.message || 'Zoho OAuth not available');
     }
@@ -138,7 +129,6 @@ export default function PortalLogin() {
   return (
     <div className="portal-auth-bg">
       <div className="portal-auth-card">
-        {/* Logo / Branding */}
         <div className="portal-auth-logo">
           <div className="logo-icon" style={{ background: 'var(--blue)', width: 48, height: 48, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <svg width="24" height="24" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -163,7 +153,6 @@ export default function PortalLogin() {
           </div>
         )}
 
-        {/* Zoho SSO Button */}
         <button
           type="button"
           onClick={handleZohoLogin}

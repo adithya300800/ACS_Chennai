@@ -1,9 +1,17 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
+import { useToast } from '../contexts/ToastContext.jsx';
 import { api } from '../lib/api.js';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
+
+// Exponential backoff with cap, and circuit-break after 3 failures so a
+// truly dead token doesn't generate a forever-reconnecting log spam
+// (the 12× 401 pattern from the original HAR).
+const MAX_RECONNECT_ATTEMPTS = 3;
+const BASE_RECONNECT_MS = 1000;
+const MAX_RECONNECT_MS = 30000;
 
 function timeAgo(dateStr) {
   if (!dateStr) return '';
@@ -35,16 +43,20 @@ function NotifIcon({ type }) {
 
 export default function NotificationBell() {
   const { accessToken, employee } = useAuth();
+  const toast = useToast();
   const navigate = useNavigate();
   const dropdownRef = useRef(null);
   const eventSourceRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  const reconnectAttemptRef = useRef(0);
+  const browserNotifRequestedRef = useRef(false);
 
   const [open, setOpen] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [connectionLost, setConnectionLost] = useState(false); // circuit-broken, user must refresh
 
   // Load initial notifications
   const loadNotifications = useCallback(async () => {
@@ -52,33 +64,60 @@ export default function NotificationBell() {
     setLoading(true);
     try {
       const data = await api.getNotifications(null, accessToken);
-      // API returns array directly or { notifications: [] }
       const items = Array.isArray(data) ? data : (data.notifications || []);
       setNotifications(items);
-      setUnreadCount(items.filter(n => !n.isRead).length);
+      setUnreadCount(items.filter((n) => !n.isRead).length);
     } catch (err) {
-      console.error('Failed to load notifications:', err);
+      // 401 paths already dispatch auth:logout from the api.js interceptor.
+      // Anything else (network/transient) gets a soft toast — don't spam the user.
+      if (err.status !== 401 && err.status !== 0) {
+        console.error('Failed to load notifications:', err);
+      }
     } finally {
       setLoading(false);
     }
   }, [accessToken]);
 
-  // Connect SSE
-  const connectSSE = useCallback(() => {
+  // Connect SSE via single-use ticket. Replaces the legacy ?token= JWT-in-URL
+  // path (Code Reviewer P2-2) — JWT no longer reaches reverse-proxy logs.
+  const connectSSE = useCallback(async () => {
     if (!accessToken || !employee) return;
 
-    // Close existing connection
+    // Close existing connection before opening a new one
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;
     }
 
-    // Note: EventSource doesn't support custom headers — token passed via query param
-    const url = `${API_BASE}/api/dpr/notifications?token=${encodeURIComponent(accessToken)}`;
+    let ticket;
+    try {
+      const res = await api.getNotificationTicket(accessToken);
+      ticket = res.ticket;
+    } catch (err) {
+      // 401 already triggered auth:logout via the api interceptor.
+      // A 401 here means the JWT truly is dead — no point reconnecting.
+      if (err.status === 401) {
+        setConnectionLost(true);
+        return;
+      }
+      // Transient failure on the ticket POST — schedule a reconnect
+      // (e.g. backend briefly unreachable, network blip).
+      scheduleReconnect();
+      return;
+    }
+
+    if (!ticket) {
+      scheduleReconnect();
+      return;
+    }
+
+    const url = `${API_BASE}/api/dpr/notifications?ticket=${encodeURIComponent(ticket)}`;
     const es = new EventSource(url);
 
     es.onopen = () => {
       setConnected(true);
+      setConnectionLost(false);
+      reconnectAttemptRef.current = 0;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;
@@ -86,26 +125,39 @@ export default function NotificationBell() {
     };
 
     es.onerror = () => {
+      // EventSource can't tell 401 from a transient drop — close and
+      // let the ticket-based reconnect try. The next ticket POST will
+      // tell us definitively whether the auth is dead.
       setConnected(false);
       es.close();
       eventSourceRef.current = null;
-      // Reconnect with backoff
-      reconnectTimeoutRef.current = setTimeout(() => {
-        connectSSE();
-      }, 5000);
+      scheduleReconnect();
     };
 
     es.addEventListener('notification', (e) => {
       try {
         const notif = JSON.parse(e.data);
-        setNotifications(prev => {
-          // Avoid duplicates
-          const exists = prev.some(n => n.id === notif.id);
+        setNotifications((prev) => {
+          const exists = prev.some((n) => n.id === notif.id);
           if (exists) return prev;
           return [notif, ...prev];
         });
         if (!notif.isRead) {
-          setUnreadCount(c => c + 1);
+          setUnreadCount((c) => c + 1);
+          // Soft in-app toast so background-tab users don't miss events
+          if (notif.message) {
+            toast.push(notif.message, 'info', 4000);
+          }
+          // Ask for browser notification permission once, then notify
+          if (typeof Notification !== 'undefined' && Notification.permission === 'default' && !browserNotifRequestedRef.current) {
+            browserNotifRequestedRef.current = true;
+            Notification.requestPermission().catch(() => {});
+          } else if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            try {
+              // eslint-disable-next-line no-new
+              new Notification('ACS Chennai', { body: notif.message || 'New notification' });
+            } catch {}
+          }
         }
       } catch {}
     });
@@ -115,14 +167,29 @@ export default function NotificationBell() {
     });
 
     es.addEventListener('heartbeat', () => {
-      // Just keepalive - nothing to do
+      // Keepalive — nothing to do
     });
 
     eventSourceRef.current = es;
-  }, [accessToken, employee]);
+  }, [accessToken, employee, toast]);
+
+  // Exponential backoff reconnect — capped at MAX_RECONNECT_MS and
+  // circuit-broken after MAX_RECONNECT_ATTEMPTS so a permanently rejected
+  // ticket (rotated JWT secret, banned user) doesn't hammer the backend.
+  const scheduleReconnect = useCallback(() => {
+    if (reconnectAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
+      setConnectionLost(true);
+      return;
+    }
+    reconnectAttemptRef.current += 1;
+    const delay = Math.min(MAX_RECONNECT_MS, BASE_RECONNECT_MS * 2 ** reconnectAttemptRef.current);
+    reconnectTimeoutRef.current = setTimeout(connectSSE, delay);
+  }, [connectSSE]);
 
   useEffect(() => {
     loadNotifications();
+    reconnectAttemptRef.current = 0;
+    setConnectionLost(false);
     connectSSE();
     return () => {
       if (eventSourceRef.current) {
@@ -131,8 +198,10 @@ export default function NotificationBell() {
       }
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
       }
     };
+    // Re-mount on token change so the ticket request picks up the new JWT
   }, [loadNotifications, connectSSE]);
 
   // Close dropdown on outside click
@@ -147,15 +216,23 @@ export default function NotificationBell() {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
+  // Close dropdown on Escape (accessibility)
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [open]);
+
   const handleNotifClick = async (notif) => {
-    // Mark as read locally
     if (!notif.isRead) {
-      setNotifications(prev =>
-        prev.map(n => n.id === notif.id ? { ...n, isRead: true } : n)
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === notif.id ? { ...n, isRead: true } : n))
       );
-      setUnreadCount(c => Math.max(0, c - 1));
+      setUnreadCount((c) => Math.max(0, c - 1));
     }
-    // Navigate to DPR
     if (notif.dprId) {
       navigate('/portal/dpr/my', { state: { selectedDprId: notif.dprId } });
     }
@@ -165,21 +242,33 @@ export default function NotificationBell() {
   const handleMarkAllRead = async () => {
     try {
       await api.markAllNotificationsRead(accessToken);
-      setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+      setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
       setUnreadCount(0);
     } catch (err) {
-      console.error('Failed to mark all read:', err);
+      toast.push('Could not mark notifications as read.', 'error');
     }
   };
 
+  const handleRetryConnection = () => {
+    reconnectAttemptRef.current = 0;
+    setConnectionLost(false);
+    connectSSE();
+  };
+
   const displayCount = unreadCount > 9 ? '9+' : unreadCount;
+  const statusTitle = connectionLost
+    ? 'Disconnected — click to retry'
+    : connected
+      ? 'Connected'
+      : 'Reconnecting...';
 
   return (
     <div style={{ position: 'relative' }} ref={dropdownRef}>
       <button
         className={`notification-bell-btn ${open ? 'active' : ''}`}
-        onClick={() => setOpen(o => !o)}
-        title={`Notifications${connected ? ' (connected)' : ' (offline)'}`}
+        onClick={() => setOpen((o) => !o)}
+        title={statusTitle}
+        aria-label={`Notifications (${unreadCount} unread)`}
         style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}
       >
         <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24">
@@ -188,19 +277,46 @@ export default function NotificationBell() {
         {unreadCount > 0 && (
           <span className="notification-badge">{displayCount}</span>
         )}
-        {!connected && (
+        {connectionLost ? (
+          <span
+            onClick={(e) => { e.stopPropagation(); handleRetryConnection(); }}
+            style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', position: 'absolute', top: 2, left: 2, cursor: 'pointer' }}
+            title="Click to retry"
+          />
+        ) : !connected ? (
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#f59e0b', position: 'absolute', top: 2, left: 2 }} title="Reconnecting..." />
-        )}
+        ) : null}
       </button>
 
       {open && (
-        <div className="notification-dropdown">
+        <div
+          className="notification-dropdown"
+          role="dialog"
+          aria-label="Notifications"
+        >
           <div style={{ padding: '0.875rem 1rem', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ fontWeight: 600, color: 'var(--navy)', fontSize: '0.9rem' }}>
               Notifications
             </div>
             <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-              <div style={{ width: 8, height: 8, borderRadius: '50%', background: connected ? '#22c55e' : '#ef4444' }} title={connected ? 'Connected' : 'Disconnected'} />
+              <div
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: connectionLost ? '#ef4444' : connected ? '#22c55e' : '#f59e0b',
+                }}
+                title={statusTitle}
+              />
+              {connectionLost && (
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={handleRetryConnection}
+                  style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem' }}
+                >
+                  Retry
+                </button>
+              )}
               {unreadCount > 0 && (
                 <button
                   className="btn btn-ghost btn-sm"
@@ -225,11 +341,14 @@ export default function NotificationBell() {
                 <p style={{ fontSize: '0.75rem', marginTop: '0.25rem' }}>You'll be notified when DPRs are reviewed</p>
               </div>
             ) : (
-              notifications.map(notif => (
+              notifications.map((notif) => (
                 <div
                   key={notif.id}
                   className={`notification-item ${!notif.isRead ? 'unread' : ''}`}
                   onClick={() => handleNotifClick(notif)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleNotifClick(notif); } }}
                 >
                   <NotifIcon type={notif.type} />
                   <div className="notification-content">

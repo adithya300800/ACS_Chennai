@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 
 function StatusBadge({ status }) {
@@ -29,30 +30,49 @@ function StatCard({ number, label, color }) {
   );
 }
 
+function PhotoThumb({ photo }) {
+  const src = photo.thumbUrl || photo.readUrl || photo.blobUrl;
+  if (!src) {
+    return (
+      <div
+        style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.65rem', color: '#94a3b8' }}
+      >
+        📷
+      </div>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt={photo.caption || 'Site photo'}
+      loading="lazy"
+      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+    />
+  );
+}
+
 export default function DprDashboard() {
   const { accessToken, employee } = useAuth();
+  const toast = useToast();
   const [dprs, setDprs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [reviewing, setReviewing] = useState(null); // id of DPR being reviewed
   const [adminNotes, setAdminNotes] = useState('');
+  const [rejectReason, setRejectReason] = useState('');
   const [actionLoading, setActionLoading] = useState('');
   const [filter, setFilter] = useState('SUBMITTED');
   const [stats, setStats] = useState({ today: 0, pending: 0, approvedWeek: 0, total: 0 });
 
   const loadDprs = useCallback(async () => {
-    try {
-      const data = await api.getDprs({ status: filter }, accessToken);
-      return data.dprs || [];
-    } catch (err) {
-      throw err;
-    }
+    const data = await api.getDprs({ status: filter }, accessToken);
+    return data.dprs || [];
   }, [accessToken, filter]);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
+    setError('');
     try {
-      // Load pending count and today's count in parallel
       const [pendingData, todayData, weekData] = await Promise.all([
         api.getDprs({ status: 'SUBMITTED' }, accessToken),
         api.getDprs({ status: 'UNDER_REVIEW' }, accessToken),
@@ -69,28 +89,77 @@ export default function DprDashboard() {
       const items = await loadDprs();
       setDprs(items);
     } catch (err) {
-      setError(err.message);
+      // 401 paths are handled by the api.js interceptor (auth:logout).
+      // Anything else surfaces as a toast + inline error.
+      if (err.status !== 401) {
+        setError(err.message);
+        toast.push(err.message || 'Failed to load DPRs.', 'error');
+      }
     } finally {
       setLoading(false);
     }
-  }, [accessToken, filter, loadDprs]);
+  }, [accessToken, filter, loadDprs, toast]);
 
   useEffect(() => {
     loadAll();
-  }, [filter]);
+  }, [filter, loadAll]);
 
-  const handleReview = async (dprId, action) => {
-    setActionLoading(action);
+  // Optimistic approve: change the card's status immediately, revert on error.
+  // Feels instant on a good connection; rolls back cleanly on a 4xx/5xx.
+  const handleApprove = async (dprId) => {
+    const snapshot = dprs;
+    setActionLoading('approve');
+    // Optimistic update
+    setDprs((prev) => prev.map((d) => (d.id === dprId ? { ...d, status: 'APPROVED' } : d)));
     try {
-      await api.reviewDpr(dprId, { corrections: {}, adminNotes }, accessToken);
+      await api.approveDpr(dprId, adminNotes || undefined, accessToken);
       setReviewing(null);
       setAdminNotes('');
+      toast.push('DPR approved.', 'success');
       await loadAll();
     } catch (err) {
-      setError(err.message);
+      setDprs(snapshot);
+      if (err.status !== 401) {
+        toast.push(err.message || 'Could not approve DPR.', 'error');
+      }
     } finally {
       setActionLoading('');
     }
+  };
+
+  // Optimistic reject with required reason. Backend POST /:id/reject requires
+  // `reason` — the old /review endpoint didn't, which is why "reject button
+  // doesn't work" was a real bug.
+  const handleReject = async (dprId) => {
+    const reason = rejectReason.trim();
+    if (!reason) {
+      toast.push('Reject reason is required.', 'warning');
+      return;
+    }
+    const snapshot = dprs;
+    setActionLoading('reject');
+    setDprs((prev) => prev.map((d) => (d.id === dprId ? { ...d, status: 'REJECTED' } : d)));
+    try {
+      await api.rejectDpr(dprId, reason, adminNotes || undefined, accessToken);
+      setReviewing(null);
+      setAdminNotes('');
+      setRejectReason('');
+      toast.push('DPR rejected.', 'success');
+      await loadAll();
+    } catch (err) {
+      setDprs(snapshot);
+      if (err.status !== 401) {
+        toast.push(err.message || 'Could not reject DPR.', 'error');
+      }
+    } finally {
+      setActionLoading('');
+    }
+  };
+
+  const closeReview = () => {
+    setReviewing(null);
+    setAdminNotes('');
+    setRejectReason('');
   };
 
   if (!employee?.isAdmin) {
@@ -110,7 +179,7 @@ export default function DprDashboard() {
       <div className="dpr-page-header">
         <h1 className="dpr-page-title">DPR Dashboard</h1>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
-          {['SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'].map(s => (
+          {['SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'].map((s) => (
             <button
               key={s}
               className={`btn btn-sm ${filter === s ? 'btn-primary' : 'btn-secondary'}`}
@@ -122,7 +191,6 @@ export default function DprDashboard() {
         </div>
       </div>
 
-      {/* Stats */}
       <div className="dpr-dashboard-stats">
         <StatCard number={stats.today} label="Submitted Today" />
         <StatCard number={stats.pending} label="Pending Review" color="#f59e0b" />
@@ -133,9 +201,14 @@ export default function DprDashboard() {
       {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
 
       {loading ? (
-        <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--steel)' }}>
-          <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>⏳</div>
-          Loading...
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem' }}>
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="dpr-card" aria-hidden="true" style={{ minHeight: 220, opacity: 0.55 }}>
+              <div style={{ height: 16, background: '#e2e8f0', borderRadius: 4, width: '60%', marginBottom: 12 }} />
+              <div style={{ height: 12, background: '#e2e8f0', borderRadius: 4, width: '80%', marginBottom: 8 }} />
+              <div style={{ height: 12, background: '#e2e8f0', borderRadius: 4, width: '40%' }} />
+            </div>
+          ))}
         </div>
       ) : dprs.length === 0 ? (
         <div className="dpr-list-empty">
@@ -147,7 +220,7 @@ export default function DprDashboard() {
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem' }}>
-          {dprs.map(dpr => (
+          {dprs.map((dpr) => (
             <div key={dpr.id} className="dpr-card">
               <div className="dpr-card-header">
                 <div>
@@ -160,7 +233,6 @@ export default function DprDashboard() {
                 <StatusBadge status={dpr.status} />
               </div>
 
-              {/* Meta grid */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', marginBottom: '0.75rem' }}>
                 {dpr.weather && (
                   <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
@@ -182,7 +254,6 @@ export default function DprDashboard() {
                 </div>
               </div>
 
-              {/* Submitter */}
               {dpr.submittedBy && (
                 <div style={{ fontSize: '0.8rem', color: 'var(--steel)', marginBottom: '0.75rem' }}>
                   <span style={{ fontWeight: 500 }}>Submitted by:</span> {dpr.submittedBy.name}
@@ -192,18 +263,38 @@ export default function DprDashboard() {
                 </div>
               )}
 
-              {/* Photo thumbnails */}
+              {dpr.notes && (
+                <div style={{
+                  fontSize: '0.85rem',
+                  color: 'var(--navy)',
+                  background: '#f8fafc',
+                  padding: '0.625rem 0.75rem',
+                  borderRadius: 6,
+                  marginBottom: '0.75rem',
+                  borderLeft: '3px solid #cbd5e1',
+                  whiteSpace: 'pre-wrap',
+                }}>
+                  {dpr.notes}
+                </div>
+              )}
+
+              {/* Photo thumbnails — show actual images when backend provides URLs */}
               {dpr.photos?.length > 0 && (
                 <div style={{ display: 'flex', gap: '0.375rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
-                  {dpr.photos.slice(0, 4).map(photo => (
-                    <div key={photo.id} style={{ width: 48, height: 48, borderRadius: 6, background: '#f1f5f9', overflow: 'hidden', flexShrink: 0 }}>
-                      <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.6rem', color: '#94a3b8' }}>
-                        📷
-                      </div>
-                    </div>
+                  {dpr.photos.slice(0, 4).map((photo) => (
+                    <a
+                      key={photo.id}
+                      href={photo.readUrl || photo.blobUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ width: 56, height: 56, borderRadius: 6, background: '#f1f5f9', overflow: 'hidden', flexShrink: 0, display: 'block' }}
+                      title={photo.caption || 'Open photo'}
+                    >
+                      <PhotoThumb photo={photo} />
+                    </a>
                   ))}
                   {dpr.photos.length > 4 && (
-                    <div style={{ width: 48, height: 48, borderRadius: 6, background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', color: 'var(--steel)' }}>
+                    <div style={{ width: 56, height: 56, borderRadius: 6, background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', color: 'var(--steel)' }}>
                       +{dpr.photos.length - 4}
                     </div>
                   )}
@@ -219,29 +310,40 @@ export default function DprDashboard() {
                         className="form-input"
                         placeholder="Admin notes (optional)"
                         value={adminNotes}
-                        onChange={e => setAdminNotes(e.target.value)}
+                        onChange={(e) => setAdminNotes(e.target.value)}
                         style={{ fontSize: '0.85rem', padding: '0.5rem' }}
+                      />
+                      <textarea
+                        className="form-input"
+                        placeholder="Reject reason (required for reject)"
+                        value={rejectReason}
+                        onChange={(e) => setRejectReason(e.target.value)}
+                        rows={2}
+                        style={{ fontSize: '0.85rem', padding: '0.5rem', resize: 'vertical' }}
+                        aria-label="Reject reason"
                       />
                       <div style={{ display: 'flex', gap: '0.5rem' }}>
                         <button
                           className="btn btn-success btn-sm"
-                          onClick={() => handleReview(dpr.id, 'approve')}
+                          onClick={() => handleApprove(dpr.id)}
                           disabled={!!actionLoading}
                           style={{ flex: 1 }}
                         >
-                          {actionLoading === 'approve' ? '...' : '✓ Approve'}
+                          {actionLoading === 'approve' ? 'Approving...' : '✓ Approve'}
                         </button>
                         <button
                           className="btn btn-danger btn-sm"
-                          onClick={() => handleReview(dpr.id, 'reject')}
-                          disabled={!!actionLoading}
+                          onClick={() => handleReject(dpr.id)}
+                          disabled={!!actionLoading || !rejectReason.trim()}
+                          title={!rejectReason.trim() ? 'Enter a reject reason first' : ''}
                           style={{ flex: 1 }}
                         >
-                          {actionLoading === 'reject' ? '...' : '✗ Reject'}
+                          {actionLoading === 'reject' ? 'Rejecting...' : '✗ Reject'}
                         </button>
                         <button
                           className="btn btn-secondary btn-sm"
-                          onClick={() => { setReviewing(null); setAdminNotes(''); }}
+                          onClick={closeReview}
+                          disabled={!!actionLoading}
                         >
                           Cancel
                         </button>
@@ -266,8 +368,15 @@ export default function DprDashboard() {
               )}
 
               {dpr.status === 'REJECTED' && (
-                <div style={{ textAlign: 'center', padding: '0.5rem', background: '#fee2e2', borderRadius: 6, color: '#dc2626', fontSize: '0.85rem', fontWeight: 500 }}>
-                  ✗ Rejected
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                  <div style={{ textAlign: 'center', padding: '0.5rem', background: '#fee2e2', borderRadius: 6, color: '#dc2626', fontSize: '0.85rem', fontWeight: 500 }}>
+                    ✗ Rejected
+                  </div>
+                  {dpr.rejectionReason && (
+                    <div style={{ fontSize: '0.75rem', color: 'var(--steel)', fontStyle: 'italic' }}>
+                      Reason: {dpr.rejectionReason}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

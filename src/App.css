@@ -2403,3 +2403,9 @@ footer {
     grid-template-columns: 1fr;
   }
 }
+
+/* Toast entrance — used by ToastContext.jsx */
+@keyframes toast-in {
+  from { transform: translateX(20px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}

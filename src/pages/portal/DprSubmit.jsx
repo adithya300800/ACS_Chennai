@@ -1,11 +1,14 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../../lib/constants.js';
 import DprWorkEntryAdder from './DprWorkEntryAdder.jsx';
 import { SUB_WORK_TYPE_OPTIONS } from './DprWorkTypes.jsx';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
+const DRAFT_KEY = 'dpr_draft_v1';
 
 // Auto-set date to user's local timezone (no manual selection)
 const getLocalDate = () => {
@@ -15,12 +18,65 @@ const getLocalDate = () => {
   return local.toISOString().split('T')[0];
 };
 
+// Reject future-dated and malformed dates before they hit the backend.
+// Backend already validates this server-side (parseStrictISODate in
+// backend/src/lib/errors.js), but a client-side check turns the error
+// into a friendly toast instead of a 400 response the user has to
+// decipher.
+const validateReportDate = (value) => {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return 'Report date must be in YYYY-MM-DD format. Please refresh the page.';
+  }
+  const today = new Date();
+  today.setHours(23, 59, 59, 999);
+  if (new Date(value) > today) return 'Report date cannot be in the future.';
+  return null;
+};
+
+function loadDraft() {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function saveDraft(payload) {
+  try {
+    // Strip blobs (don't serialize) and blob URLs (don't persist)
+    const safe = {
+      form: payload.form,
+      notes: payload.notes,
+      workEntries: payload.workEntries,
+      photos: (payload.photos || []).map((p) => ({
+        ulid: p.ulid,
+        container: p.container,
+        filename: p.filename,
+        contentType: p.contentType,
+        sizeBytes: p.sizeBytes,
+        caption: p.caption,
+        location: p.location,
+        takenAt: p.takenAt,
+      })),
+    };
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(safe));
+  } catch {}
+}
+
+function clearDraft() {
+  try { localStorage.removeItem(DRAFT_KEY); } catch {}
+}
+
 export default function DprSubmit() {
   const { accessToken } = useAuth();
+  const toast = useToast();
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
 
-  const [form, setForm] = useState({
+  const initialDraft = loadDraft();
+  const [form, setForm] = useState(initialDraft?.form || {
     projectName: '',
     location: '',
     reportDate: getLocalDate(),
@@ -28,11 +84,32 @@ export default function DprSubmit() {
     temperature: '',
     contractor: '',
   });
-  const [photos, setPhotos] = useState([]);
-  const [workEntries, setWorkEntries] = useState([]);
-  const [notes, setNotes] = useState('');
+  const [photos, setPhotos] = useState([]); // previewUrl is rebuilt on mount from scratch
+  const [workEntries, setWorkEntries] = useState(initialDraft?.workEntries || []);
+  const [notes, setNotes] = useState(initialDraft?.notes || '');
   const [status, setStatus] = useState('idle'); // idle | uploading | submitting | error
   const [error, setError] = useState('');
+  const [showDraftBanner, setShowDraftBanner] = useState(!!initialDraft);
+  // Per-file upload status: { id: { status, progress, error } }
+  const [uploadStatuses, setUploadStatuses] = useState({});
+  const photoObjectUrlsRef = useRef(new Set());
+
+  // Persist draft on every meaningful change. Don't include previewUrl /
+  // file / blob refs — JSON.stringify would either drop them or store
+  // useless data. Save at most every 750ms to avoid disk thrash.
+  useEffect(() => {
+    const t = setTimeout(() => saveDraft({ form, notes, workEntries, photos }), 750);
+    return () => clearTimeout(t);
+  }, [form, notes, workEntries, photos]);
+
+  // Revoke any blob URLs we created when the component unmounts so the
+  // tab doesn't leak memory on long-running sessions.
+  useEffect(() => {
+    return () => {
+      photoObjectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      photoObjectUrlsRef.current.clear();
+    };
+  }, []);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -40,37 +117,71 @@ export default function DprSubmit() {
   };
 
   const removePhoto = (idx) => {
-    setPhotos((p) => p.filter((_, i) => i !== idx));
+    setPhotos((p) => {
+      const removed = p[idx];
+      if (removed?.previewUrl) {
+        URL.revokeObjectURL(removed.previewUrl);
+        photoObjectUrlsRef.current.delete(removed.previewUrl);
+      }
+      return p.filter((_, i) => i !== idx);
+    });
+    setUploadStatuses((s) => {
+      const next = { ...s };
+      delete next[idx];
+      return next;
+    });
+  };
+
+  const updateUploadStatus = (tempId, patch) => {
+    setUploadStatuses((s) => ({ ...s, [tempId]: { ...(s[tempId] || {}), ...patch } }));
   };
 
   const handleFiles = async (files) => {
-    const valid = Array.from(files).filter(
-      (f) => ['image/jpeg', 'image/png', 'image/webp'].includes(f.type) && f.size <= 5 * 1024 * 1024
+    const arr = Array.from(files);
+    const valid = arr.filter(
+      (f) => ACCEPTED_PHOTO_TYPES.includes(f.type) && f.size <= MAX_PHOTO_BYTES
     );
     if (valid.length === 0) {
-      setError('Select valid images (jpg/png/webp, max 5MB each)');
+      const msg = `Select valid images (jpg/png/webp, max ${MAX_PHOTO_BYTES / 1024 / 1024}MB each)`;
+      setError(msg);
+      toast.push(msg, 'warning');
       return;
     }
-    if (photos.length + valid.length > 10) {
-      setError('Max 10 photos allowed');
+    if (photos.length + valid.length > MAX_PHOTOS_PER_DPR) {
+      const msg = `Max ${MAX_PHOTOS_PER_DPR} photos allowed`;
+      setError(msg);
+      toast.push(msg, 'warning');
       return;
     }
 
-    setStatus('uploading');
     setError('');
 
-    const newPhotos = [];
+    // Per-file statuses tracked separately so one failed upload doesn't
+    // poison the rest of the batch (Bug #5). Successful files still get
+    // added; failed ones surface inline + as a toast.
+    const completed = [];
+    const failed = [];
+
     for (const file of valid) {
+      const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const previewUrl = URL.createObjectURL(file);
+      photoObjectUrlsRef.current.add(previewUrl);
+      updateUploadStatus(tempId, { status: 'uploading', progress: 0, filename: file.name });
+
       try {
         const { sasUrl, ulid } = await api.getDprSasUrl(file.name, file.type, 'dpr-photos', accessToken);
+        updateUploadStatus(tempId, { status: 'uploading', progress: 50 });
+
         await fetch(sasUrl, {
           method: 'PUT',
           headers: { 'Content-Type': file.type },
           body: file,
         });
+
         await api.confirmUpload(ulid, 'dpr-photos', file.name, file.type, file.size, accessToken);
 
-        newPhotos.push({
+        updateUploadStatus(tempId, { status: 'complete', progress: 100 });
+        completed.push({
           ulid,
           container: 'dpr-photos',
           filename: file.name,
@@ -79,18 +190,26 @@ export default function DprSubmit() {
           caption: '',
           location: '',
           takenAt: new Date().toISOString(),
-          file,
-          previewUrl: URL.createObjectURL(file),
+          previewUrl,
         });
       } catch (err) {
-        setError(`Upload failed for ${file.name}: ${err.message}`);
-        setStatus('idle');
-        return;
+        updateUploadStatus(tempId, { status: 'error', error: err.message, filename: file.name });
+        failed.push({ filename: file.name, error: err.message });
+        // Continue with the rest of the batch
       }
     }
 
-    setPhotos((p) => [...p, ...newPhotos]);
-    setStatus('idle');
+    // Append successful uploads in original order; failed ones keep their
+    // status entry but no photo entry — user can re-select them.
+    if (completed.length > 0) {
+      setPhotos((p) => [...p, ...completed]);
+    }
+    if (failed.length > 0) {
+      const summary = failed.length === 1
+        ? `Failed to upload ${failed[0].filename}: ${failed[0].error}`
+        : `Failed to upload ${failed.length} photo${failed.length !== 1 ? 's' : ''}.`;
+      toast.push(summary, 'error');
+    }
   };
 
   const handleDrop = (e) => {
@@ -112,19 +231,43 @@ export default function DprSubmit() {
   };
 
   const handleSubmit = async (submitStatus) => {
+    setError('');
     if (!form.projectName || !form.location || !form.reportDate) {
-      setError('Project name, location, and date are required');
+      const msg = 'Project name, location, and date are required';
+      setError(msg);
+      toast.push(msg, 'warning');
       return;
     }
     if (workEntries.length === 0) {
-      setError('Please add at least one work entry before submitting');
+      const msg = 'Please add at least one work entry before submitting';
+      setError(msg);
+      toast.push(msg, 'warning');
+      return;
+    }
+    const dateErr = validateReportDate(form.reportDate);
+    if (dateErr) {
+      setError(dateErr);
+      toast.push(dateErr, 'warning');
       return;
     }
     setStatus('submitting');
-    setError('');
 
     try {
-      const dpr = await api.createDpr(
+      const photosToSubmit = photos
+        .filter((p) => p.ulid) // only successfully uploaded photos
+        .map(({ ulid, container, filename, contentType, sizeBytes, caption, location, takenAt }) => ({
+          ulid, container, filename, contentType, sizeBytes, caption, location, takenAt,
+        }));
+      if (photosToSubmit.length === 0 && uploadStatuses && Object.values(uploadStatuses).some((s) => s.status === 'error')) {
+        // All uploads failed — don't pretend the form is submittable.
+        const msg = 'All photo uploads failed. Please re-add photos before submitting.';
+        setError(msg);
+        setStatus('idle');
+        toast.push(msg, 'error');
+        return;
+      }
+
+      await api.createDpr(
         {
           projectName: form.projectName,
           location: form.location,
@@ -134,18 +277,37 @@ export default function DprSubmit() {
           contractor: form.contractor,
           notes: notes || null,
           status: submitStatus,
-          photos: photos.map(({ ulid, container, filename, contentType, sizeBytes, caption, location, takenAt }) => ({
-            ulid, container, filename, contentType, sizeBytes, caption, location, takenAt,
-          })),
+          photos: photosToSubmit,
           workEntries: workEntries.map(({ workType, data, addedAt }) => ({ workType, data, addedAt })),
         },
         accessToken
       );
+
+      clearDraft();
+      toast.push(submitStatus === 'DRAFT' ? 'Draft saved.' : 'DPR submitted successfully.', 'success');
       navigate('/portal/dpr/my');
     } catch (err) {
-      setError(err.message || 'Failed to submit DPR');
+      const msg = err.message || 'Failed to submit DPR';
+      setError(msg);
       setStatus('idle');
+      if (err.status !== 401) toast.push(msg, 'error');
     }
+  };
+
+  const handleDiscardDraft = () => {
+    clearDraft();
+    setForm({
+      projectName: '',
+      location: '',
+      reportDate: getLocalDate(),
+      weather: 'Sunny',
+      temperature: '',
+      contractor: '',
+    });
+    setWorkEntries([]);
+    setNotes('');
+    setShowDraftBanner(false);
+    toast.push('Draft discarded.', 'info');
   };
 
   return (
@@ -153,10 +315,35 @@ export default function DprSubmit() {
       <div className="dpr-card">
         <h1 className="dpr-page-title">Submit Daily Progress Report</h1>
 
+        {showDraftBanner && (
+          <div
+            role="status"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.75rem',
+              padding: '0.75rem 1rem',
+              background: '#eff6ff',
+              border: '1px solid #bfdbfe',
+              borderRadius: 6,
+              marginBottom: '1rem',
+              fontSize: '0.875rem',
+              color: '#1e40af',
+            }}
+          >
+            <span style={{ flex: 1 }}>📝 Restored unsaved draft from your previous visit.</span>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowDraftBanner(false)}>
+              Dismiss
+            </button>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={handleDiscardDraft}>
+              Discard
+            </button>
+          </div>
+        )}
+
         {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
 
         <div className="dpr-form">
-          {/* Project & Auto Date */}
           <div className="form-row">
             <div className="form-group" style={{ flex: 2 }}>
               <label htmlFor="projectName">Project Name *</label>
@@ -169,13 +356,11 @@ export default function DprSubmit() {
             </div>
           </div>
 
-          {/* Location */}
           <div className="form-group">
             <label htmlFor="location">Location *</label>
             <input id="location" name="location" className="form-input" value={form.location} onChange={handleChange} placeholder="Site address or location description" />
           </div>
 
-          {/* Weather, Temperature, Contractor */}
           <div className="form-row">
             <div className="form-group">
               <label htmlFor="weather">Weather</label>
@@ -193,7 +378,6 @@ export default function DprSubmit() {
             </div>
           </div>
 
-          {/* Notes */}
           <div className="form-group">
             <label htmlFor="notes">Notes / Comments <span style={{ fontWeight: 400, color: 'var(--steel)' }}>(optional)</span></label>
             <textarea
@@ -208,7 +392,6 @@ export default function DprSubmit() {
             />
           </div>
 
-          {/* Work Entries Section */}
           <div className="form-group">
             <label>Work Entries *</label>
             {workEntries.length > 0 && (
@@ -217,7 +400,7 @@ export default function DprSubmit() {
                   <div key={idx} className={`work-entry-card ${entry.data.overallStatus === 'Fail' || entry.data.result === 'Fail' || entry.data.overallStatus === 'Unapproved' ? 'entry-critical' : ''}`}>
                     <div className="work-entry-card-header">
                       <span className="work-entry-card-title">{getWorkEntryLabel(entry.workType)}</span>
-                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => handleRemoveWorkEntry(idx)}>×</button>
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => handleRemoveWorkEntry(idx)} aria-label="Remove work entry">×</button>
                     </div>
                     <div className="work-entry-card-body">
                       {Object.entries(entry.data).slice(0, 4).map(([key, val]) => (
@@ -237,27 +420,30 @@ export default function DprSubmit() {
             <DprWorkEntryAdder onAdd={handleAddWorkEntry} />
           </div>
 
-          {/* Photo Upload */}
           <div className="form-group">
-            <label>Site Photos (max 10)</label>
+            <label>Site Photos (max {MAX_PHOTOS_PER_DPR})</label>
             <div
               className="photo-upload-zone"
               onDrop={handleDrop}
               onDragOver={(e) => e.preventDefault()}
               onClick={() => fileInputRef.current?.click()}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInputRef.current?.click(); } }}
+              aria-label="Add photos"
             >
               <svg width="32" height="32" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
-              <p>Drag & drop photos or click to browse</p>
-              <span>JPG, PNG, WebP — max 5MB each</span>
+              <p>Drag &amp; drop photos or click to browse</p>
+              <span>JPG, PNG, WebP — max {MAX_PHOTO_BYTES / 1024 / 1024}MB each</span>
             </div>
-            <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" multiple style={{ display: 'none' }} onChange={(e) => handleFiles(e.target.files)} />
+            <input ref={fileInputRef} type="file" accept={ACCEPTED_PHOTO_TYPES.join(',')} multiple style={{ display: 'none' }} onChange={(e) => handleFiles(e.target.files)} />
 
             {photos.length > 0 && (
               <div className="photo-grid">
                 {photos.map((photo, idx) => (
-                  <div key={idx} className="photo-thumb">
+                  <div key={photo.ulid || idx} className="photo-thumb">
                     <img src={photo.previewUrl} alt={photo.caption || 'Site photo'} />
-                    <button type="button" className="photo-remove" onClick={() => removePhoto(idx)}>×</button>
+                    <button type="button" className="photo-remove" onClick={() => removePhoto(idx)} aria-label="Remove photo">×</button>
                     <input
                       className="photo-caption-input"
                       placeholder="Caption..."
@@ -267,19 +453,44 @@ export default function DprSubmit() {
                         updated[idx] = { ...updated[idx], caption: e.target.value };
                         setPhotos(updated);
                       }}
+                      aria-label="Photo caption"
                     />
                   </div>
                 ))}
               </div>
             )}
+
+            {/* Per-file status (visible only during an in-progress batch) */}
+            {Object.values(uploadStatuses).some((s) => s.status === 'uploading' || s.status === 'error') && (
+              <div style={{ marginTop: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                {Object.entries(uploadStatuses).map(([id, s]) =>
+                  s.status === 'uploading' || s.status === 'error' ? (
+                    <div
+                      key={id}
+                      style={{
+                        fontSize: '0.8rem',
+                        color: s.status === 'error' ? '#dc2626' : 'var(--steel)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.5rem',
+                      }}
+                    >
+                      <span>{s.status === 'uploading' ? '⏳' : '⚠️'}</span>
+                      <span>{s.filename}</span>
+                      {s.status === 'uploading' && <span>{s.progress}%</span>}
+                      {s.status === 'error' && <span style={{ opacity: 0.85 }}>— {s.error}</span>}
+                    </div>
+                  ) : null
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Actions */}
           <div className="dpr-form-actions">
-            <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting' || status === 'uploading'}>
+            <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting'}>
               {status === 'submitting' ? 'Saving...' : 'Save as Draft'}
             </button>
-            <button type="button" className="btn btn-primary" onClick={() => handleSubmit('SUBMITTED')} disabled={status === 'submitting' || status === 'uploading'}>
+            <button type="button" className="btn btn-primary" onClick={() => handleSubmit('SUBMITTED')} disabled={status === 'submitting'}>
               {status === 'submitting' ? 'Submitting...' : 'Submit Report'}
             </button>
           </div>

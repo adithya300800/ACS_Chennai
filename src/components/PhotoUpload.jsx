@@ -1,10 +1,11 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import { api } from '../lib/api.js';
+import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../lib/constants.js';
 
-const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
-const MAX_SIZE = 5 * 1024 * 1024; // 5MB
-const MAX_FILES = 10;
+const ACCEPTED_TYPES = ACCEPTED_PHOTO_TYPES;
+const MAX_SIZE = MAX_PHOTO_BYTES;
+const MAX_FILES = MAX_PHOTOS_PER_DPR;
 
 function UploadItem({ item, onRemove }) {
   const statusLabel = {
@@ -116,6 +117,17 @@ export default function PhotoUpload({ dprId, onPhotosChange, initialPhotos = [] 
   })));
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState('');
+  // Track blob URLs we created so we can revoke them on unmount.
+  // Items in `items` get a previewUrl from URL.createObjectURL; without
+  // revocation, long-running tabs accumulate dead references.
+  const ownedUrlsRef = useRef(new Set());
+
+  useEffect(() => {
+    return () => {
+      ownedUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      ownedUrlsRef.current.clear();
+    };
+  }, []);
 
   const processFiles = useCallback(async (files) => {
     const arr = Array.from(files);
@@ -137,19 +149,23 @@ export default function PhotoUpload({ dprId, onPhotosChange, initialPhotos = [] 
     setError('');
 
     // Create pending items with previews
-    const newItems = valid.map(file => ({
-      id: `temp-${Date.now()}-${Math.random()}`,
-      file,
-      filename: file.name,
-      contentType: file.type,
-      sizeBytes: file.size,
-      ulid: null,
-      status: 'idle',
-      progress: 0,
-      caption: '',
-      previewUrl: URL.createObjectURL(file),
-      error: '',
-    }));
+    const newItems = valid.map(file => {
+      const previewUrl = URL.createObjectURL(file);
+      ownedUrlsRef.current.add(previewUrl);
+      return {
+        id: `temp-${Date.now()}-${Math.random()}`,
+        file,
+        filename: file.name,
+        contentType: file.type,
+        sizeBytes: file.size,
+        ulid: null,
+        status: 'idle',
+        progress: 0,
+        caption: '',
+        previewUrl,
+        error: '',
+      };
+    });
 
     setItems(prev => [...prev, ...newItems]);
 
@@ -231,6 +247,11 @@ export default function PhotoUpload({ dprId, onPhotosChange, initialPhotos = [] 
 
   const removeItem = (id) => {
     setItems(prev => {
+      const removed = prev.find(i => i.id === id);
+      if (removed?.previewUrl && ownedUrlsRef.current.has(removed.previewUrl)) {
+        URL.revokeObjectURL(removed.previewUrl);
+        ownedUrlsRef.current.delete(removed.previewUrl);
+      }
       const updated = prev.filter(i => i.id !== id);
       const completed = updated.filter(i => i.status === 'complete');
       onPhotosChange?.(completed.map(({ id, ulid, filename, contentType, sizeBytes, caption }) => ({
