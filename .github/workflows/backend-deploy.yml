@@ -34,7 +34,12 @@ jobs:
         run: npm test
 
       - name: Push Prisma schema to Supabase
-        run: npx prisma db push --schema=backend/prisma/schema.prisma --skip-generate
+        run: npx prisma db push --schema=backend/prisma/schema.prisma --skip-generate --accept-data-loss
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Seed database
+        run: node prisma/seed.js
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
