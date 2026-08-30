@@ -33,11 +33,14 @@ const ZOHO_DOMAIN = process.env.ZOHO_DOMAIN || 'https://accounts.zoho.com';
 // receives the OAuth tokens, leaving the user stuck on the login page
 // even after Zoho says "Login successful".
 //
-// Set FRONTEND_ORIGIN to the deployed frontend origin (e.g.
-// https://acschennai.com). When unset, fall back to '*'. This is still
-// safe because the parent validates `event.origin` against
-// VITE_API_URL on receipt (see src/pages/PortalLogin.jsx).
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
+// Round-12: fall back to ALLOWED_ORIGINS/FRONTEND_URL before '*'. index.js
+// already hard-fails at boot unless one of those is set in production, so
+// in practice we now always post to an explicit origin and never broadcast
+// tokens with a '*' targetOrigin.
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN
+  || (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)[0]
+  || process.env.FRONTEND_URL
+  || '*';
 
 // OAuth state store: in-memory with TTL. NOTE: lost on restart — see P3 finding.
 // For multi-instance deployments move to Redis.
@@ -146,6 +149,84 @@ function consumeOAuthState(state) {
   return entry;
 }
 
+// Render the OAuth popup's closing page.
+//
+// This is the ONLY route in this API that returns HTML containing an inline
+// <script>, and it was failing on BOTH of the security headers helmet sets
+// globally in index.js. Symptom in production: the popup rendered "Login
+// successful! Please close this window.", never closed itself, and the
+// portal login tab hung on "Signing in..." forever.
+//
+//  1. CSP. helmet 8's default policy is `script-src 'self'` with no
+//     'unsafe-inline' and no nonce, so the browser refused to execute the
+//     inline script at all — neither postMessage nor window.close() ever
+//     ran, while the surrounding <p> still rendered. We mint a per-response
+//     nonce and re-issue a *tighter* policy for this one response
+//     (default-src 'none') rather than weakening the API-wide default.
+//
+//  2. COOP. helmet sets `same-origin-allow-popups` globally. That is the
+//     correct value for an *opener*, but this document IS the popup and its
+//     opener (the frontend origin) is cross-origin. Per the COOP matching
+//     rule, policies match only if both are `unsafe-none`, or if they are
+//     equal AND same-origin. Opener `unsafe-none` (GitHub Pages sets no
+//     COOP) paired with `same-origin-allow-popups` here does NOT match, so
+//     the popup is moved into a new browsing context group: window.opener
+//     becomes null (the tokens are silently dropped) and the popup is no
+//     longer an auxiliary browsing context, so window.close() is a no-op.
+//     `unsafe-none` on this response keeps the popup in the opener's group.
+//
+// Cache-Control: no-store because the success body carries bearer tokens.
+function sendPopupPage(res, { payload, message }) {
+  const nonce = crypto.randomBytes(16).toString('base64');
+
+  res.setHeader(
+    'Content-Security-Policy',
+    `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`
+  );
+  res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
+  res.setHeader('Cache-Control', 'no-store');
+
+  // Escape sequences that could break out of the <script> context or the
+  // JS string literal. The payload is server-built, but employee.name is
+  // derived from user-controlled email, so don't rely on that staying true.
+  const json = JSON.stringify(payload)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+
+  res.type('html').send(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>ACS Chennai</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;margin:0;display:flex;align-items:center;justify-content:center;height:100vh;color:#333;text-align:center;padding:1.5rem}</style>
+</head><body><p id="m">${message}</p>
+<script nonce="${nonce}">
+(function () {
+  var sent = false;
+  try {
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage(${json}, ${JSON.stringify(FRONTEND_ORIGIN)});
+      sent = true;
+    }
+  } catch (e) {}
+
+  if (!sent) {
+    document.getElementById('m').textContent =
+      'Could not reach the portal tab. Please close this window and sign in again.';
+    return;
+  }
+
+  window.close();
+  // window.close() is silently ignored when the browser refuses (e.g. the
+  // popup is not script-closable). Don't leave a stale "please close this
+  // window" up if that happens — say what actually holds.
+  setTimeout(function () {
+    document.getElementById('m').textContent =
+      'Signed in. You can close this window.';
+  }, 500);
+})();
+</script></body></html>`);
+}
+
 // POST /api/auth/zoho - Initiate Zoho OAuth. Frontend's PortalLogin.jsx
 // calls POST (it has no body to send, but POST avoids the auth URL leaking
 // through browser history and any CDN cache). Returns { authUrl } for the
@@ -183,19 +264,17 @@ router.post('/zoho', (req, res) => {
 router.get('/zoho/callback', async (req, res) => {
   const { code, state } = req.query;
 
-  const errorHtml = (errorCode) => `<!DOCTYPE html><html><body><script>
-    if (window.opener) {
-      window.opener.postMessage({ type: 'zoho-oauth-error', error: '${errorCode}' }, '${FRONTEND_ORIGIN}');
-    }
-    window.close();
-  </script><p>Login failed (${errorCode}). Please close this window and try again.</p></body></html>`;
+  const errorHtml = (errorCode) => sendPopupPage(res, {
+    payload: { type: 'zoho-oauth-error', error: errorCode },
+    message: `Sign-in failed (${errorCode}). Closing...`,
+  });
 
-  if (!code) return res.send(errorHtml('no_code'));
+  if (!code) return errorHtml('no_code');
 
   // Round-9: TTL-enforced state check. consumeOAuthState both validates
   // expiresAt and one-time-uses the entry.
   if (!consumeOAuthState(state)) {
-    return res.send(errorHtml('invalid_state'));
+    return errorHtml('invalid_state');
   }
 
   try {
@@ -213,7 +292,7 @@ router.get('/zoho/callback', async (req, res) => {
 
     if (!tokenRes.ok) {
       console.error('[zoho] token exchange failed', tokenRes.status);
-      return res.send(errorHtml('token_exchange_failed'));
+      return errorHtml('token_exchange_failed');
     }
 
     const tokens = await tokenRes.json();
@@ -229,14 +308,14 @@ router.get('/zoho/callback', async (req, res) => {
       } catch (e) { /* fall through */ }
     }
 
-    if (!email) return res.send(errorHtml('no_email'));
+    if (!email) return errorHtml('no_email');
     email = email.toLowerCase();
 
     // Email-domain allowlist (AppSec #20)
     const domain = email.split('@')[1];
     if (!domain || !ALLOWED_EMAIL_DOMAINS.includes(domain)) {
       console.warn('[zoho] signup blocked — domain not allowlisted', { emailHash: hashIdentifier(email), domain });
-      return res.send(errorHtml('domain_not_allowed'));
+      return errorHtml('domain_not_allowed');
     }
 
     const prisma = req.app.get('prisma');
@@ -248,24 +327,19 @@ router.get('/zoho/callback', async (req, res) => {
     });
 
     const { accessToken, refreshToken } = signTokens(employee);
-    const employeeData = sanitizeEmployee(employee);
 
-    const responseData = JSON.stringify({
-      type: 'zoho-oauth-success',
-      accessToken,
-      refreshToken,
-      employee: employeeData,
+    sendPopupPage(res, {
+      payload: {
+        type: 'zoho-oauth-success',
+        accessToken,
+        refreshToken,
+        employee: sanitizeEmployee(employee),
+      },
+      message: 'Signed in. Closing this window...',
     });
-
-    res.send(`<!DOCTYPE html><html><body><script>
-      if (window.opener) {
-        window.opener.postMessage(${responseData}, '${FRONTEND_ORIGIN}');
-      }
-      window.close();
-    </script><p>Login successful! Please close this window.</p></body></html>`);
   } catch (err) {
     console.error('[zoho] callback error', err);
-    res.send(errorHtml('server_error'));
+    errorHtml('server_error');
   }
 });
 

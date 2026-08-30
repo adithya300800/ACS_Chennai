@@ -4,6 +4,18 @@ import { useAuth } from '../contexts/AuthContext.jsx';
 import { useToast } from '../contexts/ToastContext.jsx';
 import { api } from '../lib/api.js';
 
+// Map the backend's typed OAuth error codes to something a human can act on.
+// The popup posts `{ type: 'zoho-oauth-error', error: '<code>' }`; showing the
+// raw code ("token_exchange_failed") to an employee is not an error message.
+const ZOHO_ERRORS = {
+  no_code: 'Zoho did not return an authorization code. Please try again.',
+  invalid_state: 'Your sign-in session expired. Please try again.',
+  token_exchange_failed: 'Could not complete sign-in with Zoho. Please try again.',
+  no_email: 'Your Zoho account has no email address associated with it.',
+  domain_not_allowed: 'This email domain is not permitted for the employee portal.',
+  server_error: 'Something went wrong on our end. Please try again.',
+};
+
 export default function PortalLogin() {
   const { login, setAuthData } = useAuth();
   const toast = useToast();
@@ -133,7 +145,23 @@ export default function PortalLogin() {
       // Navigate the already-open popup to the real authUrl.
       popup.location.href = authUrl;
 
-      const handleMessage = (event) => {
+      // Every exit path (success, error, popup closed, timeout) funnels
+      // through here so we never leave a listener, an interval or a timer
+      // running — and never leave the button stuck on "Signing in...".
+      // Declared with `let` up front so `cleanup` never closes over a
+      // binding that is still in its temporal dead zone.
+      let settled = false;
+      let closedWatch = null;
+      let giveUp = null;
+      const cleanup = () => {
+        settled = true;
+        window.removeEventListener('message', handleMessage);
+        clearInterval(closedWatch);
+        clearTimeout(giveUp);
+        try { popup.close(); } catch {}
+      };
+
+      function handleMessage(event) {
         // Trust the origin of the message sender. The popup runs on the
         // backend origin (acs-chennai.onrender.com) after Zoho redirects
         // it cross-origin. VITE_API_URL is not always set in CI (it's an
@@ -148,9 +176,7 @@ export default function PortalLogin() {
           : [window.location.origin];
         if (!allowedOrigins.includes(event.origin)) return;
         if (event.data?.type === 'zoho-oauth-success') {
-          window.removeEventListener('message', handleMessage);
-          clearInterval(closedWatch);
-          try { popup.close(); } catch {}
+          cleanup();
           setAuthData(event.data.accessToken, event.data.employee, event.data.refreshToken);
           try {
             Object.keys(sessionStorage).forEach((k) => {
@@ -159,25 +185,34 @@ export default function PortalLogin() {
           } catch {}
           navigate('/portal/attendance', { replace: true });
         } else if (event.data?.type === 'zoho-oauth-error') {
-          window.removeEventListener('message', handleMessage);
-          clearInterval(closedWatch);
-          try { popup.close(); } catch {}
+          cleanup();
           setStatus('error');
-          setErrorMsg(event.data.error || 'Zoho login failed');
+          setErrorMsg(ZOHO_ERRORS[event.data.error] || 'Zoho login failed. Please try again.');
         }
-      };
+      }
       window.addEventListener('message', handleMessage);
 
       // If the user closes the popup manually mid-flow (e.g. abandons the
       // Zoho sign-in screen), bail out of the loading state so they can
       // retry instead of staring at a stuck "Signing in..." button.
-      const closedWatch = setInterval(() => {
+      closedWatch = setInterval(() => {
         if (popup.closed) {
-          clearInterval(closedWatch);
-          window.removeEventListener('message', handleMessage);
+          cleanup();
           setStatus((s) => (s === 'loading' ? 'idle' : s));
         }
       }, 500);
+
+      // Last-resort backstop. If the popup is alive but inert — its script
+      // blocked, its opener severed, the network wedged — no message and no
+      // `closed` transition will ever arrive, and the login page would hang
+      // on "Signing in..." indefinitely. That was the reported production
+      // symptom. Always give the user a way out.
+      giveUp = setTimeout(() => {
+        if (settled) return;
+        cleanup();
+        setStatus('error');
+        setErrorMsg('Zoho sign-in timed out. Please close the Zoho window and try again.');
+      }, 3 * 60 * 1000);
 
     } catch (err) {
       // Network failed before we could navigate the popup — close it so
