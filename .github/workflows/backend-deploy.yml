@@ -33,15 +33,24 @@ jobs:
       - name: Run tests
         run: npm test
 
-      # Round-10: build a transaction-mode pooler URL from SUPABASE_DB_PASSWORD
-      # so the schema push works from GitHub Actions. Supabase's direct-connection
-      # hostname (port 5432) is firewalled to project IPs and is unreachable from
-      # GitHub-hosted runners. Pooler (port 6543) is reachable from anywhere.
-      # Falls back to secrets.DATABASE_URL if SUPABASE_DB_PASSWORD isn't set.
-      # continue-on-error so a transient DB hiccup never blocks the Render deploy.
+      # Round-11: the previous attempt constructed the correct pooler URL but
+      # prisma db push hung for 10+ minutes — likely a TCP handshake or auth
+      # timeout. Added diagnostic steps so a future failure shows the exact
+      # cause, with --timeout caps so it never hangs the job.
+      - name: Probe Supabase pooler connectivity
+        continue-on-error: true
+        run: |
+          # Redact the password before printing. Shows only host:port, db name.
+          HOST=$(echo "$DATABASE_URL" | sed -E 's|.*@([^/]+)/.*|\1|' | sed -E 's|:.*||')
+          PORT=$(echo "$DATABASE_URL" | sed -E 's|.*@[^:]+:([0-9]+)/.*|\1|')
+          echo "Probing $HOST:$PORT (timeout 15s)…"
+          timeout 15 bash -c "</dev/tcp/$HOST/$PORT" 2>&1 && echo "TCP OK" || echo "TCP FAIL (rc=$?)"
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+
       - name: Push Prisma schema to Supabase
         continue-on-error: true
-        run: npx prisma db push --schema=prisma/schema.prisma --skip-generate --accept-data-loss
+        run: npx prisma db push --schema=prisma/schema.prisma --skip-generate --accept-data-loss --timeout 30s
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
