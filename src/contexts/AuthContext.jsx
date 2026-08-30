@@ -11,6 +11,26 @@ export function AuthProvider({ children }) {
   const navigateRef = useRef(null);
   const locationRef = useRef(null);
 
+  // Defined early so the preemptive-refresh useEffect below can reference it
+  // in its dependency array without hitting a JS TDZ (declared-later is a
+  // ReferenceError for `const`). This callback's own deps are [] so it never
+  // changes identity — moving it up is safe and stable.
+  const refreshTokenFn = useCallback(async () => {
+    const refresh = localStorage.getItem('acs_refresh');
+    if (!refresh) throw new Error('No refresh token');
+
+    const data = await api.post('/auth/refresh', { refreshToken: refresh });
+    const newAccessToken = data.accessToken;
+
+    const stored = localStorage.getItem('acs_auth');
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      localStorage.setItem('acs_auth', JSON.stringify({ ...parsed, accessToken: newAccessToken }));
+    }
+    setAccessToken(newAccessToken);
+    return newAccessToken;
+  }, []);
+
   // On mount, try to restore session from localStorage
   useEffect(() => {
     const stored = localStorage.getItem('acs_auth');
@@ -161,22 +181,6 @@ export function AuthProvider({ children }) {
     setAccessToken(null);
     setEmployee(null);
   }, [accessToken]);
-
-  const refreshTokenFn = useCallback(async () => {
-    const refresh = localStorage.getItem('acs_refresh');
-    if (!refresh) throw new Error('No refresh token');
-
-    const data = await api.post('/auth/refresh', { refreshToken: refresh });
-    const newAccessToken = data.accessToken;
-
-    const stored = localStorage.getItem('acs_auth');
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      localStorage.setItem('acs_auth', JSON.stringify({ ...parsed, accessToken: newAccessToken }));
-    }
-    setAccessToken(newAccessToken);
-    return newAccessToken;
-  }, []);
 
   // Provide navigate via a hook wrapper so consumers don't have to wrap us.
   // Called once by <RouterScope /> (see below) to inject react-router.
