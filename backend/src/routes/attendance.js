@@ -2,22 +2,38 @@ const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
 
-// Helper: Get UTC start and end of a local date (YYYY-MM format)
+// Helper: Get local start and end of a month (YYYY-MM format) for the
+// configured timezone (Asia/Kolkata; set in src/index.js). Returns the
+// full month inclusive of the last day's last millisecond.
 function getMonthRange(yearMonth) {
   const [year, month] = yearMonth.split('-').map(Number);
-  // Convert local date to UTC range for database query
-  const startDate = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
-  const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+  // Local-time constructors — `Date.UTC(...)` would compute a UTC boundary
+  // and miss / double-count days for users east of UTC. Once TZ=Asia/Kolkata
+  // is set in src/index.js, "local midnight" IS IST midnight.
+  const startDate = new Date(year, month - 1, 1, 0, 0, 0, 0);
+  // Last day of (year, month) at 23:59:59.999 local — `new Date(y, m, 0)`
+  // is the last day of the previous index, so passing the input month
+  // (1-indexed in the query string) gives the last day of the queried
+  // month, which is what `lte` needs to be inclusive.
+  const endDate = new Date(year, month, 0, 23, 59, 59, 999);
   return { startDate, endDate };
 }
 
-// Helper: Parse YYYY-MM-DD string to UTC midnight for storage
+// Helper: Parse YYYY-MM-DD string to local midnight for storage.
+// Once TZ=Asia/Kolkata is set in src/index.js, "local midnight" IS
+// IST midnight — matching the calendar day the user clicked.
 function parseLocalDate(dateStr) {
   const [year, month, day] = dateStr.split('-').map(Number);
-  return new Date(Date.UTC(year, month - 1, day));
+  return new Date(year, month - 1, day);
 }
 
-// Helper: Get date string YYYY-MM-DD from Date object (local timezone for display)
+// Helper: Get date string YYYY-MM-DD from a Date object. Uses the server's
+// LOCAL timezone (which is Asia/Kolkata after src/index.js boots with
+// `process.env.TZ = 'Asia/Kolkata'`). Prisma reads `@db.Date` columns as
+// midnight-local JS Dates, so `getDate/getMonth/getFullYear` on a freshly
+// read row always returns the calendar day the user clicked — provided the
+// server's local TZ matches the user's calendar TZ (true for an Indian
+// workforce).
 function toLocalDateString(date) {
   const d = new Date(date);
   const year = d.getFullYear();
@@ -26,10 +42,12 @@ function toLocalDateString(date) {
   return `${year}-${month}-${day}`;
 }
 
-// Helper: Get today's UTC date for attendance record (uses server time)
-function getTodayUTCDate() {
+// Helper: Get today's date in the server's local timezone for the
+// attendance-record day bucket. With TZ=Asia/Kolkata set in src/index.js,
+// this returns IST midnight today — matching the user's calendar.
+function getTodayLocalDate() {
   const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
 }
 
 // All routes require auth
@@ -86,9 +104,12 @@ router.get('/today', async (req, res) => {
   let attendanceDate;
   if (localDate && /^\d{4}-\d{2}-\d{2}$/.test(localDate)) {
     const [year, month, day] = localDate.split('-').map(Number);
-    attendanceDate = new Date(Date.UTC(year, month - 1, day));
+    // Local constructor — once TZ=Asia/Kolkata is set in src/index.js,
+    // this becomes IST midnight of the day the frontend sent (the user's
+    // browser-local day, also IST).
+    attendanceDate = new Date(year, month - 1, day);
   } else {
-    attendanceDate = getTodayUTCDate();
+    attendanceDate = getTodayLocalDate();
   }
 
   try {
@@ -129,7 +150,7 @@ router.get('/today', async (req, res) => {
 router.get('/status', async (req, res) => {
   const prisma = req.app.get('prisma');
   try {
-    const attendanceDate = getTodayUTCDate();
+    const attendanceDate = getTodayLocalDate();
     const record = await prisma.attendance.findFirst({
       where: { employeeId: req.employeeId, date: attendanceDate },
       include: { sessions: { orderBy: { checkIn: 'asc' } } },
@@ -206,11 +227,18 @@ router.post('/check-in', async (req, res) => {
     claimedLocalDateTime = ts.toISOString();
   }
 
-  // P2: server time is the source of truth — use it for both checkInAt and
-  // the attendance-date bucket (UTC day of the server clock).
-  const checkInTime = new Date();
+  // P2 (revised): the EFFECTIVE click time is the client-claimed instant
+  // if it passes the drift check above; otherwise the server wall clock.
+  // The bucket for the Attendance row uses the same effective time, in
+  // LOCAL components (Asia/Kolkata after src/index.js sets TZ), so the
+  // day we record matches the day the user saw on their phone when they
+  // tapped Check-in. This also collapses the previous "10:40 pm displayed
+  // when user clicked at 10:50 pm" symptom — that gap was the network +
+  // server-clock delay baked into the stored value, which we now prefer
+  // the client-claimed time over.
+  const checkInTime = claimedLocalDateTime ? new Date(claimedLocalDateTime) : new Date();
   const attendanceDate = new Date(
-    Date.UTC(checkInTime.getUTCFullYear(), checkInTime.getUTCMonth(), checkInTime.getUTCDate())
+    checkInTime.getFullYear(), checkInTime.getMonth(), checkInTime.getDate()
   );
 
   try {

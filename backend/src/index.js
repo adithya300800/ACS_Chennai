@@ -1,3 +1,10 @@
+// Asia/Kolkata is the project's single source of truth for calendar days.
+// The server otherwise runs in Render's UTC default, which produces
+// off-by-one day-buckets for users east of UTC — e.g. an IST employee
+// marking between 00:00 and 05:29 IST would see their record bucketed
+// under the PREVIOUS UTC date. MUST be set before any Date operation,
+// including module-level requires that may read the clock indirectly.
+process.env.TZ = 'Asia/Kolkata';
 require('dotenv').config();
 // express-async-errors monkey-patches Express 4 to forward rejected promises
 // from async route handlers into the global error middleware. Without it,
