@@ -13,6 +13,7 @@ async function main() {
       name: 'Admin User',
       designation: 'HR Manager',
       department: 'Human Resources',
+      isAdmin: true,
     },
     {
       email: 'employee1@acschennai.com',
@@ -40,7 +41,10 @@ async function main() {
   for (const emp of employees) {
     await prisma.employee.upsert({
       where: { email: emp.email },
-      update: {},
+      // Spread the data so re-running seed fixes the admin's isAdmin
+      // and refreshes bcrypt hashes (previous seed left admin as
+      // isAdmin=false because update:{} skipped it).
+      update: emp,
       create: emp,
     });
     console.log(`  Created/verified: ${emp.email}`);

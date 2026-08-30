@@ -76,48 +76,9 @@ router.post('/schema', requireAuth, async (req, res) => {
   }
 });
 
-// Round-11 (debug): GET /api/diag/quick — non-auth introspection. Returns
-// the actual table list + the exact Prisma error from a real
-// prisma.employee.findUnique, so we can see why /api/auth/login 500s on
-// every email. NOT for production use. DELETE once login is healthy.
-router.get('/quick', async (req, res) => {
-  const prisma = req.app.get('prisma') || new PrismaClient();
-  const out = { tables: null, employeeColumns: null, findUniqueError: null, employeeCount: null };
-  try {
-    out.tables = await prisma.$queryRawUnsafe(`
-      SELECT table_name FROM information_schema.tables
-      WHERE table_schema='public' AND table_type='BASE TABLE'
-      ORDER BY table_name
-    `);
-  } catch (e) {
-    out.tables = { error: e.message?.split('\n')[0], code: e.code };
-  }
-  try {
-    out.employeeColumns = await prisma.$queryRawUnsafe(`
-      SELECT column_name, data_type FROM information_schema.columns
-      WHERE table_schema='public' AND table_name='employees'
-      ORDER BY ordinal_position
-    `);
-  } catch (e) {
-    out.employeeColumns = { error: e.message?.split('\n')[0], code: e.code };
-  }
-  try {
-    out.employeeCount = await prisma.employee.count();
-  } catch (e) {
-    out.employeeCount = { error: e.message?.split('\n')[0], code: e.code };
-  }
-  try {
-    await prisma.employee.findUnique({ where: { email: 'admin@acschennai.com' } });
-  } catch (e) {
-    out.findUniqueError = {
-      code: e.code,
-      name: e.name,
-      message: e.message?.split('\n').slice(0, 3),
-      meta: e.meta,
-    };
-  }
-  res.json(out);
-});
+// Round-11 (debug): TEMPORARY non-auth introspection — was used to confirm
+// P2021 (table does not exist) was the live cause of /api/auth/login 500.
+// Schema is now confirmed in place via /api/diag/schema below. Removed.
 
 // Round-8 (debug): POST /api/diag/dpr-create — runs the exact prisma.dPR.create
 // the production handler does and returns the underlying error verbatim so we
