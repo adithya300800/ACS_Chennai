@@ -33,28 +33,27 @@ jobs:
       - name: Run tests
         run: npm test
 
-      # Round-11: Prisma 5.22 does NOT support `--timeout` on `db push`. The
-      # previous version used `--timeout 30s`, which Prisma rejected with
-      # "unknown or unexpected option" — it printed usage and exited 0 without
-      # ever pushing schema. Seed then failed silently because
-      # continue-on-error on seed masked "table does not exist" → empty DB
-      # → login 500. Fixed: removed the unsupported flag and removed
-      # continue-on-error on schema/seed so future failures surface.
-      - name: Probe Supabase pooler connectivity
+      # Round-11b: Prisma's introspection + DDL hangs on pgbouncer transaction
+      # mode (port 6543). Supabase exposes the same hostname on TWO ports:
+      #   6543 = transaction-mode pooler (good for app queries, bad for DDL)
+      #   5432 = session-mode     pooler (good for migrations, db push)
+      # Using port 5432 (no pgbouncer=true flag) for the schema-push step.
+      # Render runtime + seed can keep using port 6543 (transaction-mode).
+      - name: Probe Supabase session-mode pooler connectivity
         continue-on-error: true
         run: |
-          # Redact the password before printing. Shows only host:port, db name.
-          HOST=$(echo "$DATABASE_URL" | sed -E 's|.*@([^/]+)/.*|\1|' | sed -E 's|:.*||')
-          PORT=$(echo "$DATABASE_URL" | sed -E 's|.*@[^:]+:([0-9]+)/.*|\1|')
+          HOST=$(echo "$SCHEMA_PUSH_URL" | sed -E 's|.*@([^/]+)/.*|\1|' | sed -E 's|:.*||')
+          PORT=$(echo "$SCHEMA_PUSH_URL" | sed -E 's|.*@[^:]+:([0-9]+)/.*|\1|')
           echo "Probing $HOST:$PORT (timeout 15s)…"
           timeout 15 bash -c "</dev/tcp/$HOST/$PORT" 2>&1 && echo "TCP OK" || echo "TCP FAIL (rc=$?)"
         env:
-          DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+          SCHEMA_PUSH_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
-      - name: Push Prisma schema to Supabase
+      - name: Push Prisma schema to Supabase (session-mode pooler)
         run: npx prisma db push --schema=prisma/schema.prisma --skip-generate --accept-data-loss
         env:
-          DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+          SCHEMA_PUSH_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
       - name: Seed database
         run: node prisma/seed.js
