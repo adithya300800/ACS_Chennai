@@ -205,6 +205,11 @@ export const api = {
   // Round-7: these previously used raw fetch() in PortalLogin, bypassing
   // the timeout wrapper and 401 handling. They return the parsed JSON
   // directly; the caller handles the OAuth popup lifecycle.
-  getZohoAuthUrl: () => api.get('/auth/zoho'),
+  //
+  // Backend (backend/src/routes/auth.js) intentionally registers POST only:
+  // the auth URL contains the OAuth `state` and should never be cached or
+  // appear in browser/CDN history. The route comment claims the frontend
+  // uses POST, but this helper used GET — which 404'd until round-11 fix.
+  getZohoAuthUrl: () => api.post('/auth/zoho'),
   postZohoCallback: (code) => api.post('/auth/zoho/callback', { code }),
 };
