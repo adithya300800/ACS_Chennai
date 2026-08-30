@@ -24,6 +24,21 @@ const ZOHO_CLIENT_SECRET = process.env.ZOHO_CLIENT_SECRET;
 const ZOHO_REDIRECT_URI = process.env.ZOHO_REDIRECT_URI;
 const ZOHO_DOMAIN = process.env.ZOHO_DOMAIN || 'https://accounts.zoho.com';
 
+// Round-11: targetOrigin for the postMessage back to the popup opener.
+//
+// The popup is opened on the FRONTEND origin (acschennai.com) but the
+// callback HTML runs on the BACKEND origin (acs-chennai.onrender.com),
+// so `window.location.origin` here is the backend — wrong. Using the
+// wrong target silently drops the postMessage and the parent never
+// receives the OAuth tokens, leaving the user stuck on the login page
+// even after Zoho says "Login successful".
+//
+// Set FRONTEND_ORIGIN to the deployed frontend origin (e.g.
+// https://acschennai.com). When unset, fall back to '*'. This is still
+// safe because the parent validates `event.origin` against
+// VITE_API_URL on receipt (see src/pages/PortalLogin.jsx).
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
+
 // OAuth state store: in-memory with TTL. NOTE: lost on restart — see P3 finding.
 // For multi-instance deployments move to Redis.
 //
@@ -170,7 +185,7 @@ router.get('/zoho/callback', async (req, res) => {
 
   const errorHtml = (errorCode) => `<!DOCTYPE html><html><body><script>
     if (window.opener) {
-      window.opener.postMessage({ type: 'zoho-oauth-error', error: '${errorCode}' }, window.location.origin);
+      window.opener.postMessage({ type: 'zoho-oauth-error', error: '${errorCode}' }, '${FRONTEND_ORIGIN}');
     }
     window.close();
   </script><p>Login failed (${errorCode}). Please close this window and try again.</p></body></html>`;
@@ -244,7 +259,7 @@ router.get('/zoho/callback', async (req, res) => {
 
     res.send(`<!DOCTYPE html><html><body><script>
       if (window.opener) {
-        window.opener.postMessage(${responseData}, window.location.origin);
+        window.opener.postMessage(${responseData}, '${FRONTEND_ORIGIN}');
       }
       window.close();
     </script><p>Login successful! Please close this window.</p></body></html>`);
