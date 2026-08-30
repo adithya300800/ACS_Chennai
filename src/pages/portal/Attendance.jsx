@@ -72,6 +72,14 @@ export default function Attendance() {
   });
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
+  // Round-9 P0 #4: track geolocation permission state so we can disable the
+  // check-in button instead of falling back to (0,0). Possible values:
+  //   'prompt'    — permission API unsupported or still asking the user
+  //   'granted'   — geolocation is allowed (set after first successful fix)
+  //   'denied'    — user blocked geolocation; check-in must be disabled
+  //   'error'     — geolocation API threw (no navigator.geolocation, etc.)
+  //   'unsupported' — navigator.permissions.query rejected the geolocation name
+  const [geoState, setGeoState] = useState('prompt');
   const [selectedRecord, setSelectedRecord] = useState(null);
   const modalRef = useRef(null);
   const closeButtonRef = useRef(null);
@@ -132,7 +140,13 @@ export default function Attendance() {
     }
   }, [todayRecord, currentMonth]);
 
-  // Request geolocation with retry
+  // Request geolocation with retry.
+  // GeolocationPositionError numeric codes (per W3C Geolocation API spec):
+  //   1 = PERMISSION_DENIED
+  //   2 = POSITION_UNAVAILABLE
+  //   3 = TIMEOUT
+  // We only retry on TIMEOUT — PERMISSION_DENIED is final (the user denied
+  // the site), and POSITION_UNAVAILABLE means the device has no fix.
   const requestLocation = () => {
     return new Promise((resolve, reject) => {
       if (!navigator.geolocation) {
@@ -147,11 +161,20 @@ export default function Attendance() {
             longitude: pos.coords.longitude,
           }),
           (err) => {
-            // Allow up to 2 retries for timeout/PERMISSION_DENIED errors
-            if (attempt < 2 && (err.code === err.TIMEOUT || err.code === err.PERMISSION_DENIED)) {
+            // Round-10 fix: previously compared `err.code === err.TIMEOUT`,
+            // but `err.TIMEOUT` is undefined on GeolocationPositionError
+            // (it's not a static on the class). The numeric 3 IS the
+            // TIMEOUT code per W3C; PERMISSION_DENIED is final.
+            const isTimeout = err && err.code === 3;
+            if (attempt < 2 && isTimeout) {
               tryGetLocation(attempt + 1);
             } else {
-              reject(new Error('Unable to get location'));
+              const reason =
+                err && err.code === 1 ? 'permission denied'
+                : err && err.code === 2 ? 'position unavailable'
+                : err && err.code === 3 ? 'timed out'
+                : 'unknown';
+              reject(new Error(`Location ${reason}`));
             }
           },
           { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 }
@@ -167,19 +190,31 @@ export default function Attendance() {
     setStatus('checking-in');
     setError('');
 
-    let lat = 0, lng = 0, addr = 'Location unavailable';
-
+    // Round-10 fix: never silently fall back to (0,0) when geolocation fails.
+    // Backend BE3 removed its (0,0) rejection, but the frontend still passed
+    // (0,0,'Location unavailable') on geo failure — that left a stale-looking
+    // location on the record. Instead, if GPS isn't available we ABORT the
+    // check-in and surface a clear 'enable location' message.
+    let lat, lng, addr;
     try {
       const coords = await requestLocation();
       lat = coords.latitude;
       lng = coords.longitude;
       addr = formatCoords(lat, lng);
-    } catch {
-      // Use default
+    } catch (err) {
+      setStatus('idle');
+      setError(
+        err && /permission/i.test(err.message)
+          ? 'Location access is required to mark attendance. Please enable location for this site in your browser settings, then tap Mark Attendance again.'
+          : `Could not determine your location (${err && err.message ? err.message : 'unknown'}). Move to a spot with clearer sky or enable location, then try again.`
+      );
+      return;
     }
 
     try {
-      // Get employee's local datetime (ISO string in local timezone)
+      // Get employee's local datetime (ISO string in local timezone).
+      // Backend now uses server time as the source of truth for checkInAt;
+      // localDateTime is echoed back as `claimedLocalDateTime` for UI.
       const localDateTime = new Date().toISOString();
 
       const data = await api.post('/attendance/check-in', {

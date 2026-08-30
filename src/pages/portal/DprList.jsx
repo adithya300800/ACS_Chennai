@@ -54,6 +54,13 @@ export default function DprList() {
   const [nextCursor, setNextCursor] = useState(null);
   const [filter, setFilter] = useState({ status: '', myOnly: false, from: '', to: '' });
   const [showFilters, setShowFilters] = useState(false);
+  // P0 fix (round-10): clicking a row previously navigated to the same
+  // route with location.state.selectedDpr — nothing read that state, so
+  // the click looked broken. Open an inline modal with the DPR detail
+  // (fetches the canonical row with photos + read-SAS URLs).
+  const [expandedDpr, setExpandedDpr] = useState(null);
+  const [expandedLoading, setExpandedLoading] = useState(false);
+  const [expandedError, setExpandedError] = useState('');
 
   const fetchDprs = useCallback(async (cursor = null) => {
     try {
@@ -93,7 +100,8 @@ export default function DprList() {
 
   useEffect(() => {
     load();
-  }, [filter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter, accessToken]);
 
   const handleFilterChange = (key, value) => {
     setFilter(f => ({ ...f, [key]: value }));
@@ -103,9 +111,39 @@ export default function DprList() {
     if (nextCursor && !loadingMore) load(nextCursor);
   };
 
-  const handleRowClick = (dpr) => {
-    navigate('/portal/dpr/my', { state: { selectedDpr: dpr } });
+  const handleRowClick = async (dpr) => {
+    // Round-10 fix: fetch the full DPR (with photos + read-SAS URLs) and
+    // open an inline modal. Previously this navigated to the same route
+    // with location.state.selectedDpr — nothing read that state, so the
+    // click appeared to do nothing.
+    setExpandedDpr({ ...dpr, photos: [] });
+    setExpandedError('');
+    setExpandedLoading(true);
+    try {
+      const full = await api.getDpr(dpr.id, accessToken);
+      setExpandedDpr(full);
+    } catch (err) {
+      setExpandedError(err.message || 'Failed to load DPR details');
+    } finally {
+      setExpandedLoading(false);
+    }
   };
+
+  const handleCloseModal = () => {
+    setExpandedDpr(null);
+    setExpandedError('');
+    setExpandedLoading(false);
+  };
+
+  // Close modal on Escape (matches NotificationBell behaviour for a11y)
+  useEffect(() => {
+    if (!expandedDpr) return;
+    const handler = (e) => {
+      if (e.key === 'Escape') handleCloseModal();
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [expandedDpr]);
 
   return (
     <div className="dpr-page">
@@ -237,6 +275,87 @@ export default function DprList() {
             {!hasMore && filter.status && ` · All ${filter.status.toLowerCase().replace('_', ' ')} DPRs loaded`}
           </div>
         </>
+      )}
+
+      {expandedDpr && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`DPR ${expandedDpr.projectName} details`}
+          onClick={handleCloseModal}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 100, padding: '1rem',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: 'white', borderRadius: 12, maxWidth: 720, width: '100%',
+              maxHeight: '85vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.25)',
+            }}
+          >
+            <div style={{ padding: '1.25rem 1.5rem', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h2 style={{ margin: 0, fontSize: '1.15rem', color: 'var(--navy)' }}>{expandedDpr.projectName}</h2>
+                <div style={{ marginTop: '0.25rem', fontSize: '0.85rem', color: 'var(--steel)' }}>
+                  {new Date(expandedDpr.reportDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                  {' · '}{expandedDpr.location}
+                </div>
+              </div>
+              <button
+                onClick={handleCloseModal}
+                aria-label="Close DPR details"
+                className="btn btn-ghost btn-sm"
+                style={{ fontSize: '1.25rem', lineHeight: 1 }}
+              >
+                ×
+              </button>
+            </div>
+
+            <div style={{ padding: '1.25rem 1.5rem' }}>
+              {expandedLoading ? (
+                <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--steel)' }}>Loading details…</div>
+              ) : expandedError ? (
+                <div className="portal-auth-error">{expandedError}</div>
+              ) : (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem 1.5rem', marginBottom: '1rem', fontSize: '0.9rem' }}>
+                    <div><strong>Status:</strong> <StatusBadge status={expandedDpr.status} /></div>
+                    <div><strong>Work Type:</strong> {expandedDpr.workType || 'N/A'}</div>
+                    <div><strong>Weather:</strong> {expandedDpr.weather || '—'}</div>
+                    <div><strong>Temperature:</strong> {expandedDpr.temperature || '—'}</div>
+                    <div><strong>Contractor:</strong> {expandedDpr.contractor || '—'}</div>
+                    <div><strong>Submitted by:</strong> {expandedDpr.submittedBy?.name || '—'}</div>
+                  </div>
+                  {expandedDpr.notes && (
+                    <div style={{ marginBottom: '1rem', fontSize: '0.9rem' }}>
+                      <strong>Notes:</strong>
+                      <div style={{ marginTop: '0.25rem', color: 'var(--steel)', whiteSpace: 'pre-wrap' }}>{expandedDpr.notes}</div>
+                    </div>
+                  )}
+                  {expandedDpr.photos && expandedDpr.photos.length > 0 && (
+                    <div>
+                      <strong style={{ fontSize: '0.9rem' }}>Photos ({expandedDpr.photos.length})</strong>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '0.5rem', marginTop: '0.5rem' }}>
+                        {expandedDpr.photos.map((p) => (
+                          <a key={p.id} href={p.readUrl} target="_blank" rel="noopener noreferrer" title={p.filename}>
+                            <img
+                              src={p.readUrl}
+                              alt={p.caption || p.filename}
+                              style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 6 }}
+                            />
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -2409,3 +2409,31 @@ footer {
   from { transform: translateX(20px); opacity: 0; }
   to   { transform: translateX(0);    opacity: 1; }
 }
+/* Round-10 a11y (WCAG 2.4.1 Bypass Blocks, Level A): visually-hidden
+   skip-nav link. Becomes visible on focus so keyboard users can jump
+   past the navigation straight to <main id="main-content">. */
+.skip-nav-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 10000;
+  background: var(--navy);
+  color: #fff;
+  padding: 0.75rem 1rem;
+  border-radius: 0 0 6px 6px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.skip-nav-link:focus {
+  left: 0.5rem;
+  top: 0.5rem;
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+/* <main id="main-content"> must accept programmatic focus so the
+   route-change handler in ScrollToTop.jsx can move focus there.
+   Tabindex -1 keeps it out of the natural tab order. */
+#main-content:focus {
+  outline: none;
+}

@@ -19,6 +19,13 @@ export default function Header() {
 
   return (
     <header>
+      {/* Round-10 a11y (WCAG 2.4.1 Bypass Blocks, Level A): skip-nav link.
+          First focusable element on the page — keyboard users (Tab on load)
+          can jump past the nav straight to <main id="main-content">.
+          Visually hidden until focused, then becomes visible + outlines. */}
+      <a href="#main-content" className="skip-nav-link">
+        Skip to main content
+      </a>
       <div className="container">
         <Link to="/" className="header-logo">
           <div className="logo-icon">

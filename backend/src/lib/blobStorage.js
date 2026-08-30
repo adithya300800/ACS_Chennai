@@ -166,6 +166,7 @@ async function deleteBlob(containerName, blobName) {
 }
 
 module.exports = {
+  getClient,
   generateULID,
   generateUploadSASUrl,
   generateReadSASUrl,

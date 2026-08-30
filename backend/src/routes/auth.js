@@ -26,9 +26,21 @@ const ZOHO_DOMAIN = process.env.ZOHO_DOMAIN || 'https://accounts.zoho.com';
 
 // OAuth state store: in-memory with TTL. NOTE: lost on restart — see P3 finding.
 // For multi-instance deployments move to Redis.
+//
+// Round-9 hardening: every entry stores an explicit `expiresAt`. Both /zoho
+// (write) and /zoho/callback (read) check that `now > expiresAt` and reject
+// with a typed INVALID_STATE — previously the callback only checked
+// `oauthStateStore.has(state)` which left the TTL unenforced and let an
+// attacker replay a stolen state indefinitely until the prune pass on
+// /zoho ran.
 const oauthStateStore = new Map();
-const STATE_TTL_MS = 10 * 60 * 1000;
-const STATE_TTL_SECONDS = STATE_TTL_MS / 1000;
+const STATE_TTL_MS = 5 * 60 * 1000; // 5 minutes — tightened from 10 in round-9
+
+// Per-jti access-token blacklist for /api/auth/logout. Same TTL as the
+// access token itself (24h). requireAuth() consults it on every request —
+// keep the lookup cheap. NOTE: in-memory and per-process. For multi-instance
+// deployments move to Redis. (Tracked as a known P3 limitation.)
+const tokenBlacklist = new Map(); // jti → expiresAt (ms)
 
 // Email-domain allowlist for self-provisioning (Zoho-verified emails only).
 // Adjust as needed; defaults to the customer domain + common test domains.
@@ -41,18 +53,24 @@ const ALLOWED_EMAIL_DOMAINS = (process.env.ALLOWED_EMAIL_DOMAINS
 // Access token is 24h so a single workday doesn't trigger expiry mid-upload. The
 // real defence against expiry is the frontend's auto-refresh interceptor — once
 // that's in place we can shorten this back to ~1h.
+//
+// Round-9: access tokens now carry a `jti` so the logout endpoint can revoke
+// them via tokenBlacklist. We don't include jti on refresh tokens; logout
+// clears the blacklist entry but the refresh token itself is JWT-only —
+// full refresh-token revocation is out of scope for this round (P2).
 function signTokens(employee) {
+  const accessJti = crypto.randomBytes(16).toString('base64url');
   const accessToken = jwt.sign(
-    { employeeId: employee.id, email: employee.email, isAdmin: !!employee.isAdmin },
+    { employeeId: employee.id, email: employee.email, isAdmin: !!employee.isAdmin, jti: accessJti },
     JWT_SECRET,
     { algorithm: 'HS256', expiresIn: '24h' }
   );
   const refreshToken = jwt.sign(
-    { employeeId: employee.id },
+    { employeeId: employee.id, jti: crypto.randomBytes(16).toString('base64url') },
     JWT_REFRESH_SECRET,
     { algorithm: 'HS256', expiresIn: '7d' }
   );
-  return { accessToken, refreshToken };
+  return { accessToken, refreshToken, accessJti };
 }
 
 // Strip sensitive fields before returning employee to client.
@@ -67,6 +85,52 @@ function sanitizeEmployee(employee) {
   return safe;
 }
 
+// Find or create an Employee by Zoho-verified email with a P2002-safe
+// fallback. Two concurrent logins for the same Zoho user used to race on
+// `prisma.employee.create` and surface P2002 as a 500 (P1-#9). The catch
+// path re-fetches the row so the loser of the race continues down the
+// "update tokens" branch instead of erroring out.
+async function findOrCreateEmployee(prisma, { email, accessToken, refreshToken }) {
+  let employee = await prisma.employee.findUnique({ where: { email } });
+  if (employee) {
+    return prisma.employee.update({
+      where: { email },
+      data: { zohoAccessToken: accessToken, zohoRefreshToken: refreshToken },
+    });
+  }
+  const nameParts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
+  const name = nameParts.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+  try {
+    return await prisma.employee.create({
+      data: { email, name, zohoAccessToken: accessToken, zohoRefreshToken: refreshToken },
+    });
+  } catch (err) {
+    if (err && err.code === 'P2002') {
+      // Lost the race; the winner created the row. Refetch and update.
+      const existing = await prisma.employee.findUnique({ where: { email } });
+      if (existing) {
+        return prisma.employee.update({
+          where: { email },
+          data: { zohoAccessToken: accessToken, zohoRefreshToken: refreshToken },
+        });
+      }
+    }
+    throw err;
+  }
+}
+
+// Validate OAuth state against the in-memory store. Returns the stored entry
+// on success and consumes it (one-time use). Returns null on any failure so
+// every call site can branch identically.
+function consumeOAuthState(state) {
+  if (!state || typeof state !== 'string') return null;
+  const entry = oauthStateStore.get(state);
+  if (!entry) return null;
+  oauthStateStore.delete(state);
+  if (!entry.expiresAt || Date.now() > entry.expiresAt) return null;
+  return entry;
+}
+
 // POST /api/auth/zoho - Initiate Zoho OAuth. Frontend's PortalLogin.jsx
 // calls POST (it has no body to send, but POST avoids the auth URL leaking
 // through browser history and any CDN cache). Returns { authUrl } for the
@@ -79,14 +143,14 @@ router.post('/zoho', (req, res) => {
   // Prune expired state entries (cheap; happens once per /zoho start).
   const now = Date.now();
   for (const [key, value] of oauthStateStore.entries()) {
-    if (now - value.timestamp > STATE_TTL_MS) {
+    if (!value.expiresAt || now > value.expiresAt) {
       oauthStateStore.delete(key);
     }
   }
 
-  // Cryptographically random state (AppSec #6)
+  // Cryptographically random state (AppSec #6) with an explicit expiresAt.
   const state = crypto.randomBytes(32).toString('base64url');
-  oauthStateStore.set(state, { timestamp: now });
+  oauthStateStore.set(state, { timestamp: now, expiresAt: now + STATE_TTL_MS });
 
   const scopes = 'openid profile email';
   const authUrl = `${ZOHO_DOMAIN}/oauth/v2/auth?` +
@@ -113,11 +177,11 @@ router.get('/zoho/callback', async (req, res) => {
 
   if (!code) return res.send(errorHtml('no_code'));
 
-  // Validate state for CSRF protection
-  if (!state || !oauthStateStore.has(state)) {
+  // Round-9: TTL-enforced state check. consumeOAuthState both validates
+  // expiresAt and one-time-uses the entry.
+  if (!consumeOAuthState(state)) {
     return res.send(errorHtml('invalid_state'));
   }
-  oauthStateStore.delete(state); // one-time use
 
   try {
     const tokenRes = await fetch(`${ZOHO_DOMAIN}/oauth/v2/token`, {
@@ -162,29 +226,11 @@ router.get('/zoho/callback', async (req, res) => {
 
     const prisma = req.app.get('prisma');
 
-    // Find or create employee (Zoho-verified emails only)
-    let employee = await prisma.employee.findUnique({ where: { email } });
-    if (!employee) {
-      const nameParts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
-      const name = nameParts.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
-      employee = await prisma.employee.create({
-        data: {
-          email,
-          name,
-          zohoAccessToken: access_token,
-          zohoRefreshToken: refresh_token,
-        },
-      });
-      console.log('[zoho] new employee provisioned', { employeeId: employee.id, emailHash: hashIdentifier(email) });
-    } else {
-      employee = await prisma.employee.update({
-        where: { email },
-        data: {
-          zohoAccessToken: access_token,
-          zohoRefreshToken: refresh_token,
-        },
-      });
-    }
+    const employee = await findOrCreateEmployee(prisma, {
+      email,
+      accessToken: access_token,
+      refreshToken: refresh_token,
+    });
 
     const { accessToken, refreshToken } = signTokens(employee);
     const employeeData = sanitizeEmployee(employee);
@@ -215,10 +261,12 @@ router.post('/zoho/callback', async (req, res) => {
 
   if (!code) return res.status(400).json({ error: 'Authorization code required' });
 
-  if (!state || !oauthStateStore.has(state)) {
+  // Round-9: TTL-enforced state. Both missing/expired states collapse to a
+  // single INVALID_STATE so an attacker can't distinguish "never issued" from
+  // "expired".
+  if (!consumeOAuthState(state)) {
     return res.status(400).json({ error: 'Invalid or missing OAuth state', code: 'INVALID_STATE' });
   }
-  oauthStateStore.delete(state); // one-time use
 
   if (!ZOHO_CLIENT_ID || !ZOHO_CLIENT_SECRET || !ZOHO_REDIRECT_URI) {
     return res.status(503).json({ error: 'Zoho OAuth not configured' });
@@ -278,28 +326,11 @@ router.post('/zoho/callback', async (req, res) => {
 
     const prisma = req.app.get('prisma');
 
-    let employee = await prisma.employee.findUnique({ where: { email } });
-    if (!employee) {
-      const nameParts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
-      const name = nameParts.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
-      employee = await prisma.employee.create({
-        data: {
-          email,
-          name,
-          zohoAccessToken: access_token,
-          zohoRefreshToken: refresh_token,
-        },
-      });
-      console.log('[zoho] new employee provisioned (POST flow)', { employeeId: employee.id, emailHash: hashIdentifier(email) });
-    } else {
-      employee = await prisma.employee.update({
-        where: { email },
-        data: {
-          zohoAccessToken: access_token,
-          zohoRefreshToken: refresh_token,
-        },
-      });
-    }
+    const employee = await findOrCreateEmployee(prisma, {
+      email,
+      accessToken: access_token,
+      refreshToken: refresh_token,
+    });
 
     const { accessToken, refreshToken } = signTokens(employee);
 
@@ -318,6 +349,11 @@ router.post('/zoho/callback', async (req, res) => {
 // Password-based login ONLY for existing employees. NO auto-provisioning
 // (AppSec #1). Auto-provisioning is reserved for the Zoho OAuth flow above,
 // where the email is verified by Zoho.
+//
+// Round-9: the IP-only loginLimiter (mounted at /api/auth/login BEFORE
+// body-parser in index.js) remains the first line of defence. A second
+// IP+email-hash limiter (loginEmailLimiter) is mounted AFTER body-parser
+// at the same path to defend against corporate-NAT credential stuffing.
 router.post('/login', async (req, res) => {
   const prisma = req.app.get('prisma');
   const { email, password } = req.body;
@@ -373,8 +409,9 @@ router.post('/refresh', async (req, res) => {
     });
     if (!employee) return res.status(401).json({ error: 'Employee not found' });
 
+    const newJti = crypto.randomBytes(16).toString('base64url');
     const accessToken = jwt.sign(
-      { employeeId: employee.id, email: employee.email, isAdmin: !!employee.isAdmin },
+      { employeeId: employee.id, email: employee.email, isAdmin: !!employee.isAdmin, jti: newJti },
       JWT_SECRET,
       { algorithm: 'HS256', expiresIn: '24h' }
     );
@@ -387,22 +424,62 @@ router.post('/refresh', async (req, res) => {
   }
 });
 
+// POST /api/auth/logout
+// Round-9: revokes the supplied access token via the in-memory blacklist.
+// requireAuth consults tokenBlacklist on every request, so any further use
+// of the same bearer token returns 401 TOKEN_REVOKED. Returns 204.
+//
+// Note: the refresh-token JWT itself is not on a deny-list (out of scope);
+// for full revocation move to a tokenVersion column on Employee.
+router.post('/logout', requireAuth, async (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
+      if (decoded && decoded.jti && decoded.exp) {
+        // exp is in seconds; convert to ms and store with a small grace so
+        // a token already expired is harmlessly garbage-collected.
+        tokenBlacklist.set(decoded.jti, decoded.exp * 1000);
+      }
+    } catch (e) {
+      // Token already invalid — still return 204; logout is idempotent.
+    }
+  }
+  // Opportunistic GC of expired blacklist entries so the Map can't grow
+  // unbounded across long-running processes.
+  const nowMs = Date.now();
+  for (const [jti, exp] of tokenBlacklist.entries()) {
+    if (exp <= nowMs) tokenBlacklist.delete(jti);
+  }
+  res.status(204).end();
+});
+
+// Helper exported for middleware/auth.js to consult the blacklist on every
+// authenticated request. Returns true if the jti has been revoked.
+function isTokenRevoked(jti) {
+  if (!jti) return false;
+  const exp = tokenBlacklist.get(jti);
+  if (exp === undefined) return false;
+  if (exp <= Date.now()) {
+    tokenBlacklist.delete(jti);
+    return false;
+  }
+  return true;
+}
+
 // GET /api/auth/me
+// Round-9: returns the minimal { id, email, name, isAdmin } the frontend
+// needs for preemptive refresh + UI gating. Extra fields (designation,
+// department, createdAt) are dropped because the SPA already loads the
+// richer profile from /api/employees/me-equivalents on the portal layout.
 router.get('/me', requireAuth, async (req, res) => {
   const prisma = req.app.get('prisma');
 
   try {
     const employee = await prisma.employee.findUnique({
       where: { id: req.employeeId },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        designation: true,
-        department: true,
-        isAdmin: true,
-        createdAt: true,
-      },
+      select: { id: true, email: true, name: true, isAdmin: true },
     });
 
     if (!employee) return res.status(404).json({ error: 'Employee not found' });
@@ -414,3 +491,4 @@ router.get('/me', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.isTokenRevoked = isTokenRevoked;

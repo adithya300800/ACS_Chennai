@@ -90,10 +90,17 @@ export default function DprDashboard() {
       setDprs(items);
     } catch (err) {
       // 401 paths are handled by the api.js interceptor (auth:logout).
-      // Anything else surfaces as a toast + inline error.
+      // Round-10: 5xx is shown with a friendlier "temporarily unavailable"
+      // message + retry button so the admin doesn't see a generic
+      // "Internal server error" and think the app is broken (the underlying
+      // cause is usually a transient Prisma cold-start on Render free tier).
       if (err.status !== 401) {
-        setError(err.message);
-        toast.push(err.message || 'Failed to load DPRs.', 'error');
+        const isServer = err.status >= 500;
+        const msg = isServer
+          ? 'DPR queue temporarily unavailable — please retry in a moment.'
+          : (err.message || 'Failed to load DPRs.');
+        setError(msg);
+        toast.push(msg, isServer ? 'warning' : 'error');
       }
     } finally {
       setLoading(false);

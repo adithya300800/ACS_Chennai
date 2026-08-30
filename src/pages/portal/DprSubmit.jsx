@@ -70,11 +70,34 @@ function clearDraft() {
   try { localStorage.removeItem(DRAFT_KEY); } catch {}
 }
 
+// Backend allowlist (must match backend/src/routes/dpr.js validWorkTypes).
+// Production-readiness P0-3: the backend silently defaults workType to
+// MATERIAL_RECEIPT if the field is absent, so every DPR was being mis-tagged.
+// We derive the top-level workType from the first work entry's section —
+// this keeps the frontend source-of-truth (one entry == one section) in
+// sync with the database column.
+const ALLOWED_WORK_TYPES = ['MATERIAL_RECEIPT', 'QUALITY_TESTING', 'SITE_INSPECTION', 'EXCEPTIONS_SAFETY'];
+
+function deriveTopLevelWorkType(workEntries) {
+  if (!Array.isArray(workEntries) || workEntries.length === 0) return null;
+  const firstType = workEntries[0]?.workType;
+  if (!firstType) return null;
+  const found = SUB_WORK_TYPE_OPTIONS.find((s) => s.value === firstType);
+  const section = found?.section;
+  return ALLOWED_WORK_TYPES.includes(section) ? section : null;
+}
+
 export default function DprSubmit() {
   const { accessToken } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
+  // Production-readiness P0-11 / P1-2: prevent double-click from firing two
+  // parallel POSTs. State (`status`) is updated async after the first click
+  // and React batches the state-set + button-disable, leaving a 1-2 frame
+  // window where the user can click the second button. A useRef guard is
+  // synchronous and immune to React render scheduling.
+  const submittingRef = useRef(false);
 
   const initialDraft = loadDraft();
   const [form, setForm] = useState(initialDraft?.form || {
@@ -235,25 +258,49 @@ export default function DprSubmit() {
   };
 
   const handleSubmit = async (submitStatus) => {
+    // Production-readiness P0-11: synchronous re-entry guard. React's
+    // onClick → setState → re-render path is async, so without this ref a
+    // second click before the re-render reaches the disabled button would
+    // fire a duplicate POST. A ref is checked synchronously and cleared
+    // in the finally block so retries work after errors.
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+
     setError('');
     if (!form.projectName || !form.location || !form.reportDate) {
       const msg = 'Project name, location, and date are required';
       setError(msg);
       toast.push(msg, 'warning');
+      submittingRef.current = false;
       return;
     }
     if (workEntries.length === 0) {
       const msg = 'Please add at least one work entry before submitting';
       setError(msg);
       toast.push(msg, 'warning');
+      submittingRef.current = false;
       return;
     }
     const dateErr = validateReportDate(form.reportDate);
     if (dateErr) {
       setError(dateErr);
       toast.push(dateErr, 'warning');
+      submittingRef.current = false;
       return;
     }
+
+    // Production-readiness P0-3: derive top-level workType from the first
+    // work entry's section. Backend allowlist is the source of truth; the
+    // SUB_WORK_TYPE_OPTIONS list maps each entry to one of the 4 sections.
+    const topLevelWorkType = deriveTopLevelWorkType(workEntries);
+    if (!topLevelWorkType) {
+      const msg = 'Could not determine DPR workType from the work entries.';
+      setError(msg);
+      toast.push(msg, 'warning');
+      submittingRef.current = false;
+      return;
+    }
+
     setStatus('submitting');
 
     try {
@@ -268,6 +315,7 @@ export default function DprSubmit() {
         setError(msg);
         setStatus('idle');
         toast.push(msg, 'error');
+        submittingRef.current = false;
         return;
       }
 
@@ -279,6 +327,7 @@ export default function DprSubmit() {
           weather: form.weather,
           temperature: form.temperature,
           contractor: form.contractor,
+          workType: topLevelWorkType,
           notes: notes || null,
           status: submitStatus,
           photos: photosToSubmit,
@@ -295,6 +344,8 @@ export default function DprSubmit() {
       setError(msg);
       setStatus('idle');
       if (err.status !== 401) toast.push(msg, 'error');
+    } finally {
+      submittingRef.current = false;
     }
   };
 

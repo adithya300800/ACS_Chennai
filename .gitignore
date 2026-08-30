@@ -20,3 +20,6 @@ pnpm-lock.yaml
 
 # Claude settings (never commit)
 .claude/
+
+# MCP config (may contain env-expanded secrets)
+.mcp.json

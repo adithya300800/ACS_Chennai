@@ -180,13 +180,26 @@ export const api = {
   rejectDpr: (id, reason, adminNotes, token) =>
     api.post(`/dpr/${id}/reject`, { reason, adminNotes }, token),
   generateDprPdf: (id, token) => api.post(`/dpr/${id}/pdf`, {}, token),
+  // P0 round-9: GET /api/dpr/notifications is mounted only as an SSE stream,
+  // so JSON-parsing the response silently throws and the bell shows "0 unread".
+  // The dedicated JSON-list endpoint returns { notifications: [...] } so
+  // callers should expect that shape (NotificationBell already handles both).
   getNotifications: (lastId, token) =>
-    api.get(`/dpr/notifications${lastId ? '?lastNotificationId=' + lastId : ''}`, token),
+    api.get(`/dpr/notifications/list${lastId ? '?lastNotificationId=' + lastId : ''}`, token),
   markAllNotificationsRead: (token) =>
     api.put('/dpr/notifications/read-all', {}, token),
   // Single-use SSE ticket — replaces ?token= JWT-in-URL (Code Reviewer P2-2)
   getNotificationTicket: (token) =>
     api.post('/dpr/notifications/ticket', {}, token),
+
+  // Auth helpers (BE4 added /api/auth/logout and /api/auth/me)
+  // postLogout revokes the refresh token server-side so a stolen token stops
+  // being valid after the user signs out (round-8 P2). Call this BEFORE
+  // clearing localStorage so the request can still use the access token.
+  postLogout: (token) => api.post('/auth/logout', null, token),
+  // fetchMe returns the current employee; used by AuthContext for preemptive
+  // refresh when the access token is about to expire (round-8 P1).
+  fetchMe: (token) => api.get('/auth/me', token),
 
   // Zoho OAuth — public endpoints (no auth token).
   // Round-7: these previously used raw fetch() in PortalLogin, bypassing

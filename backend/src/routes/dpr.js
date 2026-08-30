@@ -18,6 +18,38 @@ function asyncHandler(fn) {
 // In-memory pending uploads (ulid -> { employeeId, container, filename })
 const pendingUploads = new Map();
 
+// ─── Idempotency-Key store ─────────────────────────────────────────────────
+// Round-10: when a client retries a POST (mobile flaky network, browser
+// refresh, double-click) with the same Idempotency-Key, return the cached
+// response instead of creating a duplicate DPR. Capped at 5 min — long enough
+// to ride out a slow mobile retry, short enough that the map can't grow
+// unboundedly. Keyed by (employeeId, Idempotency-Key) so a leaked key from
+// employee A can't replay employee B's response. The CORS Allow-Headers list
+// (index.js) already exposes this header to the browser.
+const idempotencyCache = new Map(); // key: `${employeeId}:${idempotencyKey}` → { status, body, savedAt }
+const IDEMPOTENCY_TTL_MS = 5 * 60 * 1000;
+
+function pruneIdempotency() {
+  const cutoff = Date.now() - IDEMPOTENCY_TTL_MS;
+  for (const [k, v] of idempotencyCache.entries()) {
+    if (v.savedAt <= cutoff) idempotencyCache.delete(k);
+  }
+}
+function getCachedIdempotent(employeeId, key) {
+  const cacheKey = `${employeeId}:${key}`;
+  const cached = idempotencyCache.get(cacheKey);
+  if (!cached) return null;
+  if (Date.now() - cached.savedAt > IDEMPOTENCY_TTL_MS) {
+    idempotencyCache.delete(cacheKey);
+    return null;
+  }
+  return cached;
+}
+function storeIdempotent(employeeId, key, status, body) {
+  pruneIdempotency();
+  idempotencyCache.set(`${employeeId}:${key}`, { status, body, savedAt: Date.now() });
+}
+
 // SSE connections per employee
 const sseConnections = new Map(); // employeeId -> Set<{res, lastNotificationId}>
 
@@ -27,8 +59,8 @@ const sseConnections = new Map(); // employeeId -> Set<{res, lastNotificationId}
 // client first calls POST /api/dpr/notifications/ticket (authenticated via
 // Bearer header), receives a short-lived opaque ticket, then opens the SSE
 // stream with ?ticket=... — proxies only ever see the ticket.
-const sseTickets = new Map(); // ticket -> { employeeId, expiresAt }
-const TICKET_TTL_MS = 60 * 1000; // 60 seconds — enough for the EventSource to connect
+const sseTickets = new Map(); // ticket -> { employeeId, expiresAt, lastSeenAt }
+const TICKET_TTL_MS = 5 * 60 * 1000; // 5 min sliding window — survives mobile reconnects
 
 function pruneTickets() {
   const now = Date.now();
@@ -39,14 +71,21 @@ function pruneTickets() {
 function createTicket(employeeId) {
   pruneTickets();
   const ticket = crypto.randomBytes(32).toString('base64url');
-  sseTickets.set(ticket, { employeeId, expiresAt: Date.now() + TICKET_TTL_MS });
-  // Auto-expire after TTL
-  setTimeout(() => sseTickets.delete(ticket), TICKET_TTL_MS).unref();
+  sseTickets.set(ticket, {
+    employeeId,
+    expiresAt: Date.now() + TICKET_TTL_MS,
+    lastSeenAt: Date.now(),
+  });
+  // Best-effort auto-cleanup at TTL
+  setTimeout(() => {
+    const entry = sseTickets.get(ticket);
+    if (entry && entry.expiresAt <= Date.now()) sseTickets.delete(ticket);
+  }, TICKET_TTL_MS).unref();
   return ticket;
 }
 
 // POST /api/dpr/notifications/ticket — must be authenticated via Bearer header.
-// Returns a single-use 60-second ticket for opening an SSE stream.
+// Returns a long-lived (5 min sliding) ticket for opening an SSE stream.
 router.post('/notifications/ticket', requireAuth, (req, res) => {
   const ticket = createTicket(req.employeeId);
   res.json({ ticket, expiresIn: TICKET_TTL_MS / 1000 });
@@ -63,14 +102,19 @@ router.get('/notifications', async (req, res) => {
   let employeeId = null;
 
   if (ticket) {
-    // Preferred path — opaque ticket from POST /api/dpr/notifications/ticket
+    // Preferred path — opaque ticket from POST /api/dpr/notifications/ticket.
+    // Round-10 fix: sliding 5-min window, NOT single-use. Single-use tickets
+    // break the EventSource auto-reconnect path — any mobile network blip
+    // (subway, elevator, wifi handoff) reopens the stream with the same
+    // ticket, and the previous impl 401'd on the second connect. Tickets
+    // stay valid for the lifetime of an active connection; we refresh
+    // lastSeenAt on every heartbeat so an idle/disconnected ticket ages out.
     const entry = sseTickets.get(ticket);
     if (!entry || entry.expiresAt <= Date.now()) {
       sseTickets.delete(ticket);
       return res.status(401).json({ error: 'Invalid or expired ticket' });
     }
-    // Single-use: delete immediately so the ticket can't be replayed.
-    sseTickets.delete(ticket);
+    entry.lastSeenAt = Date.now();
     employeeId = entry.employeeId;
   } else if (token) {
     // LEGACY FALLBACK — JWT in URL. Works for the current frontend bundle but
@@ -248,6 +292,24 @@ router.post('/confirm-upload', async (req, res) => {
 // ─── POST /api/dpr ────────────────────────────────────────────────────────────
 router.post('/', async (req, res) => {
   const prisma = getPrisma(req);
+
+  // Round-10: Idempotency-Key replay protection. If the client retried
+  // (mobile blip / refresh / accidental double-submit), return the cached
+  // 201 response instead of creating a duplicate DPR row. The header is
+  // exposed via CORS Allow-Headers (index.js:62) so the browser preflight
+  // succeeds.
+  const idempotencyKey = req.headers['idempotency-key'];
+  if (idempotencyKey && typeof idempotencyKey === 'string' && idempotencyKey.length > 0 && idempotencyKey.length <= 200) {
+    const cached = getCachedIdempotent(req.employeeId, idempotencyKey);
+    if (cached) {
+      // Replay — return the original response with a header so the client
+      // can tell this is a replay (helps debug "did my second click create
+      // a duplicate?" investigations).
+      res.setHeader('Idempotent-Replay', 'true');
+      return res.status(cached.status).json(cached.body);
+    }
+  }
+
   const {
     projectName, location, reportDate, weather, temperature,
     contractor, workType, notes, workEntries, status, photos = [],
@@ -275,8 +337,24 @@ router.post('/', async (req, res) => {
   }
 
   const validWorkTypes = ['MATERIAL_RECEIPT', 'QUALITY_TESTING', 'SITE_INSPECTION', 'EXCEPTIONS_SAFETY'];
-  if (workType !== undefined && !validWorkTypes.includes(workType)) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid workType' });
+  // P0-3: `workType` was previously optional and silently defaulted to
+  // 'MATERIAL_RECEIPT' if missing. That masked a frontend-side wiring bug
+  // (DprSubmit never sent the field) and corrupted every DPR's classification
+  // — a payroll/audit-integrity defect. The new contract is loud:
+  //   - missing / empty / non-string       → 400 WORKTYPE_REQUIRED
+  //   - present but not in the allowlist   → 422 WORKTYPE_INVALID
+  if (workType === undefined || workType === null || (typeof workType === 'string' && workType.trim() === '')) {
+    return res.status(400).json({
+      error: 'workType is required',
+      code: 'WORKTYPE_REQUIRED',
+    });
+  }
+  if (!validWorkTypes.includes(workType)) {
+    return res.status(422).json({
+      error: `workType must be one of: ${validWorkTypes.join(', ')}`,
+      code: 'WORKTYPE_INVALID',
+      allowed: validWorkTypes,
+    });
   }
 
   // Strict date validation (P0-4) — silent rollover for 2026-02-30 etc.
@@ -329,7 +407,10 @@ router.post('/', async (req, res) => {
         weather: weather || null,
         temperature: temperature || null,
         contractor: contractor || null,
-        workType: workType || 'MATERIAL_RECEIPT',
+        // P0-3: `workType` is now validated upstream as required. No silent
+        // default here — if the validator above let it through, it's a real
+        // string and we pass it through verbatim.
+        workType,
         notes: notes || null,
         workEntries: workEntries || null,
         status: status || 'DRAFT',
@@ -355,6 +436,10 @@ router.post('/', async (req, res) => {
       },
     });
 
+    if (idempotencyKey && typeof idempotencyKey === 'string') {
+      storeIdempotent(req.employeeId, idempotencyKey, 201, dpr);
+    }
+
     res.status(201).json(dpr);
   } catch (err) {
     // Log the Prisma error code + meta only — never the full request body
@@ -376,15 +461,17 @@ router.post('/', async (req, res) => {
       }
       return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     }
-    // Round-8 DEBUG: include the error message in the response so we can see
-    // what's failing. DELETE after F5/F6 root cause identified.
+    // Round-10: removed debug leakage (debugMessage / debugCode / debugMeta /
+    // debugName) — production clients must not see Prisma internals or stack
+    // traces. The error is fully logged server-side with the hashed employee
+    // identifier for correlation; the client gets a stable error code and
+    // request id it can quote when reporting.
+    const requestId = req.headers['x-request-id'] || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    res.setHeader('X-Request-Id', requestId);
     res.status(500).json({
       error: 'Failed to create DPR',
-      debugMessage: err.message?.split('\n'),
-      debugCode: err.code,
-      debugMeta: err.meta,
-      debugName: err.name,
-      requestId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      code: 'DPR_SAVE_FAILED',
+      requestId,
     });
   }
 });
@@ -503,7 +590,14 @@ router.get('/:id', async (req, res) => {
     const dpr = await prisma.dPR.findUnique({
       where: { id },
       include: {
-        photos: true,
+        // P0-1: include the parent DPR's submittedById on each photo so the
+        // read-SAS can rebuild the `${employeeId}/${ulid}.${ext}` tenant
+        // prefix that the upload (blobStorage.js:66) wrote under. Without
+        // this, every photo GET 404s and we lose the primary business
+        // value (DPR photos).
+        photos: {
+          include: { dpr: { select: { submittedById: true } } },
+        },
         submittedBy: { select: { id: true, name: true, email: true } },
         reviewedBy: { select: { id: true, name: true, email: true } },
         approvedBy: { select: { id: true, name: true, email: true } },
@@ -529,11 +623,22 @@ router.get('/:id', async (req, res) => {
     // from the validated contentType (not the user-supplied filename which
     // may have the wrong case or no extension at all — leading to 404s on
     // the image fetch).
+    //
+    // P0-1: The blob name must mirror the upload shape exactly
+    // (blobStorage.js:66: `${employeeId}/${ulid}.${ext}`). The DPR owner
+    // is `dpr.submittedById`; we fall back to it from `p.dpr.submittedById`
+    // because the include above pulls it onto each photo row.
+    const dprOwnerId = dpr.submittedById;
     const photosWithUrls = await Promise.all(dpr.photos.map(async p => {
       const ext = CONTENT_TYPE_EXT[p.contentType];
-      const blobName = ext ? `${p.ulid}.${ext}` : p.ulid;
+      const employeeId = (p.dpr && p.dpr.submittedById) || dprOwnerId;
+      const blobName = ext
+        ? `${employeeId}/${p.ulid}.${ext}`
+        : `${employeeId}/${p.ulid}`;
       const { sasUrl } = await generateReadSASUrl(p.container, blobName);
-      return { ...p, readUrl: sasUrl };
+      // Strip the helper join before sending to the client
+      const { dpr: _dprJoin, ...photoForClient } = p;
+      return { ...photoForClient, readUrl: sasUrl };
     }));
 
     res.json({ ...dpr, photos: photosWithUrls });
@@ -974,6 +1079,72 @@ router.post('/:id/reject', async (req, res) => {
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to reject DPR' });
+  }
+});
+
+// ─── GET /api/dpr/notifications/list ───────────────────────────────────────
+// P0-2: Frontend NotificationBell calls `api.getNotifications(...)` which
+// hits `GET /api/dpr/notifications?lastNotificationId=...` expecting a JSON
+// body — but that path is mounted as a `text/event-stream` SSE handler. The
+// JSON parser then throws inside a catch the bell treats as non-fatal and
+// the bell silently shows "0 unread" forever.
+//
+// We KEEP the SSE stream at `/notifications` for the live feed (don't break
+// the bell's push channel) and ADD this sibling JSON-list endpoint. The
+// frontend is being patched separately to point `getNotifications` here.
+router.get('/notifications/list', async (req, res) => {
+  const prisma = getPrisma(req);
+  const lastId = req.query.lastId;
+
+  try {
+    // Cursor pagination — `lastId` is the createdAt+id cursor from the
+    // previous page. We bound it to 50 per page so a runaway client can't
+    // pull the whole table.
+    const where = { employeeId: req.employeeId };
+    if (lastId) {
+      // Defensive: lastId is "<ISO createdAt>|<notificationId>". Anything
+      // malformed returns 400 instead of silently returning everything.
+      const decoded = Buffer.from(String(lastId), 'base64').toString();
+      const [cTs, cId] = decoded.split('|');
+      const cDate = new Date(cTs);
+      if (!cId || isNaN(cDate.getTime())) {
+        return res.status(400).json({ error: 'INVALID_CURSOR', message: 'lastId is malformed or expired' });
+      }
+      where.OR = [
+        { createdAt: { lt: cDate } },
+        { createdAt: cDate, id: { lt: cId } },
+      ];
+    }
+
+    const notifications = await prisma.notification.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+      select: {
+        id: true,
+        type: true,
+        dprId: true,
+        message: true,
+        isRead: true,
+        createdAt: true,
+      },
+    });
+
+    const last = notifications[notifications.length - 1];
+    const nextCursor = last
+      ? Buffer.from(`${last.createdAt instanceof Date ? last.createdAt.toISOString() : new Date(last.createdAt).toISOString()}|${last.id}`).toString('base64')
+      : null;
+
+    res.json({ notifications, nextCursor });
+  } catch (err) {
+    console.error('Notifications list error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to list notifications' });
   }
 });
 

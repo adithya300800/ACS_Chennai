@@ -122,7 +122,52 @@ router.get('/today', async (req, res) => {
   }
 });
 
+// GET /api/attendance/status
+// P3: lightweight status ping (auth-required). Returns the current session status
+// (none / active / already-checked-out) without creating or modifying anything.
+// Express auto-handles HEAD on the same path (headers only).
+router.get('/status', async (req, res) => {
+  const prisma = req.app.get('prisma');
+  try {
+    const attendanceDate = getTodayUTCDate();
+    const record = await prisma.attendance.findFirst({
+      where: { employeeId: req.employeeId, date: attendanceDate },
+      include: { sessions: { orderBy: { checkIn: 'asc' } } },
+    });
+
+    if (!record) {
+      return res.json({ status: 'none', activeSession: null, attendanceId: null });
+    }
+
+    const activeSession = record.sessions.find(s => !s.checkOut) || null;
+    const status = activeSession
+      ? 'active'
+      : (record.sessions.length > 0 ? 'already-checked-out' : 'none');
+
+    res.json({
+      status,
+      activeSession: activeSession
+        ? { id: activeSession.id, checkIn: activeSession.checkIn.toISOString() }
+        : null,
+      attendanceId: record.id,
+    });
+  } catch (err) {
+    console.error('Attendance status error:', err);
+    res.status(500).json({ error: 'Failed to fetch attendance status' });
+  }
+});
+
 // POST /api/attendance/check-in
+// P0#6: Atomic find-or-create for the Attendance record. Two concurrent
+// check-ins both pass findFirst(); instead, try create() and on P2002 (unique
+// violation on @@unique([employeeId, date])) look up the row another winner
+// inserted. This eliminates the race-window 500.
+// P0#4: Drop the (0,0) hard-rejection. Allow (0,0) as valid coordinates; if
+// the client also provides no address, reject as 'Location required' (soft).
+// P2: Server time (UTC) is ALWAYS the source of truth for checkIn. The client
+// localDateTime is validated for drift (to detect clock-skew / abuse) and
+// echoed back in the response as `claimedLocalDateTime` for UI display, but
+// never persisted as the check-in timestamp.
 router.post('/check-in', async (req, res) => {
   const prisma = req.app.get('prisma');
   const { latitude, longitude, address, localDateTime } = req.body;
@@ -139,52 +184,39 @@ router.post('/check-in', async (req, res) => {
   if (Math.abs(lat) > 90 || Math.abs(lng) > 180) {
     return res.status(400).json({ error: 'Coordinates out of range' });
   }
-  // Reject 0,0 coordinates (null island — invalid location)
-  if (lat === 0 && lng === 0) {
-    return res.status(400).json({ error: 'Invalid location coordinates' });
+  // P0#4: (0,0) is now valid. Reject only if the client also failed to send
+  // an address — i.e. truly no location signal.
+  const addressText = typeof address === 'string' ? address.trim() : '';
+  if (lat === 0 && lng === 0 && addressText === '') {
+    return res.status(400).json({ error: 'Location required' });
   }
 
-  // Cap client-supplied timestamp drift at ±15 minutes to prevent back/future-dating
+  // P2: Validate client-supplied localDateTime drift, but never trust it as
+  // the source of truth. The server clock wins; the client value is for UI.
+  let claimedLocalDateTime = null;
   if (localDateTime) {
     const ts = new Date(localDateTime);
-    if (!Number.isNaN(ts.getTime())) {
-      const driftMs = Math.abs(ts.getTime() - Date.now());
-      if (driftMs > 15 * 60 * 1000) {
-        return res.status(400).json({ error: 'Check-in timestamp drift too large (max 15 minutes)' });
-      }
+    if (Number.isNaN(ts.getTime())) {
+      return res.status(400).json({ error: 'Invalid localDateTime format' });
     }
+    const driftMs = Math.abs(ts.getTime() - Date.now());
+    if (driftMs > 15 * 60 * 1000) {
+      return res.status(400).json({ error: 'Check-in timestamp drift too large (max 15 minutes)' });
+    }
+    claimedLocalDateTime = ts.toISOString();
   }
 
-  // Use employee's local datetime (sent from frontend) to derive:
-  // 1. Attendance record date (local date)
-  // 2. checkIn timestamp (local time converted to UTC for storage)
-  let attendanceDate;
-  let checkInTime;
-
-  if (localDateTime) {
-    // Parse the local datetime and convert to UTC for storage
-    const localDate = new Date(localDateTime);
-    checkInTime = localDate; // Store local time as-is, but in UTC context
-
-    // Extract date components for attendance record (local date)
-    const year = localDate.getFullYear();
-    const month = localDate.getMonth();
-    const day = localDate.getDate();
-    attendanceDate = new Date(Date.UTC(year, month, day));
-  } else {
-    // Fallback: use current UTC
-    const now = new Date();
-    attendanceDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-    checkInTime = now;
-  }
+  // P2: server time is the source of truth — use it for both checkInAt and
+  // the attendance-date bucket (UTC day of the server clock).
+  const checkInTime = new Date();
+  const attendanceDate = new Date(
+    Date.UTC(checkInTime.getUTCFullYear(), checkInTime.getUTCMonth(), checkInTime.getUTCDate())
+  );
 
   try {
-    // Find or create attendance record for today
-    let attendance = await prisma.attendance.findFirst({
-      where: { employeeId: req.employeeId, date: attendanceDate },
-    });
-
-    if (!attendance) {
+    // P0#6: atomic find-or-create via try-create + P2002 catch.
+    let attendance;
+    try {
       attendance = await prisma.attendance.create({
         data: {
           employeeId: req.employeeId,
@@ -192,16 +224,30 @@ router.post('/check-in', async (req, res) => {
           status: 'Present',
         },
       });
+    } catch (createErr) {
+      // P2002 = unique violation on (employeeId, date). A concurrent request
+      // won the race; look up the row it created and reuse it.
+      if (createErr && createErr.code === 'P2002') {
+        attendance = await prisma.attendance.findFirst({
+          where: { employeeId: req.employeeId, date: attendanceDate },
+        });
+        if (!attendance) {
+          // Extremely unlikely (delete-between-create-and-find); bubble up.
+          throw createErr;
+        }
+      } else {
+        throw createErr;
+      }
     }
 
-    // Create new session with employee's local time
+    // Create the new session with server time (P2 source-of-truth).
     const session = await prisma.attendanceSession.create({
       data: {
         attendanceId: attendance.id,
         checkIn: checkInTime,
         checkInLat: latitude,
         checkInLng: longitude,
-        checkInAddr: address || null,
+        checkInAddr: addressText || null,
       },
     });
 
@@ -220,6 +266,8 @@ router.post('/check-in', async (req, res) => {
         checkIn: s.checkIn ? s.checkIn.toISOString() : null,
         checkOut: s.checkOut ? s.checkOut.toISOString() : null,
       })),
+      // P2: client-claimed local datetime, for UI display only.
+      claimedLocalDateTime,
     };
 
     res.status(201).json(transformed);
@@ -230,6 +278,13 @@ router.post('/check-in', async (req, res) => {
 });
 
 // PUT /api/attendance/check-out/:sessionId
+// P0#7: TOCTOU-safe check-out via updateMany() with a checkOut:null guard.
+// The previous design did findUnique() (read checkOut), decided it was null,
+// then called unconditional update(). Two concurrent check-outs could both
+// pass the null check; the second silently overwrote the first's checkOut
+// timestamp. updateMany() translates the guard into a single SQL UPDATE
+// WHERE check_out IS NULL — atomic at the DB layer.
+// P0#4: same (0,0) softening as check-in.
 router.put('/check-out/:sessionId', async (req, res) => {
   const prisma = req.app.get('prisma');
   const { sessionId } = req.params;
@@ -247,36 +302,52 @@ router.put('/check-out/:sessionId', async (req, res) => {
   if (Math.abs(lat) > 90 || Math.abs(lng) > 180) {
     return res.status(400).json({ error: 'Coordinates out of range' });
   }
-  if (lat === 0 && lng === 0) {
-    return res.status(400).json({ error: 'Invalid location coordinates' });
+  // P0#4: soft (0,0) check — only reject if also no address.
+  const addressText = typeof address === 'string' ? address.trim() : '';
+  if (lat === 0 && lng === 0 && addressText === '') {
+    return res.status(400).json({ error: 'Location required' });
   }
 
   try {
-    const session = await prisma.attendanceSession.findUnique({
+    // Auth / ownership check (non-race read — these don't change).
+    const existing = await prisma.attendanceSession.findUnique({
       where: { id: sessionId },
-      include: { attendance: true },
+      include: { attendance: { select: { employeeId: true } } },
     });
 
-    if (!session) {
+    if (!existing) {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    if (session.attendance.employeeId !== req.employeeId) {
+    if (existing.attendance.employeeId !== req.employeeId) {
       return res.status(403).json({ error: 'Not authorized' });
     }
 
-    if (session.checkOut) {
+    // P0#7: atomic guard via updateMany(). Returns { count }.
+    // SQL: UPDATE attendance_sessions SET check_out=$now, ... WHERE id=$id AND check_out IS NULL
+    const checkOutTime = new Date();
+    const updateResult = await prisma.attendanceSession.updateMany({
+      where: {
+        id: sessionId,
+        checkOut: null,
+      },
+      data: {
+        checkOut: checkOutTime,
+        checkOutLat: latitude,
+        checkOutLng: longitude,
+        checkOutAddr: addressText || null,
+      },
+    });
+
+    if (updateResult.count === 0) {
+      // Another request already checked out this session between our auth
+      // read and this update. Surface a clear 409 to the client.
       return res.status(409).json({ error: 'Already checked out' });
     }
 
-    const updated = await prisma.attendanceSession.update({
+    // Re-read with relations for the response payload.
+    const updated = await prisma.attendanceSession.findUnique({
       where: { id: sessionId },
-      data: {
-        checkOut: new Date(),
-        checkOutLat: latitude,
-        checkOutLng: longitude,
-        checkOutAddr: address || null,
-      },
       include: { attendance: { include: { sessions: { orderBy: { checkIn: 'asc' } } } } },
     });
 

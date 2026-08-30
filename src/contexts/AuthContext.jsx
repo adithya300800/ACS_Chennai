@@ -26,6 +26,54 @@ export function AuthProvider({ children }) {
     setLoading(false);
   }, []);
 
+  // Round-10: preemptive refresh so a daily-active user isn't bounced to
+  // /portal/login at 23h59m. Decode the stored access token's `exp` claim
+  // and schedule a refresh 1 hour before it. The api.js interceptor handles
+  // 401s on the fly, but a proactive refresh avoids the user seeing a flash
+  // of "session expired" right when they're trying to submit something
+  // important (DPR, attendance). Cancelled on logout.
+  const preemptiveTimerRef = useRef(null);
+  useEffect(() => {
+    // Don't schedule if no token or no logout in flight
+    if (!accessToken) {
+      if (preemptiveTimerRef.current) {
+        clearTimeout(preemptiveTimerRef.current);
+        preemptiveTimerRef.current = null;
+      }
+      return;
+    }
+    try {
+      // Decode the JWT payload without verifying — the api interceptor will
+      // catch any real invalidity on the next request. We only need `exp`.
+      const parts = accessToken.split('.');
+      if (parts.length !== 3) return;
+      const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+      if (!payload || typeof payload.exp !== 'number') return;
+      const expiresAtMs = payload.exp * 1000;
+      const msUntilRefresh = Math.max(60_000, expiresAtMs - Date.now() - 60 * 60 * 1000); // 1h before
+      // Skip if exp is already past (shouldn't happen — interceptor handles)
+      if (msUntilRefresh > 24 * 60 * 60 * 1000) return;
+
+      preemptiveTimerRef.current = setTimeout(async () => {
+        try {
+          await refreshTokenFn();
+        } catch (err) {
+          // Refresh failed — let the interceptor's auth:logout fire on the
+          // next 401 instead of proactively bouncing the user mid-session.
+          console.warn('[auth] preemptive refresh failed:', err?.message || err);
+        }
+      }, msUntilRefresh);
+    } catch {
+      // Malformed JWT — let api.js interceptor's normal 401 path handle it
+    }
+    return () => {
+      if (preemptiveTimerRef.current) {
+        clearTimeout(preemptiveTimerRef.current);
+        preemptiveTimerRef.current = null;
+      }
+    };
+  }, [accessToken, refreshTokenFn]);
+
   // Wire up auth:logout listener from the api.js interceptor. When a 401
   // comes back with TOKEN_INVALID (or refresh itself fails), the interceptor
   // dispatches this event so we can clear local state and bounce the user to
@@ -92,12 +140,27 @@ export function AuthProvider({ children }) {
     setEmployee(employee);
   }, []);
 
-  const logout = useCallback(() => {
+  // Round-9 P1: call the backend logout endpoint BEFORE clearing localStorage
+  // so the access token is still available for the Authorization header.
+  // BE4 added POST /api/auth/logout to revoke refresh tokens server-side —
+  // without this a stolen refresh token stays valid for the full 7-day TTL
+  // after the user signs out. We swallow failures (network already dead,
+  // token already expired, etc.) — the local clear is the source of truth
+  // for the UI.
+  const logout = useCallback(async () => {
+    const token = accessToken;
+    try {
+      if (token) {
+        await api.postLogout(token);
+      }
+    } catch (err) {
+      console.warn('[auth] backend logout failed (continuing with local clear):', err?.message || err);
+    }
     localStorage.removeItem('acs_auth');
     localStorage.removeItem('acs_refresh');
     setAccessToken(null);
     setEmployee(null);
-  }, []);
+  }, [accessToken]);
 
   const refreshTokenFn = useCallback(async () => {
     const refresh = localStorage.getItem('acs_refresh');

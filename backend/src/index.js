@@ -14,13 +14,14 @@ const authRoutes = require('./routes/auth');
 const attendanceRoutes = require('./routes/attendance');
 const dprRoutes = require('./routes/dpr');
 const contactRoutes = require('./routes/contact');
-const diagRoutes = require('./routes/diag'); // Round-8: temporary diagnostic endpoint
+const diagRoutes = require('./routes/diag'); // Round-8: diagnostic endpoint (intentionally retained for ops — gated by admin auth)
 const { loginLimiter, refreshLimiter, contactLimiter, sasLimiter } = require('./middleware/rateLimit');
 
 const app = express();
 const prisma = new PrismaClient();
 
-// Trust Azure App Service load balancer (1 hop) so req.ip reflects the client
+// Trust Render's reverse-proxy load balancer (1 hop) so req.ip reflects the
+// real client behind Render's edge, not the proxy's IP (rate-limit + audit).
 app.set('trust proxy', 1);
 
 const PORT = (process.env.PORT && process.env.PORT !== '') ? process.env.PORT : 8080;
@@ -58,7 +59,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-Request-ID, X-Internal-Token');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Max-Age', '300');
   }
@@ -121,19 +122,31 @@ app.get('/ready', async (req, res) => {
     checks.db = 'ok';
   } catch (err) {
     ok = false;
-    checks.db = `fail: ${err.message?.split('\n')[0] || 'unknown'}`;
+    // Include err.code + err.name so an empty-message Prisma error (e.g.
+    // a network-layer failure) still surfaces the cause for diagnosis.
+    checks.db = `fail: ${err.code || err.name || 'unknown'}: ${err.message?.split('\n')[0] || ''}`;
   }
 
   try {
+    // R2/S3 readiness: cheap credential + bucket reachability probe.
+    // The previous code called client.listContainers — an Azure Blob SDK
+    // method that does NOT exist on the AWS S3 v3 client the R2 client is
+    // built on. This permanently surfaced a 503 from /ready. HeadBucketCommand
+    // is the S3-equivalent (R2-compatible) credential check; it doesn't
+    // enumerate objects, so it stays cheap on the hot path.
     const { getClient } = require('./lib/blobStorage');
+    const { HeadBucketCommand } = require('@aws-sdk/client-s3');
     const client = getClient();
-    // List containers with prefix to verify credentials without listing the whole account
-    const iter = client.listContainers({ prefix: 'dpr-' }).byPage({ maxPageSize: 1 });
-    await iter.next();
+    const bucket = process.env.R2_BUCKET_DPR_PHOTOS || 'dpr-photos';
+    await client.send(new HeadBucketCommand({ Bucket: bucket }));
     checks.blob = 'ok';
   } catch (err) {
     ok = false;
-    checks.blob = `fail: ${err.message?.split('\n')[0] || 'unknown'}`;
+    // Distinguish missing-bucket (NotFound), auth/perm (Forbidden), and
+    // network failures (NetworkingError) so operators can see the cause
+    // without the error leaking credentials or bucket names.
+    const errName = err?.name || err?.Code || 'unknown';
+    checks.blob = `fail: ${errName}`;
   }
 
   res.status(ok ? 200 : 503).json({ status: ok ? 'ready' : 'degraded', checks });

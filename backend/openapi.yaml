@@ -1,16 +1,33 @@
 openapi: 3.0.3
 info:
   title: ACS Chennai Portal API
-  description: Backend API for ACS Chennai employee portal (auth, attendance)
+  description: |
+    Backend API for the ACS Chennai employee portal.
+    Authentication: HS256 JWT (24h access / 7d refresh) issued by `/api/auth/login`,
+    `/api/auth/refresh`, or the Zoho OAuth flow. Send the access token in the
+    `Authorization: Bearer <token>` header on every protected endpoint.
+
+    Idempotency: POST `/api/dpr` accepts an optional `Idempotency-Key` header so
+    retries (mobile network drop, double-click) collapse to a single record.
+    The same key + payload returns the same response; a different payload
+    under the same key returns 409.
   version: 1.0.0
   contact:
     name: ACS Chennai
     url: https://acschennai.com
+
 servers:
-  - url: https://acsportal-backend.azurewebsites.net
-    description: Azure production
+  - url: https://acs-chennai.onrender.com
+    description: Render production
   - url: http://localhost:8080
     description: Local development
+
+tags:
+  - name: Health
+  - name: Auth
+  - name: Attendance
+  - name: DPR
+  - name: Contact
 
 components:
   securitySchemes:
@@ -19,27 +36,141 @@ components:
       scheme: bearer
       bearerFormat: JWT
 
+  parameters:
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      required: false
+      description: |
+        Opaque client-supplied key (UUID v4 or any 1..128 char string) that
+        collapses retry storms into a single effect on POST /api/dpr.
+      schema:
+        type: string
+        maxLength: 128
+    RequestId:
+      in: header
+      name: X-Request-ID
+      required: false
+      description: Echoed back in error response `requestId` for log correlation.
+      schema:
+        type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Authenticated but not authorized for this resource
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BadRequest:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationError'
+    Conflict:
+      description: State-machine conflict (duplicate, version conflict, or invalid transition)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
   schemas:
     Error:
       type: object
+      required: [error]
       properties:
         error:
+          type: string
+          description: Human-readable error message
+        code:
+          type: string
+          description: Stable machine-readable code (e.g. INVALID_JSON, NOT_FOUND)
+        requestId:
+          type: string
+          description: Server-assigned request id for log correlation
+    ValidationError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+        message:
+          type: string
+        fields:
+          type: array
+          items:
+            type: string
+        requestId:
           type: string
     HealthResponse:
       type: object
       properties:
         status:
           type: string
-          example: ok
+          enum: [ok]
         timestamp:
           type: string
           format: date-time
+    ReadyResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, degraded]
+        checks:
+          type: object
+          properties:
+            db:
+              type: string
+              description: ok | fail:<errCode>: <message>
+            blob:
+              type: string
+              description: ok | fail:<errName>
+    VersionResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        deploySha:
+          type: string
+        deployTime:
+          type: string
+        nodeEnv:
+          type: string
     AuthUrlResponse:
       type: object
       properties:
         authUrl:
           type: string
           format: uri
+          description: Zoho OAuth authorization URL to open in a popup or redirect.
     LoginRequest:
       type: object
       required: [email, password]
@@ -50,28 +181,87 @@ components:
         password:
           type: string
           format: password
-    AuthResponse:
+    ZohoCallbackRequest:
       type: object
+      required: [code, state]
       properties:
-        accessToken:
+        code:
           type: string
-        refreshToken:
+          description: Authorization code returned by Zoho
+        state:
           type: string
-        employee:
-          type: object
-          properties:
-            id:
-              type: string
-            email:
-              type: string
-            name:
-              type: string
+          description: State value from POST /api/auth/zoho (CSRF protection)
     RefreshRequest:
       type: object
       required: [refreshToken]
       properties:
         refreshToken:
           type: string
+    Employee:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        designation:
+          type: string
+          nullable: true
+        department:
+          type: string
+          nullable: true
+        isAdmin:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+    AuthResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+          description: JWT access token (HS256, 24h expiry)
+        refreshToken:
+          type: string
+          description: JWT refresh token (HS256, 7d expiry)
+        employee:
+          $ref: '#/components/schemas/Employee'
+    AttendanceSession:
+      type: object
+      properties:
+        id:
+          type: string
+        attendanceId:
+          type: string
+        checkIn:
+          type: string
+          format: date-time
+          nullable: true
+        checkOut:
+          type: string
+          format: date-time
+          nullable: true
+        checkInLat:
+          type: number
+          nullable: true
+        checkInLng:
+          type: number
+          nullable: true
+        checkInAddr:
+          type: string
+          nullable: true
+        checkOutLat:
+          type: number
+          nullable: true
+        checkOutLng:
+          type: number
+          nullable: true
+        checkOutAddr:
+          type: string
+          nullable: true
     AttendanceRecord:
       type: object
       properties:
@@ -82,30 +272,408 @@ components:
         date:
           type: string
           format: date
-        checkIn:
+        status:
           type: string
-          format: date-time
-          nullable: true
-        checkOut:
-          type: string
-          format: date-time
-          nullable: true
         sessions:
           type: array
           items:
-            type: object
+            $ref: '#/components/schemas/AttendanceSession'
     CheckInRequest:
       type: object
+      required: [latitude, longitude]
       properties:
-        localDate:
+        latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+        address:
+          type: string
+          maxLength: 500
+          nullable: true
+        localDateTime:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Client-local ISO datetime. Drift from server time must be ≤ 15
+            minutes. When supplied, the date portion becomes the attendance
+            record date and the value is stored as the checkIn timestamp.
+    CheckOutRequest:
+      type: object
+      required: [latitude, longitude]
+      properties:
+        latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+        address:
+          type: string
+          maxLength: 500
+          nullable: true
+    ContactRequest:
+      type: object
+      required: [name, email, message]
+      properties:
+        name:
+          type: string
+          maxLength: 120
+        company:
+          type: string
+          maxLength: 200
+          nullable: true
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        phone:
+          type: string
+          maxLength: 30
+          nullable: true
+        projectType:
+          type: string
+          enum: [Chemical, Pharmaceutical, Residential, Industrial, Logistics, Other]
+          nullable: true
+        message:
+          type: string
+          maxLength: 4000
+    SasUrlRequest:
+      type: object
+      required: [filename, contentType, container]
+      properties:
+        filename:
+          type: string
+          maxLength: 255
+        contentType:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+        container:
+          type: string
+          enum: [dpr-photos, dpr-documents]
+    SasUrlResponse:
+      type: object
+      properties:
+        sasUrl:
+          type: string
+          format: uri
+          description: Presigned R2 PUT URL (15-minute expiry)
+        ulid:
+          type: string
+          description: 26-char Crockford base32 identifier for the blob
+        blobPath:
+          type: string
+          description: Storage path — `${employeeId}/${ulid}.${ext}`
+        expiresAt:
+          type: string
+          format: date-time
+    ConfirmUploadRequest:
+      type: object
+      required: [ulid, container, filename, contentType, sizeBytes]
+      properties:
+        ulid:
+          type: string
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        container:
+          type: string
+          enum: [dpr-photos, dpr-documents]
+        filename:
+          type: string
+          maxLength: 255
+        contentType:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+        sizeBytes:
+          type: integer
+          minimum: 1
+          maximum: 10485760
+    DprPhotoInput:
+      type: object
+      required: [ulid, container, filename, contentType, sizeBytes]
+      properties:
+        ulid:
+          type: string
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        container:
+          type: string
+          enum: [dpr-photos, dpr-documents]
+        filename:
+          type: string
+          maxLength: 255
+        contentType:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+        sizeBytes:
+          type: integer
+          minimum: 1
+          maximum: 10485760
+        caption:
+          type: string
+          maxLength: 500
+          nullable: true
+        location:
+          type: string
+          maxLength: 500
+          nullable: true
+        takenAt:
+          type: string
+          format: date-time
+          nullable: true
+    DprPhoto:
+      type: object
+      properties:
+        id:
+          type: string
+        ulid:
+          type: string
+        container:
+          type: string
+        filename:
+          type: string
+        contentType:
+          type: string
+        sizeBytes:
+          type: integer
+        caption:
+          type: string
+          nullable: true
+        location:
+          type: string
+          nullable: true
+        takenAt:
+          type: string
+          format: date-time
+          nullable: true
+        readUrl:
+          type: string
+          format: uri
+          description: 24-hour presigned GET URL
+    CreateDprRequest:
+      type: object
+      required: [projectName, location, reportDate]
+      properties:
+        projectName:
+          type: string
+          maxLength: 200
+        location:
+          type: string
+          maxLength: 200
+        reportDate:
           type: string
           format: date
-          description: YYYY-MM-DD
+          description: Strict YYYY-MM-DD (e.g. 2026-02-30 is rejected)
+        weather:
+          type: string
+          maxLength: 80
+          nullable: true
+        temperature:
+          type: string
+          maxLength: 20
+          nullable: true
+        contractor:
+          type: string
+          maxLength: 200
+          nullable: true
+        workType:
+          type: string
+          enum: [MATERIAL_RECEIPT, QUALITY_TESTING, SITE_INSPECTION, EXCEPTIONS_SAFETY]
+          nullable: true
+        notes:
+          type: string
+          maxLength: 5000
+          nullable: true
+        workEntries:
+          type: array
+          nullable: true
+          items:
+            type: object
+        status:
+          type: string
+          enum: [DRAFT, SUBMITTED]
+          nullable: true
+        photos:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/DprPhotoInput'
+    UpdateDprRequest:
+      type: object
+      required: [version]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+          description: Optimistic-concurrency version; mismatches return 409.
+        projectName:
+          type: string
+          maxLength: 200
+        location:
+          type: string
+          maxLength: 200
+        reportDate:
+          type: string
+          format: date
+        weather:
+          type: string
+          maxLength: 80
+        temperature:
+          type: string
+          maxLength: 20
+        contractor:
+          type: string
+          maxLength: 200
+        workType:
+          type: string
+          enum: [MATERIAL_RECEIPT, QUALITY_TESTING, SITE_INSPECTION, EXCEPTIONS_SAFETY]
+        notes:
+          type: string
+          maxLength: 5000
+        workEntries:
+          type: array
+          items:
+            type: object
+    Dpr:
+      type: object
+      properties:
+        id:
+          type: string
+        projectName:
+          type: string
+        location:
+          type: string
+        reportDate:
+          type: string
+          format: date
+        weather:
+          type: string
+          nullable: true
+        temperature:
+          type: string
+          nullable: true
+        contractor:
+          type: string
+          nullable: true
+        workType:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        workEntries:
+          type: array
+          items:
+            type: object
+        status:
+          type: string
+          enum: [DRAFT, SUBMITTED, UNDER_REVIEW, APPROVED, REJECTED]
+        version:
+          type: integer
+        submittedById:
+          type: string
+        submittedBy:
+          $ref: '#/components/schemas/Employee'
+        reviewedBy:
+          $ref: '#/components/schemas/Employee'
+        approvedBy:
+          $ref: '#/components/schemas/Employee'
+        submittedAt:
+          type: string
+          format: date-time
+          nullable: true
+        reviewedAt:
+          type: string
+          format: date-time
+          nullable: true
+        approvedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        photos:
+          type: array
+          items:
+            $ref: '#/components/schemas/DprPhoto'
+    DprListResponse:
+      type: object
+      properties:
+        dprs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Dpr'
+        nextCursor:
+          type: string
+          nullable: true
+          description: Opaque base64 cursor — pass back as `cursor` query to fetch the next page.
+    SseTicketResponse:
+      type: object
+      properties:
+        ticket:
+          type: string
+          description: Opaque 60-second ticket for opening the notifications SSE stream.
+        expiresIn:
+          type: integer
+          description: Seconds until the ticket expires.
+    AdminNotesRequest:
+      type: object
+      properties:
+        adminNotes:
+          type: string
+          maxLength: 2000
+    RejectDprRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        adminNotes:
+          type: string
+          maxLength: 2000
+    MarkReadResponse:
+      type: object
+      properties:
+        updated:
+          type: integer
+    SasTicketRequest:
+      type: object
+      required: [ulid, container, filename, contentType, sizeBytes]
+      properties:
+        ulid:
+          type: string
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        container:
+          type: string
+          enum: [dpr-photos, dpr-documents]
+        filename:
+          type: string
+          maxLength: 255
+        contentType:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+        sizeBytes:
+          type: integer
+          minimum: 1
+          maximum: 10485760
+
+security:
+  - bearerAuth: []
 
 paths:
   /health:
     get:
-      summary: Health check
+      summary: Liveness probe (no downstream dependencies)
       tags: [Health]
       security: []
       responses:
@@ -116,20 +684,63 @@ paths:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
 
-  /api/auth/zoho:
+  /ready:
     get:
-      summary: Initiate Zoho OAuth flow
+      summary: Readiness probe — verifies Postgres and R2
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: All downstreams reachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          description: At least one downstream check failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+
+  /version:
+    get:
+      summary: Deployment metadata (internal token required)
+      tags: [Health]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: header
+          name: X-Internal-Token
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Version metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Internal token not configured on the server
+
+  /api/auth/zoho:
+    post:
+      summary: Initiate Zoho OAuth — returns the authorization URL
       tags: [Auth]
       security: []
       responses:
         '200':
-          description: OAuth URL generated
+          description: Authorization URL generated
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuthUrlResponse'
         '503':
-          description: Zoho OAuth not configured
+          description: Zoho OAuth not configured on the server
           content:
             application/json:
               schema:
@@ -137,27 +748,65 @@ paths:
 
   /api/auth/zoho/callback:
     get:
-      summary: Zoho OAuth callback
+      summary: Zoho OAuth popup-window callback (returns HTML that postMessages the opener)
       tags: [Auth]
       security: []
       parameters:
         - in: query
           name: code
+          required: true
           schema:
             type: string
         - in: query
           name: state
+          required: true
           schema:
             type: string
       responses:
         '200':
-          description: OAuth callback handled (HTML)
+          description: HTML page that postMessages `{type: 'zoho-oauth-success', accessToken, refreshToken, employee}` to `window.opener` and closes.
+
+    post:
+      summary: Zoho OAuth SPA callback — returns JSON tokens directly
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZohoCallbackRequest'
+      responses:
+        '200':
+          description: Tokens issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
         '400':
-          description: Invalid OAuth state
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Zoho rejected the code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Email domain not allowed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Zoho OAuth not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /api/auth/login:
     post:
-      summary: Login with email and password
+      summary: Login with email and password (existing employees only)
       tags: [Auth]
       security: []
       requestBody:
@@ -173,12 +822,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
-          description: Invalid credentials
+          description: Invalid credentials (also returned when email does not exist)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /api/auth/refresh:
     post:
-      summary: Refresh access token
+      summary: Exchange a refresh token for a new access token
       tags: [Auth]
       security: []
       requestBody:
@@ -189,38 +844,54 @@ paths:
               $ref: '#/components/schemas/RefreshRequest'
       responses:
         '200':
-          description: Token refreshed
+          description: New access token issued
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AuthResponse'
+                type: object
+                properties:
+                  accessToken:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Refresh token invalid or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
-  /api/auth/logout:
-    post:
-      summary: Logout and invalidate refresh token
+  /api/auth/me:
+    get:
+      summary: Get the currently-authenticated employee profile
       tags: [Auth]
-      security:
-        - bearerAuth: []
       responses:
         '200':
-          description: Logged out
+          description: Profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Employee'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /api/attendance:
     get:
-      summary: Get attendance for a month
+      summary: List attendance records for a calendar month
       tags: [Attendance]
-      security:
-        - bearerAuth: []
       parameters:
         - in: query
           name: month
           required: true
           schema:
             type: string
+            pattern: '^\d{4}-\d{2}$'
             example: "2026-08"
       responses:
         '200':
-          description: Attendance records
+          description: Attendance records for the month
           content:
             application/json:
               schema:
@@ -228,49 +899,559 @@ paths:
                 items:
                   $ref: '#/components/schemas/AttendanceRecord'
         '400':
-          description: Missing/invalid month
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
   /api/attendance/today:
     get:
-      summary: Get today's attendance
+      summary: Get the attendance record for a specific local date (defaults to server UTC today)
       tags: [Attendance]
-      security:
-        - bearerAuth: []
       parameters:
         - in: query
           name: localDate
+          required: false
           schema:
             type: string
             format: date
       responses:
         '200':
-          description: Today's record
+          description: Today's record, or `null` if no record exists
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AttendanceRecord'
+                oneOf:
+                  - $ref: '#/components/schemas/AttendanceRecord'
+                  - type: 'null'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
-  /api/attendance/checkin:
+  /api/attendance/check-in:
     post:
-      summary: Check in for the day
+      summary: Check in — creates a new session for the day
       tags: [Attendance]
-      security:
-        - bearerAuth: []
       requestBody:
+        required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/CheckInRequest'
       responses:
-        '200':
-          description: Checked in
+        '201':
+          description: Attendance session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttendanceRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
-  /api/attendance/checkout:
-    post:
-      summary: Check out
+  /api/attendance/check-out/{sessionId}:
+    put:
+      summary: Check out — closes an open session
       tags: [Attendance]
-      security:
-        - bearerAuth: []
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckOutRequest'
       responses:
         '200':
-          description: Checked out
+          description: Session closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttendanceSession'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Session already checked out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/attendance/all:
+    get:
+      summary: Admin-only — list attendance across all employees for a month
+      tags: [Attendance]
+      parameters:
+        - in: query
+          name: month
+          required: true
+          schema:
+            type: string
+            pattern: '^\d{4}-\d{2}$'
+      responses:
+        '200':
+          description: All attendance records for the month
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AttendanceRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/contact:
+    post:
+      summary: Submit a contact form (sends an email via Resend)
+      tags: [Contact]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContactRequest'
+      responses:
+        '200':
+          description: Message accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Email service not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/dpr/notifications/ticket:
+    post:
+      summary: Mint a single-use ticket for opening the SSE notifications stream
+      tags: [DPR]
+      responses:
+        '200':
+          description: Ticket issued (60-second TTL, single-use)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SseTicketResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/dpr/notifications:
+    get:
+      summary: Server-Sent Events stream of per-employee notifications
+      tags: [DPR]
+      security: []
+      parameters:
+        - in: query
+          name: ticket
+          required: false
+          schema:
+            type: string
+          description: Preferred — opaque ticket from POST /api/dpr/notifications/ticket (60s TTL).
+        - in: query
+          name: token
+          required: false
+          schema:
+            type: string
+          description: Legacy fallback — JWT in URL. Deprecated; will be removed.
+        - in: query
+          name: lastNotificationId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: text/event-stream — events: `connected`, `heartbeat`, `notification`
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/dpr/notifications/read-all:
+    put:
+      summary: Mark every unread notification as read for the caller
+      tags: [DPR]
+      responses:
+        '200':
+          description: Count of notifications updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarkReadResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/dpr/sas-url:
+    post:
+      summary: Generate a presigned PUT URL for uploading a DPR photo
+      tags: [DPR]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SasUrlRequest'
+      responses:
+        '200':
+          description: Presigned URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SasUrlResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/dpr/confirm-upload:
+    post:
+      summary: Confirm a photo was uploaded to R2 — server-side HEAD verification
+      tags: [DPR]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmUploadRequest'
+      responses:
+        '200':
+          description: Upload verified
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verified:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: Pending upload not found (unknown ulid or wrong employee)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Photo exceeds 10 MB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: Could not verify the upload against R2
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/dpr:
+    post:
+      summary: Create a new DPR (supports `Idempotency-Key` for safe retry)
+      tags: [DPR]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDprRequest'
+      responses:
+        '201':
+          description: DPR created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dpr'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Duplicate DPR for this reportDate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Photo exceeds size limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    get:
+      summary: List DPRs (paginated, optionally scoped to the caller via `my=true`)
+      tags: [DPR]
+      parameters:
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            type: string
+          description: Opaque cursor from a previous response's `nextCursor`.
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+            enum: [DRAFT, SUBMITTED, UNDER_REVIEW, APPROVED, REJECTED]
+        - in: query
+          name: from
+          required: false
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: to
+          required: false
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: my
+          required: false
+          schema:
+            type: boolean
+          description: Force ownership filter even for admins.
+      responses:
+        '200':
+          description: Page of DPRs
+          headers:
+            X-Total-Count:
+              schema:
+                type: integer
+            X-Has-More:
+              schema:
+                type: boolean
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DprListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/dpr/{id}:
+    get:
+      summary: Get a single DPR with photos (read-SAS URLs attached)
+      tags: [DPR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: DPR
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dpr'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      summary: Update a DPR (optimistic-concurrency via `version`)
+      tags: [DPR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDprRequest'
+      responses:
+        '200':
+          description: DPR updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dpr'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Version conflict — DPR was modified by another action
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/dpr/{id}/review:
+    post:
+      summary: Admin — move DPR into UNDER_REVIEW
+      tags: [DPR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminNotesRequest'
+      responses:
+        '200':
+          description: DPR updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dpr'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Invalid status transition or version conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/dpr/{id}/approve:
+    post:
+      summary: Admin — move DPR into APPROVED
+      tags: [DPR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminNotesRequest'
+      responses:
+        '200':
+          description: DPR updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dpr'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Invalid status transition or version conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/dpr/{id}/reject:
+    post:
+      summary: Admin — move DPR into REJECTED (requires a reason)
+      tags: [DPR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectDprRequest'
+      responses:
+        '200':
+          description: DPR updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dpr'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Invalid status transition or version conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/dpr/{id}/pdf:
+    post:
+      summary: PDF generation — not yet implemented
+      tags: [DPR]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '501':
+          description: Not implemented
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
