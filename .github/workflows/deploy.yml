@@ -31,6 +31,12 @@ jobs:
           cache: 'npm'
       - name: Install dependencies
         run: npm ci
+      - name: Install backend test dependencies
+        # Backend __tests__/* require jsonwebtoken, bcryptjs, etc. which
+        # are in backend/package.json (not the root). Without this the
+        # test gate fails with "Cannot find module 'jsonwebtoken'" and
+        # blocks the Pages deploy.
+        run: npm ci --prefix backend --ignore-scripts
       # Round-7: gate frontend deploys on the existing test suite (api.js,
       # ErrorBoundary, auth context, blob upload, attendance). A failed
       # test now blocks GitHub Pages instead of pushing a regression to
