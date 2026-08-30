@@ -33,10 +33,13 @@ jobs:
       - name: Run tests
         run: npm test
 
-      # Round-11: the previous attempt constructed the correct pooler URL but
-      # prisma db push hung for 10+ minutes — likely a TCP handshake or auth
-      # timeout. Added diagnostic steps so a future failure shows the exact
-      # cause, with --timeout caps so it never hangs the job.
+      # Round-11: Prisma 5.22 does NOT support `--timeout` on `db push`. The
+      # previous version used `--timeout 30s`, which Prisma rejected with
+      # "unknown or unexpected option" — it printed usage and exited 0 without
+      # ever pushing schema. Seed then failed silently because
+      # continue-on-error on seed masked "table does not exist" → empty DB
+      # → login 500. Fixed: removed the unsupported flag and removed
+      # continue-on-error on schema/seed so future failures surface.
       - name: Probe Supabase pooler connectivity
         continue-on-error: true
         run: |
@@ -49,13 +52,11 @@ jobs:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
       - name: Push Prisma schema to Supabase
-        continue-on-error: true
-        run: npx prisma db push --schema=prisma/schema.prisma --skip-generate --accept-data-loss --timeout 30s
+        run: npx prisma db push --schema=prisma/schema.prisma --skip-generate --accept-data-loss
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
       - name: Seed database
-        continue-on-error: true
         run: node prisma/seed.js
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
