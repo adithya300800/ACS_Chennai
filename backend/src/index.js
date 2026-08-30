@@ -45,7 +45,21 @@ app.disable('x-powered-by');
 // responses, X-Frame-Options prevents clickjacking on error pages if any
 // HTML slips through). The default CSP `default-src 'self'` is fine for
 // a JSON-only API — there are no inline scripts or external assets.
-app.use(helmet());
+//
+// Round-11: override helmet's default `Cross-Origin-Opener-Policy:
+// same-origin` to `same-origin-allow-popups`. The default severs
+// window.opener as soon as the Zoho OAuth popup navigates cross-origin
+// from the popup opener (acschennai.com) to the backend's callback
+// (acs-chennai.onrender.com) — which means the callback HTML's
+// `window.opener.postMessage(...)` runs against `window.opener === null`
+// and the OAuth tokens are silently never delivered to the parent.
+// `same-origin-allow-popups` preserves COOP isolation for non-popup
+// browsing contexts while keeping the opener reference intact for
+// popup-launched documents, which is exactly what the OAuth callback
+// needs.
+app.use(helmet({
+  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+}));
 
 // CORS — manual headers, exact origin allowlist.
 // Round-7: trimmed methods to what this API actually uses. Audited the
