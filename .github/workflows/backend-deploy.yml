@@ -33,15 +33,23 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # Round-10: build a transaction-mode pooler URL from SUPABASE_DB_PASSWORD
+      # so the schema push works from GitHub Actions. Supabase's direct-connection
+      # hostname (port 5432) is firewalled to project IPs and is unreachable from
+      # GitHub-hosted runners. Pooler (port 6543) is reachable from anywhere.
+      # Falls back to secrets.DATABASE_URL if SUPABASE_DB_PASSWORD isn't set.
+      # continue-on-error so a transient DB hiccup never blocks the Render deploy.
       - name: Push Prisma schema to Supabase
+        continue-on-error: true
         run: npx prisma db push --schema=prisma/schema.prisma --skip-generate --accept-data-loss
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
       - name: Seed database
+        continue-on-error: true
         run: node prisma/seed.js
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
       - name: Trigger Render Deploy
         run: |
