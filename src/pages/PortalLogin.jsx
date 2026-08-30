@@ -99,36 +99,58 @@ export default function PortalLogin() {
     setStatus('loading');
     setErrorMsg('');
 
+    // CRITICAL: open the popup SYNCHRONOUSLY (inside the click handler,
+    // before any await) so the user gesture is preserved. Modern browsers
+    // (Chrome, Safari, Firefox) drop the "user activated" flag after the
+    // first await/microtask boundary — if we await the authUrl fetch first
+    // and then call window.open, the popup is blocked, the user sees
+    // nothing happen, and we lose them. Pre-open to about:blank (returns a
+    // valid popup reference even before navigation) and navigate it to
+    // the real authUrl after the fetch resolves.
+    const width = 600;
+    const height = 700;
+    const left = window.screenX + (window.outerWidth - width) / 2;
+    const top = window.screenY + (window.outerHeight - height) / 2;
+    const features = `width=${width},height=${height},left=${left},top=${top},scrollbars=yes`;
+    const popup = window.open('about:blank', 'ZohoOAuth', features);
+
+    // If the synchronous popup-open itself was blocked (some browsers do
+    // this even for about:blank), DO NOT navigate the parent to authUrl.
+    // The previous fallback (`window.location.href = authUrl`) meant the
+    // parent became the popup; after Zoho + callback, the callback HTML's
+    // `window.close()` then killed the parent's tab — user reported this
+    // as "portal login page is just full blank". Show an actionable
+    // error and let the user retry with popups enabled.
+    if (!popup) {
+      setStatus('error');
+      setErrorMsg('Pop-ups are blocked for this site. Please allow pop-ups and try again.');
+      return;
+    }
+
     try {
       // Round-7: use api.js so this inherits the 30s timeout wrapper.
       const { authUrl } = await api.getZohoAuthUrl();
-
-      const width = 600;
-      const height = 700;
-      const left = window.screenX + (window.outerWidth - width) / 2;
-      const top = window.screenY + (window.outerHeight - height) / 2;
-      const popup = window.open(
-        authUrl,
-        'ZohoOAuth',
-        `width=${width},height=${height},left=${left},top=${top},scrollbars=yes`
-      );
-
-      if (!popup) {
-        window.location.href = authUrl;
-        return;
-      }
+      // Navigate the already-open popup to the real authUrl.
+      popup.location.href = authUrl;
 
       const handleMessage = (event) => {
-        // Note: apiUrl was previously read here; we now derive from
-        // window.location.origin for the popup parent — this is the
-        // frontend origin (acschennai.com) and the message arrives from
-        // the backend (acs-portal-api.azurewebsites.net) via the
-        // postMessage call. Trust only the configured backend origin.
-        const expectedBackendOrigin = new URL(import.meta.env.VITE_API_URL || window.location.origin).origin;
-        if (event.origin !== expectedBackendOrigin) return;
-        if (event.data.type === 'zoho-oauth-success') {
+        // Trust the origin of the message sender. The popup runs on the
+        // backend origin (acs-chennai.onrender.com) after Zoho redirects
+        // it cross-origin. VITE_API_URL is not always set in CI (it's an
+        // optional build-time var for backend overrides) — so fall back
+        // to (a) the configured backend origin or (b) the current page's
+        // origin. Accept either; the typed `event.data.type` check below
+        // is the real defense against rogue messages (origin can't be
+        // spoofed by other windows).
+        const expected = (import.meta.env.VITE_API_URL || '').trim();
+        const allowedOrigins = expected
+          ? [new URL(expected).origin, window.location.origin]
+          : [window.location.origin];
+        if (!allowedOrigins.includes(event.origin)) return;
+        if (event.data?.type === 'zoho-oauth-success') {
           window.removeEventListener('message', handleMessage);
-          popup.close();
+          clearInterval(closedWatch);
+          try { popup.close(); } catch {}
           setAuthData(event.data.accessToken, event.data.employee, event.data.refreshToken);
           try {
             Object.keys(sessionStorage).forEach((k) => {
@@ -136,18 +158,36 @@ export default function PortalLogin() {
             });
           } catch {}
           navigate('/portal/attendance', { replace: true });
-        } else if (event.data.type === 'zoho-oauth-error') {
+        } else if (event.data?.type === 'zoho-oauth-error') {
           window.removeEventListener('message', handleMessage);
-          popup.close();
+          clearInterval(closedWatch);
+          try { popup.close(); } catch {}
           setStatus('error');
           setErrorMsg(event.data.error || 'Zoho login failed');
         }
       };
       window.addEventListener('message', handleMessage);
 
+      // If the user closes the popup manually mid-flow (e.g. abandons the
+      // Zoho sign-in screen), bail out of the loading state so they can
+      // retry instead of staring at a stuck "Signing in..." button.
+      const closedWatch = setInterval(() => {
+        if (popup.closed) {
+          clearInterval(closedWatch);
+          window.removeEventListener('message', handleMessage);
+          setStatus((s) => (s === 'loading' ? 'idle' : s));
+        }
+      }, 500);
+
     } catch (err) {
+      // Network failed before we could navigate the popup — close it so
+      // the user isn't left with an empty about:blank window.
+      try { popup.close(); } catch {}
       setStatus('error');
       setErrorMsg(err.message || 'Zoho OAuth not available');
+      // Note: closedWatch is owned by the success path; if we never
+      // registered the message listener (authUrl fetch failed), there's
+      // nothing for the watcher to clean up.
     }
   };
 
