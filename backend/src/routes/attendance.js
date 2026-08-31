@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
-const { buildTimesheetRows } = require('../lib/timesheet');
+const { buildTimesheetRows, TIMESHEET_COLUMNS } = require('../lib/timesheet');
 const { pickWriter } = require('../lib/excelWriter');
 const { hashIdentifier } = require('../lib/pii');
 
@@ -591,7 +591,12 @@ router.get('/export', async (req, res) => {
     // truncate the response (browser sees a partial download). Wrap in
     // try/catch to set a trailer header if streaming hasn't begun.
     try {
-      await writer.write(res, { rows, summary, month });
+      await writer.write(res, {
+        columns: TIMESHEET_COLUMNS,
+        rows,
+        sheetName: 'Timesheet',
+        filename: `timesheet-${month}.xlsx`,
+      });
     } catch (writeErr) {
       console.error('[attendance/export] writer error:', writeErr.message?.split('\n')[0]);
       if (!res.headersSent) {
