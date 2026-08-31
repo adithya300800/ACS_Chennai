@@ -259,6 +259,27 @@ const server = app.listen(PORT, () => {
   console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ') || '(none)'}`);
 });
 
+// R2 bucket CORS self-heal (round-13). Without this, browser preflight to
+// the presigned PUT URL returns 403 (no Access-Control-Allow-* headers)
+// and the browser aborts the upload with "Network error during upload"
+// before any bytes leave. Idempotent: re-running on every boot keeps the
+// policy in sync if someone hand-edits the bucket and breaks uploads
+// again. Non-fatal: a failure here must not block /ready from reporting
+// blob: ok — we still serve traffic even if R2 rejects PutBucketCors
+// (operator can add s3:PutBucketCors to the IAM key, or run the
+// equivalent wrangler r2 bucket cors put once from the dashboard).
+const { applyR2Cors } = require('./lib/blobStorage');
+applyR2Cors(ALLOWED_ORIGINS).then((results) => {
+  const failed = results.filter((r) => !r.ok);
+  if (failed.length === 0) {
+    console.log(`[r2-cors] applied CORS policy to ${results.length} bucket(s): ${results.map((r) => r.Bucket).join(', ')}`);
+  } else {
+    console.error('[r2-cors] some buckets failed:', JSON.stringify(failed));
+  }
+}).catch((err) => {
+  console.error('[r2-cors] apply failed (non-fatal):', err?.$metadata?.httpStatusCode || err?.message || err);
+});
+
 // Graceful shutdown — close server first, then disconnect Prisma
 let shuttingDown = false;
 async function shutdown(signal) {

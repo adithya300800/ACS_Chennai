@@ -8,7 +8,7 @@
  *   R2_ACCESS_KEY_ID  — R2 Access Key ID
  *   R2_SECRET_ACCESS_KEY — R2 Secret Access Key
  */
-const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, PutBucketCorsCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { randomBytes } = require('crypto');
 
@@ -165,6 +165,56 @@ async function deleteBlob(containerName, blobName) {
   await client.send(new DeleteObjectCommand({ Bucket: containerName, Key: blobName }));
 }
 
+// R2 buckets we own — CORS policy must allow the frontend origin so the
+// browser's preflight (OPTIONS) on a presigned PUT URL doesn't return 403
+// and abort the upload before the bytes leave. Without this, the frontend
+// gets a generic "Network error during upload" because the XHR error event
+// fires on preflight failure, not on the PUT itself.
+//
+// Discovery: round-13. R2 buckets had no CORS rule at all, so the browser
+// preflight from https://acschennai.com → <bucket>.<account>.r2... returned
+// 403 with no Access-Control-Allow-* headers, killing the upload. Backend
+// code was correct; only the bucket policy was missing.
+const ALLOWED_R2_BUCKETS = [
+  process.env.R2_BUCKET_DPR_PHOTOS        || 'dpr-photos',
+  process.env.R2_BUCKET_DPR_DOCUMENTS     || 'dpr-documents',
+  process.env.R2_BUCKET_INSPECTION_PHOTOS || 'inspection-photos',
+].filter(Boolean);
+
+/**
+ * Apply a permissive-yet-scoped CORS policy to every R2 bucket we use, so
+ * the browser's preflight to the presigned PUT URL succeeds. Idempotent —
+ * safe to call on every boot. Non-fatal at the boot layer: caller logs
+ * errors and continues serving traffic.
+ *
+ * Requires the R2 access key to have `s3:PutBucketCors` permission on each
+ * bucket (the same key signs presigned URLs, which requires bucket-level
+ * permissions; PutBucketCors is typically included by default on R2).
+ */
+async function applyR2Cors(allowedOrigins) {
+  const client = getClient();
+  const origins = (Array.isArray(allowedOrigins) && allowedOrigins.length > 0)
+    ? allowedOrigins
+    : ['https://acschennai.com']; // safe default if env not set
+  const rules = [{
+    AllowedOrigins: origins,
+    AllowedMethods: ['PUT', 'GET', 'HEAD'],
+    AllowedHeaders: ['*'],
+    ExposeHeaders:  ['ETag'],
+    MaxAgeSeconds:  300,
+  }];
+  const results = [];
+  for (const Bucket of ALLOWED_R2_BUCKETS) {
+    try {
+      await client.send(new PutBucketCorsCommand({ Bucket, CORSConfiguration: { CORSRules: rules } }));
+      results.push({ Bucket, ok: true });
+    } catch (err) {
+      results.push({ Bucket, ok: false, error: err?.$metadata?.httpStatusCode || err?.name || err?.message });
+    }
+  }
+  return results;
+}
+
 module.exports = {
   getClient,
   generateULID,
@@ -173,6 +223,8 @@ module.exports = {
   verifyBlobExists,
   uploadBufferToBlob,
   deleteBlob,
+  applyR2Cors,
+  ALLOWED_R2_BUCKETS,
   CONTENT_TYPE_EXT,
 };
 
