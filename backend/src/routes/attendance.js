@@ -42,6 +42,49 @@ function toLocalDateString(date) {
   return `${year}-${month}-${day}`;
 }
 
+// Helper: compute the attendance "day bucket" for a given instant, in the
+// user's own timezone (IANA name from `Intl.DateTimeFormat().resolvedOptions
+// .timeZone`). Falls back to the server's local TZ (Asia/Kolkata) when no
+// clientTimezone is supplied — preserves backward compat with old frontends
+// and with the existing IST workforce.
+//
+// Rationale (round-14): the previous code used `new Date(instant).getDate()`,
+// which is the SERVER's local calendar day. For an Indian user that matches
+// the user's calendar, but for a PST user the bucket can be off by ±1 day.
+// Round-14 lets the client send its IANA timezone so we extract the
+// calendar day in the user's frame instead.
+//
+// No data migration: existing rows retain their (potentially off-by-one) date
+// values. Only NEW check-ins go through this path. The recorded `checkIn`
+// instant (UTC) is unchanged either way — the fix is purely about which
+// calendar day the row is bucketed into.
+function computeLocalDate(instant, ianaTz) {
+  if (typeof ianaTz === 'string' && ianaTz.length > 0 && ianaTz.length < 64) {
+    try {
+      // en-CA yields YYYY-MM-DD ordered parts.
+      const fmt = new Intl.DateTimeFormat('en-CA', {
+        timeZone: ianaTz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      });
+      const parts = fmt.formatToParts(instant);
+      const y = parts.find((p) => p.type === 'year').value;
+      const m = parts.find((p) => p.type === 'month').value;
+      const d = parts.find((p) => p.type === 'day').value;
+      // Build a Date that Prisma's @db.Date will store as this calendar day
+      // regardless of the server's TZ. Using UTC midnight keeps the column
+      // value stable across deploys / TZ changes.
+      const utc = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d)));
+      if (!Number.isNaN(utc.getTime())) return utc;
+    } catch (_e) {
+      // Invalid IANA name (or Node Intl missing the tz database) — fall
+      // through to the server-local computation.
+    }
+  }
+  return new Date(instant.getFullYear(), instant.getMonth(), instant.getDate());
+}
+
 // Helper: Get today's date in the server's local timezone for the
 // attendance-record day bucket. With TZ=Asia/Kolkata set in src/index.js,
 // this returns IST midnight today — matching the user's calendar.
@@ -191,7 +234,7 @@ router.get('/status', async (req, res) => {
 // never persisted as the check-in timestamp.
 router.post('/check-in', async (req, res) => {
   const prisma = req.app.get('prisma');
-  const { latitude, longitude, address, localDateTime } = req.body;
+  const { latitude, longitude, address, localDateTime, clientTimezone } = req.body;
 
   if (latitude === undefined || latitude === null || longitude === undefined || longitude === null) {
     return res.status(400).json({ error: 'latitude and longitude are required' });
@@ -229,17 +272,13 @@ router.post('/check-in', async (req, res) => {
 
   // P2 (revised): the EFFECTIVE click time is the client-claimed instant
   // if it passes the drift check above; otherwise the server wall clock.
-  // The bucket for the Attendance row uses the same effective time, in
-  // LOCAL components (Asia/Kolkata after src/index.js sets TZ), so the
-  // day we record matches the day the user saw on their phone when they
-  // tapped Check-in. This also collapses the previous "10:40 pm displayed
-  // when user clicked at 10:50 pm" symptom — that gap was the network +
-  // server-clock delay baked into the stored value, which we now prefer
-  // the client-claimed time over.
+  // The bucket for the Attendance row uses the same effective time. Round-14:
+  // the date is computed in the USER's local timezone (clientTimezone) when
+  // provided, falling back to the server's local TZ (Asia/Kolkata) for IST
+  // workforce backward compat. This collapses the previous off-by-one bug
+  // where a check-in at 23:00 PST landed in the next IST day.
   const checkInTime = claimedLocalDateTime ? new Date(claimedLocalDateTime) : new Date();
-  const attendanceDate = new Date(
-    checkInTime.getFullYear(), checkInTime.getMonth(), checkInTime.getDate()
-  );
+  const attendanceDate = computeLocalDate(checkInTime, clientTimezone);
 
   try {
     // P0#6: atomic find-or-create via try-create + P2002 catch.

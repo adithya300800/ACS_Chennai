@@ -215,13 +215,22 @@ export default function Attendance() {
       // Get employee's local datetime (ISO string in local timezone).
       // Backend now uses server time as the source of truth for checkInAt;
       // localDateTime is echoed back as `claimedLocalDateTime` for UI.
+      // Round-14: also send the IANA timezone so the backend can bucket
+      // the attendance row into the user's LOCAL calendar day. Without
+      // this, a PST user checking in at 23:00 PST would land in the next
+      // IST day — off-by-one date bug fixed in round-14.
       const localDateTime = new Date().toISOString();
+      const clientTimezone =
+        typeof Intl !== 'undefined'
+          ? Intl.DateTimeFormat().resolvedOptions().timeZone
+          : undefined;
 
       const data = await api.post('/attendance/check-in', {
         latitude: lat,
         longitude: lng,
         address: addr,
-        localDateTime
+        localDateTime,
+        clientTimezone,
       }, accessToken);
       setTodayRecord(data);
       setStatus('idle');
