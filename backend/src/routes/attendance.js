@@ -578,6 +578,7 @@ router.get('/export', async (req, res) => {
 
     // Pick writer BEFORE calling it — we want to log the format chosen.
     const writer = pickWriter();
+    const extension = writer.format === 'xlsx' ? 'xlsx' : 'csv';
 
     console.log('[attendance/export]', {
       requester: hashIdentifier(req.employeeId),
@@ -595,7 +596,7 @@ router.get('/export', async (req, res) => {
         columns: TIMESHEET_COLUMNS,
         rows,
         sheetName: 'Timesheet',
-        filename: `timesheet-${month}.xlsx`,
+        filename: `timesheet-${month}.${extension}`,
       });
     } catch (writeErr) {
       console.error('[attendance/export] writer error:', writeErr.message?.split('\n')[0]);
