@@ -15,6 +15,10 @@ import Admin from './pages/portal/Admin.jsx';
 import DprSubmit from './pages/portal/DprSubmit.jsx';
 import DprList from './pages/portal/DprList.jsx';
 import DprDashboard from './pages/admin/DprDashboard.jsx';
+import InspectionSubmit from './pages/portal/InspectionSubmit.jsx';
+import InspectionList from './pages/portal/InspectionList.jsx';
+import InspectionDetail from './pages/portal/InspectionDetail.jsx';
+import InspectionDashboard from './pages/admin/InspectionDashboard.jsx';
 
 function App() {
   const location = useLocation();
@@ -59,6 +63,10 @@ function App() {
           <Route path="dpr/submit" element={<DprSubmit />} />
           <Route path="dpr/my" element={<DprList />} />
           <Route path="admin/dpr" element={<DprDashboard />} />
+          <Route path="inspection/submit" element={<InspectionSubmit />} />
+          <Route path="inspection/my" element={<InspectionList />} />
+          <Route path="inspection/:id" element={<InspectionDetail />} />
+          <Route path="admin/inspection" element={<InspectionDashboard />} />
           <Route path="leave" element={<ComingSoon name="Leave Management" />} />
           <Route path="training" element={<ComingSoon name="Training" />} />
           <Route path="assets" element={<ComingSoon name="Assets" />} />

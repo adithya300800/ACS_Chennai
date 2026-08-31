@@ -62,7 +62,7 @@ export default function DprDashboard() {
   const [rejectReason, setRejectReason] = useState('');
   const [actionLoading, setActionLoading] = useState('');
   const [filter, setFilter] = useState('SUBMITTED');
-  const [stats, setStats] = useState({ today: 0, pending: 0, approvedWeek: 0, total: 0 });
+  const [stats, setStats] = useState({ today: 0, pending: 0, approvedWeek: 0, total: 0, openInspections: 0 });
 
   const loadDprs = useCallback(async () => {
     const data = await api.getDprs({ status: filter }, accessToken);
@@ -73,10 +73,13 @@ export default function DprDashboard() {
     setLoading(true);
     setError('');
     try {
-      const [pendingData, todayData, weekData] = await Promise.all([
+      const [pendingData, todayData, weekData, openInspectionsData] = await Promise.all([
         api.getDprs({ status: 'SUBMITTED' }, accessToken),
         api.getDprs({ status: 'UNDER_REVIEW' }, accessToken),
         api.getDprs({ status: 'APPROVED' }, accessToken),
+        // Round-12: 5th stat card — open inspection records across the org.
+        // Non-fatal if it fails (e.g. permissions); fall back to 0.
+        api.getInspections({ status: 'OPEN', limit: '1' }, accessToken).catch(() => ({ inspections: [] })),
       ]);
 
       setStats({
@@ -84,6 +87,7 @@ export default function DprDashboard() {
         pending: (todayData.dprs || []).length,
         approvedWeek: (weekData.dprs || []).length,
         total: (pendingData.dprs || []).length + (todayData.dprs || []).length,
+        openInspections: openInspectionsData.inspections?.length || 0,
       });
 
       const items = await loadDprs();
@@ -202,7 +206,8 @@ export default function DprDashboard() {
         <StatCard number={stats.today} label="Submitted Today" />
         <StatCard number={stats.pending} label="Pending Review" color="#f59e0b" />
         <StatCard number={stats.approvedWeek} label="Approved" color="#22c55e" />
-        <StatCard number={stats.total} label="Total Active" />
+        <StatCard number={stats.openInspections} label="Open Inspections" color="#dc2626" />
+        <StatCard number={stats.total} label="Total Active DPRs" />
       </div>
 
       {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
@@ -259,6 +264,12 @@ export default function DprDashboard() {
                 <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
                   <span style={{ fontWeight: 500 }}>Photos:</span> {dpr.photos?.length || 0}
                 </div>
+                {Array.isArray(dpr.inspections) && dpr.inspections.length > 0 && (
+                  <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
+                    <span style={{ fontWeight: 500 }}>Inspections:</span>{' '}
+                    {dpr.inspections.length} linked
+                  </div>
+                )}
               </div>
 
               {dpr.submittedBy && (

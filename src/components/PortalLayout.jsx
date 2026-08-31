@@ -79,6 +79,33 @@ export default function PortalLayout() {
       ),
     }] : []),
     {
+      to: '/portal/inspection/my',
+      label: 'Inspections',
+      icon: (
+        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+          <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" /><rect x="9" y="3" width="6" height="4" rx="1" /><path d="M9 14l2 2 4-4" />
+        </svg>
+      ),
+    },
+    ...(employee?.isAdmin ? [{
+      to: '/portal/admin/inspection',
+      label: 'Inspection Dashboard',
+      icon: (
+        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
+        </svg>
+      ),
+    }] : []),
+    {
+      to: '/portal/inspection/submit',
+      label: 'New Inspection',
+      icon: (
+        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" />
+        </svg>
+      ),
+    },
+    {
       to: '/portal/dpr/submit',
       label: 'New DPR',
       icon: (

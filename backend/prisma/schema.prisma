@@ -22,11 +22,12 @@ model Employee {
   zohoRefreshToken String?        @map("zoho_refresh_token")
   createdAt        DateTime       @default(now()) @map("created_at")
   updatedAt        DateTime       @updatedAt @map("updated_at")
-  attendance       Attendance[]
-  dprSubmitted     DPR[]          @relation("DPRSubmitter")
-  dprReviewed      DPR[]          @relation("DPRReviewer")
-  dprApproved      DPR[]          @relation("DPRApprover")
-  notifications    Notification[]
+  attendance           Attendance[]
+  dprSubmitted         DPR[]                @relation("DPRSubmitter")
+  dprReviewed          DPR[]                @relation("DPRReviewer")
+  dprApproved          DPR[]                @relation("DPRApprover")
+  inspectionSubmitted  InspectionRecord[]   @relation("InspectionSubmitter")
+  notifications        Notification[]
 
   @@map("employees")
 }
@@ -78,33 +79,45 @@ enum DPRStatus {
 }
 
 model DPR {
-  id            String    @id @default(uuid())
-  projectName   String
-  location      String
-  reportDate    DateTime  @db.Date
-  weather       String?
-  temperature   String?
-  contractor    String?
-  workType      String    @default("MATERIAL_RECEIPT")
-  notes         String?
-  workEntries   Json?
-  status        DPRStatus @default(DRAFT)
-  version       Int       @default(1)
-  submittedById String    @map("submitted_by_id")
-  reviewedById  String?   @map("reviewed_by_id")
-  approvedById  String?   @map("approved_by_id")
-  submittedAt   DateTime? @map("submitted_at")
-  reviewedAt    DateTime? @map("reviewed_at")
-  approvedAt    DateTime? @map("approved_at")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
+  id                       String    @id @default(uuid())
+  projectName              String
+  location                 String
+  reportDate               DateTime  @db.Date
+  weather                  String?
+  temperature              String?
+  contractor               String?
+  workType                 String    @default("MATERIAL_RECEIPT")
+  notes                    String?
+  // Round-12 DPR refactor: 5 daily-narrative fields requested by the PMC
+  // domain review (work executed / location / manpower / risks / materials
+  // summary) + a customSections JSON blob for the user's ad-hoc text + table
+  // blocks added via the "+" button. workEntries is kept (nullable, deprecated)
+  // so old DPRs render without a migration step.
+  workExecutedToday        String?   @map("work_executed_today")
+  workLocation             String?   @map("work_location")
+  manpowerSummary          String?   @map("manpower_summary")
+  risksHindrances          String?   @map("risks_hindrances")
+  materialsReceivedSummary String?   @map("materials_received_summary")
+  customSections           Json?     @map("custom_sections")
+  workEntries              Json?
+  status                   DPRStatus @default(DRAFT)
+  version                  Int       @default(1)
+  submittedById            String    @map("submitted_by_id")
+  reviewedById             String?   @map("reviewed_by_id")
+  approvedById             String?   @map("approved_by_id")
+  submittedAt              DateTime? @map("submitted_at")
+  reviewedAt               DateTime? @map("reviewed_at")
+  approvedAt               DateTime? @map("approved_at")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @updatedAt @map("updated_at")
 
-  submittedBy   Employee       @relation("DPRSubmitter", fields: [submittedById], references: [id])
-  reviewedBy    Employee?      @relation("DPRReviewer", fields: [reviewedById], references: [id])
-  approvedBy    Employee?      @relation("DPRApprover", fields: [approvedById], references: [id])
+  submittedBy   Employee           @relation("DPRSubmitter", fields: [submittedById], references: [id])
+  reviewedBy    Employee?          @relation("DPRReviewer", fields: [reviewedById], references: [id])
+  approvedBy    Employee?          @relation("DPRApprover", fields: [approvedById], references: [id])
   photos        DPRPhoto[]
   revisions     DPRRevision[]
   notifications Notification[]
+  inspections   InspectionRecord[]
 
   @@unique([submittedById, reportDate])
   @@index([reportDate, id])
@@ -149,6 +162,72 @@ model DPRRevision {
   // this index the audit trail read on /api/dpr/:id history hits a seq scan.
   @@index([dprId, changedAt])
   @@map("dpr_revision")
+}
+
+// ─────────────────────────────────────────────
+// Inspection & Compliance Records Module (Round-12)
+// ─────────────────────────────────────────────
+// 15 sub-work types (material / cube / water / waterproofing / villa / day-
+// activity / NCR / safety / major_deviation) used to live as nested rows
+// inside DPR.workEntries. They are now first-class records that:
+//   - FK to a DPR (nullable — for filings on Sundays / holidays)
+//   - carry their own photos (DPR photos stay on the DPR)
+//   - can be filtered by date range, project, type, severity, status
+// inspectionType is the SUB_WORK_TYPE_OPTIONS value (e.g. 'material_inspection',
+// 'cube_casting', 'ncr', 'safety_violation'). The structured field payload per
+// type lives in WORK_TYPE_FIELDS (frontend/src/pages/portal/DprWorkTypes.jsx)
+// and is stored as JSON in `data` for forward compatibility.
+
+model InspectionRecord {
+  id             String   @id @default(uuid())
+  projectName    String
+  location       String
+  reportDate     DateTime @db.Date
+  weather        String?
+  contractor     String?
+  dprId          String?  @map("dpr_id")
+  inspectionType String   @map("inspection_type")
+  data           Json
+  status         String   @default("OPEN")
+  // severity is meaningful for NCR / safety_violation / major_deviation;
+  // null for routine inspections (material receipt, cube test, etc.).
+  severity       String?
+  submittedById  String   @map("submitted_by_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  dpr         DPR?             @relation(fields: [dprId], references: [id])
+  submittedBy Employee         @relation("InspectionSubmitter", fields: [submittedById], references: [id])
+  photos      InspectionPhoto[]
+
+  // Indexes mirror DPR's pattern: owner + date for "my inspections this week",
+  // dprId for "show me inspections on this DPR", and (date,id) for cursor
+  // pagination in list views.
+  @@index([submittedById, reportDate])
+  @@index([dprId])
+  @@index([reportDate, id])
+  @@index([inspectionType])
+  @@map("inspection_record")
+}
+
+model InspectionPhoto {
+  id           String    @id @default(uuid())
+  inspectionId String    @map("inspection_id")
+  ulid         String
+  container    String
+  filename     String
+  contentType  String    @map("content_type")
+  sizeBytes    Int       @map("size_bytes")
+  caption      String?
+  location     String?
+  takenAt      DateTime? @map("taken_at")
+  uploadedAt   DateTime  @default(now()) @map("uploaded_at")
+
+  inspection InspectionRecord @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+
+  @@index([inspectionId])
+  @@index([ulid])
+  @@map("inspection_photo")
 }
 
 model Notification {

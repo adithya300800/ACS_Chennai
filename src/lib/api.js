@@ -212,4 +212,24 @@ export const api = {
   // uses POST, but this helper used GET — which 404'd until round-11 fix.
   getZohoAuthUrl: () => api.post('/auth/zoho'),
   postZohoCallback: (code) => api.post('/auth/zoho/callback', { code }),
+
+  // Round-12: Inspection & Compliance Records — first-class resource that
+  // owns the 15 structured sub-work types (material / cube / water /
+  // waterproofing / villa / day-activity / NCR / safety / major_deviation)
+  // formerly nested inside DPR.workEntries. SAS upload goes to the
+  // `inspection-photos` container so a leaky SAS can't cross to DPR photos.
+  getInspectionSasUrl: (filename, contentType, token) =>
+    api.post('/inspection/sas-url', { filename, contentType, container: 'inspection-photos' }, token),
+  confirmInspectionUpload: (ulid, filename, contentType, sizeBytes, token) =>
+    api.post('/inspection/confirm-upload', {
+      ulid, container: 'inspection-photos', filename, contentType, sizeBytes,
+    }, token),
+  createInspection: (data, token) => api.post('/inspection', data, token),
+  getInspections: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/inspection${qs ? '?' + qs : ''}`, token);
+  },
+  getInspection: (id, token) => api.get(`/inspection/${id}`, token),
+  updateInspection: (id, data, version, token) =>
+    api.put(`/inspection/${id}`, { ...data, version }, token),
 };

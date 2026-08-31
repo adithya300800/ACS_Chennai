@@ -20,6 +20,10 @@ const { PrismaClient } = require('@prisma/client');
 const authRoutes = require('./routes/auth');
 const attendanceRoutes = require('./routes/attendance');
 const dprRoutes = require('./routes/dpr');
+// Round-12: Inspection & Compliance Records — new resource that owns the 15
+// structured sub-work types formerly nested inside DPR.workEntries (material
+// receipt, cube test, water quality, waterproofing, NCR, safety, etc.).
+const inspectionRoutes = require('./routes/inspection');
 const contactRoutes = require('./routes/contact');
 const diagRoutes = require('./routes/diag'); // Round-8: diagnostic endpoint (intentionally retained for ops — gated by admin auth)
 const { loginLimiter, refreshLimiter, contactLimiter, sasLimiter } = require('./middleware/rateLimit');
@@ -184,6 +188,11 @@ app.use('/api/dpr/sas-url', sasLimiter);
 // DPR mount opts in to a 1mb body limit (work entries + photo metadata
 // payloads can legitimately exceed the 16kb default).
 app.use('/api/dpr', express.json({ limit: dprBodyLimit }), dprRoutes);
+// Round-12: Inspection & Compliance Records. Same 1mb limit as DPR —
+// inspection `data` is a structured JSON blob (NCR / cube test / material
+// receipt) and can legitimately exceed the 16kb default.
+app.use('/api/inspection/sas-url', sasLimiter);
+app.use('/api/inspection', express.json({ limit: dprBodyLimit }), inspectionRoutes);
 app.use('/api/contact', contactLimiter, contactRoutes);
 // Round-8 TEMPORARY: diagnostic endpoint to introspect deployed DB schema.
 // Mounted AFTER the body-parsers so it can read raw body. DELETE after F5/F6 resolved.

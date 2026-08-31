@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
 
@@ -28,6 +28,62 @@ function StatusBadge({ status }) {
     REJECTED: 'Rejected',
   }[status] || status;
   return <span className={`dpr-status-badge ${cls}`}>{label}</span>;
+}
+
+// Round-12: render user-added ad-hoc sections (text + tables) read-only
+// inside the DPR detail modal. Mirrors the editor shape at DprCustomSection.
+function CustomSectionsView({ sections }) {
+  if (!Array.isArray(sections) || sections.length === 0) return null;
+  return (
+    <div style={{ marginTop: '1rem' }}>
+      <h3 style={{ fontSize: '0.95rem', margin: '0 0 0.5rem', color: 'var(--navy)' }}>
+        Custom Sections
+      </h3>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+        {sections.map((s) => (
+          <div
+            key={s.id}
+            style={{ border: '1px solid #e2e8f0', borderRadius: 6, padding: '0.625rem 0.875rem', background: '#fff' }}
+          >
+            <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--navy)', marginBottom: '0.25rem' }}>
+              {s.type === 'text' ? '📝 ' : '📊 '}
+              {s.title || <em style={{ color: '#94a3b8' }}>(untitled)</em>}
+            </div>
+            {s.type === 'text' ? (
+              <div style={{ whiteSpace: 'pre-wrap', fontSize: '0.9rem' }}>
+                {s.content || <em style={{ color: '#94a3b8' }}>(empty)</em>}
+              </div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                  <thead>
+                    <tr style={{ background: '#f1f5f9' }}>
+                      {(s.columns || []).map((c, i) => (
+                        <th key={i} style={{ textAlign: 'left', padding: '0.375rem', borderBottom: '1px solid #e2e8f0' }}>
+                          {c}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(s.rows || []).map((r, i) => (
+                      <tr key={i}>
+                        {(s.columns || []).map((_, j) => (
+                          <td key={j} style={{ padding: '0.375rem', borderBottom: '1px solid #f1f5f9' }}>
+                            {r[j] != null && r[j] !== '' ? r[j] : <span style={{ color: '#cbd5e1' }}>—</span>}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function timeAgo(dateStr) {
@@ -329,14 +385,62 @@ export default function DprList() {
                     <div><strong>Contractor:</strong> {expandedDpr.contractor || '—'}</div>
                     <div><strong>Submitted by:</strong> {expandedDpr.submittedBy?.name || '—'}</div>
                   </div>
+
+                  {/* Round-12: 5 daily-narrative fields. */}
+                  <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '1rem', marginTop: '0.5rem' }}>
+                    <h3 style={{ fontSize: '0.95rem', margin: '0 0 0.5rem', color: 'var(--navy)' }}>
+                      Daily Narrative
+                    </h3>
+                    <dl style={{ margin: 0, display: 'grid', gridTemplateColumns: 'minmax(140px, max-content) 1fr', gap: '0.5rem 1rem', fontSize: '0.9rem' }}>
+                      <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Work executed:</dt>
+                      <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.workExecutedToday || <em style={{ color: '#94a3b8' }}>—</em>}</dd>
+                      <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Work location:</dt>
+                      <dd style={{ margin: 0 }}>{expandedDpr.workLocation || <em style={{ color: '#94a3b8' }}>—</em>}</dd>
+                      <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Man power:</dt>
+                      <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.manpowerSummary || <em style={{ color: '#94a3b8' }}>—</em>}</dd>
+                      <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Risks:</dt>
+                      <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.risksHindrances || <em style={{ color: '#94a3b8' }}>—</em>}</dd>
+                      <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Materials:</dt>
+                      <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.materialsReceivedSummary || <em style={{ color: '#94a3b8' }}>—</em>}</dd>
+                    </dl>
+                  </div>
+
                   {expandedDpr.notes && (
-                    <div style={{ marginBottom: '1rem', fontSize: '0.9rem' }}>
-                      <strong>Notes:</strong>
+                    <div style={{ marginTop: '1rem', fontSize: '0.9rem' }}>
+                      <strong>Other notes:</strong>
                       <div style={{ marginTop: '0.25rem', color: 'var(--steel)', whiteSpace: 'pre-wrap' }}>{expandedDpr.notes}</div>
                     </div>
                   )}
+
+                  {/* Round-12: user-added ad-hoc sections. */}
+                  <CustomSectionsView sections={expandedDpr.customSections} />
+
+                  {/* Round-12: linked inspection records. */}
+                  {Array.isArray(expandedDpr.inspections) && expandedDpr.inspections.length > 0 && (
+                    <div style={{ marginTop: '1rem' }}>
+                      <h3 style={{ fontSize: '0.95rem', margin: '0 0 0.5rem', color: 'var(--navy)' }}>
+                        Linked Inspection Records ({expandedDpr.inspections.length})
+                      </h3>
+                      <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                        {expandedDpr.inspections.map((insp) => (
+                          <li key={insp.id} style={{ fontSize: '0.9rem' }}>
+                            <Link to={`/portal/inspection/${insp.id}`}>{insp.inspectionType}</Link>
+                            {' · '}
+                            <span style={{ color: 'var(--steel)' }}>{insp.status}</span>
+                            {insp.severity && (
+                              <>
+                                {' · '}
+                                <span style={{ color: 'var(--steel)' }}>{insp.severity}</span>
+                              </>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
                   {expandedDpr.photos && expandedDpr.photos.length > 0 && (
-                    <div>
+                    <div style={{ marginTop: '1rem' }}>
                       <strong style={{ fontSize: '0.9rem' }}>Photos ({expandedDpr.photos.length})</strong>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '0.5rem', marginTop: '0.5rem' }}>
                         {expandedDpr.photos.map((p) => (

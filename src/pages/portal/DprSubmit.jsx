@@ -1,29 +1,22 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { uploadBlob } from '../../lib/blobUpload.js';
 import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../../lib/constants.js';
-import DprWorkEntryAdder from './DprWorkEntryAdder.jsx';
-import { SUB_WORK_TYPE_OPTIONS } from './DprWorkTypes.jsx';
+import DprCustomSection from './DprCustomSection.jsx';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
 const DRAFT_KEY = 'dpr_draft_v1';
 
-// Auto-set date to user's local timezone (no manual selection)
 const getLocalDate = () => {
   const now = new Date();
   const offset = now.getTimezoneOffset();
-  const local = new Date(now.getTime() - offset * 60000);
+  const local = new Date(now - offset * 60000);
   return local.toISOString().split('T')[0];
 };
 
-// Reject future-dated and malformed dates before they hit the backend.
-// Backend already validates this server-side (parseStrictISODate in
-// backend/src/lib/errors.js), but a client-side check turns the error
-// into a friendly toast instead of a 400 response the user has to
-// decipher.
 const validateReportDate = (value) => {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return 'Report date must be in YYYY-MM-DD format. Please refresh the page.';
@@ -33,6 +26,17 @@ const validateReportDate = (value) => {
   if (new Date(value) > today) return 'Report date cannot be in the future.';
   return null;
 };
+
+// Round-12: DPR's `workType` is now a category tag, not a derived value.
+// All 15 sub-work-types moved to Inspection & Compliance Records, so the
+// DPR's workType just needs to classify the day's narrative. Keep the
+// backend's required-allowlist intact.
+const WORK_TYPE_OPTIONS = [
+  { value: 'MATERIAL_RECEIPT', label: 'Material Receipt' },
+  { value: 'QUALITY_TESTING', label: 'Quality / Testing' },
+  { value: 'SITE_INSPECTION', label: 'Site Inspection' },
+  { value: 'EXCEPTIONS_SAFETY', label: 'Exceptions / Safety' },
+];
 
 function loadDraft() {
   try {
@@ -46,11 +50,11 @@ function loadDraft() {
 
 function saveDraft(payload) {
   try {
-    // Strip blobs (don't serialize) and blob URLs (don't persist)
     const safe = {
       form: payload.form,
+      dailyFields: payload.dailyFields,
       notes: payload.notes,
-      workEntries: payload.workEntries,
+      customSections: payload.customSections,
       photos: (payload.photos || []).map((p) => ({
         ulid: p.ulid,
         container: p.container,
@@ -70,21 +74,11 @@ function clearDraft() {
   try { localStorage.removeItem(DRAFT_KEY); } catch {}
 }
 
-// Backend allowlist (must match backend/src/routes/dpr.js validWorkTypes).
-// Production-readiness P0-3: the backend silently defaults workType to
-// MATERIAL_RECEIPT if the field is absent, so every DPR was being mis-tagged.
-// We derive the top-level workType from the first work entry's section —
-// this keeps the frontend source-of-truth (one entry == one section) in
-// sync with the database column.
-const ALLOWED_WORK_TYPES = ['MATERIAL_RECEIPT', 'QUALITY_TESTING', 'SITE_INSPECTION', 'EXCEPTIONS_SAFETY'];
-
-function deriveTopLevelWorkType(workEntries) {
-  if (!Array.isArray(workEntries) || workEntries.length === 0) return null;
-  const firstType = workEntries[0]?.workType;
-  if (!firstType) return null;
-  const found = SUB_WORK_TYPE_OPTIONS.find((s) => s.value === firstType);
-  const section = found?.section;
-  return ALLOWED_WORK_TYPES.includes(section) ? section : null;
+function formatIndianDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
 export default function DprSubmit() {
@@ -92,11 +86,6 @@ export default function DprSubmit() {
   const toast = useToast();
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
-  // Production-readiness P0-11 / P1-2: prevent double-click from firing two
-  // parallel POSTs. State (`status`) is updated async after the first click
-  // and React batches the state-set + button-disable, leaving a 1-2 frame
-  // window where the user can click the second button. A useRef guard is
-  // synchronous and immune to React render scheduling.
   const submittingRef = useRef(false);
 
   const initialDraft = loadDraft();
@@ -107,27 +96,39 @@ export default function DprSubmit() {
     weather: 'Sunny',
     temperature: '',
     contractor: '',
+    workType: 'SITE_INSPECTION',
   });
-  const [photos, setPhotos] = useState([]); // previewUrl is rebuilt on mount from scratch
-  const [workEntries, setWorkEntries] = useState(initialDraft?.workEntries || []);
+  // Round-12: 5 daily-narrative fields every site engineer records at end
+  // of day. Backend caps match the route validator.
+  const [dailyFields, setDailyFields] = useState(initialDraft?.dailyFields || {
+    workExecutedToday: '',
+    workLocation: '',
+    manpowerSummary: '',
+    risksHindrances: '',
+    materialsReceivedSummary: '',
+  });
+  const [customSections, setCustomSections] = useState(initialDraft?.customSections || []);
+  const [photos, setPhotos] = useState([]);
   const [notes, setNotes] = useState(initialDraft?.notes || '');
-  const [status, setStatus] = useState('idle'); // idle | uploading | submitting | error
+  const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
   const [showDraftBanner, setShowDraftBanner] = useState(!!initialDraft);
-  // Per-file upload status: { id: { status, progress, error } }
   const [uploadStatuses, setUploadStatuses] = useState({});
+  const [todayInspections, setTodayInspections] = useState([]);
+  const [todayInspectionsLoaded, setTodayInspectionsLoaded] = useState(false);
   const photoObjectUrlsRef = useRef(new Set());
 
-  // Persist draft on every meaningful change. Don't include previewUrl /
-  // file / blob refs — JSON.stringify would either drop them or store
-  // useless data. Save at most every 750ms to avoid disk thrash.
+  // Persist draft on every meaningful change. 750ms debounce matches the
+  // pre-Round-12 behaviour at the original DprSubmit.jsx:124.
   useEffect(() => {
-    const t = setTimeout(() => saveDraft({ form, notes, workEntries, photos }), 750);
+    const t = setTimeout(
+      () => saveDraft({ form, dailyFields, notes, customSections, photos }),
+      750
+    );
     return () => clearTimeout(t);
-  }, [form, notes, workEntries, photos]);
+  }, [form, dailyFields, notes, customSections, photos]);
 
-  // Revoke any blob URLs we created when the component unmounts so the
-  // tab doesn't leak memory on long-running sessions.
+  // Revoke any blob URLs we created when the component unmounts.
   useEffect(() => {
     return () => {
       photoObjectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
@@ -135,9 +136,35 @@ export default function DprSubmit() {
     };
   }, []);
 
+  // Load today's inspection records so the summary card shows real data
+  // while the engineer fills in the DPR. If none exist, the empty state
+  // promotes the "Create inspection record →" link.
+  const loadTodayInspections = useCallback(async () => {
+    if (!accessToken) return;
+    setTodayInspectionsLoaded(true);
+    try {
+      const data = await api.getInspections(
+        { reportDate: form.reportDate, limit: '20' },
+        accessToken
+      );
+      setTodayInspections(data.inspections || []);
+    } catch {
+      setTodayInspections([]);
+    }
+  }, [accessToken, form.reportDate]);
+
+  useEffect(() => {
+    loadTodayInspections();
+  }, [loadTodayInspections]);
+
   const handleChange = (e) => {
     const { name, value } = e.target;
     setForm((f) => ({ ...f, [name]: value }));
+  };
+
+  const handleDailyChange = (e) => {
+    const { name, value } = e.target;
+    setDailyFields((f) => ({ ...f, [name]: value }));
   };
 
   const removePhoto = (idx) => {
@@ -180,9 +207,6 @@ export default function DprSubmit() {
 
     setError('');
 
-    // Per-file statuses tracked separately so one failed upload doesn't
-    // poison the rest of the batch (Bug #5). Successful files still get
-    // added; failed ones surface inline + as a toast.
     const completed = [];
     const failed = [];
 
@@ -196,10 +220,6 @@ export default function DprSubmit() {
         const { sasUrl, ulid } = await api.getDprSasUrl(file.name, file.type, 'dpr-photos', accessToken);
         updateUploadStatus(tempId, { status: 'uploading', progress: 0 });
 
-        // PUT to blob with real progress + 60s timeout. Previously a raw
-        // fetch() with no timeout and no progress — the bar would jump
-        // 0% → 50% → 100% and would never resolve if Azure hung (Aug 29
-        // 2026 user report: "uploading photo struck forever at 0%").
         await uploadBlob(sasUrl, file, {
           contentType: file.type,
           onProgress: (pct) => updateUploadStatus(tempId, { status: 'uploading', progress: pct }),
@@ -222,15 +242,10 @@ export default function DprSubmit() {
       } catch (err) {
         updateUploadStatus(tempId, { status: 'error', error: err.message, filename: file.name });
         failed.push({ filename: file.name, error: err.message });
-        // Continue with the rest of the batch
       }
     }
 
-    // Append successful uploads in original order; failed ones keep their
-    // status entry but no photo entry — user can re-select them.
-    if (completed.length > 0) {
-      setPhotos((p) => [...p, ...completed]);
-    }
+    if (completed.length > 0) setPhotos((p) => [...p, ...completed]);
     if (failed.length > 0) {
       const summary = failed.length === 1
         ? `Failed to upload ${failed[0].filename}: ${failed[0].error}`
@@ -244,25 +259,7 @@ export default function DprSubmit() {
     handleFiles(e.dataTransfer.files);
   };
 
-  const handleAddWorkEntry = (entry) => {
-    setWorkEntries((prev) => [...prev, entry]);
-  };
-
-  const handleRemoveWorkEntry = (idx) => {
-    setWorkEntries((prev) => prev.filter((_, i) => i !== idx));
-  };
-
-  const getWorkEntryLabel = (workType) => {
-    const found = SUB_WORK_TYPE_OPTIONS.find((s) => s.value === workType);
-    return found ? found.label : workType;
-  };
-
   const handleSubmit = async (submitStatus) => {
-    // Production-readiness P0-11: synchronous re-entry guard. React's
-    // onClick → setState → re-render path is async, so without this ref a
-    // second click before the re-render reaches the disabled button would
-    // fire a duplicate POST. A ref is checked synchronously and cleared
-    // in the finally block so retries work after errors.
     if (submittingRef.current) return;
     submittingRef.current = true;
 
@@ -274,8 +271,8 @@ export default function DprSubmit() {
       submittingRef.current = false;
       return;
     }
-    if (workEntries.length === 0) {
-      const msg = 'Please add at least one work entry before submitting';
+    if (!form.workType) {
+      const msg = 'Primary work category is required';
       setError(msg);
       toast.push(msg, 'warning');
       submittingRef.current = false;
@@ -289,28 +286,15 @@ export default function DprSubmit() {
       return;
     }
 
-    // Production-readiness P0-3: derive top-level workType from the first
-    // work entry's section. Backend allowlist is the source of truth; the
-    // SUB_WORK_TYPE_OPTIONS list maps each entry to one of the 4 sections.
-    const topLevelWorkType = deriveTopLevelWorkType(workEntries);
-    if (!topLevelWorkType) {
-      const msg = 'Could not determine DPR workType from the work entries.';
-      setError(msg);
-      toast.push(msg, 'warning');
-      submittingRef.current = false;
-      return;
-    }
-
     setStatus('submitting');
 
     try {
       const photosToSubmit = photos
-        .filter((p) => p.ulid) // only successfully uploaded photos
+        .filter((p) => p.ulid)
         .map(({ ulid, container, filename, contentType, sizeBytes, caption, location, takenAt }) => ({
           ulid, container, filename, contentType, sizeBytes, caption, location, takenAt,
         }));
-      if (photosToSubmit.length === 0 && uploadStatuses && Object.values(uploadStatuses).some((s) => s.status === 'error')) {
-        // All uploads failed — don't pretend the form is submittable.
+      if (photosToSubmit.length === 0 && Object.values(uploadStatuses).some((s) => s.status === 'error')) {
         const msg = 'All photo uploads failed. Please re-add photos before submitting.';
         setError(msg);
         setStatus('idle');
@@ -327,11 +311,19 @@ export default function DprSubmit() {
           weather: form.weather,
           temperature: form.temperature,
           contractor: form.contractor,
-          workType: topLevelWorkType,
+          workType: form.workType,
           notes: notes || null,
           status: submitStatus,
+          // Round-12: 5 daily-narrative fields.
+          workExecutedToday: dailyFields.workExecutedToday || null,
+          workLocation: dailyFields.workLocation || null,
+          manpowerSummary: dailyFields.manpowerSummary || null,
+          risksHindrances: dailyFields.risksHindrances || null,
+          materialsReceivedSummary: dailyFields.materialsReceivedSummary || null,
+          // User-added ad-hoc text + table sections.
+          customSections: Array.isArray(customSections) && customSections.length > 0 ? customSections : null,
           photos: photosToSubmit,
-          workEntries: workEntries.map(({ workType, data, addedAt }) => ({ workType, data, addedAt })),
+          // workEntries intentionally omitted — moved to Inspection & Compliance Records.
         },
         accessToken
       );
@@ -358,8 +350,16 @@ export default function DprSubmit() {
       weather: 'Sunny',
       temperature: '',
       contractor: '',
+      workType: 'SITE_INSPECTION',
     });
-    setWorkEntries([]);
+    setDailyFields({
+      workExecutedToday: '',
+      workLocation: '',
+      manpowerSummary: '',
+      risksHindrances: '',
+      materialsReceivedSummary: '',
+    });
+    setCustomSections([]);
     setNotes('');
     setShowDraftBanner(false);
     toast.push('Draft discarded.', 'info');
@@ -369,6 +369,11 @@ export default function DprSubmit() {
     <div className="dpr-page">
       <div className="dpr-card">
         <h1 className="dpr-page-title">Submit Daily Progress Report</h1>
+        <p style={{ color: 'var(--steel)', fontSize: '0.9rem', marginBottom: '1rem' }}>
+          Daily narrative for the cover page. Detailed material receipts, cube
+          tests, NCRs, and safety records go on the
+          {' '}<Link to="/portal/inspection/submit">Inspection &amp; Compliance</Link> page.
+        </p>
 
         {showDraftBanner && (
           <div
@@ -399,6 +404,7 @@ export default function DprSubmit() {
         {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
 
         <div className="dpr-form">
+          {/* Project metadata */}
           <div className="form-row">
             <div className="form-group" style={{ flex: 2 }}>
               <label htmlFor="projectName">Project Name *</label>
@@ -433,48 +439,150 @@ export default function DprSubmit() {
             </div>
           </div>
 
+          {/* Primary work category — backend-required tag for filtering on the admin dashboard. */}
           <div className="form-group">
-            <label htmlFor="notes">Notes / Comments <span style={{ fontWeight: 400, color: 'var(--steel)' }}>(optional)</span></label>
+            <label htmlFor="workType">Primary Work Category *</label>
+            <select id="workType" name="workType" className="form-input" value={form.workType} onChange={handleChange}>
+              {WORK_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
+              Classifies today's narrative. Detailed material / QC / safety records
+              are filed separately on the Inspection &amp; Compliance page.
+            </span>
+          </div>
+
+          {/* Round-12: 5 daily-narrative PMC fields. */}
+          <fieldset
+            style={{
+              border: '1px solid #e2e8f0',
+              borderRadius: 8,
+              padding: '1rem',
+              margin: '1.5rem 0',
+              background: '#fafbfc',
+            }}
+          >
+            <legend style={{ padding: '0 0.5rem', fontWeight: 600, color: 'var(--navy)', fontSize: '0.9rem' }}>
+              Daily Narrative
+            </legend>
+
+            <div className="form-group">
+              <label htmlFor="workExecutedToday">
+                Short notes on today's work
+                <span style={{ fontWeight: 400, color: 'var(--steel)' }}> (optional)</span>
+              </label>
+              <textarea
+                id="workExecutedToday"
+                name="workExecutedToday"
+                className="form-input"
+                rows={3}
+                value={dailyFields.workExecutedToday}
+                onChange={handleDailyChange}
+                placeholder="e.g. Villa 4 GF slab casting completed (8 m³ M25); Villa 7 FF columns up to lintel level."
+                style={{ resize: 'vertical', minHeight: '80px' }}
+              />
+              <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
+                3–5 sentences. What was actually executed today.
+              </span>
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="workLocation">
+                Area of inspection carried out
+                <span style={{ fontWeight: 400, color: 'var(--steel)' }}> (optional)</span>
+              </label>
+              <input
+                id="workLocation"
+                name="workLocation"
+                className="form-input"
+                value={dailyFields.workLocation}
+                onChange={handleDailyChange}
+                placeholder="e.g. Villa 4 – GF Slab & Villa 7 – FF Columns"
+              />
+              <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
+                Villa / block / floor or area reference.
+              </span>
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="manpowerSummary">
+                Man power
+                <span style={{ fontWeight: 400, color: 'var(--steel)' }}> (optional)</span>
+              </label>
+              <textarea
+                id="manpowerSummary"
+                name="manpowerSummary"
+                className="form-input"
+                rows={2}
+                value={dailyFields.manpowerSummary}
+                onChange={handleDailyChange}
+                placeholder="Mason — 6 nos — 8 hrs | Helper — 4 nos — 8 hrs | Electrician — 1 no — 4 hrs"
+              />
+              <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
+                One trade per line: Trade — count — hours. Pipe-separate multiple trades.
+              </span>
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="risksHindrances">
+                Any risks
+                <span style={{ fontWeight: 400, color: 'var(--steel)' }}> (optional)</span>
+              </label>
+              <textarea
+                id="risksHindrances"
+                name="risksHindrances"
+                className="form-input"
+                rows={3}
+                value={dailyFields.risksHindrances}
+                onChange={handleDailyChange}
+                placeholder="Heavy rain forecast 14:00 — slab pour may need to reschedule. Plastering at Villa 9 awaiting client shade approval."
+                style={{ resize: 'vertical', minHeight: '80px' }}
+              />
+              <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
+                Weather, labour, material, equipment, statutory, client — anything
+                that could affect tomorrow's plan.
+              </span>
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="materialsReceivedSummary">
+                Any materials received
+                <span style={{ fontWeight: 400, color: 'var(--steel)' }}> (optional)</span>
+              </label>
+              <textarea
+                id="materialsReceivedSummary"
+                name="materialsReceivedSummary"
+                className="form-input"
+                rows={2}
+                value={dailyFields.materialsReceivedSummary}
+                onChange={handleDailyChange}
+                placeholder="OPC 53 cement — 50 bags (ACC); M-sand — 4 Cu.m (ABC quarry); 12 mm TMT — 1.2 MT (TATA)"
+              />
+              <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
+                High-level rollup. Detailed material inspections go on the
+                Inspection &amp; Compliance page.
+              </span>
+            </div>
+          </fieldset>
+
+          {/* Kept for backward-compat — generic notes catchall. */}
+          <div className="form-group">
+            <label htmlFor="notes">
+              Other observations
+              <span style={{ fontWeight: 400, color: 'var(--steel)' }}> (optional)</span>
+            </label>
             <textarea
               id="notes"
               name="notes"
               className="form-input"
-              rows={3}
+              rows={2}
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              placeholder="Additional observations, remarks, or issues noted on site..."
-              style={{ resize: 'vertical', minHeight: '80px' }}
+              placeholder="Anything else worth recording for this report..."
+              style={{ resize: 'vertical', minHeight: '60px' }}
             />
           </div>
 
-          <div className="form-group">
-            <label>Work Entries *</label>
-            {workEntries.length > 0 && (
-              <div className="work-entries-list">
-                {workEntries.map((entry, idx) => (
-                  <div key={idx} className={`work-entry-card ${entry.data.overallStatus === 'Fail' || entry.data.result === 'Fail' || entry.data.overallStatus === 'Unapproved' ? 'entry-critical' : ''}`}>
-                    <div className="work-entry-card-header">
-                      <span className="work-entry-card-title">{getWorkEntryLabel(entry.workType)}</span>
-                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => handleRemoveWorkEntry(idx)} aria-label="Remove work entry">×</button>
-                    </div>
-                    <div className="work-entry-card-body">
-                      {Object.entries(entry.data).slice(0, 4).map(([key, val]) => (
-                        <div key={key} className="work-entry-card-field">
-                          <span className="work-entry-card-label">{key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase())}:</span>
-                          <span className="work-entry-card-value">{Array.isArray(val) ? val.join(', ') : String(val)}</span>
-                        </div>
-                      ))}
-                      {Object.keys(entry.data).length > 4 && (
-                        <span className="work-entry-card-more">+ {Object.keys(entry.data).length - 4} more fields</span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            <DprWorkEntryAdder onAdd={handleAddWorkEntry} />
-          </div>
-
+          {/* Photos */}
           <div className="form-group">
             <label>Site Photos (max {MAX_PHOTOS_PER_DPR})</label>
             <div
@@ -515,7 +623,6 @@ export default function DprSubmit() {
               </div>
             )}
 
-            {/* Per-file status (visible only during an in-progress batch) */}
             {Object.values(uploadStatuses).some((s) => s.status === 'uploading' || s.status === 'error') && (
               <div style={{ marginTop: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
                 {Object.entries(uploadStatuses).map(([id, s]) =>
@@ -541,7 +648,59 @@ export default function DprSubmit() {
             )}
           </div>
 
-          <div className="dpr-form-actions">
+          {/* User-added ad-hoc sections (text + tables). */}
+          <div style={{ marginTop: '1.5rem' }}>
+            <DprCustomSection value={customSections} onChange={setCustomSections} />
+          </div>
+
+          {/* Today's inspection records summary card — links to the Inspection & Compliance page. */}
+          <div
+            className="dpr-card"
+            style={{
+              marginTop: '1.5rem',
+              background: '#f8fafc',
+              borderLeft: '3px solid var(--blue)',
+            }}
+          >
+            <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", fontSize: '1rem', marginBottom: '0.5rem', color: 'var(--navy)' }}>
+              Today's Inspection &amp; Compliance Records
+            </h3>
+            {todayInspectionsLoaded && todayInspections.length === 0 ? (
+              <p style={{ color: 'var(--steel)', fontSize: '0.9rem', margin: 0 }}>
+                None filed yet for {formatIndianDate(form.reportDate)}.
+                {' '}
+                <Link to={`/portal/inspection/submit?date=${form.reportDate}`}>
+                  Create inspection record →
+                </Link>
+              </p>
+            ) : !todayInspectionsLoaded ? (
+              <p style={{ color: 'var(--steel)', fontSize: '0.9rem', margin: 0 }}>Loading…</p>
+            ) : (
+              <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                {todayInspections.slice(0, 5).map((insp) => (
+                  <li key={insp.id} style={{ fontSize: '0.9rem' }}>
+                    <Link to={`/portal/inspection/${insp.id}`}>{insp.inspectionType}</Link>
+                    {' · '}
+                    <span style={{ color: 'var(--steel)' }}>{insp.location}</span>
+                    {' · '}
+                    <span style={{ color: 'var(--steel)' }}>{insp.status}</span>
+                  </li>
+                ))}
+                {todayInspections.length > 5 && (
+                  <li style={{ color: 'var(--steel)', fontSize: '0.85rem' }}>
+                    + {todayInspections.length - 5} more on the Inspection page.
+                  </li>
+                )}
+                <li style={{ marginTop: '0.5rem' }}>
+                  <Link to={`/portal/inspection/submit?date=${form.reportDate}`}>
+                    + Create inspection record
+                  </Link>
+                </li>
+              </ul>
+            )}
+          </div>
+
+          <div className="dpr-form-actions" style={{ marginTop: '1.5rem' }}>
             <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting'}>
               {status === 'submitting' ? 'Saving...' : 'Save as Draft'}
             </button>

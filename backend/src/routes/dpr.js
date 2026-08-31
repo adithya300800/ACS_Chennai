@@ -15,6 +15,90 @@ function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
 
+// Round-12: validator for DPR.customSections — the user-added ad-hoc text
+// and table blocks the engineer pastes via the "+ Add Section" button on
+// the DPR form. Schema is enforced server-side so a malicious or buggy
+// client can't poison the column with arbitrary JSON / HTML / huge blobs.
+//
+// Shape:
+//   Array<{
+//     id: string (≤64 chars),
+//     type: 'text' | 'table',
+//     title: string (1..120 chars),
+//     // text only:
+//     content?: string (≤5000 chars),
+//     // table only:
+//     columns?: string[] (1..6 entries, each ≤60 chars),
+//     rows?: string[][] (≤200 rows; each row length must equal columns.length;
+//                        each cell ≤500 chars),
+//   }>
+//
+// The frontend assigns `id` via crypto.randomUUID() so a future reorder or
+// rename doesn't lose the row the engineer typed.
+function validateCustomSections(v) {
+  if (v == null) return { ok: true };
+  if (!Array.isArray(v)) return { ok: false, msg: 'customSections must be an array' };
+  if (v.length > 20) return { ok: false, msg: 'customSections: max 20 sections per DPR' };
+  const idSet = new Set();
+  for (const [i, s] of v.entries()) {
+    if (!s || typeof s !== 'object' || Array.isArray(s)) {
+      return { ok: false, msg: `customSections[${i}] must be an object` };
+    }
+    if (typeof s.id !== 'string' || s.id.length === 0 || s.id.length > 64) {
+      return { ok: false, msg: `customSections[${i}].id invalid (1..64 chars)` };
+    }
+    if (idSet.has(s.id)) return { ok: false, msg: `customSections[${i}].id duplicate` };
+    idSet.add(s.id);
+    if (s.type !== 'text' && s.type !== 'table') {
+      return { ok: false, msg: `customSections[${i}].type must be 'text' or 'table'` };
+    }
+    if (typeof s.title !== 'string' || s.title.length === 0 || s.title.length > 120) {
+      return { ok: false, msg: `customSections[${i}].title invalid (1..120 chars)` };
+    }
+    if (s.type === 'text') {
+      if (s.content != null && (typeof s.content !== 'string' || s.content.length > 5000)) {
+        return { ok: false, msg: `customSections[${i}].content invalid (≤5000 chars)` };
+      }
+      // Reject unknown keys on text sections so the column shape stays clean
+      // and a frontend bug can't smuggle in `columns` / `rows` by accident.
+      const allowed = new Set(['id', 'type', 'title', 'content']);
+      for (const k of Object.keys(s)) {
+        if (!allowed.has(k)) return { ok: false, msg: `customSections[${i}].${k} not allowed on text` };
+      }
+    } else { // table
+      if (!Array.isArray(s.columns) || s.columns.length === 0 || s.columns.length > 6) {
+        return { ok: false, msg: `customSections[${i}].columns must be array of 1..6` };
+      }
+      for (const [j, c] of s.columns.entries()) {
+        if (typeof c !== 'string' || c.length === 0 || c.length > 60) {
+          return { ok: false, msg: `customSections[${i}].columns[${j}] invalid (1..60 chars)` };
+        }
+      }
+      if (!Array.isArray(s.rows)) {
+        return { ok: false, msg: `customSections[${i}].rows must be array` };
+      }
+      if (s.rows.length > 200) {
+        return { ok: false, msg: `customSections[${i}].rows: max 200 rows` };
+      }
+      for (const [j, r] of s.rows.entries()) {
+        if (!Array.isArray(r) || r.length !== s.columns.length) {
+          return { ok: false, msg: `customSections[${i}].rows[${j}] must have ${s.columns.length} cells` };
+        }
+        for (const [k, cell] of r.entries()) {
+          if (typeof cell !== 'string' || cell.length > 500) {
+            return { ok: false, msg: `customSections[${i}].rows[${j}][${k}] invalid (≤500 chars)` };
+          }
+        }
+      }
+      const allowed = new Set(['id', 'type', 'title', 'columns', 'rows']);
+      for (const k of Object.keys(s)) {
+        if (!allowed.has(k)) return { ok: false, msg: `customSections[${i}].${k} not allowed on table` };
+      }
+    }
+  }
+  return { ok: true };
+}
+
 // In-memory pending uploads (ulid -> { employeeId, container, filename })
 const pendingUploads = new Map();
 
@@ -198,7 +282,11 @@ router.post('/sas-url', async (req, res) => {
   }
 
   const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
-  const allowedContainers = ['dpr-photos', 'dpr-documents'];
+  // Round-12: 'inspection-photos' added for the Inspection & Compliance page.
+  // The existing dpr-photos container is still used for DPR-level photos
+  // (the daily narrative); inspection photos get their own bucket so a
+  // single leaky SAS can't cross between the two record types.
+  const allowedContainers = ['dpr-photos', 'dpr-documents', 'inspection-photos'];
 
   if (!allowedTypes.includes(contentType)) {
     return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: 'Only image/jpeg, image/png, image/webp allowed' });
@@ -312,7 +400,13 @@ router.post('/', async (req, res) => {
 
   const {
     projectName, location, reportDate, weather, temperature,
-    contractor, workType, notes, workEntries, status, photos = [],
+    contractor, workType, notes, workEntries,
+    // Round-12: 5 new daily-narrative PMC fields + the user-added ad-hoc
+    // sections blob. workEntries is still accepted (legacy clients) but the
+    // server silently drops it — the Inspection page owns that data now.
+    workExecutedToday, workLocation, manpowerSummary,
+    risksHindrances, materialsReceivedSummary, customSections,
+    status, photos = [],
   } = req.body || {};
 
   // typeof guards (Code Reviewer P1-2): reject non-string types before they
@@ -323,12 +417,26 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'projectName, location, reportDate required' });
   }
 
-  // Length caps (P1-3) — keep the database tidy, prevent abuse
-  const MAX = { projectName: 200, location: 200, weather: 80, temperature: 20, contractor: 200, notes: 5000 };
+  // Length caps (P1-3) — keep the database tidy, prevent abuse. Round-12:
+  // extended with caps for the 5 new daily-narrative PMC fields.
+  const MAX = {
+    projectName: 200, location: 200, weather: 80, temperature: 20, contractor: 200,
+    notes: 5000,
+    workExecutedToday: 1000, workLocation: 500, manpowerSummary: 1000,
+    risksHindrances: 2000, materialsReceivedSummary: 1000,
+  };
   for (const [k, cap] of Object.entries(MAX)) {
     if (req.body[k] != null && typeof req.body[k] === 'string' && req.body[k].length > cap) {
       return res.status(400).json({ error: 'VALIDATION_ERROR', message: `${k} exceeds ${cap} chars` });
     }
+  }
+
+  // customSections shape guard — runs after the length caps so a giant blob
+  // hits the cheaper cap check first. Validator returns 400 with a precise
+  // path so the UI can highlight the offending field on round-trip.
+  const sectionsCheck = validateCustomSections(customSections);
+  if (!sectionsCheck.ok) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: sectionsCheck.msg, field: 'customSections' });
   }
 
   const validStatuses = ['DRAFT', 'SUBMITTED'];
@@ -412,7 +520,16 @@ router.post('/', async (req, res) => {
         // string and we pass it through verbatim.
         workType,
         notes: notes || null,
-        workEntries: workEntries || null,
+        // Round-12: write the 5 daily-narrative fields + customSections blob.
+        // workEntries is intentionally NOT persisted — it's legacy from the
+        // pre-refactor DPR and lives on the Inspection page now. Old rows
+        // that already have it are untouched (column is nullable).
+        workExecutedToday: workExecutedToday || null,
+        workLocation: workLocation || null,
+        manpowerSummary: manpowerSummary || null,
+        risksHindrances: risksHindrances || null,
+        materialsReceivedSummary: materialsReceivedSummary || null,
+        customSections: customSections || null,
         status: status || 'DRAFT',
         submittedById: req.employeeId,
         // P2-3: DRAFT saves don't have a submittedAt timestamp
@@ -433,6 +550,7 @@ router.post('/', async (req, res) => {
       include: {
         photos: true,
         submittedBy: { select: { id: true, name: true, email: true } },
+        inspections: { select: { id: true, inspectionType: true, status: true, severity: true } },
       },
     });
 
@@ -605,6 +723,13 @@ router.get('/:id', async (req, res) => {
           orderBy: { version: 'desc' },
           select: { id: true, version: true, changedAt: true, changedById: true },
         },
+        // Round-12: linked Inspection & Compliance records (FK dprId). The
+        // list/detail UI uses this to render the summary card on the DPR
+        // and the "Linked Inspections" section on the detail modal.
+        inspections: {
+          select: { id: true, inspectionType: true, status: true, severity: true, createdAt: true },
+          orderBy: { createdAt: 'desc' },
+        },
       },
     });
 
@@ -669,9 +794,12 @@ router.put('/:id', async (req, res) => {
   // able to set submittedById (transfer ownership), status, reviewedById,
   // approvedById, or any of the audit timestamps via PUT. Status transitions
   // go through /review, /approve, /reject endpoints only.
+  // Round-12: extended with the 5 daily-narrative PMC fields + customSections.
   const ALLOWED_UPDATE_FIELDS = [
     'projectName', 'location', 'reportDate', 'weather', 'temperature',
     'contractor', 'workType', 'notes', 'workEntries',
+    'workExecutedToday', 'workLocation', 'manpowerSummary',
+    'risksHindrances', 'materialsReceivedSummary', 'customSections',
   ];
   const unknown = Object.keys(fields).filter(k => !ALLOWED_UPDATE_FIELDS.includes(k));
   if (unknown.length) {
@@ -682,11 +810,25 @@ router.put('/:id', async (req, res) => {
     });
   }
 
-  // Length caps on the allowed fields too
-  const MAX = { projectName: 200, location: 200, weather: 80, temperature: 20, contractor: 200, notes: 5000 };
+  // Length caps on the allowed fields too. Same caps as POST.
+  const MAX = {
+    projectName: 200, location: 200, weather: 80, temperature: 20, contractor: 200,
+    notes: 5000,
+    workExecutedToday: 1000, workLocation: 500, manpowerSummary: 1000,
+    risksHindrances: 2000, materialsReceivedSummary: 1000,
+  };
   for (const [k, cap] of Object.entries(MAX)) {
     if (fields[k] != null && typeof fields[k] === 'string' && fields[k].length > cap) {
       return res.status(400).json({ error: 'VALIDATION_ERROR', message: `${k} exceeds ${cap} chars` });
+    }
+  }
+
+  // customSections shape guard on PUT — same validator as POST. Setting it
+  // to `null` (clearing all sections) is allowed and stored as DB NULL.
+  if (fields.customSections !== undefined) {
+    const sectionsCheck = validateCustomSections(fields.customSections);
+    if (!sectionsCheck.ok) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: sectionsCheck.msg, field: 'customSections' });
     }
   }
 
@@ -717,7 +859,11 @@ router.put('/:id', async (req, res) => {
         version: { increment: 1 },
         updatedAt: new Date(),
       },
-      include: { photos: true, submittedBy: { select: { id: true, name: true, email: true } } },
+      include: {
+        photos: true,
+        submittedBy: { select: { id: true, name: true, email: true } },
+        inspections: { select: { id: true, inspectionType: true, status: true, severity: true } },
+      },
     });
 
     res.json(updated);
