@@ -268,9 +268,9 @@ header('timesheet.buildTimesheetRows');
   const row14 = r4.rows.find(x => x.date === '2026-08-14');
   ok('present row status', row14.status === 'Present');
   eq('present first check-in', row14.firstCheckIn, '09:00');
-  eq('present last check-out', row14.lastCheckOut, '17:30');
-  eq('present worked hours', row14.workedHours, '7.50');
-  eq('present session count', row14.sessionCount, 2);
+  ok('present row has no lastCheckOut (removed column)', row14.lastCheckOut === undefined);
+  ok('present row has no workedHours (removed column)', row14.workedHours === undefined);
+  ok('present row has no sessionCount (removed column)', row14.sessionCount === undefined);
 
   const r5 = ts.buildTimesheetRows({
     employees: [{ id: 'e1', name: 'Alice', department: 'Eng' }],
@@ -305,8 +305,12 @@ header('timesheet.buildTimesheetRows');
   const total = r1.summary.totalPresent + r1.summary.totalAbsent + r1.summary.totalLeave + r1.summary.totalWeekend + r1.summary.totalFuture;
   ok('summary totals add up', total === r1.summary.daysRendered);
 
-  // TIMESHEET_COLUMNS contract
-  ok('TIMESHEET_COLUMNS has expected keys', ts.TIMESHEET_COLUMNS.map(c => c.key).every(k => ['date','employeeId','employeeName','department','status','firstCheckIn','lastCheckOut','workedHours','sessionCount','leaveType','remarks'].includes(k)));
+  // TIMESHEET_COLUMNS contract — Last Check-Out / Worked Hours / Sessions were
+  // removed in the round-13 follow-up because the field workforce only does
+  // check-in. Employee Name is now the first column.
+  const expectedKeys = ['employeeName','date','employeeId','department','status','firstCheckIn','leaveType','remarks'];
+  ok('TIMESHEET_COLUMNS has expected keys', ts.TIMESHEET_COLUMNS.map(c => c.key).every(k => expectedKeys.includes(k)));
+  ok('TIMESHEET_COLUMNS first column is Employee Name', ts.TIMESHEET_COLUMNS[0].key === 'employeeName');
   ok('every column has width', ts.TIMESHEET_COLUMNS.every(c => typeof c.width === 'number' && c.width > 0));
 }
 

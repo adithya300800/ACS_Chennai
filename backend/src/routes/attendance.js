@@ -580,12 +580,19 @@ router.get('/export', async (req, res) => {
     const writer = pickWriter();
     const extension = writer.format === 'xlsx' ? 'xlsx' : 'csv';
 
+    // Include employee name in the filename when the export is scoped to a
+    // single employee. safeFilename() in excelWriter.js will sanitize it.
+    const filename = (employeeId && employees.length === 1)
+      ? `${employees[0].name}-timesheet-${month}.${extension}`
+      : `timesheet-${month}.${extension}`;
+
     console.log('[attendance/export]', {
       requester: hashIdentifier(req.employeeId),
       month,
       employeeId: employeeId || 'ALL',
       format: writer.format,
       rows: rows.length,
+      filename,
     });
 
     // Body is streamed from here on. Errors past this point can only
@@ -596,7 +603,7 @@ router.get('/export', async (req, res) => {
         columns: TIMESHEET_COLUMNS,
         rows,
         sheetName: 'Timesheet',
-        filename: `timesheet-${month}.${extension}`,
+        filename,
       });
     } catch (writeErr) {
       console.error('[attendance/export] writer error:', writeErr.message?.split('\n')[0]);

@@ -12,9 +12,10 @@
 //   5. Date > today (future in current month)  →  'Future'
 //   6. Otherwise                               →  'Absent'  (past date, no record)
 //
-// Worked-hours computation uses SUM of closed-session durations, not
-// (lastOut − firstIn). This avoids inflating hours when the employee took
-// a long lunch break. Open sessions (no checkOut) render as '—'.
+// First check-in is taken from the earliest session of the day. The
+// export intentionally omits lastCheckOut / workedHours / sessionCount —
+// the field workforce only uses check-in. Open sessions (no checkOut)
+// are flagged via the Remarks column.
 
 'use strict';
 
@@ -158,9 +159,8 @@ function buildAttendanceMap(attendanceRows) {
 }
 
 // Main builder. Returns { rows, summary }.
-//   rows: array of { date, employeeId, employeeName, department, status,
-//                     firstCheckIn, lastCheckOut, workedHours, sessionCount,
-//                     leaveType, remarks }
+//   rows: array of { employeeName, date, employeeId, department, status,
+//                     firstCheckIn, leaveType, remarks }
 //   summary: { employees, daysRendered, totalPresent, totalAbsent,
 //              totalLeave, totalWeekend, totalFuture }
 function buildTimesheetRows({ employees, attendanceRows, leaveRequests, month, today }) {
@@ -204,35 +204,24 @@ function buildTimesheetRows({ employees, attendanceRows, leaveRequests, month, t
       const status = resolveStatus({ dateMs, attendanceRow: atd, leaveMap: leave ? { [dateMs]: leave } : null, todayMs });
 
       let firstCheckIn = '—';
-      let lastCheckOut = '—';
-      let workedHours = '';
-      let sessionCount = 0;
       let remarks = '';
 
       if (atd && Array.isArray(atd.sessions) && atd.sessions.length > 0) {
-        sessionCount = atd.sessions.length;
         const sorted = [...atd.sessions].sort((a, b) =>
           new Date(a.checkIn).getTime() - new Date(b.checkIn).getTime());
         firstCheckIn = formatTimeStr(sorted[0].checkIn);
-        const last = sorted[sorted.length - 1];
-        lastCheckOut = formatTimeStr(last.checkOut);
-        if (!last.checkOut) remarks = 'Open session';
-        const h = sumSessionHours(sorted);
-        workedHours = h == null ? '' : h.toFixed(2);
+        if (!sorted[sorted.length - 1].checkOut) remarks = 'Open session';
       } else if (atd && atd.status && atd.status !== 'Present') {
         remarks = atd.notes || '';
       }
 
       rows.push({
+        employeeName: emp.name || '',
         date: formatDateStr(dateMs),
         employeeId: emp.id,
-        employeeName: emp.name || '',
         department: emp.department || '',
         status,
         firstCheckIn,
-        lastCheckOut,
-        workedHours,
-        sessionCount,
         leaveType: leave ? leave.leaveType : '',
         remarks,
       });
@@ -250,16 +239,16 @@ function buildTimesheetRows({ employees, attendanceRows, leaveRequests, month, t
 }
 
 // Header row + column widths for the timesheet sheet.
+// Employee Name is intentionally first so the file is scannable when
+// opened in Excel. Last Check-Out / Worked Hours / Sessions were removed
+// because the field workflow only uses check-in.
 const TIMESHEET_COLUMNS = [
+  { header: 'Employee Name',    key: 'employeeName',  width: 28 },
   { header: 'Date',             key: 'date',          width: 12 },
   { header: 'Employee ID',      key: 'employeeId',    width: 14 },
-  { header: 'Employee Name',    key: 'employeeName',  width: 28 },
   { header: 'Department',       key: 'department',    width: 22 },
   { header: 'Status',           key: 'status',        width: 10 },
   { header: 'First Check-In',   key: 'firstCheckIn',  width: 14 },
-  { header: 'Last Check-Out',   key: 'lastCheckOut',  width: 14 },
-  { header: 'Worked Hours',     key: 'workedHours',    width: 13 },
-  { header: 'Sessions',         key: 'sessionCount',  width: 9  },
   { header: 'Leave Type',       key: 'leaveType',     width: 12 },
   { header: 'Remarks',          key: 'remarks',       width: 30 },
 ];
