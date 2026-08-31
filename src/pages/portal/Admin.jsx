@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 
 const formatDate = (dateStr) => {
@@ -44,6 +45,7 @@ const getMapUrl = (lat, lng) => {
 
 export default function Admin() {
   const { employee, accessToken } = useAuth();
+  const { push } = useToast();
   const navigate = useNavigate();
   const [month, setMonth] = useState(() => {
     const now = new Date();
@@ -54,6 +56,18 @@ export default function Admin() {
   const [error, setError] = useState('');
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [expandedEmployee, setExpandedEmployee] = useState(null);
+  const [exporting, setExporting] = useState(false);
+  const exportUrlRef = useRef(null);
+
+  // Cleanup blob URLs on unmount — avoid leaking object URLs across navigations.
+  useEffect(() => {
+    return () => {
+      if (exportUrlRef.current) {
+        URL.revokeObjectURL(exportUrlRef.current);
+        exportUrlRef.current = null;
+      }
+    };
+  }, []);
 
   const fetchAttendance = useCallback(async () => {
     setLoading(true);
@@ -81,6 +95,60 @@ export default function Admin() {
     fetchAttendance();
   }, [month, accessToken, employee?.isAdmin, navigate, fetchAttendance]);
 
+  // Round-13: download the current month as XLSX. The api.download() helper
+  // returns a Blob + filename from Content-Disposition; we wrap it in a
+  // transient <a download> click and revoke the object URL after.
+  const handleExportMonth = async () => {
+    setExporting(true);
+    try {
+      const { blob, filename, format, rowCount } = await api.downloadTimesheet(month, accessToken);
+      if (exportUrlRef.current) URL.revokeObjectURL(exportUrlRef.current);
+      const url = URL.createObjectURL(blob);
+      exportUrlRef.current = url;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      const note = format === 'csv-fallback'
+        ? `Downloaded as CSV (Excel library unavailable). ${rowCount} rows.`
+        : `Downloaded ${rowCount} rows.`;
+      push(note, 'success');
+    } catch (err) {
+      const code = err && err.code;
+      let msg = err.message || 'Export failed';
+      if (code === 'EXPORT_THROTTLED') msg = 'Too many exports — please wait a minute.';
+      else if (err.status === 403) msg = 'Admin access required.';
+      push(msg, 'error');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleExportEmployee = async (empId, empName) => {
+    setExporting(true);
+    try {
+      const { blob, filename } = await api.downloadTimesheet(month, accessToken, { employeeId: empId });
+      if (exportUrlRef.current) URL.revokeObjectURL(exportUrlRef.current);
+      const url = URL.createObjectURL(blob);
+      exportUrlRef.current = url;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      push(`Downloaded timesheet for ${empName}.`, 'success');
+    } catch (err) {
+      push(err.message || 'Export failed', 'error');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   // Group by employee
   const byEmployee = records.reduce((acc, r) => {
     const empId = r.employee.id;
@@ -99,12 +167,38 @@ export default function Admin() {
           <h1 className="header-title">Attendance Dashboard</h1>
           <p className="header-subtitle">Monitor all employees' attendance</p>
         </div>
-        <input
-          type="month"
-          value={month}
-          onChange={(e) => setMonth(e.target.value)}
-          className="month-input"
-        />
+        <div className="admin-header-actions">
+          <input
+            type="month"
+            value={month}
+            onChange={(e) => setMonth(e.target.value)}
+            className="month-input"
+            aria-label="Select month"
+          />
+          <button
+            type="button"
+            className="admin-export-btn"
+            onClick={handleExportMonth}
+            disabled={exporting}
+            aria-label={`Download ${monthLabel} timesheet as Excel`}
+          >
+            {exporting ? (
+              <>
+                <span className="spinner"></span>
+                Preparing...
+              </>
+            ) : (
+              <>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                Download Timesheet
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Loading */}
@@ -155,6 +249,20 @@ export default function Admin() {
                   <div className="employee-meta">
                     <span className="employee-dept">{emp.department || 'No dept'}</span>
                     <span className="employee-days">{daysWorked} days</span>
+                    <button
+                      type="button"
+                      className="employee-export-btn"
+                      title={`Download ${emp.name}'s timesheet`}
+                      aria-label={`Download ${emp.name}'s timesheet as Excel`}
+                      onClick={(e) => { e.stopPropagation(); handleExportEmployee(emp.id, emp.name); }}
+                      disabled={exporting}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                    </button>
                     <button
                       className="expand-btn"
                       aria-label={isExpanded ? 'Collapse record' : 'Expand record'}

@@ -24,9 +24,14 @@ const dprRoutes = require('./routes/dpr');
 // structured sub-work types formerly nested inside DPR.workEntries (material
 // receipt, cube test, water quality, waterproofing, NCR, safety, etc.).
 const inspectionRoutes = require('./routes/inspection');
+// Round-13: Leave Request workflow (employee submit / admin approve-reject).
+const leaveRoutes = require('./routes/leave');
 const contactRoutes = require('./routes/contact');
 const diagRoutes = require('./routes/diag'); // Round-8: diagnostic endpoint (intentionally retained for ops — gated by admin auth)
-const { loginLimiter, refreshLimiter, contactLimiter, sasLimiter } = require('./middleware/rateLimit');
+const {
+  loginLimiter, refreshLimiter, contactLimiter, sasLimiter,
+  exportLimiter, leaveCreateLimiter,
+} = require('./middleware/rateLimit');
 
 const app = express();
 const prisma = new PrismaClient();
@@ -86,6 +91,12 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-Request-ID, X-Internal-Token');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
+    // Round-13: expose Content-Disposition + X-Export-* so the browser JS
+    // can read the suggested filename and the chosen export format on the
+    // /api/attendance/export binary response. Without this the browser
+    // gets a Blob but no way to know what to call the file or whether the
+    // server fell back from xlsx to csv.
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Export-Format, X-Export-Row-Count, X-Request-Id');
     res.setHeader('Access-Control-Max-Age', '300');
   }
   if (req.method === 'OPTIONS') {
@@ -183,7 +194,15 @@ app.get('/ready', async (req, res) => {
 app.use('/api/auth/login', loginLimiter);
 app.use('/api/auth/refresh', refreshLimiter);
 app.use('/api/auth', authRoutes);
+// Round-13: rate-limit the binary export BEFORE requireAuth so the limiter
+// fires even for unauthenticated floods (saves a DB lookup). The handler
+// itself still requires admin, so a banned admin still gets 403.
+app.use('/api/attendance/export', exportLimiter);
 app.use('/api/attendance', attendanceRoutes);
+// Round-13: leave routes. The create-rate-limiter is mounted inside the
+// route file (POST /) so it only throttles submissions — list/get/cancel
+// remain unthrottled. leaveCreateLimiter is imported above and exported.
+app.use('/api/leave', leaveRoutes);
 app.use('/api/dpr/sas-url', sasLimiter);
 // DPR mount opts in to a 1mb body limit (work entries + photo metadata
 // payloads can legitimately exceed the 16kb default).

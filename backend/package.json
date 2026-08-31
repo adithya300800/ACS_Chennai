@@ -9,7 +9,8 @@
     "db:push": "prisma db push",
     "db:seed": "node prisma/seed.js",
     "test": "jest",
-    "test:watch": "jest --watch"
+    "test:watch": "jest --watch",
+    "test:round13": "node scripts/round13-tests.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1121.0",
@@ -17,6 +18,7 @@
     "@azure/storage-blob": "^12.33.0",
     "@prisma/client": "^5.22.0",
     "bcryptjs": "^2.4.3",
+    "exceljs": "^4.4.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
     "express-async-errors": "^3.1.1",

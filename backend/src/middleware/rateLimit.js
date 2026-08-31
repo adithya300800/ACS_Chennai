@@ -116,6 +116,31 @@ const callbackLimiter = rateLimit({
   message: { error: 'Too many OAuth callbacks from this address. Please slow down.', code: 'OAUTH_THROTTLED' },
 });
 
+// Round-13: 5 / minute / IP — attendance Excel export. HR/admin regenerates
+// the file rarely; a runaway button or scripted abuse is the risk.
+const exportLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  validate: { trustProxy: true },
+  message: { error: 'Too many export requests. Please wait a minute.', code: 'EXPORT_THROTTLED' },
+});
+
+// Round-13: 10 / hour / IP — leave request creation. Legitimate users submit
+// at most a handful per month; 10/hour is plenty and stops scripted
+// double-submit storms.
+const leaveCreateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  validate: { trustProxy: true },
+  message: { error: 'Too many leave submissions. Please try again later.', code: 'LEAVE_THROTTLED' },
+});
+
 module.exports = {
   loginLimiter,
   loginEmailLimiter,
@@ -123,4 +148,6 @@ module.exports = {
   contactLimiter,
   sasLimiter,
   callbackLimiter,
+  exportLimiter,
+  leaveCreateLimiter,
 };

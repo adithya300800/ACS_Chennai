@@ -159,6 +159,68 @@ export const api = {
   put: (path, body, token) => request('PUT', path, body, token),
   delete: (path, token) => request('DELETE', path, null, token),
 
+  // Round-13: download() — fetch a binary response (XLSX / CSV) and return
+  // a Blob + parsed Content-Disposition filename. Routes through the same
+  // fetchWithTimeout helper as JSON calls so a hung server still aborts at
+  // 30s. Token + single-flight 401 refresh handled here too.
+  download: async (path, token, { timeoutMs = 60_000 } = {}) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      let res = await fetch(`${API_BASE}/api${path}`, {
+        method: 'GET',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        signal: controller.signal,
+      });
+      // Mirror the JSON request() path: on TOKEN_EXPIRED/TOKEN_NBF, try a
+      // single refresh then retry. Binary responses rarely come back 401,
+      // but a long-running session can hit this during a slow export.
+      if (res.status === 401 && token && !path.startsWith('/auth/')) {
+        try {
+          const newToken = await (refreshingPromise || (refreshingPromise = doRefresh().finally(() => {
+            setTimeout(() => { refreshingPromise = null; }, 0);
+          })));
+          res = await fetch(`${API_BASE}/api${path}`, {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${newToken}` },
+            signal: controller.signal,
+          });
+        } catch (refreshErr) {
+          dispatchLogoutOnce('refresh_failed');
+          throw new ApiError('Session expired. Please sign in again.', 401, 'TOKEN_EXPIRED');
+        }
+      }
+      if (!res.ok) {
+        // Try to extract a server-side error message from the JSON body.
+        let errBody = {};
+        try { errBody = await res.json(); } catch {}
+        if (res.status === 401) dispatchLogoutOnce(errBody.code || 'no_token');
+        throw new ApiError(errBody.error || 'Download failed', res.status, errBody.code);
+      }
+      const blob = await res.blob();
+      // Parse Content-Disposition for the suggested filename; fall back to
+      // a timestamp-based name. Header may be absent on a misconfigured server.
+      const cd = res.headers.get('Content-Disposition') || '';
+      const m = /filename="?([^"]+)"?/i.exec(cd);
+      const filename = m ? m[1] : `download-${Date.now()}.bin`;
+      return {
+        blob,
+        filename,
+        contentType: res.headers.get('Content-Type') || '',
+        format: res.headers.get('X-Export-Format') || '',
+        rowCount: Number(res.headers.get('X-Export-Row-Count') || 0),
+      };
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        throw new ApiError('Download timed out — please try again.', 0, 'TIMEOUT');
+      }
+      if (err instanceof ApiError) throw err;
+      throw new ApiError('Network error — is the server running?', 0, 'NETWORK_ERROR');
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  },
+
   // DPR methods
   getDprSasUrl: (filename, contentType, container, token) =>
     api.post('/dpr/sas-url', { filename, contentType, container }, token),
@@ -232,4 +294,26 @@ export const api = {
   getInspection: (id, token) => api.get(`/inspection/${id}`, token),
   updateInspection: (id, data, version, token) =>
     api.put(`/inspection/${id}`, { ...data, version }, token),
+
+  // Round-13: Attendance Excel timesheet export + Leave Request workflow.
+  // The export route returns a binary blob; use api.download() instead of
+  // api.get() — JSON parsing the response would silently produce `{}` and
+  // lose the bytes.
+  downloadTimesheet: (month, token, opts = {}) =>
+    api.download(`/attendance/export?month=${encodeURIComponent(month)}${opts.employeeId ? `&employeeId=${encodeURIComponent(opts.employeeId)}` : ''}`, token, { timeoutMs: 60_000 }),
+  // Leave endpoints. Non-admin callers see only their own requests via
+  // /api/leave/my; the admin queue lives at /api/leave with optional filters.
+  getMyLeaves: (token) => api.get('/leave/my', token),
+  createLeave: (data, token) => api.post('/leave', data, token),
+  cancelLeave: (id, token) => api.post(`/leave/${id}/cancel`, {}, token),
+  getLeave: (id, token) => api.get(`/leave/${id}`, token),
+  // Admin-only.
+  getAllLeaves: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/leave${qs ? '?' + qs : ''}`, token);
+  },
+  approveLeave: (id, reviewNotes, token) =>
+    api.post(`/leave/${id}/approve`, { reviewNotes: reviewNotes || '' }, token),
+  rejectLeave: (id, reviewNotes, token) =>
+    api.post(`/leave/${id}/reject`, { reviewNotes }, token),
 };

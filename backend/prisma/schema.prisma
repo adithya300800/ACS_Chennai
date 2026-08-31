@@ -28,6 +28,8 @@ model Employee {
   dprApproved          DPR[]                @relation("DPRApprover")
   inspectionSubmitted  InspectionRecord[]   @relation("InspectionSubmitter")
   notifications        Notification[]
+  leaveRequests        LeaveRequest[]       @relation("LeaveSubmitter")
+  leaveReviewed        LeaveRequest[]       @relation("LeaveReviewer")
 
   @@map("employees")
 }
@@ -63,6 +65,9 @@ model AttendanceSession {
   createdAt    DateTime   @default(now()) @map("created_at")
   attendance   Attendance @relation(fields: [attendanceId], references: [id])
 
+  // Round-13: attendanceId used by every session list query under an attendance row.
+  // Without this index, the timesheet exporter's per-row session fetch hits a seq scan.
+  @@index([attendanceId])
   @@map("attendance_sessions")
 }
 
@@ -231,19 +236,72 @@ model InspectionPhoto {
 }
 
 model Notification {
-  id         String   @id @default(uuid())
-  employeeId String   @map("employee_id")
-  type       String
-  dprId      String?  @map("dpr_id")
-  message    String
-  isRead     Boolean  @default(false) @map("is_read")
-  createdAt  DateTime @default(now()) @map("created_at")
+  id             String   @id @default(uuid())
+  employeeId     String   @map("employee_id")
+  type           String
+  dprId          String?  @map("dpr_id")
+  leaveRequestId String?  @map("leave_request_id")
+  message        String
+  isRead         Boolean  @default(false) @map("is_read")
+  createdAt      DateTime @default(now()) @map("created_at")
 
-  employee Employee @relation(fields: [employeeId], references: [id])
-  dpr      DPR?     @relation(fields: [dprId], references: [id])
+  employee     Employee      @relation(fields: [employeeId], references: [id])
+  dpr          DPR?          @relation(fields: [dprId], references: [id])
+  leaveRequest LeaveRequest? @relation(fields: [leaveRequestId], references: [id], onDelete: SetNull)
 
   @@index([employeeId, createdAt])
   // Round-7: dpr relation is included in many read queries; index for joins.
   @@index([dprId])
+  // Round-13: leave notifications join through leaveRequestId on the bell feed.
+  @@index([leaveRequestId])
   @@map("notification")
+}
+
+// ─────────────────────────────────────────────
+// Leave Request Module (Round-13)
+// ─────────────────────────────────────────────
+// Standard leave request workflow:
+//   1. Employee submits POST /api/leave (status=PENDING).
+//   2. Admin reviews via /portal/admin/leave; approve or reject
+//      (status → APPROVED / REJECTED, with reviewedById/reviewedAt set).
+//   3. Employee may cancel a PENDING request (status → CANCELLED).
+//
+// LeaveType is a string validated server-side (not an enum) so adding new
+// leave categories (e.g. MATERNITY, COMP_OFF) is a non-migration change.
+//
+// Future extensibility hooks baked in:
+//   - `metadata Json?` — for attachments, half-day flags, custom HR policies
+//   - `cancelledAt` + `reviewNotes` columns present from day 1 so audit flows
+//     in v2 don't need a schema migration.
+//   - No `dayCount` column (holiday/weekend policy changes don't require
+//     backfill).
+//
+// Indexes chosen for the hot reads:
+//   - employee dashboard "my recent leave" → (employeeId, startDate)
+//   - admin queue "pending leave oldest first" → (status, startDate)
+
+model LeaveRequest {
+  id           String    @id @default(uuid())
+  employeeId   String    @map("employee_id")
+  startDate    DateTime  @db.Date
+  endDate      DateTime  @db.Date
+  leaveType    String    @default("CASUAL") @map("leave_type")
+  reason       String
+  status       String    @default("PENDING")
+  reviewedById String?   @map("reviewed_by_id")
+  reviewedAt   DateTime? @map("reviewed_at")
+  reviewNotes  String?   @map("review_notes")
+  cancelledAt  DateTime? @map("cancelled_at")
+  metadata     Json?
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  employee      Employee       @relation("LeaveSubmitter", fields: [employeeId], references: [id])
+  reviewedBy    Employee?      @relation("LeaveReviewer", fields: [reviewedById], references: [id])
+  notifications Notification[]
+
+  @@index([employeeId, startDate])
+  @@index([status, startDate])
+  @@index([startDate, endDate])
+  @@map("leave_request")
 }

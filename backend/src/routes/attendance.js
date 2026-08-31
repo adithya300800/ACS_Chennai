@@ -1,6 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
+const { buildTimesheetRows } = require('../lib/timesheet');
+const { pickWriter } = require('../lib/excelWriter');
+const { hashIdentifier } = require('../lib/pii');
 
 // Helper: Get local start and end of a month (YYYY-MM format) for the
 // configured timezone (Asia/Kolkata; set in src/index.js). Returns the
@@ -485,6 +488,125 @@ router.get('/all', async (req, res) => {
   } catch (err) {
     console.error('Admin attendance error:', err);
     res.status(500).json({ error: 'Failed to fetch attendance' });
+  }
+});
+
+// Round-13: GET /api/attendance/export?month=YYYY-MM[&employeeId=...]
+// Admin-only. Streams an XLSX (or CSV fallback) of the attendance month.
+// Memory-flat via WorkbookWriter; gracefully falls back to CSV if the
+// exceljs native shim is missing. Overlaps APPROVED LeaveRequest rows on
+// top of attendance so 'L' cells render in the spreadsheet.
+//
+// IMPORTANT: this route writes the response body itself. Do not call
+// res.status(200).json() here — only set headers, then stream.
+router.get('/export', async (req, res) => {
+  const prisma = req.app.get('prisma');
+  const { month, employeeId } = req.query;
+
+  // Admin gate — use the JWT claim first (cheap), confirm with a fresh
+  // DB read so a recently-granted admin role is honored without waiting
+  // for the 24h access-token window to expire.
+  if (!req.isAdmin) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  const employee = await prisma.employee.findUnique({ where: { id: req.employeeId }, select: { isAdmin: true } });
+  if (!employee || !employee.isAdmin) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+
+  if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+    return res.status(400).json({ error: 'month query param required (YYYY-MM)' });
+  }
+
+  // Reject months outside a sane range — defends against DOS via "year 0001"
+  // queries that explode the row iteration. Lower bound matches when the
+  // org started using this system; upper bound caps future-dated abuse.
+  const [yearStr, monthStr] = month.split('-');
+  const year = Number(yearStr);
+  const monthNum = Number(monthStr);
+  if (!Number.isInteger(year) || !Number.isInteger(monthNum) || monthNum < 1 || monthNum > 12) {
+    return res.status(400).json({ error: 'INVALID_MONTH', message: 'month must be YYYY-MM with 01 ≤ MM ≤ 12' });
+  }
+  if (year < 2024 || year > 2100) {
+    return res.status(400).json({ error: 'OUT_OF_RANGE', message: 'month year out of supported range' });
+  }
+
+  try {
+    const { startDate, endDate } = getMonthRange(month);
+
+    // Filter to one employee if requested. Otherwise include everyone —
+    // admins and non-admins both go in the timesheet.
+    const employeeWhere = employeeId ? { id: String(employeeId) } : {};
+
+    const employees = await prisma.employee.findMany({
+      where: employeeWhere,
+      select: { id: true, name: true, email: true, department: true },
+      orderBy: { name: 'asc' },
+    });
+
+    if (employees.length === 0) {
+      return res.status(404).json({ error: 'NO_EMPLOYEES', message: 'No employees match the filter' });
+    }
+
+    const attendanceRows = await prisma.attendance.findMany({
+      where: {
+        date: { gte: startDate, lte: endDate },
+        employeeId: { in: employees.map((e) => e.id) },
+      },
+      include: { sessions: { orderBy: { checkIn: 'asc' } } },
+    });
+
+    // Pull APPROVED leave that overlaps the month. Overlap SQL:
+    //   startDate <= month-end AND endDate >= month-start
+    const leaveRows = await prisma.leaveRequest.findMany({
+      where: {
+        status: 'APPROVED',
+        employeeId: { in: employees.map((e) => e.id) },
+        startDate: { lte: endDate },
+        endDate: { gte: startDate },
+      },
+      select: { id: true, employeeId: true, startDate: true, endDate: true, leaveType: true, status: true },
+    });
+
+    const { rows, summary } = buildTimesheetRows({
+      employees,
+      attendanceRows,
+      leaveRequests: leaveRows,
+      month,
+      today: new Date(),
+    });
+
+    // Pick writer BEFORE calling it — we want to log the format chosen.
+    const writer = pickWriter();
+
+    console.log('[attendance/export]', {
+      requester: hashIdentifier(req.employeeId),
+      month,
+      employeeId: employeeId || 'ALL',
+      format: writer.format,
+      rows: rows.length,
+    });
+
+    // Body is streamed from here on. Errors past this point can only
+    // truncate the response (browser sees a partial download). Wrap in
+    // try/catch to set a trailer header if streaming hasn't begun.
+    try {
+      await writer.write(res, { rows, summary, month });
+    } catch (writeErr) {
+      console.error('[attendance/export] writer error:', writeErr.message?.split('\n')[0]);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Export failed' });
+      } else {
+        res.end();
+      }
+    }
+  } catch (err) {
+    console.error('Attendance export error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to build export' });
+    } else {
+      res.end();
+    }
   }
 });
 
