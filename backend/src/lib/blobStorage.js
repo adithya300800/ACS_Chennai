@@ -8,7 +8,7 @@
  *   R2_ACCESS_KEY_ID  — R2 Access Key ID
  *   R2_SECRET_ACCESS_KEY — R2 Secret Access Key
  */
-const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, PutBucketCorsCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, PutBucketCorsCommand, CreateBucketCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { randomBytes } = require('crypto');
 
@@ -183,13 +183,19 @@ const ALLOWED_R2_BUCKETS = [
 
 /**
  * Apply a permissive-yet-scoped CORS policy to every R2 bucket we use, so
- * the browser's preflight to the presigned PUT URL succeeds. Idempotent —
- * safe to call on every boot. Non-fatal at the boot layer: caller logs
- * errors and continues serving traffic.
+ * the browser's preflight to the presigned PUT URL succeeds. Also auto-
+ * creates any missing bucket first (round-13 finding: round-12 added the
+ * `inspection-photos` route but the bucket was never provisioned in R2,
+ * so uploads silently failed with "Network error during upload").
  *
- * Requires the R2 access key to have `s3:PutBucketCors` permission on each
- * bucket (the same key signs presigned URLs, which requires bucket-level
- * permissions; PutBucketCors is typically included by default on R2).
+ * Idempotent — safe to call on every boot. CreateBucket errors with
+ * `BucketAlreadyOwnedByYou` / `BucketAlreadyExists` are treated as success
+ * (the bucket is there, which is what we wanted).
+ *
+ * Non-fatal at the boot layer: caller logs errors and continues serving
+ * traffic even if a bucket can't be created (operator must add the
+ * missing permissions to the R2 access key, or create buckets manually
+ * via the Cloudflare dashboard / wrangler CLI).
  */
 async function applyR2Cors(allowedOrigins) {
   const client = getClient();
@@ -205,11 +211,37 @@ async function applyR2Cors(allowedOrigins) {
   }];
   const results = [];
   for (const Bucket of ALLOWED_R2_BUCKETS) {
+    let bucketReady = true;
+    let createErr = null;
+    try {
+      // Step 1: ensure the bucket exists. CreateBucket is idempotent — an
+      // existing bucket just returns BucketAlreadyOwnedByYou (HTTP 200
+      // with a body marker). The R2 S3-compatible API accepts the same
+      // call shape as AWS S3; location constraint is omitted since R2
+      // chooses the bucket's region itself.
+      await client.send(new CreateBucketCommand({ Bucket }));
+    } catch (err) {
+      const code = err?.$metadata?.httpStatusCode;
+      const name = err?.name || err?.Code || '';
+      if (name === 'BucketAlreadyOwnedByYou' || name === 'BucketAlreadyExists' || code === 409) {
+        // Already exists — that's what we wanted.
+      } else {
+        bucketReady = false;
+        createErr = err;
+      }
+    }
+
+    if (!bucketReady) {
+      results.push({ Bucket, ok: false, error: `create: ${createErr?.$metadata?.httpStatusCode || createErr?.name || createErr?.message}` });
+      continue;
+    }
+
+    // Step 2: apply (or refresh) the CORS policy.
     try {
       await client.send(new PutBucketCorsCommand({ Bucket, CORSConfiguration: { CORSRules: rules } }));
       results.push({ Bucket, ok: true });
     } catch (err) {
-      results.push({ Bucket, ok: false, error: err?.$metadata?.httpStatusCode || err?.name || err?.message });
+      results.push({ Bucket, ok: false, error: `cors: ${err?.$metadata?.httpStatusCode || err?.name || err?.message}` });
     }
   }
   return results;
