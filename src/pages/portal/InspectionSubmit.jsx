@@ -451,7 +451,7 @@ export default function InspectionSubmit() {
                 </div>
               </div>
             )}
-            {!workEntry && <WorkEntryAdder onAdd={setWorkEntry} sectionLabel="Add Inspection Record" />}
+            {!workEntry && <WorkEntryAdder onAdd={setWorkEntry} sectionLabel="Add Inspection Record" submitLabel="Add Inspection Record" />}
           </div>
 
           <div className="form-group">

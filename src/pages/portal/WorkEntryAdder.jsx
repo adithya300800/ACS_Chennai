@@ -17,7 +17,7 @@ import React, { useState } from 'react';
 import { WORK_TYPE_SECTIONS, SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import WorkEntryForm from './WorkEntryForm.jsx';
 
-export default function WorkEntryAdder({ onAdd, sectionLabel = 'Add Work Entry' }) {
+export default function WorkEntryAdder({ onAdd, sectionLabel = 'Add Work Entry', submitLabel }) {
   const [selectedSection, setSelectedSection] = useState(null);
   const [selectedSubType, setSelectedSubType] = useState(null);
   const [showForm, setShowForm] = useState(false);
@@ -112,6 +112,7 @@ export default function WorkEntryAdder({ onAdd, sectionLabel = 'Add Work Entry' 
             workType={selectedSubType}
             onAdd={handleAdd}
             onCancel={handleCancel}
+            submitLabel={submitLabel}
           />
         </div>
       )}
