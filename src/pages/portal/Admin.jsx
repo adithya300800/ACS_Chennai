@@ -11,14 +11,18 @@ import { formatDate, formatFullDate, formatTimeOrDash, getMapUrl } from '../../l
 
 const formatTime = formatTimeOrDash;
 
+// Round-17 B-05: helper used both for the initial state and for the
+// "Jump to today" button so the two never drift.
+function getCurrentMonth() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
 export default function Admin() {
   const { employee, accessToken } = useAuth();
   const { push } = useToast();
   const navigate = useNavigate();
-  const [month, setMonth] = useState(() => {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  });
+  const [month, setMonth] = useState(getCurrentMonth);
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -34,6 +38,23 @@ export default function Admin() {
         URL.revokeObjectURL(exportUrlRef.current);
         exportUrlRef.current = null;
       }
+    };
+  }, []);
+
+  // Round-17 D-06: OSM's slippy-map tiles use THREE.WebGLRenderer under the
+  // hood and emit noisy "GPU stall" / WebGL fallback warnings in dev mode.
+  // These don't indicate a real bug — suppress them only in dev so prod
+  // console stays untouched.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
+    const origWarn = console.warn;
+    console.warn = (...args) => {
+      const msg = String(args[0] || '');
+      if (msg.includes('THREE.WebGLRenderer') || msg.includes('GPU stall')) return;
+      origWarn.apply(console, args);
+    };
+    return () => {
+      console.warn = origWarn;
     };
   }, []);
 
@@ -143,6 +164,17 @@ export default function Admin() {
             className="month-input"
             aria-label="Select month"
           />
+          {/* Round-17 B-05: shortcut back to the current month so an admin
+              doesn't have to remember which month they last picked. Disabled
+              when already there to avoid a pointless re-fetch. */}
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => setMonth(getCurrentMonth())}
+            disabled={month === getCurrentMonth()}
+          >
+            Jump to today
+          </button>
           <button
             type="button"
             className="admin-export-btn"
@@ -317,6 +349,7 @@ export default function Admin() {
                         height="160"
                         frameBorder="0"
                         scrolling="no"
+                        loading="lazy"
                         src={getMapUrl(parseFloat(session.checkInLat), parseFloat(session.checkInLng))}
                         style={{ border: 0, borderRadius: '8px' }}
                       />

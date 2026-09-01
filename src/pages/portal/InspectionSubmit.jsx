@@ -459,6 +459,8 @@ export default function InspectionSubmit() {
 
           <div className="form-group">
             <label>Photos (max {MAX_PHOTOS_PER_DPR})</label>
+            {/* Round-17 B-14: photo previews via URL.createObjectURL — verified in
+                handleFiles() (previewUrl stored on each photo + rendered in photo-grid below). */}
             <div
               className="photo-upload-zone"
               onDrop={handleDrop}
@@ -522,7 +524,7 @@ export default function InspectionSubmit() {
             )}
           </div>
 
-          <div className="dpr-form-actions">
+          <div className="dpr-form-actions dpr-form-actions-sticky">
             <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting'}>
               {status === 'submitting' ? 'Saving...' : 'Save as Draft'}
             </button>

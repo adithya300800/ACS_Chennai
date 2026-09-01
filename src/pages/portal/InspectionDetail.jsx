@@ -4,6 +4,7 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
+import Breadcrumb from '../../components/Breadcrumb.jsx';
 
 function formatIndianDate(iso) {
   if (!iso) return '—';
@@ -92,6 +93,19 @@ export default function InspectionDetail() {
   return (
     <div className="dpr-page">
       <div className="dpr-card">
+        {/* Round-17 B-03: breadcrumb above H1. Last item is current page (no `to`). */}
+        <Breadcrumb
+          items={[
+            { label: 'My Inspection Records', to: '/portal/inspection/my' },
+            {
+              // Match the H1 below so the breadcrumb's current-page label is
+              // consistent with the page title. Falls back to project name
+              // when no typeMeta label exists (defensive — `typeMeta` lookup
+              // covers SUB_WORK_TYPE_OPTIONS enum values).
+              label: `${typeMeta?.label || record.inspectionType}${record.projectName ? ` · ${record.projectName}` : ''}`,
+            },
+          ]}
+        />
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
           <div>
             <h1 className="dpr-page-title" style={{ marginBottom: '0.25rem' }}>

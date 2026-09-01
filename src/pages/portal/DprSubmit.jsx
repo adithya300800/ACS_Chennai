@@ -412,8 +412,15 @@ export default function DprSubmit() {
             </div>
             <div className="form-group" style={{ flex: 1 }}>
               <label htmlFor="reportDate">Report Date</label>
-              <input id="reportDate" type="date" name="reportDate" className="form-input" value={form.reportDate} readOnly style={{ background: '#f1f5f9', cursor: 'default' }} />
-              <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>Auto-set to your local date</span>
+              <input
+                id="reportDate"
+                type="date"
+                name="reportDate"
+                className="form-input"
+                value={form.reportDate}
+                onChange={handleChange}
+                max={getLocalDate()}
+              />
             </div>
           </div>
 
@@ -585,6 +592,8 @@ export default function DprSubmit() {
           {/* Photos */}
           <div className="form-group">
             <label>Site Photos (max {MAX_PHOTOS_PER_DPR})</label>
+            {/* Round-17 B-14: photo previews via URL.createObjectURL — verified in
+                handleFiles() (previewUrl stored on each photo + rendered in photo-grid below). */}
             <div
               className="photo-upload-zone"
               onDrop={handleDrop}
@@ -700,7 +709,7 @@ export default function DprSubmit() {
             )}
           </div>
 
-          <div className="dpr-form-actions" style={{ marginTop: '1.5rem' }}>
+          <div className="dpr-form-actions dpr-form-actions-sticky" style={{ marginTop: '1.5rem' }}>
             <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting'}>
               {status === 'submitting' ? 'Saving...' : 'Save as Draft'}
             </button>

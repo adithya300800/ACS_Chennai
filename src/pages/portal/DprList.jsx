@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
+import Breadcrumb from '../../components/Breadcrumb.jsx';
 
 const STATUS_FILTERS = [
   { value: '', label: 'All Statuses' },
@@ -346,7 +347,21 @@ export default function DprList() {
             }}
           >
             <div style={{ padding: '1.25rem 1.5rem', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {/* Round-17 B-03: breadcrumb in modal header. Last item is current page (no `to`). */}
+                <Breadcrumb
+                  items={[
+                    { label: 'My Daily Reports', to: '/portal/dpr/my' },
+                    {
+                      // Prefer projectName; fall back to formatted reportDate so
+                      // the breadcrumb always carries context even if the project
+                      // name is empty (defensive — modal already gates on `expandedDpr`).
+                      label: expandedDpr.projectName
+                        || new Date(expandedDpr.reportDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+                        || 'Daily Report',
+                    },
+                  ]}
+                />
                 <h2 style={{ margin: 0, fontSize: '1.15rem', color: 'var(--navy)' }}>{expandedDpr.projectName}</h2>
                 <div style={{ marginTop: '0.25rem', fontSize: '0.85rem', color: 'var(--steel)' }}>
                   {new Date(expandedDpr.reportDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}

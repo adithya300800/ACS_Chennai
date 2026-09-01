@@ -4,6 +4,7 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import VideoPlayer from '../../components/VideoPlayer.jsx';
+import Breadcrumb from '../../components/Breadcrumb.jsx';
 import {
   TRAINING_PROGRESS_PING_MS,
   TRAINING_PROVIDER_LABELS,
@@ -195,6 +196,14 @@ export default function TrainingDetail() {
           Back to My Learning
         </Link>
       </div>
+
+      {/* Round-17 B-03: breadcrumb above the H1. Last item is current page (no `to`). */}
+      <Breadcrumb
+        items={[
+          { label: 'My Learning', to: '/portal/training' },
+          { label: course.title || 'Untitled course' },
+        ]}
+      />
 
       <div className="training-detail-meta">
         <h1 className="training-detail-title">{course.title || 'Untitled course'}</h1>

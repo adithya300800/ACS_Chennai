@@ -2019,6 +2019,32 @@ footer {
   }
 }
 
+/* Round-17 D-04: on a 375px viewport, the 3-col admin attendance grid
+   overflows horizontally. Stack each record's columns so the rows flow
+   down the page instead of clipping off the right edge. */
+@media (max-width: 480px) {
+  .admin-page {
+    padding: 1rem;
+  }
+  .admin-header-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .records-header,
+  .record-row {
+    grid-template-columns: 1fr;
+    text-align: left;
+    row-gap: 0.35rem;
+  }
+  .records-header span:not(:first-child),
+  .record-row span:not(:first-child) {
+    padding-left: 0;
+  }
+  .record-row .record-status {
+    justify-self: start;
+  }
+}
+
 /* === RESPONSIVE === */
 @media (max-width: 768px) {
   .portal-sidebar {
@@ -2158,6 +2184,27 @@ footer {
   justify-content: flex-end;
   padding-top: 0.5rem;
   border-top: 1px solid var(--border);
+}
+
+/* Round-17 B-01/D-02: pin Save/Submit to the bottom of the viewport on mobile
+   so users don't lose context while scrolling. Desktop uses static layout. */
+.dpr-form-actions-sticky {
+  position: sticky;
+  bottom: 0;
+  background: var(--white);
+  padding: 0.85rem 0;
+  margin-top: 1rem;
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.06);
+  z-index: 5;
+}
+
+@media (min-width: 768px) {
+  .dpr-form-actions-sticky {
+    position: static;
+    box-shadow: none;
+    background: transparent;
+    padding-top: 0;
+  }
 }
 
 .field-error {
@@ -2398,6 +2445,21 @@ footer {
   padding: 2rem;
   color: var(--steel);
   font-size: 0.9rem;
+}
+
+/* Round-17 D-05: on a 375px viewport, the bell button was ~36x36 (below
+   the 40px WCAG touch-target floor) and the 360px dropdown overflowed the
+   page. Bump the tap target and clamp the dropdown to the viewport. */
+@media (max-width: 480px) {
+  .notification-bell-btn {
+    min-width: 40px;
+    min-height: 40px;
+  }
+  .notification-dropdown {
+    width: calc(100vw - 2rem);
+    max-width: 360px;
+    right: 1rem;
+  }
 }
 
 /* ─── DPR Detail View ─── */
