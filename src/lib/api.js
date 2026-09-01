@@ -329,13 +329,15 @@ export const api = {
   createTrainingCourse: (data, token) => api.post('/training/courses', data, token),
   updateTrainingCourse: (id, data, token) =>
     api.put(`/training/courses/${id}`, data, token),
-  // Bulk assign — backend loops the employeeIds array server-side and
-  // returns { created: [...], skipped: [...], invalidIds: [...] } so the
-  // admin UI can show "Assigned to 12 · 1 duplicate · 2 invalid".
-  assignTraining: (courseId, employeeIds, opts = {}, token) =>
+  // Bulk assign — backend accepts either employeeIds (cuids) OR
+  // employeeEmails and resolves them server-side. We pass emails because
+  // admins paste a textarea of emails, not a list of cuids. The backend
+  // returns { created: [...], skipped: [...], invalidInputs: [...] } so
+  // the admin UI can show "Assigned to 12 · 1 duplicate · 2 invalid".
+  assignTraining: (courseId, employeeIdsOrEmails, opts = {}, token) =>
     api.post('/training/enrollments', {
       courseId,
-      employeeIds,
+      employeeEmails: employeeIdsOrEmails,
       ...(opts.dueDate ? { dueDate: opts.dueDate } : {}),
       ...(opts.priority ? { priority: opts.priority } : {}),
     }, token),

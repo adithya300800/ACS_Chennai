@@ -260,7 +260,7 @@ router.post('/enrollments', trainingWriteLimiter, asyncHandler(async (req, res) 
       code: result.code,
     });
   }
-  const { courseId, employeeIds, dueDate, priority } = result.value;
+  const { courseId, employeeIds, employeeEmails, dueDate, priority } = result.value;
 
   const fresh = await assertFreshAdmin(req, prisma);
   if (!fresh) return res.status(403).json({ error: 'Admin access required' });
@@ -278,13 +278,27 @@ router.post('/enrollments', trainingWriteLimiter, asyncHandler(async (req, res) 
     });
   }
 
-  // Resolve valid employee ids (skip silently + report for any invalid IDs).
-  const employees = await prisma.employee.findMany({
-    where: { id: { in: employeeIds } },
-    select: { id: true, name: true },
-  });
-  const foundIds = new Set(employees.map((e) => e.id));
-  const invalidIds = employeeIds.filter((id) => !foundIds.has(id));
+  // Resolve employees: either by id (when employeeIds was supplied) OR by
+  // email (when employeeEmails was supplied). The UI uses the email form
+  // because admins don't have ids handy in a paste-emails textarea.
+  let employees;
+  let invalidInputs;
+  if (employeeEmails) {
+    const lowered = employeeEmails.map((e) => e.toLowerCase());
+    employees = await prisma.employee.findMany({
+      where: { email: { in: lowered } },
+      select: { id: true, name: true, email: true },
+    });
+    const foundEmails = new Set(employees.map((e) => e.email.toLowerCase()));
+    invalidInputs = employeeEmails.filter((e) => !foundEmails.has(e.toLowerCase()));
+  } else {
+    employees = await prisma.employee.findMany({
+      where: { id: { in: employeeIds } },
+      select: { id: true, name: true, email: true },
+    });
+    const foundIds = new Set(employees.map((e) => e.id));
+    invalidInputs = employeeIds.filter((id) => !foundIds.has(id));
+  }
 
   // Create enrollments sequentially. The (courseId, employeeId) @@unique
   // makes this idempotent — a re-assign is a 409 we ignore for "already
@@ -352,16 +366,16 @@ router.post('/enrollments', trainingWriteLimiter, asyncHandler(async (req, res) 
   console.log('[training/assign]', {
     actor: hashIdentifier(req.employeeId),
     courseId,
-    requested: employeeIds.length,
+    requested: (employeeEmails || employeeIds).length,
     created: created.length,
     skipped: skipped.length,
-    invalid: invalidIds.length,
+    invalid: invalidInputs.length,
   });
 
   res.status(201).json({
     created: created.map(serializeEnrollment),
     skipped,
-    invalidIds,
+    invalidInputs,
   });
 }));
 

@@ -307,6 +307,9 @@ function validateUpdateCourse(body) {
 }
 
 // Validate the body for POST /api/training/enrollments (admin bulk-assign).
+// Accepts EITHER `employeeIds[]` (cuids) OR `employeeEmails[]` — the route
+// handler resolves emails → ids server-side. This matches the v1 UI flow
+// where admins paste emails in a textarea instead of selecting from a list.
 function validateAssignEnrollments(body) {
   if (!body || typeof body !== 'object') {
     return { ok: false, code: 'INVALID_BODY', message: 'Body required' };
@@ -316,28 +319,33 @@ function validateAssignEnrollments(body) {
     return { ok: false, code: 'INVALID_COURSE_ID', message: 'courseId is required' };
   }
 
-  if (!Array.isArray(body.employeeIds)) {
-    return { ok: false, code: 'INVALID_EMPLOYEE_IDS', message: 'employeeIds must be an array' };
+  // Must have one of employeeIds / employeeEmails
+  const hasIds = Array.isArray(body.employeeIds);
+  const hasEmails = Array.isArray(body.employeeEmails);
+  if (!hasIds && !hasEmails) {
+    return { ok: false, code: 'INVALID_EMPLOYEE_IDS', message: 'employeeIds or employeeEmails must be an array' };
   }
-  if (body.employeeIds.length === 0) {
-    return { ok: false, code: 'NO_EMPLOYEES', message: 'employeeIds must contain at least one id' };
+  const rawList = hasIds ? body.employeeIds : body.employeeEmails;
+  if (rawList.length === 0) {
+    return { ok: false, code: 'NO_EMPLOYEES', message: 'employee list must contain at least one entry' };
   }
-  if (body.employeeIds.length > MAX_EMPLOYEE_IDS_PER_BULK) {
+  if (rawList.length > MAX_EMPLOYEE_IDS_PER_BULK) {
     return {
       ok: false,
       code: 'TOO_MANY_EMPLOYEES',
       message: `Cannot assign to more than ${MAX_EMPLOYEE_IDS_PER_BULK} employees in one request`,
     };
   }
-  const employeeIds = [];
   const seen = new Set();
-  for (const id of body.employeeIds) {
-    if (typeof id !== 'string' || id.trim().length === 0) {
-      return { ok: false, code: 'INVALID_EMPLOYEE_ID', message: 'employeeIds must be non-empty strings' };
+  const cleaned = [];
+  for (const entry of rawList) {
+    if (typeof entry !== 'string' || entry.trim().length === 0) {
+      return { ok: false, code: 'INVALID_EMPLOYEE_ID', message: 'employee entries must be non-empty strings' };
     }
-    if (!seen.has(id)) {
-      seen.add(id);
-      employeeIds.push(id);
+    const v = entry.trim();
+    if (!seen.has(v.toLowerCase())) {
+      seen.add(v.toLowerCase());
+      cleaned.push(v);
     }
   }
 
@@ -372,7 +380,13 @@ function validateAssignEnrollments(body) {
 
   return {
     ok: true,
-    value: { courseId: body.courseId, employeeIds, dueDate, priority },
+    value: {
+      courseId: body.courseId,
+      employeeIds: cleaned,
+      employeeEmails: hasEmails ? cleaned : null,
+      dueDate,
+      priority,
+    },
   };
 }
 
