@@ -77,10 +77,9 @@ export function AuthProvider({ children }) {
       preemptiveTimerRef.current = setTimeout(async () => {
         try {
           await refreshTokenFn();
-        } catch (err) {
+        } catch {
           // Refresh failed — let the interceptor's auth:logout fire on the
           // next 401 instead of proactively bouncing the user mid-session.
-          console.warn('[auth] preemptive refresh failed:', err?.message || err);
         }
       }, msUntilRefresh);
     } catch {
@@ -173,8 +172,8 @@ export function AuthProvider({ children }) {
       if (token) {
         await api.postLogout(token);
       }
-    } catch (err) {
-      console.warn('[auth] backend logout failed (continuing with local clear):', err?.message || err);
+    } catch {
+      // Swallowed — see comment above; the local clear is the source of truth.
     }
     localStorage.removeItem('acs_auth');
     localStorage.removeItem('acs_refresh');

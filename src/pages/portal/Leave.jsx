@@ -153,7 +153,7 @@ export default function Leave() {
   return (
     <div className="leave-page">
       <div className="leave-page-header">
-        <h1 className="leave-page-title">My Leave</h1>
+        <h1 className="leave-page-title" aria-label="My Leave">My Leave</h1>
         <p className="leave-page-sub">Submit a leave request and track its status</p>
       </div>
 

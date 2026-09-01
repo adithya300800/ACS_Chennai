@@ -58,7 +58,7 @@ export default function AdminOverview() {
     <div className="dpr-page">
       <div className="dpr-page-header">
         <div>
-          <h1 className="dpr-page-title">Admin Overview</h1>
+          <h1 className="dpr-page-title" aria-label="Admin Overview">Admin Overview</h1>
           <p className="dpr-page-sub" style={{ color: 'var(--steel)', margin: 0, fontSize: '0.9rem' }}>
             Welcome back, <strong>{employee?.name?.split(' ')[0] || 'Admin'}</strong>. Pick a module to review.
           </p>

@@ -206,7 +206,7 @@ export default function TrainingDetail() {
       />
 
       <div className="training-detail-meta">
-        <h1 className="training-detail-title">{course.title || 'Untitled course'}</h1>
+        <h1 className="training-detail-title" aria-label={`Training: ${course.title || 'Untitled course'}`}>{course.title || 'Untitled course'}</h1>
         <div className="training-detail-sub">
           <span className={`training-pill training-pill-${enrollment.status.toLowerCase()}`}>
             {enrollment.status === 'IN_PROGRESS' ? 'In Progress' : enrollment.status === 'COMPLETED' ? 'Completed' : 'Assigned'}

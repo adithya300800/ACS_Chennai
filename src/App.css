@@ -19,6 +19,25 @@
   --shadow-xl:   0 24px 60px rgba(0,0,0,0.12);
   --radius:      12px;
   --radius-lg:   18px;
+
+  /* Typography scale (F-02) — semantic names for consistent text sizing */
+  --text-xs:     0.75rem;   /* 12px — micro labels */
+  --text-sm:     0.875rem;  /* 14px — small body */
+  --text-base:   1rem;      /* 16px — body */
+  --text-lg:     1.125rem;  /* 18px — emphasized body */
+  --text-xl:     1.25rem;   /* 20px — small headings */
+  --text-2xl:    1.5rem;    /* 24px — section headings */
+  --text-3xl:    1.875rem;  /* 30px — page headings */
+
+  /* Spacing scale (F-03) — 8pt grid for consistent layout rhythm */
+  --space-1:     0.25rem;   /* 4px */
+  --space-2:     0.5rem;    /* 8px */
+  --space-3:     0.75rem;   /* 12px */
+  --space-4:     1rem;      /* 16px */
+  --space-5:     1.25rem;   /* 20px */
+  --space-6:     1.5rem;    /* 24px */
+  --space-7:     2rem;      /* 32px */
+  --space-8:     3rem;      /* 48px */
 }
 
 * { box-sizing: border-box; overflow-x: hidden; }
@@ -77,7 +96,7 @@ a { text-decoration: none; }
 }
 .body-lg { font-size: 1.1rem; line-height: 1.7; color: var(--steel); }
 .body-md { font-size: 0.95rem; line-height: 1.7; color: var(--steel); }
-.muted { color: #94A3B8; }
+.muted { color: #64748B; }
 .accent { color: var(--blue); }
 .amber { color: var(--amber); }
 
@@ -620,7 +639,7 @@ nav a.active { color: var(--blue); background: rgba(0,102,255,0.06); border-bott
   border-color: var(--blue);
   box-shadow: 0 0 0 3px rgba(0,102,255,0.1);
 }
-.form-input::placeholder { color: #94A3B8; }
+.form-input::placeholder { color: #64748B; opacity: 0.7; }
 select.form-input { appearance: none; cursor: pointer; }
 .contact-info-card {
   background: var(--white);
@@ -1646,7 +1665,7 @@ footer {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #94a3b8;
+  color: #64748B;
   font-size: 1.5rem;
   flex-shrink: 0;
 }
@@ -1664,7 +1683,7 @@ footer {
   font-size: 0.75rem;
   margin-bottom: 0.375rem;
 }
-.upload-item-status.idle              { color: #94a3b8; }
+.upload-item-status.idle              { color: #64748B; }
 .upload-item-status.requesting-sas,
 .upload-item-status.uploading         { color: #3b82f6; }
 .upload-item-status.confirming        { color: #f59e0b; }
@@ -1694,7 +1713,7 @@ footer {
   background: none;
   border: none;
   cursor: pointer;
-  color: #94a3b8;
+  color: #64748B;
   font-size: 1.25rem;
   padding: 0.25rem;
   border-radius: 4px;
@@ -3967,4 +3986,20 @@ footer {
   .training-card { flex-direction: column; align-items: stretch; }
   .training-card-side { justify-content: flex-start; }
   .training-form-row { grid-template-columns: 1fr; }
+}
+
+/* === A11Y: REDUCED MOTION (WCAG 2.3.3 Animation from Interactions, Level AAA) ===
+ * Suppresses non-essential animations and transitions for users who have set
+ * their OS-level "reduce motion" preference. Essential state-change indicators
+ * (focus rings, form validation colors) are not animated and remain visible.
+ * This is a targeted override; it does not remove any defined @keyframes —
+ * it simply collapses their durations to ~0 so users with vestibular
+ * sensitivities are not exposed to large-scale motion. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

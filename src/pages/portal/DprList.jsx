@@ -362,7 +362,12 @@ export default function DprList() {
                     },
                   ]}
                 />
-                <h2 style={{ margin: 0, fontSize: '1.15rem', color: 'var(--navy)' }}>{expandedDpr.projectName}</h2>
+                <h1
+                  style={{ margin: 0, fontSize: '1.15rem', color: 'var(--navy)' }}
+                  aria-label={`${expandedDpr.projectName} — Daily Progress Report`}
+                >
+                  {expandedDpr.projectName}
+                </h1>
                 <div style={{ marginTop: '0.25rem', fontSize: '0.85rem', color: 'var(--steel)' }}>
                   {new Date(expandedDpr.reportDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
                   {' · '}{expandedDpr.location}
