@@ -30,6 +30,8 @@ import Training from './pages/portal/Training.jsx';
 import TrainingDetail from './pages/portal/TrainingDetail.jsx';
 import TrainingDashboard from './pages/admin/TrainingDashboard.jsx';
 import TrainingCourseNew from './pages/admin/TrainingCourseNew.jsx';
+// Round-17 C-14: shared Coming Soon placeholder (was inline in App.jsx).
+import ComingSoon from './components/ComingSoon.jsx';
 
 function App() {
   const location = useLocation();
@@ -107,7 +109,7 @@ function App() {
           element={
             <>
               <Header />
-              <main>
+              <main id="main-content">
                 <Routes>
                   <Route path="/" element={<Home />} />
                   <Route path="/about" element={<About />} />
@@ -146,20 +148,9 @@ function RoleBranchLanding() {
   return isAdmin ? <AdminOverview /> : <Navigate to="attendance" replace />;
 }
 
-// Simple Coming Soon placeholder for stubbed portal pages
-function ComingSoon({ name }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '60vh', gap: '1rem', textAlign: 'center', padding: '2rem' }}>
-      <div style={{ fontSize: '3rem' }}>🚧</div>
-      <h2 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", fontSize: '1.5rem', fontWeight: '700', color: 'var(--navy)' }}>
-        {name} — Coming Soon
-      </h2>
-      <p style={{ color: 'var(--steel)', maxWidth: '400px' }}>
-        This feature is on our roadmap and will be available in a future update.
-      </p>
-      <a href="/" style={{ color: 'var(--blue)', fontSize: '0.9rem', textDecoration: 'none' }}>← Back to website</a>
-    </div>
-  );
-}
+// Round-17 C-14: the inline ComingSoon component was hoisted into
+// src/components/ComingSoon.jsx so the Assets stub and any future "Soon"
+// surfaces share the same look. The legacy inline definition was removed;
+// the shared component is imported at the top of this file.
 
 export default App;

@@ -125,7 +125,7 @@ function BlogList() {
               <p>{post.excerpt}</p>
               <Link to={`/blog/${post.slug}`} className="read-more" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
                 Read Article
-                <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
               </Link>
             </div>
           ))}
@@ -155,7 +155,7 @@ function BlogArticle() {
     <section className="section alt">
       <div className="container" style={{ maxWidth: '760px' }}>
         <Link to="/blog" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', color: 'var(--steel)', fontSize: '0.88rem', marginBottom: '2rem', textDecoration: 'none' }}>
-          <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+          <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
           Back to Blog
         </Link>
 

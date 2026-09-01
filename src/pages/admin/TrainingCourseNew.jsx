@@ -63,7 +63,6 @@ export default function TrainingCourseNew() {
   const { push } = useToast();
 
   const [employees, setEmployees] = useState([]);
-  const [loadingEmployees, setLoadingEmployees] = useState(true);
   const [employeeError, setEmployeeError] = useState('');
 
   // Course form state
@@ -83,27 +82,14 @@ export default function TrainingCourseNew() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
 
-  // Guard — admin only.
-  useEffect(() => {
-    // We don't have employee here at this scope; the route guard in App.jsx
-    // ensures only admins reach this page. We still double-check via a
-    // lightweight admin-only fetch on mount.
-  }, []);
-
-  // We need a way to enumerate employees — there's no /api/admin/employees
-  // route, so for now we derive from the enrollments list (any employee
-  // mentioned in /api/training/enrollments shows up here) + a manual
-  // search fallback. Cleaner: a dedicated /api/admin/employees endpoint
-  // would be added in a future round. For now, this view seeds from any
-  // prior assignments + a text-input override path.
+  // Guard — admin only. v1 deliberately skips employee enumeration (no
+  // /api/admin/employees route yet) and uses email-paste bulk assignment
+  // instead. The block-comment above is preserved as design intent so the
+  // future endpoint knows what to replace; the empty useEffect + the
+  // loadingEmployees flag were dead — collapsed in round-17 C-17.
   //
-  // To keep v1 self-contained, we DO NOT require employee listing. The
-  // admin enters email addresses one per line as the selection mechanism.
-  // This is honest about v1's scope: bulk-by-emails is more robust than
-  // a checkbox list whose membership depends on prior assignment history.
-  useEffect(() => {
-    setLoadingEmployees(false);
-  }, []);
+  // Admin access is enforced by the App.jsx route guard (admin-only
+  // ProtectedRoute wrapper). No client-side double-check needed.
 
   // URL → provider auto-detection. If the admin manually picks a provider
   // from the dropdown, we lock to their choice until they edit the URL again.

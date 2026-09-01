@@ -81,7 +81,7 @@ export default function Projects() {
                 <h3>{p.name}</h3>
                 <p>{p.desc}</p>
                 <div className="project-metric">
-                  <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                  <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
                   {p.metric} — {p.metricLabel}
                 </div>
               </div>

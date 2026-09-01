@@ -202,7 +202,7 @@ export default function DprList() {
         <h1 className="dpr-page-title">My Daily Reports</h1>
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
           <button className="btn btn-secondary btn-sm" onClick={() => setShowFilters(s => !s)}>
-            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2V12.46z"/></svg>
+            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 3H2l8 9.46V19l4 2V12.46z"/></svg>
             Filters {showFilters ? '▲' : '▼'}
           </button>
           <button className="btn btn-primary btn-sm" onClick={() => navigate('/portal/dpr/submit')}>
@@ -271,7 +271,6 @@ export default function DprList() {
             <div className="dpr-list-item" style={{ background: '#f8fafc', fontWeight: 600, fontSize: '0.8rem', color: 'var(--steel)', padding: '0.75rem 1rem' }}>
               <div style={{ flex: '0 0 36px' }}></div>
               <div style={{ flex: 2 }}>Project / Date</div>
-              <div style={{ flex: 1, display: 'none' }}>Location</div>
               <div style={{ flex: 1 }}>Status</div>
               <div style={{ flex: 1 }}>Photos</div>
               <div style={{ flex: 1 }}>Submitted</div>
@@ -292,7 +291,6 @@ export default function DprList() {
                     {dpr.contractor ? ` · ${dpr.contractor}` : ''}
                   </div>
                 </div>
-                <div style={{ flex: 1, display: 'none' }} className="dpr-list-location">{dpr.location}</div>
                 <div style={{ flex: 1 }}>
                   <StatusBadge status={dpr.status} map={DPR_STATUS_MAP} />
                 </div>

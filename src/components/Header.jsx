@@ -29,7 +29,7 @@ export default function Header() {
       <div className="container">
         <Link to="/" className="header-logo">
           <div className="logo-icon">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
               <path d="M10 2L18 16H2L10 2Z" fill="white" />
             </svg>
           </div>
@@ -54,7 +54,7 @@ export default function Header() {
           aria-expanded={mobileOpen}
           onClick={() => setMobileOpen(o => !o)}
         >
-          <svg width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+          <svg width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true">
             {mobileOpen
               ? <path d="M18 6L6 18M6 6l12 12" />
               : <path d="M3 12h18M3 6h18M3 18h18" />}

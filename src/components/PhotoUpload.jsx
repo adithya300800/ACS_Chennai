@@ -18,88 +18,46 @@ function UploadItem({ item, onRemove }) {
     error: item.error || 'Failed',
   }[item.status] || item.status;
 
-  const statusColor = {
-    idle: '#94a3b8',
-    'requesting-sas': '#3b82f6',
-    uploading: '#3b82f6',
-    confirming: '#f59e0b',
-    complete: '#22c55e',
-    error: '#ef4444',
-  }[item.status] || '#94a3b8';
-
   return (
-    <div style={{
-      display: 'flex',
-      gap: '0.75rem',
-      padding: '0.75rem',
-      background: 'white',
-      borderRadius: 8,
-      border: '1px solid #e2e8f0',
-      alignItems: 'center',
-    }}>
+    <div className="upload-item">
       {item.previewUrl ? (
         <img
           src={item.previewUrl}
           alt={item.caption || 'Photo'}
-          style={{ width: 56, height: 56, borderRadius: 6, objectFit: 'cover', flexShrink: 0 }}
+          className="upload-item-thumb"
         />
       ) : (
-        <div style={{
-          width: 56, height: 56, borderRadius: 6, background: '#f1f5f9',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          color: '#94a3b8', fontSize: '1.5rem', flexShrink: 0,
-        }}>
+        <div className="upload-item-placeholder" aria-hidden="true">
           📷
         </div>
       )}
 
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: '0.85rem', fontWeight: 500, color: 'var(--navy)', marginBottom: '0.25rem' }}>
-          {item.filename}
-        </div>
-        <div style={{ fontSize: '0.75rem', color: statusColor, marginBottom: '0.375rem' }}>
+      <div className="upload-item-meta">
+        <div className="upload-item-name">{item.filename}</div>
+        <div className={`upload-item-status ${item.status}`}>
           {statusLabel}
         </div>
         {item.status === 'uploading' && (
-          <div style={{ height: 3, background: '#e2e8f0', borderRadius: 2 }}>
-            <div style={{
-              height: '100%',
-              width: `${item.progress || 0}%`,
-              background: 'var(--blue)',
-              borderRadius: 2,
-              transition: 'width 0.3s',
-            }} />
+          <div className="upload-item-progress">
+            <div
+              className="upload-item-progress-bar"
+              style={{ width: `${item.progress || 0}%` }}
+            />
           </div>
         )}
         <input
-          className="photo-caption-input"
+          className="upload-item-caption"
           placeholder="Add caption..."
           value={item.caption || ''}
           onChange={(e) => item.onCaptionChange?.(e.target.value)}
-          style={{
-            width: '100%',
-            border: '1px solid #e2e8f0',
-            borderRadius: 4,
-            padding: '0.25rem 0.5rem',
-            fontSize: '0.75rem',
-            marginTop: '0.375rem',
-          }}
         />
       </div>
 
       <button
+        className="upload-item-remove"
         onClick={onRemove}
-        style={{
-          background: 'none',
-          border: 'none',
-          cursor: 'pointer',
-          color: '#94a3b8',
-          fontSize: '1.25rem',
-          padding: '0.25rem',
-          borderRadius: 4,
-          flexShrink: 0,
-        }}
         title="Remove"
+        aria-label={`Remove ${item.filename || 'photo'}`}
       >
         ×
       </button>
@@ -262,9 +220,7 @@ export default function PhotoUpload({ dprId, onPhotosChange, initialPhotos = [] 
   return (
     <div>
       {error && (
-        <div style={{ color: '#ef4444', fontSize: '0.85rem', marginBottom: '0.75rem' }}>
-          {error}
-        </div>
+        <div className="upload-error">{error}</div>
       )}
 
       {/* Upload zone */}
@@ -275,15 +231,14 @@ export default function PhotoUpload({ dprId, onPhotosChange, initialPhotos = [] 
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onClick={() => fileInputRef.current?.click()}
-          style={{ cursor: 'pointer' }}
         >
-          <svg width="32" height="32" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+          <svg width="32" height="32" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
           </svg>
-          <p style={{ margin: '0.5rem 0 0.25rem', fontWeight: 500, color: 'var(--navy)' }}>
+          <p className="upload-zone-hint">
             Drop photos here or click to browse
           </p>
-          <span style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
+          <span className="upload-zone-meta">
             JPG, PNG, WebP — max 5MB each ({MAX_FILES - items.length} remaining)
           </span>
         </div>
@@ -300,7 +255,7 @@ export default function PhotoUpload({ dprId, onPhotosChange, initialPhotos = [] 
 
       {/* Upload queue */}
       {items.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.75rem' }}>
+        <div className="upload-queue">
           {items.map(item => (
             <UploadItem
               key={item.id}
@@ -312,7 +267,7 @@ export default function PhotoUpload({ dprId, onPhotosChange, initialPhotos = [] 
       )}
 
       {pendingCount > 0 && (
-        <div style={{ textAlign: 'center', padding: '0.75rem', color: 'var(--steel)', fontSize: '0.85rem' }}>
+        <div className="upload-pending">
           {pendingCount} photo{pendingCount !== 1 ? 's' : ''} uploading...
         </div>
       )}

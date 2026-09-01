@@ -50,8 +50,11 @@ export default function PortalLogin() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const [form, setForm] = useState({ email: '', password: '' });
-  const [status, setStatus] = useState('idle'); // idle | loading | error
-  const [errorMsg, setErrorMsg] = useState('');
+  // Round-17 B-15: login errors now flow through the shared toast stack
+  // (PortalLayout already mounts ToastProvider) — no more on-page red box,
+  // no `errorMsg` state, no `status === 'error'` branch. The user sees the
+  // error in the same place they'd see errors on every other portal page.
+  const [status, setStatus] = useState('idle'); // idle | loading
 
   // Surface "session expired" navigation state from AuthContext's logout
   // listener as a friendly toast instead of letting the user wonder why
@@ -83,14 +86,13 @@ export default function PortalLogin() {
     const error = searchParams.get('error');
 
     if (error) {
-      setStatus('error');
-      setErrorMsg('Zoho authentication failed');
+      toast.push('Zoho authentication failed.', 'error');
+      setStatus('idle');
       return;
     }
 
     if (code) {
       setStatus('loading');
-      setErrorMsg('');
 
       // Round-7: route through api.js so the Zoho callback POST inherits
       // the timeout wrapper (raw fetch could hang indefinitely if Azure
@@ -106,8 +108,8 @@ export default function PortalLogin() {
           navigate(landing, { replace: true });
         })
         .catch((err) => {
-          setStatus('error');
-          setErrorMsg(err.message || 'Zoho login failed');
+          toast.push(err.message || 'Zoho login failed.', 'error');
+          setStatus('idle');
         });
     }
   }, [searchParams, navigate, setAuthData]);
@@ -119,7 +121,6 @@ export default function PortalLogin() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setStatus('loading');
-    setErrorMsg('');
 
     try {
       const employee = await login(form.email, form.password);
@@ -135,14 +136,13 @@ export default function PortalLogin() {
       const landing = employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
       navigate(landing);
     } catch (err) {
-      setStatus('error');
-      setErrorMsg(err.message || 'Login failed. Please check your credentials.');
+      toast.push(err.message || 'Login failed. Please check your credentials.', 'error');
+      setStatus('idle');
     }
   };
 
   const handleZohoLogin = async () => {
     setStatus('loading');
-    setErrorMsg('');
 
     // CRITICAL: open the popup SYNCHRONOUSLY (inside the click handler,
     // before any await) so the user gesture is preserved. Modern browsers
@@ -167,8 +167,8 @@ export default function PortalLogin() {
     // as "portal login page is just full blank". Show an actionable
     // error and let the user retry with popups enabled.
     if (!popup) {
-      setStatus('error');
-      setErrorMsg('Pop-ups are blocked for this site. Please allow pop-ups and try again.');
+      toast.push('Pop-ups are blocked for this site. Please allow pop-ups and try again.', 'error');
+      setStatus('idle');
       return;
     }
 
@@ -222,8 +222,8 @@ export default function PortalLogin() {
           navigate(landing, { replace: true });
         } else if (event.data?.type === 'zoho-oauth-error') {
           cleanup();
-          setStatus('error');
-          setErrorMsg(ZOHO_ERRORS[event.data.error] || 'Zoho login failed. Please try again.');
+          toast.push(ZOHO_ERRORS[event.data.error] || 'Zoho login failed. Please try again.', 'error');
+          setStatus('idle');
         }
       }
       window.addEventListener('message', handleMessage);
@@ -246,16 +246,16 @@ export default function PortalLogin() {
       giveUp = setTimeout(() => {
         if (settled) return;
         cleanup();
-        setStatus('error');
-        setErrorMsg('Zoho sign-in timed out. Please close the Zoho window and try again.');
+        toast.push('Zoho sign-in timed out. Please close the Zoho window and try again.', 'error');
+        setStatus('idle');
       }, 3 * 60 * 1000);
 
     } catch (err) {
       // Network failed before we could navigate the popup — close it so
       // the user isn't left with an empty about:blank window.
       try { popup.close(); } catch {}
-      setStatus('error');
-      setErrorMsg(err.message || 'Zoho OAuth not available');
+      toast.push(err.message || 'Zoho OAuth not available.', 'error');
+      setStatus('idle');
       // Note: closedWatch is owned by the success path; if we never
       // registered the message listener (authUrl fetch failed), there's
       // nothing for the watcher to clean up.
@@ -267,7 +267,7 @@ export default function PortalLogin() {
       <div className="portal-auth-card">
         <div className="portal-auth-logo">
           <div className="logo-icon" style={{ background: 'var(--blue)', width: 48, height: 48, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <svg width="24" height="24" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <svg width="24" height="24" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
               <path d="M10 2L18 16H2L10 2Z" fill="white" />
             </svg>
           </div>
@@ -282,15 +282,6 @@ export default function PortalLogin() {
             misled admin users about what the portal is for. */}
         <p className="portal-auth-desc">Sign in to the ACS Chennai employee portal</p>
 
-        {status === 'error' && (
-          <div className="portal-auth-error">
-            <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
-            </svg>
-            {errorMsg}
-          </div>
-        )}
-
         <button
           type="button"
           onClick={handleZohoLogin}
@@ -298,7 +289,7 @@ export default function PortalLogin() {
           style={{ width: '100%', justifyContent: 'center', padding: '0.85rem', marginBottom: '1rem' }}
           disabled={status === 'loading'}
         >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="white" style={{ marginRight: '0.5rem' }}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="white" style={{ marginRight: '0.5rem' }} aria-hidden="true">
             <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/>
           </svg>
           Sign in with Zoho

@@ -39,9 +39,18 @@ export default function StatusBadge({ status, map, className = '' }) {
   const statusMap = map || DEFAULT_STATUS_MAP;
   const cls = statusMap[status] || 'dpr-status-draft';
   const label = String(status).replace(/_/g, ' ').toLowerCase();
+  const display = label.charAt(0).toUpperCase() + label.slice(1);
+  // Round-17 B-11: pill carries an aria-label with the raw enum so screen
+  // readers don't lose the original casing/digits (e.g. `PENDING_VERIFICATION`
+  // reads as "pending verification" — still readable, but the raw form is
+  // helpful for power users auditing the queue).
   return (
-    <span className={`dpr-status-badge ${cls} ${className}`.trim()}>
-      {label.charAt(0).toUpperCase() + label.slice(1)}
+    <span
+      className={`dpr-status-badge ${cls} ${className}`.trim()}
+      aria-label={`Status: ${status}`}
+      title={status}
+    >
+      {display}
     </span>
   );
 }
