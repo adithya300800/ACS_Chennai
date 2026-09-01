@@ -1,12 +1,14 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // P0/A-01: real admin overview — cross-module tiles linking into the
 // four admin review queues. Keeps the existing /portal/admin/attendance
 // route (org-wide attendance grid) untouched; admins reach it via the
 // "All Attendance" tile.
 export default function AdminOverview() {
+  useDocumentTitle('Admin Overview');
   const { employee } = useAuth();
 
   // Group tiles by what admins do with them.

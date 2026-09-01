@@ -4111,3 +4111,135 @@ footer {
 .dpr-form-section {
   scroll-margin-top: 4rem;
 }
+
+/* Round-17 B-06: bulk-select UI on the admin Inspection queue.
+   Mirrors the .dpr-bulk-action-bar block above; renamed with the
+   inspection- prefix so the two admin queues don't fight over the same
+   selectors. */
+.inspections-page .inspection-card-selected {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+  background: linear-gradient(180deg, #eff6ff 0%, transparent 60%);
+}
+
+.inspections-page .inspection-card-checkbox-label {
+  position: absolute;
+  top: 0.625rem;
+  right: 0.625rem;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.inspections-page .inspection-card-checkbox {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: var(--blue);
+}
+
+.inspections-page .inspection-bulk-action-bar {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.15), 0 2px 4px rgba(15, 23, 42, 0.06);
+  z-index: 50;
+  max-width: calc(100vw - 2rem);
+  flex-wrap: wrap;
+}
+
+.inspections-page .inspection-bulk-action-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--navy);
+  font-size: 0.9rem;
+}
+
+.inspections-page .inspection-bulk-clear {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  color: var(--steel);
+  cursor: pointer;
+}
+
+.inspections-page .inspection-bulk-clear:hover { background: var(--off-white); color: var(--navy); }
+
+.inspections-page .inspection-bulk-action-controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.inspections-page .inspection-bulk-reason-input {
+  width: 220px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+@media (max-width: 640px) {
+  .inspections-page .inspection-bulk-action-bar {
+    bottom: 0.75rem;
+    left: 0.5rem;
+    right: 0.5rem;
+    transform: none;
+    width: auto;
+  }
+  .inspections-page .inspection-bulk-reason-input {
+    width: 100%;
+  }
+  .inspections-page .inspection-bulk-action-controls {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+/* ===== F-01b: extracted inline hex tokens to utility classes ===== */
+.text-placeholder { color: #94a3b8; }              /* slate-400 — empty / (untitled) / — / Draft placeholders */
+.text-on-navy { color: #fff; }                    /* white text on dark navy backgrounds (CTA, etc.) */
+.draft-banner {                                   /* restored-draft banner on DPR / Inspection submit forms */
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  font-size: 0.875rem;
+  color: #1e40af;
+}
+.error-boundary {                                 /* dark-mode ErrorBoundary fallback wrapper */
+  max-width: 560px;
+  margin: 64px auto;
+  padding: 24px;
+  border-radius: 12px;
+  background: #1f2937;
+  color: #f9fafb;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+.error-boundary-text { color: #d1d5db; }          /* secondary copy inside error boundary */
+.error-boundary-debug {                           /* dev-mode error stacktrace pre block */
+  margin-top: 16px;
+  padding: 12px;
+  background: #111827;
+  border-radius: 6px;
+  font-size: 12px;
+  overflow-x: auto;
+  color: #fca5a5;
+}

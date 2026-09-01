@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 const LEAVE_TYPES = ['CASUAL', 'SICK', 'EARNED', 'UNPAID', 'OPTIONAL'];
 
@@ -62,6 +63,7 @@ const LeaveStatusPill = ({ status }) => {
 };
 
 export default function Leave() {
+  useDocumentTitle('My Leave');
   const { accessToken } = useAuth();
   const { push } = useToast();
 

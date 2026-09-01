@@ -6,6 +6,7 @@ import { api } from '../../lib/api.js';
 import { uploadBlob } from '../../lib/blobUpload.js';
 import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../../lib/constants.js';
 import DprCustomSection from './DprCustomSection.jsx';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
 const DRAFT_KEY = 'dpr_draft_v1';
@@ -92,6 +93,7 @@ function formatIndianDate(iso) {
 }
 
 export default function DprSubmit() {
+  useDocumentTitle('New Daily Progress Report');
   const { accessToken } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
@@ -400,18 +402,7 @@ export default function DprSubmit() {
         {showDraftBanner && (
           <div
             role="status"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.75rem',
-              padding: '0.75rem 1rem',
-              background: '#eff6ff',
-              border: '1px solid #bfdbfe',
-              borderRadius: 6,
-              marginBottom: '1rem',
-              fontSize: '0.875rem',
-              color: '#1e40af',
-            }}
+            className="draft-banner"
           >
             <span style={{ flex: 1 }}>📝 Restored unsaved draft from your previous visit.</span>
             <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowDraftBanner(false)}>

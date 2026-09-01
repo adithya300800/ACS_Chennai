@@ -4,6 +4,7 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 const STATUS_FILTERS = [
   { value: '', label: 'All Statuses' },
@@ -43,11 +44,11 @@ function CustomSectionsView({ sections }) {
           >
             <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--navy)', marginBottom: '0.25rem' }}>
               {s.type === 'text' ? '📝 ' : '📊 '}
-              {s.title || <em style={{ color: '#94a3b8' }}>(untitled)</em>}
+              {s.title || <em className="text-placeholder">(untitled)</em>}
             </div>
             {s.type === 'text' ? (
               <div style={{ whiteSpace: 'pre-wrap', fontSize: '0.9rem' }}>
-                {s.content || <em style={{ color: '#94a3b8' }}>(empty)</em>}
+                {s.content || <em className="text-placeholder">(empty)</em>}
               </div>
             ) : (
               <div style={{ overflowX: 'auto' }}>
@@ -95,6 +96,7 @@ function timeAgo(dateStr) {
 }
 
 export default function DprList() {
+  useDocumentTitle('My Daily Reports');
   const { accessToken } = useAuth();
   const navigate = useNavigate();
 
@@ -305,7 +307,7 @@ export default function DprList() {
                       <div style={{ fontSize: '0.75rem' }}>{dpr.submittedBy?.name}</div>
                     </div>
                   ) : (
-                    <span style={{ color: '#94a3b8' }}>Draft</span>
+                    <span className="text-placeholder">Draft</span>
                   )}
                 </div>
               </div>
@@ -406,15 +408,15 @@ export default function DprList() {
                     </h3>
                     <dl style={{ margin: 0, display: 'grid', gridTemplateColumns: 'minmax(140px, max-content) 1fr', gap: '0.5rem 1rem', fontSize: '0.9rem' }}>
                       <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Work executed:</dt>
-                      <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.workExecutedToday || <em style={{ color: '#94a3b8' }}>—</em>}</dd>
+                      <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.workExecutedToday || <em className="text-placeholder">—</em>}</dd>
                       <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Work location:</dt>
-                      <dd style={{ margin: 0 }}>{expandedDpr.workLocation || <em style={{ color: '#94a3b8' }}>—</em>}</dd>
+                      <dd style={{ margin: 0 }}>{expandedDpr.workLocation || <em className="text-placeholder">—</em>}</dd>
                       <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Man power:</dt>
-                      <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.manpowerSummary || <em style={{ color: '#94a3b8' }}>—</em>}</dd>
+                      <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.manpowerSummary || <em className="text-placeholder">—</em>}</dd>
                       <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Risks:</dt>
-                      <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.risksHindrances || <em style={{ color: '#94a3b8' }}>—</em>}</dd>
+                      <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.risksHindrances || <em className="text-placeholder">—</em>}</dd>
                       <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Materials:</dt>
-                      <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.materialsReceivedSummary || <em style={{ color: '#94a3b8' }}>—</em>}</dd>
+                      <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.materialsReceivedSummary || <em className="text-placeholder">—</em>}</dd>
                     </dl>
                   </div>
 

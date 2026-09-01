@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
 
 const JOBS = [
   {
@@ -102,7 +103,7 @@ function ApplyModal({ job, onClose }) {
               <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
               Email client opened
             </div>
-            <p style={{ fontSize: '0.87rem', fontWeight: '400', color: '#16A34A' }}>Please send the email to complete your application. You can also email us directly at <a href="mailto:careers@acschennai.com" style={{ color: '#16A34A' }}>careers@acschennai.com</a>.</p>
+            <p style={{ fontSize: '0.87rem', fontWeight: '400' }}>Please send the email to complete your application. You can also email us directly at <a href="mailto:careers@acschennai.com">careers@acschennai.com</a>.</p>
           </div>
         ) : (
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
@@ -143,6 +144,10 @@ function ApplyModal({ job, onClose }) {
 }
 
 export default function Careers() {
+  useDocumentTitle(
+    'Careers',
+    'Join ACS Chennai — open roles for engineers, project managers, and site supervisors.'
+  );
   const [applyingFor, setApplyingFor] = useState(null);
 
   return (

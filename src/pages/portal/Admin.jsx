@@ -4,6 +4,7 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatDate, formatFullDate, formatTimeOrDash, getMapUrl } from '../../lib/format.js';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // (Round-15+ C-03: format helpers moved to src/lib/format.js. Admin.jsx
 // originally returned '—' for null formatTime callsites, so we import
@@ -19,6 +20,7 @@ function getCurrentMonth() {
 }
 
 export default function Admin() {
+  useDocumentTitle('All Attendance');
   const { employee, accessToken } = useAuth();
   const { push } = useToast();
   const navigate = useNavigate();

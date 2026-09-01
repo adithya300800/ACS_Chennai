@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 const FILTERS = [
   { key: 'PENDING', label: 'Pending' },
@@ -48,6 +49,7 @@ const inclusiveDayCount = (startStr, endStr) => {
 };
 
 export default function LeaveDashboard() {
+  useDocumentTitle('Leave Approvals');
   const { employee, accessToken } = useAuth();
   const { push } = useToast();
 

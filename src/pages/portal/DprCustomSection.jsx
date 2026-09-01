@@ -152,7 +152,7 @@ function CustomSectionCard({ section, editing, onEdit, onCollapse, onUpdate, onR
   const summary = useMemo(() => {
     if (section.type === 'text') {
       const preview = (section.content || '').slice(0, 80);
-      return preview || <em style={{ color: '#94a3b8' }}>(empty)</em>;
+      return preview || <em className="text-placeholder">(empty)</em>;
     }
     // table
     const cols = (section.columns || []).length;
@@ -178,12 +178,12 @@ function CustomSectionCard({ section, editing, onEdit, onCollapse, onUpdate, onR
           gap: '0.75rem',
         }}
       >
-        <span aria-hidden="true" style={{ color: '#94a3b8' }}>
+        <span aria-hidden="true" className="text-placeholder">
           {section.type === 'text' ? '📝' : '📊'}
         </span>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--navy)' }}>
-            {section.title || <em style={{ color: '#94a3b8', fontWeight: 400 }}>(untitled)</em>}
+            {section.title || <em className="text-placeholder" style={{ fontWeight: 400 }}>(untitled)</em>}
           </div>
           <div style={{ fontSize: '0.8rem', color: 'var(--steel)', marginTop: '0.125rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {summary}

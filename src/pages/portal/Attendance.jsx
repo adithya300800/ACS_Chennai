@@ -2,11 +2,13 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatDate, formatFullDate, formatTime, toDateString, getMapUrl, formatCoords } from '../../lib/format.js';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // (Round-15+ C-03: format helpers moved to src/lib/format.js — the file
 // is the source of truth. Behavior matches what was here verbatim.)
 
 export default function Attendance() {
+  useDocumentTitle('My Attendance');
   const { accessToken } = useAuth();
   const [todayRecord, setTodayRecord] = useState(null);
   const [monthRecords, setMonthRecords] = useState([]);

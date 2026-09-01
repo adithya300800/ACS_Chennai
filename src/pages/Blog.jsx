@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
 
 const POSTS = [
   {
@@ -182,6 +183,10 @@ function BlogArticle() {
 }
 
 export default function Blog() {
+  useDocumentTitle(
+    'Blog',
+    'Construction industry insights, project management tips, and ACS Chennai news.'
+  );
   const { slug } = useParams();
   if (slug) return <BlogArticle />;
   return <BlogList />;

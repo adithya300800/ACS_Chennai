@@ -7,6 +7,7 @@ import {
   TRAINING_PROVIDER_LABELS,
   TRAINING_STATUSES,
 } from '../../lib/constants.js';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 /**
  * Admin training dashboard. Two sections stacked vertically:
@@ -62,6 +63,7 @@ const StatusPill = ({ status }) => (
 );
 
 export default function TrainingDashboard() {
+  useDocumentTitle('Training Library');
   const { employee, accessToken } = useAuth();
   const { push } = useToast();
   const navigate = useNavigate();

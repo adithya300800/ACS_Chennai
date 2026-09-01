@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import StatsBar from '../components/StatsBar.jsx';
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
 
 const SERVICES = [
   {
@@ -96,6 +97,10 @@ const SECTORS = [
 ];
 
 export default function Home() {
+  useDocumentTitle(
+    'Construction Project Management Consultancy',
+    'Independent PMC for residential, commercial, and infrastructure projects across Tamil Nadu. Site supervision, quality control, vendor management.'
+  );
   return (
     <>
       {/* HERO */}
@@ -267,7 +272,7 @@ export default function Home() {
       <section className="section" style={{ background: 'var(--navy)', padding: '4rem 0' }}>
         <div className="container" style={{ textAlign: 'center' }}>
           <span className="section-eyebrow reveal" data-reveal style={{ color: 'var(--amber)' }}>Let's Talk</span>
-          <h2 className="section-title reveal" data-reveal style={{ color: '#fff', marginBottom: '1rem' }}>Start a Conversation</h2>
+          <h2 className="section-title reveal text-on-navy" data-reveal style={{ marginBottom: '1rem' }}>Start a Conversation</h2>
           <p className="body-lg reveal" data-reveal style={{ margin: '0 auto 2rem', maxWidth: '520px', color: 'rgba(255,255,255,0.6)' }}>
             Whether you have a specific project scope or just want to explore options — reach out directly or fill out our project brief form.
           </p>

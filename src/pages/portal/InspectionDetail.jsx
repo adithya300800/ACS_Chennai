@@ -5,6 +5,7 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 function formatIndianDate(iso) {
   if (!iso) return '—';
@@ -25,13 +26,14 @@ function labelize(key) {
 }
 
 function renderValue(value) {
-  if (value == null || value === '') return <span style={{ color: '#94a3b8' }}>—</span>;
+  if (value == null || value === '') return <span className="text-placeholder">—</span>;
   if (Array.isArray(value)) return value.join(', ');
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }
 
 export default function InspectionDetail() {
+  useDocumentTitle('Inspection Detail');
   const { id } = useParams();
   const navigate = useNavigate();
   const { accessToken, employee } = useAuth();

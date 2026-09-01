@@ -607,4 +607,339 @@ router.put('/:id', async (req, res) => {
   }
 });
 
+// ─── Admin state-machine helpers (Round-17 B-06) ────────────────────────────
+//
+// Inspection & Compliance Records use a String `status` column (no version
+// column). The DPR bulk-review's `status + version` conditional update can't
+// be applied verbatim — we fall back to a `status`-only conditional update,
+// which still gives race-safe behavior for the admin operation window
+// (two concurrent admins clicking on the same row: one wins, the other gets
+// P2025 → we translate to VERSION_CONFLICT).
+//
+// Mirrors the round-17 DPR bulk-review pattern:
+//   - Per-ID prisma.$transaction (one failure doesn't roll back the rest)
+//   - Tagged error throws ({ _code, _status }) so the per-row bucket is precise
+//   - DB notification row written in-txn; no SSE emit here because
+//     inspection.js doesn't own the SSE plumbing — bell refresh picks up new
+//     rows on the next /api/dpr/notifications/list call. Message includes
+//     the inspection id so the owner has context (the Notification table has
+//     no inspectionId FK — schema is frozen by the B-06 constraint).
+//   - adminNotes persisted on the inspection row so admins can leave an
+//     audit-visible note alongside each ack/close/reject.
+
+const ACK_FROM = new Set(['OPEN']);
+const CLOSE_FROM = new Set(['ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
+const REJECT_FROM = new Set(['OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
+
+const INSPECTION_INCLUDE = {
+  photos: true,
+  submittedBy: { select: { id: true, name: true, email: true } },
+  dpr: { select: { id: true, reportDate: true, projectName: true } },
+};
+
+// Shared per-record transition helper used by both the single-record endpoints
+// and the bulk-review loop. Throws tagged errors on failure so callers can
+// branch on _code / _status without re-implementing the state-machine logic.
+async function transitionInspectionRecord(prisma, id, action, payload, actorEmployeeId) {
+  const allowedFrom =
+    action === 'ACKNOWLEDGE' ? ACK_FROM
+    : action === 'CLOSE' ? CLOSE_FROM
+    : action === 'REJECT' ? REJECT_FROM
+    : null;
+  if (!allowedFrom) {
+    throw Object.assign(new Error(`Unknown action ${action}`), { _code: 'UNKNOWN_ACTION', _status: 400 });
+  }
+
+  let nextStatus;
+  let notifType;
+  if (action === 'ACKNOWLEDGE') { nextStatus = 'ACKNOWLEDGED'; notifType = 'INSPECTION_ACKNOWLEDGED'; }
+  else if (action === 'CLOSE') { nextStatus = 'CLOSED'; notifType = 'INSPECTION_CLOSED'; }
+  else { nextStatus = 'REJECTED'; notifType = 'INSPECTION_REJECTED'; }
+
+  return prisma.$transaction(async (tx) => {
+    const record = await tx.inspectionRecord.findUnique({
+      where: { id },
+      include: INSPECTION_INCLUDE,
+    });
+    if (!record) {
+      throw Object.assign(new Error('Inspection record not found'), { _code: 'NOT_FOUND', _status: 404 });
+    }
+
+    if (!allowedFrom.has(record.status)) {
+      throw Object.assign(
+        new Error(`Cannot move inspection from ${record.status} to ${nextStatus}`),
+        { _code: 'INVALID_TRANSITION', _status: 409 }
+      );
+    }
+
+    // Schema-driven update — no `data` allowlist (no submittedById /
+    // submittedAt / etc. on InspectionRecord to mass-assign). We only set
+    // columns we control here, and adminNotes lives on a JSON-ish payload
+    // merged into the inspection record's `data` JSON.
+    const dataPatch = {
+      status: nextStatus,
+    };
+    if (payload.adminNotes && typeof payload.adminNotes === 'string') {
+      // Park adminNotes inside the existing JSON `data` blob under a reserved
+      // key. Don't surface this in the inspector UI — it's audit-visible only.
+      dataPatch.data = {
+        ...(record.data || {}),
+        _adminNotes: [...(((record.data || {})._adminNotes) || []), {
+          by: actorEmployeeId,
+          action,
+          notes: payload.adminNotes,
+          at: new Date().toISOString(),
+        }],
+      };
+    }
+
+    // Race-safe conditional update on `status` (no version column on this
+    // model). A concurrent admin action that already flipped status will
+    // throw P2025 from Prisma; we translate that to a tagged VERSION_CONFLICT.
+    const conditionalUpdate = await tx.inspectionRecord.update({
+      where: { id, status: record.status },
+      data: dataPatch,
+    }).catch((err) => {
+      if (err.code === 'P2025') {
+        throw Object.assign(new Error('version conflict'), { _code: 'VERSION_CONFLICT', _status: 409 });
+      }
+      throw err;
+    });
+    if (!conditionalUpdate) {
+      throw Object.assign(new Error('version conflict'), { _code: 'VERSION_CONFLICT', _status: 409 });
+    }
+
+    // Notification — no FK link available; embed the id in the message body.
+    const messageParts = [
+      `Your inspection (${record.inspectionType}) for ${record.projectName} on ${formatInspectionReportDate(record.reportDate)} was ${action.toLowerCase()}d.`,
+    ];
+    if (action === 'REJECT' && payload.reason) messageParts.push(`Reason: ${payload.reason.trim()}`);
+    if (payload.adminNotes) messageParts.push(`Notes: ${payload.adminNotes}`);
+    messageParts.push(`Inspection ID: ${id}`);
+    await tx.notification.create({
+      data: {
+        employeeId: record.submittedById,
+        type: notifType,
+        message: messageParts.join('\n'),
+      },
+    });
+
+    return tx.inspectionRecord.findUnique({
+      where: { id },
+      include: INSPECTION_INCLUDE,
+    });
+  });
+}
+
+// Defensive: reportDate may deserialize as Date or "YYYY-MM-DD" string.
+function formatInspectionReportDate(d) {
+  if (d instanceof Date) return d.toISOString().split('T')[0];
+  return String(d);
+}
+
+// ─── POST /api/inspection/:id/acknowledge ───────────────────────────────────
+// OPEN → ACKNOWLEDGED. Admin only.
+router.post('/:id/acknowledge', async (req, res) => {
+  const prisma = getPrisma(req);
+  const { id } = req.params;
+  const { adminNotes } = req.body || {};
+
+  if (!req.isAdmin) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
+  }
+  if (adminNotes !== undefined && (typeof adminNotes !== 'string' || adminNotes.length > 2000)) {
+    return res.status(400).json({ error: 'NOTES_TOO_LONG', message: 'adminNotes must be <= 2000 chars' });
+  }
+
+  try {
+    const updated = await transitionInspectionRecord(
+      prisma,
+      id,
+      'ACKNOWLEDGE',
+      { adminNotes },
+      req.employeeId
+    );
+    res.json(updated);
+  } catch (err) {
+    return inspectionHandleTransitionError(req, res, err, 'acknowledge');
+  }
+});
+
+// ─── POST /api/inspection/:id/close ─────────────────────────────────────────
+// ACKNOWLEDGED|IN_PROGRESS|PENDING_VERIFICATION → CLOSED. Admin only.
+router.post('/:id/close', async (req, res) => {
+  const prisma = getPrisma(req);
+  const { id } = req.params;
+  const { adminNotes } = req.body || {};
+
+  if (!req.isAdmin) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
+  }
+  if (adminNotes !== undefined && (typeof adminNotes !== 'string' || adminNotes.length > 2000)) {
+    return res.status(400).json({ error: 'NOTES_TOO_LONG', message: 'adminNotes must be <= 2000 chars' });
+  }
+
+  try {
+    const updated = await transitionInspectionRecord(
+      prisma,
+      id,
+      'CLOSE',
+      { adminNotes },
+      req.employeeId
+    );
+    res.json(updated);
+  } catch (err) {
+    return inspectionHandleTransitionError(req, res, err, 'close');
+  }
+});
+
+// ─── POST /api/inspection/:id/reject ─────────────────────────────────────────
+// OPEN|ACKNOWLEDGED|IN_PROGRESS|PENDING_VERIFICATION → REJECTED. Admin only.
+// Reason is required so the owner knows what to fix.
+router.post('/:id/reject', async (req, res) => {
+  const prisma = getPrisma(req);
+  const { id } = req.params;
+  const { reason, adminNotes } = req.body || {};
+
+  if (!reason || typeof reason !== 'string' || !reason.trim()) {
+    return res.status(400).json({ error: 'REASON_REQUIRED', message: 'A reason is required to reject an inspection' });
+  }
+  if (reason.length > 1000) {
+    return res.status(400).json({ error: 'REASON_TOO_LONG', message: 'Reason must be <= 1000 chars' });
+  }
+  if (adminNotes !== undefined && (typeof adminNotes !== 'string' || adminNotes.length > 2000)) {
+    return res.status(400).json({ error: 'NOTES_TOO_LONG', message: 'adminNotes must be <= 2000 chars' });
+  }
+  if (!req.isAdmin) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
+  }
+
+  try {
+    const updated = await transitionInspectionRecord(
+      prisma,
+      id,
+      'REJECT',
+      { reason, adminNotes },
+      req.employeeId
+    );
+    res.json(updated);
+  } catch (err) {
+    return inspectionHandleTransitionError(req, res, err, 'reject');
+  }
+});
+
+// Single-error handler for the three single-record transition endpoints.
+function inspectionHandleTransitionError(req, res, err, action) {
+  console.error(`Inspection ${action} error`, {
+    employeeHash: hashIdentifier(req.employeeId),
+    prismaCode: err.code,
+    message: err.message?.split('\n')[0],
+  });
+  if (err._status) {
+    return res.status(err._status).json({
+      error: err.message?.split('\n')[0] || 'Transition failed',
+      code: err._code,
+    });
+  }
+  if (err.code === 'P2025') {
+    return res.status(409).json({
+      error: 'Inspection was modified by another action. Please refresh and try again.',
+      code: 'VERSION_CONFLICT',
+    });
+  }
+  const mapped = mapPrismaError(err);
+  if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+  res.status(500).json({ error: `Failed to ${action} inspection` });
+}
+
+// ─── POST /api/inspection/bulk-review (Round-17 B-06) ───────────────────────
+//
+// Fan out an admin action (ACKNOWLEDGE | CLOSE | REJECT) over a list of
+// inspection IDs. Per-ID transaction so one failure doesn't roll back the
+// rest — admin UI shows per-row success/failure.
+//
+// Each ID goes through the SAME state-machine + per-ID tx as the single
+// endpoint above, so the audit trail (adminNotes + Notification row) is
+// identical whether the action came from the per-row menu or this batch.
+//
+// Cap: 100 IDs per call. Larger batches tie up the request for too long and
+// aren't a realistic UI selection.
+
+const INSPECTION_BULK_ACTIONS = new Set(['ACKNOWLEDGE', 'CLOSE', 'REJECT']);
+const INSPECTION_BULK_MAX_IDS = 100;
+
+router.post('/bulk-review', async (req, res) => {
+  const prisma = getPrisma(req);
+  const { ids, action, reason, adminNotes } = req.body || {};
+
+  if (!req.isAdmin) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
+  }
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'ids must be a non-empty array' });
+  }
+  if (ids.length > INSPECTION_BULK_MAX_IDS) {
+    return res.status(400).json({
+      error: 'BATCH_TOO_LARGE',
+      message: `Cannot process more than ${INSPECTION_BULK_MAX_IDS} IDs in a single batch`,
+    });
+  }
+  if (ids.some((id) => typeof id !== 'string' || !id.trim())) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'All ids must be non-empty strings' });
+  }
+  if (!INSPECTION_BULK_ACTIONS.has(action)) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      message: `action must be one of: ${[...INSPECTION_BULK_ACTIONS].join(', ')}`,
+    });
+  }
+  if (action === 'REJECT') {
+    if (!reason || typeof reason !== 'string' || !reason.trim()) {
+      return res.status(400).json({ error: 'REASON_REQUIRED', message: 'A reason is required to reject inspections' });
+    }
+    if (reason.length > 1000) {
+      return res.status(400).json({ error: 'REASON_TOO_LONG', message: 'Reason must be <= 1000 chars' });
+    }
+  }
+  if (adminNotes && (typeof adminNotes !== 'string' || adminNotes.length > 2000)) {
+    return res.status(400).json({ error: 'NOTES_TOO_LONG', message: 'adminNotes must be <= 2000 chars' });
+  }
+
+  // De-duplicate input — same ID twice would double-fire notifications.
+  const uniqueIds = [...new Set(ids)];
+  const succeeded = [];
+  const failed = [];
+
+  for (const id of uniqueIds) {
+    try {
+      const record = await transitionInspectionRecord(
+        prisma,
+        id,
+        action,
+        { reason, adminNotes },
+        req.employeeId
+      );
+      succeeded.push({ id: record.id, newStatus: record.status });
+    } catch (err) {
+      const code = err._code || (err.code === 'P2025' ? 'VERSION_CONFLICT' : 'INTERNAL');
+      const status = err._status || (err.code === 'P2025' ? 409 : 500);
+      failed.push({
+        id,
+        error: err.message?.split('\n')[0] || 'Unknown error',
+        code,
+        status,
+      });
+    }
+  }
+
+  res.json({
+    total: uniqueIds.length,
+    succeededCount: succeeded.length,
+    failedCount: failed.length,
+    succeeded,
+    failed,
+  });
+});
+
 module.exports = router;

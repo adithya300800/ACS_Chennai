@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import { useToast } from '../contexts/ToastContext.jsx';
 import { api } from '../lib/api.js';
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
 
 // Map the backend's typed OAuth error codes to something a human can act on.
 // The popup posts `{ type: 'zoho-oauth-error', error: '<code>' }`; showing the
@@ -44,6 +45,7 @@ function maybeShowWelcomeToast(toast, employee) {
 }
 
 export default function PortalLogin() {
+  useDocumentTitle('Sign in');
   const { login, setAuthData } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();

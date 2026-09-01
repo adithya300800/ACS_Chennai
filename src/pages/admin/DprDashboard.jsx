@@ -3,6 +3,7 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // C-06 (round-15+): local StatusBadge removed. We pass a per-page `map` so
 // SUBMITTED keeps its distinct blue (dpr-status-submitted, #dbeafe/#1d4ed8)
@@ -31,7 +32,8 @@ function PhotoThumb({ photo }) {
   if (!src) {
     return (
       <div
-        style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.65rem', color: '#94a3b8' }}
+        className="text-placeholder"
+        style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.65rem' }}
       >
         📷
       </div>
@@ -48,6 +50,7 @@ function PhotoThumb({ photo }) {
 }
 
 export default function DprDashboard() {
+  useDocumentTitle('Daily Reports Review');
   const { accessToken, employee } = useAuth();
   const toast = useToast();
   const [dprs, setDprs] = useState([]);
@@ -493,14 +496,14 @@ export default function DprDashboard() {
               )}
 
               {dpr.status === 'APPROVED' && (
-                <div style={{ textAlign: 'center', padding: '0.5rem', background: '#dcfce7', borderRadius: 6, color: '#16a34a', fontSize: '0.85rem', fontWeight: 500 }}>
+                <div className="dpr-status-approved" style={{ textAlign: 'center', padding: '0.5rem', borderRadius: 6, fontSize: '0.85rem', fontWeight: 500 }}>
                   ✓ Approved
                 </div>
               )}
 
               {dpr.status === 'REJECTED' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-                  <div style={{ textAlign: 'center', padding: '0.5rem', background: '#fee2e2', borderRadius: 6, color: '#dc2626', fontSize: '0.85rem', fontWeight: 500 }}>
+                  <div className="dpr-status-rejected" style={{ textAlign: 'center', padding: '0.5rem', borderRadius: 6, fontSize: '0.85rem', fontWeight: 500 }}>
                     ✗ Rejected
                   </div>
                   {dpr.rejectionReason && (

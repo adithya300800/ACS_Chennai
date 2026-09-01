@@ -1,9 +1,14 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
 
 // P0/A-12: catch-all for the public route tree so typo'd URLs render a
 // visible "page not found" instead of silently showing the homepage.
 export default function NotFound() {
+  useDocumentTitle(
+    'Page not found',
+    "The page you're looking for doesn't exist."
+  );
   return (
     <div style={{
       display: 'flex',

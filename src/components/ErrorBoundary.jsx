@@ -54,18 +54,10 @@ export default class ErrorBoundary extends React.Component {
       <div
         role="alert"
         aria-live="assertive"
-        style={{
-          maxWidth: 560,
-          margin: '64px auto',
-          padding: '24px',
-          borderRadius: 12,
-          background: '#1f2937',
-          color: '#f9fafb',
-          fontFamily: 'system-ui, -apple-system, sans-serif',
-        }}
+        className="error-boundary"
       >
         <h1 style={{ fontSize: 22, margin: '0 0 8px' }}>Something went wrong</h1>
-        <p style={{ margin: '0 0 16px', lineHeight: 1.5, color: '#d1d5db' }}>
+        <p className="error-boundary-text" style={{ margin: '0 0 16px', lineHeight: 1.5 }}>
           The page hit an unexpected error. Your work is preserved — try reloading, or
           head back to the homepage.
         </p>
@@ -93,7 +85,6 @@ export default class ErrorBoundary extends React.Component {
               borderRadius: 6,
               border: '1px solid #4b5563',
               background: 'transparent',
-              color: '#f9fafb',
               cursor: 'pointer',
             }}
           >
@@ -101,17 +92,7 @@ export default class ErrorBoundary extends React.Component {
           </button>
         </div>
         {process.env.NODE_ENV !== 'production' && (
-          <pre
-            style={{
-              marginTop: 16,
-              padding: 12,
-              background: '#111827',
-              borderRadius: 6,
-              fontSize: 12,
-              overflowX: 'auto',
-              color: '#fca5a5',
-            }}
-          >
+          <pre className="error-boundary-debug">
             {String(this.state.error?.message || this.state.error)}
           </pre>
         )}

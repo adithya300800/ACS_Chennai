@@ -10,6 +10,7 @@ import {
   TRAINING_PROVIDER_LABELS,
   TRAINING_STATUSES,
 } from '../../lib/constants.js';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 const formatDate = (dateStr) => {
   if (!dateStr) return '';
@@ -34,6 +35,7 @@ const formatDateTime = (dateStr) => {
  * doesn't wait for the next interval tick.
  */
 export default function TrainingDetail() {
+  useDocumentTitle('Training Detail');
   const { id } = useParams();
   const navigate = useNavigate();
   const { accessToken } = useAuth();

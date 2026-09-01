@@ -4,12 +4,14 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // P0/A-13: admin cross-org inspection list. The previous dead link at
 // /portal/inspection/all (rendered for admins in InspectionList.jsx)
 // bounced users out of the portal. This route fixes that — admins see
 // every inspection record across the org.
 export default function InspectionAll() {
+  useDocumentTitle('All Inspection Records');
   const { accessToken } = useAuth();
   const toast = useToast();
   const [inspections, setInspections] = useState([]);

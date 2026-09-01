@@ -4,6 +4,7 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { TRAINING_PROVIDER_LABELS, TRAINING_STATUSES, TRACKABLE_PROVIDERS } from '../../lib/constants.js';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // "My Learning" hub for the employee. Mirrors the Leave page's
 // structure (state, fetch + error/loading/empty triple, pill pattern)
@@ -52,6 +53,7 @@ const TrainingStatusPill = ({ status }) => {
 };
 
 export default function Training() {
+  useDocumentTitle('My Learning');
   const { accessToken } = useAuth();
   const { push } = useToast();
 

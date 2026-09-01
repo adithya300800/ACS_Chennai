@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
 
 const PROJECTS = [
   {
@@ -61,6 +62,10 @@ const PROJECTS = [
 ];
 
 export default function Projects() {
+  useDocumentTitle(
+    'Projects',
+    'Browse our portfolio of completed residential, commercial, and infrastructure projects across Chennai and Tamil Nadu.'
+  );
   return (
     <section className="section alt">
       <div className="container">

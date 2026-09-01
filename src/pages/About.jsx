@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
 
 const DIFFERENTIATORS = [
   '35+ years of construction PMC experience across chemical, pharmaceutical, residential, and industrial projects.',
@@ -28,6 +29,10 @@ const TEAM_INFO = [
 ];
 
 export default function About() {
+  useDocumentTitle(
+    'About Us',
+    'Meet the ACS Chennai team — engineers, project managers, and quality specialists with 15+ years across residential, commercial, and industrial builds.'
+  );
   return (
     <section className="section">
       <div className="container">

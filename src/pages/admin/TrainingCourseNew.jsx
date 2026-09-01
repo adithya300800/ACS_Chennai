@@ -8,6 +8,7 @@ import {
   TRAINING_PROVIDER_LABELS,
   TRAINING_PRIORITIES,
 } from '../../lib/constants.js';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // Mirror of backend/src/lib/trainingRules.js — keep in sync. We re-validate
 // server-side on submit, but client-side validation gives inline feedback
@@ -58,6 +59,7 @@ const addDaysInputValue = (n) => {
  * — we surface a clear toast with all three counts.
  */
 export default function TrainingCourseNew() {
+  useDocumentTitle('New Training Course');
   const navigate = useNavigate();
   const { accessToken } = useAuth();
   const { push } = useToast();

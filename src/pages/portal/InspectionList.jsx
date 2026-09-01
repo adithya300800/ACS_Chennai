@@ -5,6 +5,7 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
+import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // C-06: local StatusBadge removed (round-15+). The shared component covers
 // all inspection statuses (OPEN/ACKNOWLEDGED/IN_PROGRESS/PENDING_VERIFICATION/
@@ -47,6 +48,7 @@ function formatIndianDate(iso) {
 }
 
 export default function InspectionList() {
+  useDocumentTitle('My Inspection Records');
   const { accessToken, employee } = useAuth();
   const toast = useToast();
   const [inspections, setInspections] = useState([]);

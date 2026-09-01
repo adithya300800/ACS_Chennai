@@ -299,6 +299,19 @@ export const api = {
   updateInspection: (id, data, version, token) =>
     api.put(`/inspection/${id}`, { ...data, version }, token),
 
+  // Round-17 B-06: bulk fan-out for the admin inspection queue. Mirrors the
+  // DPR bulkReviewDprs shape — backend returns
+  // { succeededCount, failedCount, results: [...] } so the UI can show
+  // per-ID results.
+  bulkReviewInspections: ({ ids, action, reason, adminNotes }, token) =>
+    api.post('/inspection/bulk-review', { ids, action, reason, adminNotes }, token),
+  acknowledgeInspection: (id, adminNotes, token) =>
+    api.post(`/inspection/${id}/acknowledge`, { adminNotes }, token),
+  closeInspection: (id, adminNotes, token) =>
+    api.post(`/inspection/${id}/close`, { adminNotes }, token),
+  rejectInspection: (id, reason, adminNotes, token) =>
+    api.post(`/inspection/${id}/reject`, { reason, adminNotes }, token),
+
   // Round-13: Attendance Excel timesheet export + Leave Request workflow.
   // The export route returns a binary blob; use api.download() instead of
   // api.get() — JSON parsing the response would silently produce `{}` and

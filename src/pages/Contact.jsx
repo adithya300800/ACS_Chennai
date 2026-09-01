@@ -1,7 +1,12 @@
 import React, { useState } from 'react';
 import { api } from '../lib/api.js';
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
 
 export default function Contact() {
+  useDocumentTitle(
+    'Contact Us',
+    'Get in touch with ACS Chennai — Chennai office address, phone, email, and a contact form.'
+  );
   const [form, setForm] = useState({
     name: '',
     company: '',
