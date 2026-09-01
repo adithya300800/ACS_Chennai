@@ -328,6 +328,45 @@ export default function PortalLayout() {
         <div className="portal-content">
           <Outlet />
         </div>
+
+        {/* Round-17 D-03: bottom tab bar for EMPLOYEES on mobile.
+            Admins get the Overview as their landing and use the sidebar for
+            review queues — bottom tabs would be the wrong affordance.
+            Hidden on desktop via .portal-bottom-tabs display:none @ ≥768px. */}
+        {!employee?.isAdmin && (
+          <nav className="portal-bottom-tabs" aria-label="Quick navigation">
+            <NavLink to="/portal/attendance" className={({ isActive }) => `portal-bottom-tab ${isActive ? 'active' : ''}`}>
+              <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
+              </svg>
+              <span>Attendance</span>
+            </NavLink>
+            <NavLink to="/portal/dpr/my" className={({ isActive }) => `portal-bottom-tab ${isActive ? 'active' : ''}`}>
+              <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><polyline points="10 9 9 9 8 9" />
+              </svg>
+              <span>DPR</span>
+            </NavLink>
+            <NavLink to="/portal/inspection/my" className={({ isActive }) => `portal-bottom-tab ${isActive ? 'active' : ''}`}>
+              <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" /><rect x="9" y="3" width="6" height="4" rx="1" /><path d="M9 14l2 2 4-4" />
+              </svg>
+              <span>Inspection</span>
+            </NavLink>
+            <NavLink to="/portal/leave" className={({ isActive }) => `portal-bottom-tab ${isActive ? 'active' : ''}`}>
+              <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" />
+              </svg>
+              <span>Leave</span>
+            </NavLink>
+            <NavLink to="/portal/training" className={({ isActive }) => `portal-bottom-tab ${isActive ? 'active' : ''}`}>
+              <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" />
+              </svg>
+              <span>Training</span>
+            </NavLink>
+          </nav>
+        )}
       </div>
     </div>
   );

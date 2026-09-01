@@ -241,6 +241,10 @@ export const api = {
     api.post(`/dpr/${id}/approve`, { adminNotes }, token),
   rejectDpr: (id, reason, adminNotes, token) =>
     api.post(`/dpr/${id}/reject`, { reason, adminNotes }, token),
+  // Round-17 B-06: bulk fan-out for the admin queue.
+  // Returns { succeeded, failed, total } so the UI can show per-ID results.
+  bulkReviewDprs: ({ ids, action, reason, adminNotes }, token) =>
+    api.post('/dpr/bulk-review', { ids, action, reason, adminNotes }, token),
   generateDprPdf: (id, token) => api.post(`/dpr/${id}/pdf`, {}, token),
   // P0 round-9: GET /api/dpr/notifications is mounted only as an SSE stream,
   // so JSON-parsing the response silently throws and the bell shows "0 unread".

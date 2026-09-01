@@ -1228,6 +1228,189 @@ router.post('/:id/reject', async (req, res) => {
   }
 });
 
+// ─── POST /api/dpr/bulk-review (Round-17 B-06) ──────────────────────────────
+//
+// Fan out an admin action (APPROVE | REJECT | UNDER_REVIEW) over a list of
+// DPR IDs. Per-ID transaction so one failure doesn't roll back the rest of
+// the batch — the admin UI shows per-row success/failure.
+//
+// Each ID goes through the SAME status-machine + version-conditional update
+// as the single endpoint above, so the audit trail (DPRRevision +
+// Notification rows) is identical whether the action came from the per-row
+// menu or this batch.
+//
+// Cap: 100 IDs per call. A larger batch is a UI mistake (the queue never
+// renders 100 rows on one screen) and would tie up a request for too long.
+
+const BULK_ALLOWED_ACTIONS = new Set(['APPROVE', 'REJECT', 'UNDER_REVIEW']);
+const BULK_MAX_IDS = 100;
+
+router.post('/bulk-review', async (req, res) => {
+  const prisma = getPrisma(req);
+  const { ids, action, reason, adminNotes } = req.body || {};
+
+  if (!req.isAdmin) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
+  }
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'ids must be a non-empty array' });
+  }
+  if (ids.length > BULK_MAX_IDS) {
+    return res.status(400).json({
+      error: 'BATCH_TOO_LARGE',
+      message: `Cannot process more than ${BULK_MAX_IDS} IDs in a single batch`,
+    });
+  }
+  if (ids.some((id) => typeof id !== 'string' || !id.trim())) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'All ids must be non-empty strings' });
+  }
+  if (!BULK_ALLOWED_ACTIONS.has(action)) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      message: `action must be one of: ${[...BULK_ALLOWED_ACTIONS].join(', ')}`,
+    });
+  }
+  if (action === 'REJECT') {
+    if (!reason || typeof reason !== 'string' || !reason.trim()) {
+      return res.status(400).json({ error: 'REASON_REQUIRED', message: 'A reason is required to reject DPRs' });
+    }
+    if (reason.length > 1000) {
+      return res.status(400).json({ error: 'REASON_TOO_LONG', message: 'Reason must be <= 1000 chars' });
+    }
+  }
+  if (adminNotes && (typeof adminNotes !== 'string' || adminNotes.length > 2000)) {
+    return res.status(400).json({ error: 'NOTES_TOO_LONG', message: 'adminNotes must be <= 2000 chars' });
+  }
+
+  // De-duplicate the input — same ID listed twice would double-fire notifications.
+  const uniqueIds = [...new Set(ids)];
+
+  const succeeded = [];
+  const failed = [];
+
+  // Per-ID transaction. We don't wrap the whole batch in one $transaction
+  // because a single failure (e.g. one record already REJECTED) shouldn't
+  // roll back 99 successful updates.
+  for (const id of uniqueIds) {
+    try {
+      const result = await prisma.$transaction(async (tx) => {
+        const dpr = await tx.dPR.findUnique({ where: { id }, include: DPR_INCLUDE });
+        if (!dpr) {
+          throw Object.assign(new Error('DPR not found'), { _code: 'NOT_FOUND', _status: 404 });
+        }
+
+        let allowedFrom;
+        let nextStatus;
+        let updateData;
+        let notifType;
+        let notifMessage;
+
+        if (action === 'APPROVE') {
+          allowedFrom = APPROVABLE_FROM;
+          nextStatus = 'APPROVED';
+          updateData = {
+            status: 'APPROVED',
+            approvedById: req.employeeId,
+            approvedAt: new Date(),
+            version: { increment: 1 },
+          };
+          notifType = 'DPR_APPROVED';
+          notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was approved. ${adminNotes || ''}`.trim();
+        } else if (action === 'REJECT') {
+          allowedFrom = REJECTABLE_FROM;
+          nextStatus = 'REJECTED';
+          updateData = {
+            status: 'REJECTED',
+            reviewedById: req.employeeId,
+            reviewedAt: new Date(),
+            version: { increment: 1 },
+          };
+          notifType = 'DPR_REJECTED';
+          notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was rejected: ${reason.trim()}${adminNotes ? `\n${adminNotes}` : ''}`.trim();
+        } else {
+          // UNDER_REVIEW
+          allowedFrom = REVIEWABLE_FROM;
+          nextStatus = 'UNDER_REVIEW';
+          updateData = {
+            status: 'UNDER_REVIEW',
+            reviewedById: req.employeeId,
+            reviewedAt: new Date(),
+            version: { increment: 1 },
+          };
+          notifType = 'DPR_REVIEWED';
+          notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was reviewed. ${adminNotes || ''}`.trim();
+        }
+
+        if (!allowedFrom.has(dpr.status)) {
+          throw Object.assign(
+            new Error(`Cannot move DPR from ${dpr.status} to ${nextStatus}`),
+            { _code: 'INVALID_TRANSITION', _status: 409 }
+          );
+        }
+
+        const conditionalUpdate = await tx.dPR.update({
+          where: { id, status: dpr.status, version: dpr.version },
+          data: updateData,
+        });
+        if (!conditionalUpdate) {
+          throw Object.assign(new Error('version conflict'), { _code: 'VERSION_CONFLICT', _status: 409 });
+        }
+
+        await tx.dPRRevision.create({
+          data: {
+            dprId: id,
+            version: dpr.version,
+            snapshot: dpr,
+            changedById: req.employeeId,
+          },
+        });
+
+        await tx.notification.create({
+          data: {
+            employeeId: dpr.submittedById,
+            type: notifType,
+            dprId: id,
+            message: notifMessage,
+          },
+        });
+
+        return { id, newStatus: nextStatus, submittedById: dpr.submittedById, projectName: dpr.projectName };
+      });
+
+      // SSE emit outside the transaction.
+      emitNotification(result.submittedById, 'notification', {
+        id: Date.now(),
+        type: `DPR_${result.newStatus === 'UNDER_REVIEW' ? 'REVIEWED' : result.newStatus}`,
+        dprId: result.id,
+        message: `Your DPR for ${result.projectName} was ${result.newStatus.toLowerCase().replace('_', ' ')}`,
+        createdAt: new Date().toISOString(),
+      });
+
+      succeeded.push({ id: result.id, newStatus: result.newStatus });
+    } catch (err) {
+      // Distinguish Prisma P2025 (conditional update missed) from our
+      // pre-thrown tagged errors (NOT_FOUND / INVALID_TRANSITION).
+      const code = err._code || (err.code === 'P2025' ? 'VERSION_CONFLICT' : 'INTERNAL');
+      const status = err._status || (err.code === 'P2025' ? 409 : 500);
+      failed.push({
+        id,
+        error: err.message?.split('\n')[0] || 'Unknown error',
+        code,
+        status,
+      });
+    }
+  }
+
+  res.json({
+    total: uniqueIds.length,
+    succeededCount: succeeded.length,
+    failedCount: failed.length,
+    succeeded,
+    failed,
+  });
+});
+
 // ─── GET /api/dpr/notifications/list ───────────────────────────────────────
 // P0-2: Frontend NotificationBell calls `api.getNotifications(...)` which
 // hits `GET /api/dpr/notifications?lastNotificationId=...` expecting a JSON

@@ -1155,6 +1155,60 @@ footer {
   width: 100%;
 }
 
+/* Round-17 D-03: bottom tab bar for EMPLOYEES on mobile.
+   Hidden on desktop — admins get the Overview + sidebar, employees
+   get a thumb-reach nav bar at the bottom of the screen.
+   Fixed position so it stays visible while scrolling. */
+.portal-bottom-tabs {
+  display: none;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: white;
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -2px 8px rgba(15, 23, 42, 0.06);
+  padding: 0.4rem 0.25rem calc(0.4rem + env(safe-area-inset-bottom, 0));
+  z-index: 40;
+  justify-content: space-around;
+  align-items: stretch;
+}
+
+.portal-bottom-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
+  padding: 0.5rem 0.25rem;
+  border-radius: 8px;
+  color: var(--steel);
+  text-decoration: none;
+  font-size: 0.7rem;
+  font-weight: 500;
+  min-height: 44px; /* tap-target guideline */
+}
+
+.portal-bottom-tab.active {
+  color: var(--blue);
+  background: #eff6ff;
+}
+
+.portal-bottom-tab svg {
+  flex-shrink: 0;
+}
+
+@media (max-width: 767px) {
+  .portal-bottom-tabs {
+    display: flex;
+  }
+  /* Pad the page content so the last row isn't hidden under the fixed bar. */
+  .portal-content {
+    padding-bottom: 5rem;
+  }
+}
+
 /* === AUTH PAGE === */
 .portal-auth-bg {
   min-height: 100vh;
@@ -2349,6 +2403,106 @@ footer {
   display: flex;
   gap: 0.5rem;
   margin-top: 0.75rem;
+}
+
+/* Round-17 B-06: bulk-select UI on the admin DPR queue.
+   - .dpr-card-selected gives a soft blue ring so the admin can see which
+     cards are in the current batch.
+   - .dpr-card-checkbox-label sits in the top-right of each card; absolute
+     positioning avoids disturbing the existing flex header layout.
+   - .dpr-bulk-action-bar is fixed to the viewport bottom on desktop and
+     stacks below the cards on mobile (≤480px). */
+.dpr-card-selected {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+  background: linear-gradient(180deg, #eff6ff 0%, transparent 60%);
+}
+
+.dpr-card-checkbox-label {
+  position: absolute;
+  top: 0.625rem;
+  right: 0.625rem;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.dpr-card-checkbox {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: var(--blue);
+}
+
+.dpr-bulk-action-bar {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.15), 0 2px 4px rgba(15, 23, 42, 0.06);
+  z-index: 50;
+  max-width: calc(100vw - 2rem);
+  flex-wrap: wrap;
+}
+
+.dpr-bulk-action-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--navy);
+  font-size: 0.9rem;
+}
+
+.dpr-bulk-clear {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  color: var(--steel);
+  cursor: pointer;
+}
+
+.dpr-bulk-clear:hover { background: var(--off-white); color: var(--navy); }
+
+.dpr-bulk-action-controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dpr-bulk-reason-input {
+  width: 220px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+@media (max-width: 640px) {
+  .dpr-bulk-action-bar {
+    bottom: 0.75rem;
+    left: 0.5rem;
+    right: 0.5rem;
+    transform: none;
+    width: auto;
+  }
+  .dpr-bulk-reason-input {
+    width: 100%;
+  }
+  .dpr-bulk-action-controls {
+    width: 100%;
+    justify-content: space-between;
+  }
 }
 
 /* ─── Notification Bell ─── */

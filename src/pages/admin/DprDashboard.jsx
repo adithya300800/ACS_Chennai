@@ -60,6 +60,22 @@ export default function DprDashboard() {
   const [filter, setFilter] = useState('SUBMITTED');
   const [stats, setStats] = useState({ today: 0, pending: 0, approvedWeek: 0, total: 0, openInspections: 0 });
 
+  // Round-17 B-06: bulk-select state. We only allow selecting DPRs in a
+  // reviewable state (SUBMITTED / UNDER_REVIEW) — APPROVED / REJECTED are
+  // terminal and can't move forward, so checking them would only confuse
+  // the admin. `selectableIds` is computed from the loaded list each render.
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [bulkActionLoading, setBulkActionLoading] = useState(false);
+  const [bulkRejectReason, setBulkRejectReason] = useState('');
+
+  const selectableDprs = dprs.filter(
+    (d) => d.status === 'SUBMITTED' || d.status === 'UNDER_REVIEW'
+  );
+  const selectableIds = selectableDprs.map((d) => d.id);
+  const allSelected =
+    selectableIds.length > 0 &&
+    selectableIds.every((id) => selectedIds.has(id));
+
   const loadDprs = useCallback(async () => {
     const data = await api.getDprs({ status: filter }, accessToken);
     return data.dprs || [];
@@ -110,6 +126,74 @@ export default function DprDashboard() {
   useEffect(() => {
     loadAll();
   }, [filter, loadAll]);
+
+  // When the filter changes, the previously selected IDs may no longer be
+  // visible — clear them so the floating action bar doesn't show "3 selected"
+  // for IDs the admin can't see in the queue anymore.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [filter]);
+
+  const toggleSelected = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedIds((prev) => {
+      if (allSelected) return new Set();
+      return new Set(selectableIds);
+    });
+  };
+
+  // Round-17 B-06: bulk fan-out for the admin queue. Single network round-trip
+  // for N IDs (vs N trips). Per-ID results so the admin can see which ones
+  // failed (e.g. already APPROVED via concurrent single-row approve).
+  const handleBulkAction = async (action) => {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+
+    if (action === 'REJECT' && !bulkRejectReason.trim()) {
+      toast.push('Reject reason is required.', 'warning');
+      return;
+    }
+
+    setBulkActionLoading(true);
+    try {
+      const result = await api.bulkReviewDprs(
+        {
+          ids,
+          action,
+          reason: action === 'REJECT' ? bulkRejectReason.trim() : undefined,
+          adminNotes: adminNotes.trim() || undefined,
+        },
+        accessToken
+      );
+
+      const verb = action === 'APPROVE' ? 'approved' : action === 'REJECT' ? 'rejected' : 'marked for review';
+      if (result.failedCount === 0) {
+        toast.push(`${result.succeededCount} DPR${result.succeededCount === 1 ? '' : 's'} ${verb}.`, 'success');
+      } else if (result.succeededCount === 0) {
+        toast.push(`Bulk ${action.toLowerCase()} failed for all ${result.failedCount} IDs.`, 'error');
+      } else {
+        toast.push(`${verb}: ${result.succeededCount} ok, ${result.failedCount} failed.`, 'warning');
+      }
+      setSelectedIds(new Set());
+      setBulkRejectReason('');
+      setAdminNotes('');
+      await loadAll();
+    } catch (err) {
+      if (err.status !== 401) {
+        toast.push(err.message || `Bulk ${action.toLowerCase()} failed.`, 'error');
+      }
+    } finally {
+      setBulkActionLoading(false);
+    }
+  };
 
   // Optimistic approve: change the card's status immediately, revert on error.
   // Feels instant on a good connection; rolls back cleanly on a 4xx/5xx.
@@ -195,6 +279,19 @@ export default function DprDashboard() {
               {s === 'UNDER_REVIEW' ? 'Under Review' : s.charAt(0) + s.slice(1).toLowerCase()}
             </button>
           ))}
+          {/* Round-17 B-06: only show "Select all" when there's something
+              worth selecting (i.e. we're on a reviewable-status tab). */}
+          {selectableDprs.length > 0 && (
+            <button
+              className="btn btn-sm btn-secondary"
+              onClick={toggleSelectAll}
+              disabled={bulkActionLoading}
+              aria-pressed={allSelected}
+              title={allSelected ? 'Clear selection' : `Select all ${selectableDprs.length} visible`}
+            >
+              {allSelected ? '☐ Clear' : `☑ Select all (${selectableDprs.length})`}
+            </button>
+          )}
         </div>
       </div>
 
@@ -228,8 +325,28 @@ export default function DprDashboard() {
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem' }}>
-          {dprs.map((dpr) => (
-            <div key={dpr.id} className="dpr-card">
+          {dprs.map((dpr) => {
+            const isSelectable = dpr.status === 'SUBMITTED' || dpr.status === 'UNDER_REVIEW';
+            const isSelected = selectedIds.has(dpr.id);
+            return (
+            <div
+              key={dpr.id}
+              className={`dpr-card${isSelected ? ' dpr-card-selected' : ''}`}
+            >
+              {/* Round-17 B-06: per-card checkbox. Only rendered for reviewable
+                  statuses; APPROVED/REJECTED cards keep their layout untouched. */}
+              {isSelectable && (
+                <label className="dpr-card-checkbox-label" title={isSelected ? 'Deselect' : 'Select'}>
+                  <input
+                    type="checkbox"
+                    className="dpr-card-checkbox"
+                    checked={isSelected}
+                    onChange={() => toggleSelected(dpr.id)}
+                    disabled={bulkActionLoading}
+                    aria-label={`Select ${dpr.projectName} for bulk action`}
+                  />
+                </label>
+              )}
               <div className="dpr-card-header">
                 <div>
                   <h3 className="dpr-card-title">{dpr.projectName}</h3>
@@ -394,7 +511,65 @@ export default function DprDashboard() {
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
+        </div>
+      )}
+
+      {/* Round-17 B-06: floating action bar — only renders when something is
+          selected. Pinned to the viewport bottom so the admin can apply
+          actions without scrolling back up to the toolbar. */}
+      {selectedIds.size > 0 && (
+        <div className="dpr-bulk-action-bar" role="region" aria-label="Bulk actions">
+          <div className="dpr-bulk-action-summary">
+            <strong>{selectedIds.size}</strong> selected
+            {selectedIds.size > 1 && (
+              <button
+                type="button"
+                className="dpr-bulk-clear"
+                onClick={() => setSelectedIds(new Set())}
+                disabled={bulkActionLoading}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          <div className="dpr-bulk-action-controls">
+            <input
+              type="text"
+              className="form-input dpr-bulk-reason-input"
+              placeholder="Reject reason (only needed for Reject)"
+              value={bulkRejectReason}
+              onChange={(e) => setBulkRejectReason(e.target.value)}
+              disabled={bulkActionLoading}
+              aria-label="Bulk reject reason"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => handleBulkAction('UNDER_REVIEW')}
+              disabled={bulkActionLoading}
+            >
+              {bulkActionLoading ? '...' : '↪ Mark for Review'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-success btn-sm"
+              onClick={() => handleBulkAction('APPROVE')}
+              disabled={bulkActionLoading}
+            >
+              {bulkActionLoading ? '...' : '✓ Approve'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-danger btn-sm"
+              onClick={() => handleBulkAction('REJECT')}
+              disabled={bulkActionLoading || !bulkRejectReason.trim()}
+              title={!bulkRejectReason.trim() ? 'Enter a reject reason first' : ''}
+            >
+              {bulkActionLoading ? '...' : '✗ Reject'}
+            </button>
+          </div>
         </div>
       )}
     </div>
