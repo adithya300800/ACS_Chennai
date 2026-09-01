@@ -38,6 +38,16 @@ const WORK_TYPE_OPTIONS = [
   { value: 'EXCEPTIONS_SAFETY', label: 'Exceptions / Safety' },
 ];
 
+// A-11: section skip-nav anchors. Keep in sync with the <section id>
+// attributes below — used by the sticky in-form nav at the top of the page.
+const DPR_SECTIONS = [
+  { id: 'dpr-section-site', label: 'Site Info' },
+  { id: 'dpr-section-narrative', label: 'Daily Narrative' },
+  { id: 'dpr-section-photos', label: 'Photos' },
+  { id: 'dpr-section-custom', label: 'Custom Sections' },
+  { id: 'dpr-section-inspections', label: "Today's Inspections" },
+];
+
 function loadDraft() {
   try {
     const raw = localStorage.getItem(DRAFT_KEY);
@@ -375,6 +385,18 @@ export default function DprSubmit() {
           {' '}<Link to="/portal/inspection/submit">Inspection &amp; Compliance</Link> page.
         </p>
 
+        {/* A-11: sticky in-form section jump-nav so keyboard / screen-reader users
+            can skip past long blocks instead of Tabbing through every field. */}
+        <nav className="section-skip-nav" aria-label="Jump to section">
+          <ul>
+            {DPR_SECTIONS.map((s) => (
+              <li key={s.id}>
+                <a href={`#${s.id}`}>{s.label}</a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+
         {showDraftBanner && (
           <div
             role="status"
@@ -404,6 +426,8 @@ export default function DprSubmit() {
         {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
 
         <div className="dpr-form">
+          {/* A-11: section anchor — see DPR_SECTIONS for the matching skip-nav target. */}
+          <section id="dpr-section-site" className="dpr-form-section">
           {/* Project metadata */}
           <div className="form-row">
             <div className="form-group" style={{ flex: 2 }}>
@@ -457,7 +481,10 @@ export default function DprSubmit() {
               are filed separately on the Inspection &amp; Compliance page.
             </span>
           </div>
+          </section>
 
+          {/* A-11: section anchor — daily narrative + catch-all notes. */}
+          <section id="dpr-section-narrative" className="dpr-form-section">
           {/* Round-12: 5 daily-narrative PMC fields. */}
           <fieldset
             style={{
@@ -588,7 +615,10 @@ export default function DprSubmit() {
               style={{ resize: 'vertical', minHeight: '60px' }}
             />
           </div>
+          </section>
 
+          {/* A-11: section anchor — photo upload + preview grid. */}
+          <section id="dpr-section-photos" className="dpr-form-section">
           {/* Photos */}
           <div className="form-group">
             <label>Site Photos (max {MAX_PHOTOS_PER_DPR})</label>
@@ -656,12 +686,18 @@ export default function DprSubmit() {
               </div>
             )}
           </div>
+          </section>
 
+          {/* A-11: section anchor — user-added ad-hoc text + tables. */}
+          <section id="dpr-section-custom" className="dpr-form-section">
           {/* User-added ad-hoc sections (text + tables). */}
           <div style={{ marginTop: '1.5rem' }}>
             <DprCustomSection value={customSections} onChange={setCustomSections} />
           </div>
+          </section>
 
+          {/* A-11: section anchor — read-only summary of today's inspection records. */}
+          <section id="dpr-section-inspections" className="dpr-form-section">
           {/* Today's inspection records summary card — links to the Inspection & Compliance page. */}
           <div
             className="dpr-card"
@@ -708,6 +744,7 @@ export default function DprSubmit() {
               </ul>
             )}
           </div>
+          </section>
 
           <div className="dpr-form-actions dpr-form-actions-sticky" style={{ marginTop: '1.5rem' }}>
             <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting'}>

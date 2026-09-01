@@ -12,6 +12,14 @@ import WorkEntryAdder from './WorkEntryAdder.jsx';
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
 const DRAFT_KEY = 'inspection_draft_v1';
 
+// A-11: section skip-nav anchors. Keep in sync with the <section id>
+// attributes below — used by the sticky in-form nav at the top of the page.
+const INSPECTION_SECTIONS = [
+  { id: 'inspection-section-site', label: 'Site Info' },
+  { id: 'inspection-section-record', label: 'Inspection Record' },
+  { id: 'inspection-section-photos', label: 'Photos' },
+];
+
 const getLocalDate = () => {
   const now = new Date();
   const offset = now.getTimezoneOffset();
@@ -339,6 +347,18 @@ export default function InspectionSubmit() {
           quality, waterproofing, NCR, safety violation, etc. One record per submission.
         </p>
 
+        {/* A-11: sticky in-form section jump-nav so keyboard / screen-reader users
+            can skip past long blocks instead of Tabbing through every field. */}
+        <nav className="section-skip-nav" aria-label="Jump to section">
+          <ul>
+            {INSPECTION_SECTIONS.map((s) => (
+              <li key={s.id}>
+                <a href={`#${s.id}`}>{s.label}</a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+
         {showDraftBanner && (
           <div
             role="status"
@@ -368,6 +388,8 @@ export default function InspectionSubmit() {
         {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
 
         <div className="dpr-form">
+          {/* A-11: section anchor — see INSPECTION_SECTIONS for the matching skip-nav target. */}
+          <section id="inspection-section-site" className="dpr-form-section">
           <div className="form-row">
             <div className="form-group" style={{ flex: 2 }}>
               <label htmlFor="projectName">Project Name *</label>
@@ -425,7 +447,10 @@ export default function InspectionSubmit() {
               />
             </div>
           </div>
+          </section>
 
+          {/* A-11: section anchor — structured inspection record adder. */}
+          <section id="inspection-section-record" className="dpr-form-section">
           <div className="form-group">
             <label>Inspection Record *</label>
             {workEntry && (
@@ -456,7 +481,10 @@ export default function InspectionSubmit() {
             )}
             {!workEntry && <WorkEntryAdder onAdd={setWorkEntry} sectionLabel="Add Inspection Record" submitLabel="Add Inspection Record" />}
           </div>
+          </section>
 
+          {/* A-11: section anchor — photo upload + preview grid. */}
+          <section id="inspection-section-photos" className="dpr-form-section">
           <div className="form-group">
             <label>Photos (max {MAX_PHOTOS_PER_DPR})</label>
             {/* Round-17 B-14: photo previews via URL.createObjectURL — verified in
@@ -523,6 +551,7 @@ export default function InspectionSubmit() {
               </div>
             )}
           </div>
+          </section>
 
           <div className="dpr-form-actions dpr-form-actions-sticky">
             <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting'}>

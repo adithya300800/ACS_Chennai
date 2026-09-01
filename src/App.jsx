@@ -1,35 +1,39 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, Suspense } from 'react';
 import { Routes, Route, useLocation, Navigate } from 'react-router-dom';
 import Header from './components/Header.jsx';
 import Footer from './components/Footer.jsx';
 import ScrollToTop from './components/ScrollToTop.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import PortalLayout from './components/PortalLayout.jsx';
-import Home from './pages/Home.jsx';
-import About from './pages/About.jsx';
-import Projects from './pages/Projects.jsx';
-import Contact from './pages/Contact.jsx';
-import Blog from './pages/Blog.jsx';
-import Careers from './pages/Careers.jsx';
-import NotFound from './pages/NotFound.jsx';
-import PortalLogin from './pages/PortalLogin.jsx';
-import Attendance from './pages/portal/Attendance.jsx';
-import AdminOverview from './pages/admin/AdminOverview.jsx';
-import AdminAttendance from './pages/portal/Admin.jsx'; // renamed semantically; kept file path stable
-import Leave from './pages/portal/Leave.jsx';
-import DprSubmit from './pages/portal/DprSubmit.jsx';
-import DprList from './pages/portal/DprList.jsx';
-import DprDashboard from './pages/admin/DprDashboard.jsx';
-import LeaveDashboard from './pages/admin/LeaveDashboard.jsx';
-import InspectionSubmit from './pages/portal/InspectionSubmit.jsx';
-import InspectionList from './pages/portal/InspectionList.jsx';
-import InspectionAll from './pages/portal/InspectionAll.jsx';
-import InspectionDetail from './pages/portal/InspectionDetail.jsx';
-import InspectionDashboard from './pages/admin/InspectionDashboard.jsx';
-import Training from './pages/portal/Training.jsx';
-import TrainingDetail from './pages/portal/TrainingDetail.jsx';
-import TrainingDashboard from './pages/admin/TrainingDashboard.jsx';
-import TrainingCourseNew from './pages/admin/TrainingCourseNew.jsx';
+import PageLoader from './components/PageLoader.jsx';
+// G-03: route-level code splitting. Every page-level component is lazy-loaded
+// so the initial bundle ships only the shell + auth/portal chrome. Each route
+// pulls its own chunk on first navigation.
+const Home = React.lazy(() => import('./pages/Home.jsx'));
+const About = React.lazy(() => import('./pages/About.jsx'));
+const Projects = React.lazy(() => import('./pages/Projects.jsx'));
+const Contact = React.lazy(() => import('./pages/Contact.jsx'));
+const Blog = React.lazy(() => import('./pages/Blog.jsx'));
+const Careers = React.lazy(() => import('./pages/Careers.jsx'));
+const NotFound = React.lazy(() => import('./pages/NotFound.jsx'));
+const PortalLogin = React.lazy(() => import('./pages/PortalLogin.jsx'));
+const Attendance = React.lazy(() => import('./pages/portal/Attendance.jsx'));
+const AdminOverview = React.lazy(() => import('./pages/admin/AdminOverview.jsx'));
+const AdminAttendance = React.lazy(() => import('./pages/portal/Admin.jsx')); // renamed semantically; kept file path stable
+const Leave = React.lazy(() => import('./pages/portal/Leave.jsx'));
+const DprSubmit = React.lazy(() => import('./pages/portal/DprSubmit.jsx'));
+const DprList = React.lazy(() => import('./pages/portal/DprList.jsx'));
+const DprDashboard = React.lazy(() => import('./pages/admin/DprDashboard.jsx'));
+const LeaveDashboard = React.lazy(() => import('./pages/admin/LeaveDashboard.jsx'));
+const InspectionSubmit = React.lazy(() => import('./pages/portal/InspectionSubmit.jsx'));
+const InspectionList = React.lazy(() => import('./pages/portal/InspectionList.jsx'));
+const InspectionAll = React.lazy(() => import('./pages/portal/InspectionAll.jsx'));
+const InspectionDetail = React.lazy(() => import('./pages/portal/InspectionDetail.jsx'));
+const InspectionDashboard = React.lazy(() => import('./pages/admin/InspectionDashboard.jsx'));
+const Training = React.lazy(() => import('./pages/portal/Training.jsx'));
+const TrainingDetail = React.lazy(() => import('./pages/portal/TrainingDetail.jsx'));
+const TrainingDashboard = React.lazy(() => import('./pages/admin/TrainingDashboard.jsx'));
+const TrainingCourseNew = React.lazy(() => import('./pages/admin/TrainingCourseNew.jsx'));
 // Round-17 C-14: shared Coming Soon placeholder (was inline in App.jsx).
 import ComingSoon from './components/ComingSoon.jsx';
 
@@ -60,7 +64,11 @@ function App() {
   return (
     <div className="app">
       <ScrollToTop />
-      <Routes>
+      {/* G-03: single Suspense boundary around the whole router tree.
+          Vite emits one chunk per lazy() page; the boundary shows the
+          shared PageLoader while the chunk for the matched route loads. */}
+      <Suspense fallback={<PageLoader />}>
+        <Routes>
         {/* Public site */}
         <Route path="/portal/login" element={<PortalLogin />} />
         <Route
@@ -128,6 +136,7 @@ function App() {
           }
         />
       </Routes>
+      </Suspense>
     </div>
   );
 }
