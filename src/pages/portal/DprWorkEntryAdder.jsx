@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { WORK_TYPE_SECTIONS, SUB_WORK_TYPE_OPTIONS, WORK_TYPE_OPTIONS } from './DprWorkTypes.jsx';
+import { WORK_TYPE_SECTIONS, SUB_WORK_TYPE_OPTIONS, WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import DprWorkEntryForm from './DprWorkEntryForm.jsx';
 
 export default function DprWorkEntryAdder({ onAdd }) {

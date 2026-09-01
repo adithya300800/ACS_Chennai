@@ -14,8 +14,8 @@ import React, { useState } from 'react';
 //      will diverge anyway; better to start clean.
 //
 // The single source of truth for the 15 sub-types + their fields is still
-// DprWorkTypes.jsx — we import from there, not duplicate the config.
-import { WORK_TYPE_SECTIONS, SUB_WORK_TYPE_OPTIONS } from './DprWorkTypes.jsx';
+// WorkTypes.jsx — we import from there, not duplicate the config.
+import { WORK_TYPE_SECTIONS, SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import InspectionWorkEntryForm from './InspectionWorkEntryForm.jsx';
 
 export default function InspectionWorkEntryAdder({ onAdd }) {

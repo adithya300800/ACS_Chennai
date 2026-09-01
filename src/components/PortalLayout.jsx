@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
+import { useToast } from '../contexts/ToastContext.jsx';
 import NotificationBell from './NotificationBell.jsx';
 
 export default function PortalLayout() {
   const { employee, logout } = useAuth();
   const navigate = useNavigate();
+  const { push: pushToast } = useToast();
   const [sidebarOpen, setSidebarOpen] = useState(false); // Start collapsed on mobile
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
 
@@ -41,124 +43,148 @@ export default function PortalLayout() {
     if (isMobile) setSidebarOpen(false);
   };
 
-  const navItems = [
+  // P0/A-03: sidebar is now grouped under section labels (Personal / Reports /
+  // Approve) instead of 13 flat items. P1/A-04: dropped the "New DPR" and
+  // "New Inspection" CTAs — the relevant pages already have a "+ New" CTA
+  // pinned in their own list/header.
+  const navGroups = [
     {
-      to: '/portal/attendance',
-      label: 'Attendance',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
-        </svg>
-      ),
+      label: null, // first group has no header — landing/today items
+      items: [
+        {
+          to: '/portal/attendance',
+          label: 'My Attendance',
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
+            </svg>
+          ),
+        },
+        {
+          to: '/portal/leave',
+          label: 'My Leave',
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><polyline points="10 9 9 9 8 9" />
+            </svg>
+          ),
+        },
+        {
+          to: '/portal/training',
+          label: 'My Training',
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" />
+            </svg>
+          ),
+        },
+      ],
+    },
+    {
+      label: 'Field Reports',
+      items: [
+        {
+          to: '/portal/dpr/my',
+          label: 'My Daily Reports',
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><polyline points="10 9 9 9 8 9" />
+            </svg>
+          ),
+        },
+        {
+          to: '/portal/inspection/my',
+          label: 'My Inspection Records',
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" /><rect x="9" y="3" width="6" height="4" rx="1" /><path d="M9 14l2 2 4-4" />
+            </svg>
+          ),
+        },
+      ],
     },
     ...(employee?.isAdmin ? [{
-      to: '/portal/admin',
-      label: 'Dashboard',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
-        </svg>
-      ),
+      label: 'Admin',
+      items: [
+        {
+          to: '/portal/admin',
+          label: 'Overview',
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
+            </svg>
+          ),
+        },
+        {
+          to: '/portal/admin/attendance',
+          label: 'All Attendance',
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
+            </svg>
+          ),
+        },
+        {
+          to: '/portal/admin/dpr',
+          label: 'Daily Reports Review',
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+            </svg>
+          ),
+        },
+        {
+          to: '/portal/admin/inspection',
+          label: 'Inspections Review',
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
+            </svg>
+          ),
+        },
+        {
+          to: '/portal/inspection/all',
+          label: 'All Inspection Records',
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <rect x="9" y="3" width="6" height="4" rx="1" /><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" />
+            </svg>
+          ),
+        },
+        {
+          to: '/portal/admin/leave',
+          label: 'Leave Approvals',
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          ),
+        },
+        {
+          to: '/portal/admin/training',
+          label: 'Training Library',
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <path d="M22 10v6M2 10l10-5 10 5-10 5z" /><path d="M6 12v5c3 3 9 3 12 0v-5" />
+            </svg>
+          ),
+        },
+      ],
     }] : []),
     {
-      to: '/portal/dpr/my',
-      label: 'My DPRs',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><polyline points="10 9 9 9 8 9" />
-        </svg>
-      ),
-    },
-    ...(employee?.isAdmin ? [{
-      to: '/portal/admin/dpr',
-      label: 'DPR Dashboard',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
-        </svg>
-      ),
-    }] : []),
-    {
-      to: '/portal/inspection/my',
-      label: 'Inspections',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" /><rect x="9" y="3" width="6" height="4" rx="1" /><path d="M9 14l2 2 4-4" />
-        </svg>
-      ),
-    },
-    ...(employee?.isAdmin ? [{
-      to: '/portal/admin/inspection',
-      label: 'Inspection Dashboard',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
-        </svg>
-      ),
-    }] : []),
-    {
-      to: '/portal/inspection/submit',
-      label: 'New Inspection',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" />
-        </svg>
-      ),
-    },
-    {
-      to: '/portal/dpr/submit',
-      label: 'New DPR',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" />
-        </svg>
-      ),
-    },
-    {
-      to: '/portal/leave',
-      label: 'Leave',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><polyline points="10 9 9 9 8 9" />
-        </svg>
-      ),
-    },
-    ...(employee?.isAdmin ? [{
-      to: '/portal/admin/leave',
-      label: 'Leave Approvals',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-      ),
-    }] : []),
-    {
-      to: '/portal/training',
-      label: 'Training',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" />
-        </svg>
-      ),
-    },
-    ...(employee?.isAdmin ? [{
-      to: '/portal/admin/training',
-      label: 'Training Dashboard',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <path d="M22 10v6M2 10l10-5 10 5-10 5z" /><path d="M6 12v5c3 3 9 3 12 0v-5" />
-        </svg>
-      ),
-    }] : []),
-    {
-      to: '/portal/assets',
-      label: 'Assets',
-      icon: (
-        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
-          <rect x="2" y="7" width="20" height="14" rx="2" ry="2" /><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16" />
-        </svg>
-      ),
-      comingSoon: true,
+      label: 'Coming soon',
+      items: [
+        {
+          to: '/portal/assets',
+          label: 'Assets',
+          comingSoon: true,
+          icon: (
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+              <rect x="2" y="7" width="20" height="14" rx="2" ry="2" /><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16" />
+            </svg>
+          ),
+        },
+      ],
     },
   ];
 
@@ -202,35 +228,39 @@ export default function PortalLayout() {
         </div>
 
         <nav className="portal-nav">
-          {navItems.map((item) => (
-            item.comingSoon ? (
-              <button
-                key={item.to}
-                className="portal-nav-item coming-soon"
-                onClick={() => {
-                  // Simple toast notification
-                  const toast = document.createElement('div');
-                  toast.className = 'portal-toast';
-                  toast.textContent = 'Coming Soon';
-                  document.body.appendChild(toast);
-                  setTimeout(() => toast.remove(), 2500);
-                }}
-              >
-                <span className="portal-nav-icon">{item.icon}</span>
-                {sidebarOpen && <span className="portal-nav-label">{item.label}</span>}
-                {sidebarOpen && <span className="portal-nav-soon-badge">Soon</span>}
-              </button>
-            ) : (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                onClick={closeMobileSidebar}
-                className={({ isActive }) => `portal-nav-item ${isActive ? 'active' : ''}`}
-              >
-                <span className="portal-nav-icon">{item.icon}</span>
-                {sidebarOpen && <span className="portal-nav-label">{item.label}</span>}
-              </NavLink>
-            )
+          {navGroups.map((group, gi) => (
+            <React.Fragment key={group.label || `__group_${gi}`}>
+              {group.label && sidebarOpen && (
+                <div className="portal-nav-section-label">{group.label}</div>
+              )}
+              {group.items.map((item) => (
+                item.comingSoon ? (
+                  <button
+                    key={item.to}
+                    className="portal-nav-item coming-soon"
+                    onClick={() => {
+                      // P2/C-14: replaced ad-hoc document.createElement toast with
+                      // the proper ToastContext used elsewhere in the app.
+                      pushToast('Assets module is coming soon.', 'info');
+                    }}
+                  >
+                    <span className="portal-nav-icon">{item.icon}</span>
+                    {sidebarOpen && <span className="portal-nav-label">{item.label}</span>}
+                    {sidebarOpen && <span className="portal-nav-soon-badge">Soon</span>}
+                  </button>
+                ) : (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    onClick={closeMobileSidebar}
+                    className={({ isActive }) => `portal-nav-item ${isActive ? 'active' : ''}`}
+                  >
+                    <span className="portal-nav-icon">{item.icon}</span>
+                    {sidebarOpen && <span className="portal-nav-label">{item.label}</span>}
+                  </NavLink>
+                )
+              ))}
+            </React.Fragment>
           ))}
         </nav>
 

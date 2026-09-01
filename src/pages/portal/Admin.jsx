@@ -164,7 +164,7 @@ export default function Admin() {
       {/* Header */}
       <div className="admin-header">
         <div>
-          <h1 className="header-title">Attendance Dashboard</h1>
+          <h1 className="header-title">All Attendance</h1>
           <p className="header-subtitle">Monitor all employees' attendance</p>
         </div>
         <div className="admin-header-actions">

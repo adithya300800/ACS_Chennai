@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 // Round-12 clone of DprWorkEntryForm.jsx — the structured field renderer
 // for one of the 15 sub-work-types (material receipt, cube test, NCR, etc.).
-// Reads WORK_TYPE_FIELDS from DprWorkTypes.jsx so a field change there is
+// Reads WORK_TYPE_FIELDS from WorkTypes.jsx so a field change there is
 // reflected on both the DPR and Inspection pages without duplication.
-import { WORK_TYPE_FIELDS, SUB_WORK_TYPE_OPTIONS } from './DprWorkTypes.jsx';
+import { WORK_TYPE_FIELDS, SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 
 export default function InspectionWorkEntryForm({ workType, onAdd, onCancel }) {
   const config = WORK_TYPE_FIELDS[workType];

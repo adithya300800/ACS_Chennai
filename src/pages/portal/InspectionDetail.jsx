@@ -3,7 +3,7 @@ import { Link, useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { SUB_WORK_TYPE_OPTIONS } from './DprWorkTypes.jsx';
+import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 
 function formatIndianDate(iso) {
   if (!iso) return '—';

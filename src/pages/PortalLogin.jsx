@@ -72,8 +72,10 @@ export default function PortalLogin() {
       api.postZohoCallback(code)
         .then((data) => {
           setAuthData(data.accessToken, data.employee, data.refreshToken);
+          // P0/A-02: land admins on the new Overview, employees on Attendance.
+          const landing = data.employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
           // SPA navigation — preserves any draft state and avoids a full reload
-          navigate('/portal/attendance', { replace: true });
+          navigate(landing, { replace: true });
         })
         .catch((err) => {
           setStatus('error');
@@ -92,7 +94,7 @@ export default function PortalLogin() {
     setErrorMsg('');
 
     try {
-      await login(form.email, form.password);
+      const data = await login(form.email, form.password);
       // Clear dedupe keys for the new session — so a future session-expiry
       // toast can fire again.
       try {
@@ -100,7 +102,9 @@ export default function PortalLogin() {
           if (k.startsWith('acs_logout_toast_')) sessionStorage.removeItem(k);
         });
       } catch {}
-      navigate('/portal/attendance');
+      // P0/A-02: branch landing on role post-auth.
+      const landing = data?.employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
+      navigate(landing);
     } catch (err) {
       setStatus('error');
       setErrorMsg(err.message || 'Login failed. Please check your credentials.');
@@ -183,7 +187,9 @@ export default function PortalLogin() {
               if (k.startsWith('acs_logout_toast_')) sessionStorage.removeItem(k);
             });
           } catch {}
-          navigate('/portal/attendance', { replace: true });
+          // P0/A-02: branch landing on role post-auth.
+          const landing = event.data.employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
+          navigate(landing, { replace: true });
         } else if (event.data?.type === 'zoho-oauth-error') {
           cleanup();
           setStatus('error');
@@ -242,7 +248,9 @@ export default function PortalLogin() {
         </div>
 
         <h1 className="portal-auth-title">Welcome back</h1>
-        <p className="portal-auth-desc">Sign in to mark your attendance</p>
+        {/* P2/A-14: role-neutral — was "Sign in to mark your attendance", which
+            misled admin users about what the portal is for. */}
+        <p className="portal-auth-desc">Sign in to the ACS Chennai employee portal</p>
 
         {status === 'error' && (
           <div className="portal-auth-error">

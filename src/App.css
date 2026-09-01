@@ -982,6 +982,20 @@ footer {
 .portal-nav-item.coming-soon { opacity: 0.7; }
 .portal-nav-icon { display: flex; align-items: center; flex-shrink: 0; }
 .portal-nav-label { white-space: nowrap; overflow: hidden; }
+.portal-nav-section-label {
+  /* P0/A-03: subtle, uppercase section labels that split the admin
+     sidebar into Personal / Reports / Admin instead of 13 flat items. */
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--steel);
+  opacity: 0.7;
+  padding: 0.85rem 0.85rem 0.4rem;
+  margin-top: 0.25rem;
+}
+.portal-nav-section-label:first-child { margin-top: 0; }
 .portal-nav-soon-badge {
   margin-left: auto;
   font-size: 0.65rem;

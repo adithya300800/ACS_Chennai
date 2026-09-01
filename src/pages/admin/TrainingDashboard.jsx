@@ -165,7 +165,7 @@ export default function TrainingDashboard() {
     <div className="training-page training-admin-page">
       <div className="training-page-header">
         <div>
-          <h1 className="training-page-title">Training — Admin</h1>
+          <h1 className="training-page-title">Training Library</h1>
           <p className="training-page-sub">Manage courses and track employee enrollments</p>
         </div>
         <Link to="/portal/admin/training/new" className="training-btn training-btn-primary">

@@ -9,9 +9,13 @@ import Home from './pages/Home.jsx';
 import About from './pages/About.jsx';
 import Projects from './pages/Projects.jsx';
 import Contact from './pages/Contact.jsx';
+import Blog from './pages/Blog.jsx';
+import Careers from './pages/Careers.jsx';
+import NotFound from './pages/NotFound.jsx';
 import PortalLogin from './pages/PortalLogin.jsx';
 import Attendance from './pages/portal/Attendance.jsx';
-import Admin from './pages/portal/Admin.jsx';
+import AdminOverview from './pages/admin/AdminOverview.jsx';
+import AdminAttendance from './pages/portal/Admin.jsx'; // renamed semantically; kept file path stable
 import Leave from './pages/portal/Leave.jsx';
 import DprSubmit from './pages/portal/DprSubmit.jsx';
 import DprList from './pages/portal/DprList.jsx';
@@ -19,6 +23,7 @@ import DprDashboard from './pages/admin/DprDashboard.jsx';
 import LeaveDashboard from './pages/admin/LeaveDashboard.jsx';
 import InspectionSubmit from './pages/portal/InspectionSubmit.jsx';
 import InspectionList from './pages/portal/InspectionList.jsx';
+import InspectionAll from './pages/portal/InspectionAll.jsx';
 import InspectionDetail from './pages/portal/InspectionDetail.jsx';
 import InspectionDashboard from './pages/admin/InspectionDashboard.jsx';
 import Training from './pages/portal/Training.jsx';
@@ -65,7 +70,11 @@ function App() {
           }
         >
           <Route path="attendance" element={<Attendance />} />
-          <Route path="admin" element={<Admin />} />
+          {/* /portal/admin = new overview hub (A-01). /portal/admin/attendance
+              keeps the org-wide attendance grid so the existing
+              "All Attendance" tile and admin nav item still have a target. */}
+          <Route path="admin" element={<AdminOverview />} />
+          <Route path="admin/attendance" element={<AdminAttendance />} />
           <Route path="leave" element={<Leave />} />
           <Route path="dpr/submit" element={<DprSubmit />} />
           <Route path="dpr/my" element={<DprList />} />
@@ -73,6 +82,9 @@ function App() {
           <Route path="admin/leave" element={<LeaveDashboard />} />
           <Route path="inspection/submit" element={<InspectionSubmit />} />
           <Route path="inspection/my" element={<InspectionList />} />
+          {/* A-13: dead link /portal/inspection/all (rendered for admins from
+              InspectionList.jsx) now resolves to a real cross-org list. */}
+          <Route path="inspection/all" element={<InspectionAll />} />
           <Route path="inspection/:id" element={<InspectionDetail />} />
           <Route path="admin/inspection" element={<InspectionDashboard />} />
           {/* Round-14: Employee Training — employee hub, player page, and admin views.
@@ -85,7 +97,8 @@ function App() {
           <Route path="admin/training" element={<TrainingDashboard />} />
           <Route path="admin/training/new" element={<TrainingCourseNew />} />
           <Route path="assets" element={<ComingSoon name="Assets" />} />
-          <Route path="" element={<Navigate to="attendance" replace />} />
+          {/* P0/A-02: landing branches on role. Employees → Attendance; admins → Admin Overview. */}
+          <Route path="" element={<RoleBranchLanding />} />
         </Route>
 
         {/* Public routes with header/footer */}
@@ -100,7 +113,12 @@ function App() {
                   <Route path="/about" element={<About />} />
                   <Route path="/projects" element={<Projects />} />
                   <Route path="/contact" element={<Contact />} />
-                  <Route path="*" element={<Home />} />
+                  {/* A-05: Blog + Careers route stubs wired up so Header/Footer
+                      links resolve to a real page instead of bouncing to Home. */}
+                  <Route path="/blog" element={<Blog />} />
+                  <Route path="/careers" element={<Careers />} />
+                  {/* A-12: visible 404 for typo'd public URLs (was silent Home render). */}
+                  <Route path="*" element={<NotFound />} />
                 </Routes>
               </main>
               <Footer />
@@ -110,6 +128,22 @@ function App() {
       </Routes>
     </div>
   );
+}
+
+// P0/A-02: branches /portal/ (empty path) to Admin Overview for admins and
+// Attendance for employees. Lives here because the redirect target must be
+// rendered under <PortalLayout> (auth-gated), not the public tree.
+function RoleBranchLanding() {
+  // useAuth is provided via ProtectedRoute → PortalLayout → Outlet tree,
+  // but this component is rendered as a sibling of <PortalLayout> so it
+  // can't read context. Use the localStorage hint as a minimal signal —
+  // if employee missing or not admin, default to Attendance.
+  let isAdmin = false;
+  try {
+    const raw = localStorage.getItem('acs_employee');
+    if (raw) isAdmin = !!(JSON.parse(raw)?.isAdmin);
+  } catch (e) { /* ignore parse errors */ }
+  return isAdmin ? <AdminOverview /> : <Navigate to="attendance" replace />;
 }
 
 // Simple Coming Soon placeholder for stubbed portal pages

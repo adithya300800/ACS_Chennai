@@ -3,12 +3,12 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { SUB_WORK_TYPE_OPTIONS } from '../portal/DprWorkTypes.jsx';
+import { SUB_WORK_TYPE_OPTIONS } from '../portal/WorkTypes.jsx';
 
 // Round-12: admin view across all submitted inspection records across all
 // engineers. Mirrors the DprDashboard structure (stat cards + filter chips
 // + card grid) but scoped to the InspectionRecord table. The 15 sub-work
-// types are the same SUB_WORK_TYPE_OPTIONS imported from DprWorkTypes.jsx
+// types are the same SUB_WORK_TYPE_OPTIONS imported from WorkTypes.jsx
 // so a label rename there is reflected here without duplication.
 
 function StatusBadge({ status }) {
@@ -159,7 +159,7 @@ export default function InspectionDashboard() {
   return (
     <div className="dpr-page">
       <div className="dpr-page-header">
-        <h1 className="dpr-page-title">Inspection &amp; Compliance Dashboard</h1>
+        <h1 className="dpr-page-title">Inspections Review</h1>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           <Link to="/portal/inspection/submit" className="btn btn-primary btn-sm">
             + New Record

@@ -204,7 +204,7 @@ export default function DprList() {
   return (
     <div className="dpr-page">
       <div className="dpr-page-header">
-        <h1 className="dpr-page-title">My DPRs</h1>
+        <h1 className="dpr-page-title">My Daily Reports</h1>
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
           <button className="btn btn-secondary btn-sm" onClick={() => setShowFilters(s => !s)}>
             <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2V12.46z"/></svg>

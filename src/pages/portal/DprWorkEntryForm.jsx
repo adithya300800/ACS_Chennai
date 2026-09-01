@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { WORK_TYPE_FIELDS, SUB_WORK_TYPE_OPTIONS } from './DprWorkTypes.jsx';
+import { WORK_TYPE_FIELDS, SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 
 export default function DprWorkEntryForm({ workType, onAdd, onCancel }) {
   const config = WORK_TYPE_FIELDS[workType];

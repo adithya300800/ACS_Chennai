@@ -188,7 +188,7 @@ export default function DprDashboard() {
   return (
     <div className="dpr-page">
       <div className="dpr-page-header">
-        <h1 className="dpr-page-title">DPR Dashboard</h1>
+        <h1 className="dpr-page-title">Daily Reports Review</h1>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           {['SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'].map((s) => (
             <button
