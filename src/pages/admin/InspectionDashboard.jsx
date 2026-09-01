@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import StatusBadge from '../../components/StatusBadge.jsx';
 import { SUB_WORK_TYPE_OPTIONS } from '../portal/WorkTypes.jsx';
 
 // Round-12: admin view across all submitted inspection records across all
@@ -10,19 +11,10 @@ import { SUB_WORK_TYPE_OPTIONS } from '../portal/WorkTypes.jsx';
 // + card grid) but scoped to the InspectionRecord table. The 15 sub-work
 // types are the same SUB_WORK_TYPE_OPTIONS imported from WorkTypes.jsx
 // so a label rename there is reflected here without duplication.
-
-function StatusBadge({ status }) {
-  const cls = {
-    OPEN: 'dpr-status-draft',
-    ACKNOWLEDGED: 'dpr-status-review',
-    IN_PROGRESS: 'dpr-status-review',
-    PENDING_VERIFICATION: 'dpr-status-review',
-    CLOSED: 'dpr-status-approved',
-    REJECTED: 'dpr-status-rejected',
-  }[status] || 'dpr-status-draft';
-  const label = status ? status.replace(/_/g, ' ').toLowerCase() : 'open';
-  return <span className={`dpr-status-badge ${cls}`}>{label.charAt(0).toUpperCase() + label.slice(1)}</span>;
-}
+//
+// C-06 (round-15+): local StatusBadge removed; uses the shared component.
+// Inspection statuses (OPEN/ACKNOWLEDGED/IN_PROGRESS/PENDING_VERIFICATION/
+// CLOSED/REJECTED) are all in the shared DEFAULT_STATUS_MAP.
 
 function SeverityBadge({ severity }) {
   if (!severity) return null;

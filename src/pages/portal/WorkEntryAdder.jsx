@@ -1,8 +1,23 @@
 import React, { useState } from 'react';
-import { WORK_TYPE_SECTIONS, SUB_WORK_TYPE_OPTIONS, WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
-import DprWorkEntryForm from './DprWorkEntryForm.jsx';
+// C-02 (round-15+): unified section → sub-type → form picker. Replaces
+// DprWorkEntryAdder.jsx + InspectionWorkEntryAdder.jsx — both were
+// ~100-line clones rendering the same three-step flow.
+//
+// Differences between the originals:
+//   - Section header label ("Add Work Entry" vs "Add Inspection Record")
+//     is now controlled by the `sectionLabel` prop.
+//   - The original DprWorkEntryAdder imported a dead `WORK_TYPE_OPTIONS`
+//     symbol that was never referenced. Dropped during merge.
+//   - Both originals delegated the inner form to their own copy of
+//     DprWorkEntryForm / InspectionWorkEntryForm. After C-01 they both
+//     point at the unified WorkEntryForm.
+//
+// The submit callback signature is unchanged — callers still receive the
+// full entry object from WorkEntryForm: `{ workType, data, addedAt }`.
+import { WORK_TYPE_SECTIONS, SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
+import WorkEntryForm from './WorkEntryForm.jsx';
 
-export default function DprWorkEntryAdder({ onAdd }) {
+export default function WorkEntryAdder({ onAdd, sectionLabel = 'Add Work Entry' }) {
   const [selectedSection, setSelectedSection] = useState(null);
   const [selectedSubType, setSelectedSubType] = useState(null);
   const [showForm, setShowForm] = useState(false);
@@ -39,7 +54,7 @@ export default function DprWorkEntryAdder({ onAdd }) {
     <div className="work-entry-adder">
       {!selectedSection && !showForm && (
         <>
-          <label className="section-label">Add Work Entry</label>
+          <label className="section-label">{sectionLabel}</label>
           <div className="work-section-grid">
             {Object.entries(WORK_TYPE_SECTIONS).map(([key, section]) => (
               <button
@@ -93,7 +108,7 @@ export default function DprWorkEntryAdder({ onAdd }) {
               ← Back
             </button>
           </div>
-          <DprWorkEntryForm
+          <WorkEntryForm
             workType={selectedSubType}
             onAdd={handleAdd}
             onCancel={handleCancel}

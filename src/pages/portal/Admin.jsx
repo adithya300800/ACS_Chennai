@@ -3,45 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { formatDate, formatFullDate, formatTimeOrDash, getMapUrl } from '../../lib/format.js';
 
-const formatDate = (dateStr) => {
-  if (!dateStr) return '';
-  // Handle both YYYY-MM-DD and ISO strings
-  const [year, month, day] = dateStr.split('T')[0].split('-').map(Number);
-  const localDate = new Date(year, month - 1, day);
-  return localDate.toLocaleDateString('en-IN', {
-    weekday: 'short',
-    day: 'numeric',
-    month: 'short'
-  });
-};
+// (Round-15+ C-03: format helpers moved to src/lib/format.js. Admin.jsx
+// originally returned '—' for null formatTime callsites, so we import
+// formatTimeOrDash to preserve that exact behavior.)
 
-const formatFullDate = (dateStr) => {
-  if (!dateStr) return '';
-  // Handle both YYYY-MM-DD and ISO strings
-  const [year, month, day] = dateStr.split('T')[0].split('-').map(Number);
-  const localDate = new Date(year, month - 1, day);
-  return localDate.toLocaleDateString('en-IN', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric'
-  });
-};
-
-const formatTime = (dateStr) => {
-  if (!dateStr) return '—';
-  return new Date(dateStr).toLocaleTimeString('en-IN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: true
-  });
-};
-
-const getMapUrl = (lat, lng) => {
-  if (!lat || !lng || lat === 0 || lng === 0) return null;
-  return `https://www.openstreetmap.org/export/embed.html?bbox=${lng - 0.005},${lat - 0.005},${lng + 0.005},${lat + 0.005}&layer=mapnik&marker=${lat},${lng}`;
-};
+const formatTime = formatTimeOrDash;
 
 export default function Admin() {
   const { employee, accessToken } = useAuth();

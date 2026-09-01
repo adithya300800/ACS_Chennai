@@ -2,24 +2,20 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import StatusBadge from '../../components/StatusBadge.jsx';
 
-function StatusBadge({ status }) {
-  const cls = {
-    DRAFT: 'dpr-status-draft',
-    SUBMITTED: 'dpr-status-submitted',
-    UNDER_REVIEW: 'dpr-status-review',
-    APPROVED: 'dpr-status-approved',
-    REJECTED: 'dpr-status-rejected',
-  }[status] || 'dpr-status-draft';
-  const label = {
-    DRAFT: 'Draft',
-    SUBMITTED: 'Submitted',
-    UNDER_REVIEW: 'Under Review',
-    APPROVED: 'Approved',
-    REJECTED: 'Rejected',
-  }[status] || status;
-  return <span className={`dpr-status-badge ${cls}`}>{label}</span>;
-}
+// C-06 (round-15+): local StatusBadge removed. We pass a per-page `map` so
+// SUBMITTED keeps its distinct blue (dpr-status-submitted, #dbeafe/#1d4ed8)
+// separate from UNDER_REVIEW (dpr-status-review, yellow). The shared default
+// collapses both to review-yellow, which would lose the visual hierarchy
+// here (SUBMITTED is "awaiting pickup", UNDER_REVIEW is "admin has it").
+const DPR_STATUS_MAP = {
+  DRAFT: 'dpr-status-draft',
+  SUBMITTED: 'dpr-status-submitted',
+  UNDER_REVIEW: 'dpr-status-review',
+  APPROVED: 'dpr-status-approved',
+  REJECTED: 'dpr-status-rejected',
+};
 
 function StatCard({ number, label, color }) {
   return (
@@ -242,7 +238,7 @@ export default function DprDashboard() {
                     <span>📅 {new Date(dpr.reportDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
                   </div>
                 </div>
-                <StatusBadge status={dpr.status} />
+                <StatusBadge status={dpr.status} map={DPR_STATUS_MAP} />
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', marginBottom: '0.75rem' }}>

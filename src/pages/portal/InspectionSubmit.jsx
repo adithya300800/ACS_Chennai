@@ -7,7 +7,7 @@ import { uploadBlob } from '../../lib/blobUpload.js';
 import {
   MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES,
 } from '../../lib/constants.js';
-import InspectionWorkEntryAdder from './InspectionWorkEntryAdder.jsx';
+import WorkEntryAdder from './WorkEntryAdder.jsx';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
 const DRAFT_KEY = 'inspection_draft_v1';
@@ -451,7 +451,7 @@ export default function InspectionSubmit() {
                 </div>
               </div>
             )}
-            {!workEntry && <InspectionWorkEntryAdder onAdd={setWorkEntry} />}
+            {!workEntry && <WorkEntryAdder onAdd={setWorkEntry} sectionLabel="Add Inspection Record" />}
           </div>
 
           <div className="form-group">

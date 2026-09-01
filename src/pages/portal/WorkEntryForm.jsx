@@ -1,7 +1,16 @@
 import React, { useState } from 'react';
+// C-01 (round-15+): unified work-entry form. Replaces DprWorkEntryForm.jsx +
+// InspectionWorkEntryForm.jsx — both were 100-line near-clones rendering the
+// same field types (select / textarea / checklist / number / time / text)
+// driven by the WORK_TYPE_FIELDS config in WorkTypes.jsx.
+//
+// The only difference between the originals was the static text on the
+// submit button ("Add Entry" vs "Add Inspection Record"). That string now
+// comes from the `submitLabel` prop. The submit callback signature is
+// unchanged — callers still receive `{ workType, data, addedAt }`.
 import { WORK_TYPE_FIELDS, SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 
-export default function DprWorkEntryForm({ workType, onAdd, onCancel }) {
+export default function WorkEntryForm({ workType, onAdd, onCancel, submitLabel = 'Add Entry' }) {
   const config = WORK_TYPE_FIELDS[workType];
   const [formData, setFormData] = useState({});
   const [errors, setErrors] = useState({});
@@ -167,7 +176,7 @@ export default function DprWorkEntryForm({ workType, onAdd, onCancel }) {
             Cancel
           </button>
           <button type="submit" className="btn btn-primary">
-            Add Entry
+            {submitLabel}
           </button>
         </div>
       </form>

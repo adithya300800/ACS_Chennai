@@ -16,6 +16,33 @@ const ZOHO_ERRORS = {
   server_error: 'Something went wrong on our end. Please try again.',
 };
 
+// B-04 (round-15+): one-time welcome toast on first successful login per
+// employee. Keyed by employee ID in localStorage so (a) it only fires once
+// per user, and (b) logging out and a different employee logging in on the
+// same browser does not suppress the new user's first-login greeting.
+//
+// We fire from PortalLogin before navigate() because the toast lives in
+// the top-level ToastProvider, which is mounted above the router — so the
+// toast persists across the navigation and renders on top of the landing
+// page (Attendance for employees, AdminOverview for admins).
+function maybeShowWelcomeToast(toast, employee) {
+  if (!employee?.id) return;
+  let key;
+  try {
+    key = `acs_welcome_employee_${employee.id}`;
+    if (localStorage.getItem(key)) return;
+    localStorage.setItem(key, new Date().toISOString());
+  } catch {
+    // Storage unavailable (Safari private mode, quota) — fall back to
+    // showing the toast anyway rather than silently failing the welcome.
+  }
+  const name = (employee.name || '').split(' ')[0] || 'there';
+  const greeting = employee.isAdmin
+    ? `Welcome back, ${name}. Open tiles are waiting for review.`
+    : `Welcome to ACS Chennai, ${name}. Mark your attendance to start the day.`;
+  toast.push(greeting, 'success', 6000);
+}
+
 export default function PortalLogin() {
   const { login, setAuthData } = useAuth();
   const toast = useToast();
@@ -72,6 +99,7 @@ export default function PortalLogin() {
       api.postZohoCallback(code)
         .then((data) => {
           setAuthData(data.accessToken, data.employee, data.refreshToken);
+          maybeShowWelcomeToast(toast, data.employee);
           // P0/A-02: land admins on the new Overview, employees on Attendance.
           const landing = data.employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
           // SPA navigation — preserves any draft state and avoids a full reload
@@ -102,6 +130,7 @@ export default function PortalLogin() {
           if (k.startsWith('acs_logout_toast_')) sessionStorage.removeItem(k);
         });
       } catch {}
+      maybeShowWelcomeToast(toast, employee);
       // P0/A-02: branch landing on role post-auth.
       const landing = employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
       navigate(landing);
@@ -187,6 +216,7 @@ export default function PortalLogin() {
               if (k.startsWith('acs_logout_toast_')) sessionStorage.removeItem(k);
             });
           } catch {}
+          maybeShowWelcomeToast(toast, event.data.employee);
           // P0/A-02: branch landing on role post-auth.
           const landing = event.data.employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
           navigate(landing, { replace: true });

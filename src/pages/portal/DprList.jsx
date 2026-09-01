@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
+import StatusBadge from '../../components/StatusBadge.jsx';
 
 const STATUS_FILTERS = [
   { value: '', label: 'All Statuses' },
@@ -12,23 +13,17 @@ const STATUS_FILTERS = [
   { value: 'REJECTED', label: 'Rejected' },
 ];
 
-function StatusBadge({ status }) {
-  const cls = {
-    DRAFT: 'dpr-status-draft',
-    SUBMITTED: 'dpr-status-submitted',
-    UNDER_REVIEW: 'dpr-status-review',
-    APPROVED: 'dpr-status-approved',
-    REJECTED: 'dpr-status-rejected',
-  }[status] || 'dpr-status-draft';
-  const label = {
-    DRAFT: 'Draft',
-    SUBMITTED: 'Submitted',
-    UNDER_REVIEW: 'Under Review',
-    APPROVED: 'Approved',
-    REJECTED: 'Rejected',
-  }[status] || status;
-  return <span className={`dpr-status-badge ${cls}`}>{label}</span>;
-}
+// C-06 (round-15+): local StatusBadge removed; uses the shared component
+// with a per-page map so SUBMITTED stays visually distinct from UNDER_REVIEW.
+// Same rationale as DprDashboard — the two states convey different things
+// to the employee and should not collapse to one color.
+const DPR_STATUS_MAP = {
+  DRAFT: 'dpr-status-draft',
+  SUBMITTED: 'dpr-status-submitted',
+  UNDER_REVIEW: 'dpr-status-review',
+  APPROVED: 'dpr-status-approved',
+  REJECTED: 'dpr-status-rejected',
+};
 
 // Round-12: render user-added ad-hoc sections (text + tables) read-only
 // inside the DPR detail modal. Mirrors the editor shape at DprCustomSection.
@@ -299,7 +294,7 @@ export default function DprList() {
                 </div>
                 <div style={{ flex: 1, display: 'none' }} className="dpr-list-location">{dpr.location}</div>
                 <div style={{ flex: 1 }}>
-                  <StatusBadge status={dpr.status} />
+                  <StatusBadge status={dpr.status} map={DPR_STATUS_MAP} />
                 </div>
                 <div style={{ flex: 1, color: 'var(--steel)', fontSize: '0.85rem' }}>
                   {dpr.photos?.length || 0} photos
@@ -378,7 +373,7 @@ export default function DprList() {
               ) : (
                 <>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem 1.5rem', marginBottom: '1rem', fontSize: '0.9rem' }}>
-                    <div><strong>Status:</strong> <StatusBadge status={expandedDpr.status} /></div>
+                    <div><strong>Status:</strong> <StatusBadge status={expandedDpr.status} map={DPR_STATUS_MAP} /></div>
                     <div><strong>Work Type:</strong> {expandedDpr.workType || 'N/A'}</div>
                     <div><strong>Weather:</strong> {expandedDpr.weather || '—'}</div>
                     <div><strong>Temperature:</strong> {expandedDpr.temperature || '—'}</div>
