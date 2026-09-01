@@ -141,6 +141,21 @@ const leaveCreateLimiter = rateLimit({
   message: { error: 'Too many leave submissions. Please try again later.', code: 'LEAVE_THROTTLED' },
 });
 
+// Round-14: 120 / hour / IP — training write paths (admin course CRUD +
+// bulk-assign + employee progress pings + manual mark-complete). The 120/h
+// budget leaves room for ~one progress ping every 30s across a 1h session
+// while still blocking scripted spam. GETs (employee "My Learning" hub,
+// admin dashboard) are NOT throttled — they're cheap reads.
+const trainingWriteLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  validate: { trustProxy: true },
+  message: { error: 'Too many training write requests. Please slow down.', code: 'TRAINING_THROTTLED' },
+});
+
 module.exports = {
   loginLimiter,
   loginEmailLimiter,
@@ -150,4 +165,5 @@ module.exports = {
   callbackLimiter,
   exportLimiter,
   leaveCreateLimiter,
+  trainingWriteLimiter,
 };

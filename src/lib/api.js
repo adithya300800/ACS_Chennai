@@ -316,4 +316,47 @@ export const api = {
     api.post(`/leave/${id}/approve`, { reviewNotes: reviewNotes || '' }, token),
   rejectLeave: (id, reviewNotes, token) =>
     api.post(`/leave/${id}/reject`, { reviewNotes }, token),
+
+  // Round-14: Employee Training — admin assigns external courses; employees
+  // watch in-platform with auto progress capture. All admin-only endpoints
+  // 403 for non-admin tokens (the backend re-checks admin in the DB before
+  // state transitions, so a stale JWT can't act on a revoked admin claim).
+  getTrainingCourses: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/training/courses${qs ? '?' + qs : ''}`, token);
+  },
+  getTrainingCourse: (id, token) => api.get(`/training/courses/${id}`, token),
+  createTrainingCourse: (data, token) => api.post('/training/courses', data, token),
+  updateTrainingCourse: (id, data, token) =>
+    api.put(`/training/courses/${id}`, data, token),
+  // Bulk assign — backend loops the employeeIds array server-side and
+  // returns { created: [...], skipped: [...], invalidIds: [...] } so the
+  // admin UI can show "Assigned to 12 · 1 duplicate · 2 invalid".
+  assignTraining: (courseId, employeeIds, opts = {}, token) =>
+    api.post('/training/enrollments', {
+      courseId,
+      employeeIds,
+      ...(opts.dueDate ? { dueDate: opts.dueDate } : {}),
+      ...(opts.priority ? { priority: opts.priority } : {}),
+    }, token),
+  // Employee "My Learning" — only their own enrollments. Backend caps at 200.
+  getMyTraining: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/training/enrollments/my${qs ? '?' + qs : ''}`, token);
+  },
+  // Admin queue — all enrollments across the company, filterable.
+  getAllTrainingEnrollments: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/training/enrollments${qs ? '?' + qs : ''}`, token);
+  },
+  getTrainingEnrollment: (id, token) => api.get(`/training/enrollments/${id}`, token),
+  // Progress ping — called every ~10s by the player (YouTube / Vimeo IFrame
+  // API). Backend conditional UPDATE on status != COMPLETED so a stale
+  // ping can't move the row backwards, and the row is locked once complete.
+  updateTrainingProgress: (id, progressPct, lastWatchedSec, token) =>
+    api.put(`/training/enrollments/${id}/progress`, { progressPct, lastWatchedSec }, token),
+  // Manual mark-complete (employee for non-trackable providers, or admin
+  // override). 409 ENROLLMENT_LOCKED if the row is already COMPLETED.
+  markTrainingComplete: (id, note, token) =>
+    api.put(`/training/enrollments/${id}/complete`, note ? { note } : {}, token),
 };

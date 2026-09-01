@@ -26,6 +26,12 @@ const dprRoutes = require('./routes/dpr');
 const inspectionRoutes = require('./routes/inspection');
 // Round-13: Leave Request workflow (employee submit / admin approve-reject).
 const leaveRoutes = require('./routes/leave');
+// Round-14: Employee Training — admin assigns external courses (LinkedIn,
+// Coursera, Udemy, YouTube, Vimeo, etc.), employees watch in-platform with
+// auto progress capture via the YouTube / Vimeo IFrame APIs. Writes
+// (course CRUD, bulk-assign, progress pings) are rate-limited by
+// trainingWriteLimiter inside the route file; reads are not throttled.
+const trainingRoutes = require('./routes/training');
 const contactRoutes = require('./routes/contact');
 const diagRoutes = require('./routes/diag'); // Round-8: diagnostic endpoint (intentionally retained for ops — gated by admin auth)
 const {
@@ -203,6 +209,11 @@ app.use('/api/attendance', attendanceRoutes);
 // route file (POST /) so it only throttles submissions — list/get/cancel
 // remain unthrottled. leaveCreateLimiter is imported above and exported.
 app.use('/api/leave', leaveRoutes);
+// Round-14: employee training. Same pattern as leave — write-limiter is
+// mounted inside the route file on POST/PUT only, so the dashboard reads
+// stay cheap. No body-limit override: payloads are tiny (one URL + small
+// metadata), well under the global 16kb default.
+app.use('/api/training', trainingRoutes);
 app.use('/api/dpr/sas-url', sasLimiter);
 // DPR mount opts in to a 1mb body limit (work entries + photo metadata
 // payloads can legitimately exceed the 16kb default).

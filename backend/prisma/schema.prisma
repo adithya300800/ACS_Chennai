@@ -30,6 +30,9 @@ model Employee {
   notifications        Notification[]
   leaveRequests        LeaveRequest[]       @relation("LeaveSubmitter")
   leaveReviewed        LeaveRequest[]       @relation("LeaveReviewer")
+  trainingCoursesCreated  TrainingCourse[]     @relation("CourseCreatedBy")
+  trainingEnrollments     TrainingEnrollment[] @relation("EnrollEmployee")
+  trainingAssignedByMe    TrainingEnrollment[] @relation("EnrollAssignedBy")
 
   @@map("employees")
 }
@@ -241,19 +244,24 @@ model Notification {
   type           String
   dprId          String?  @map("dpr_id")
   leaveRequestId String?  @map("leave_request_id")
+  trainingEnrollmentId String? @map("training_enrollment_id")
   message        String
   isRead         Boolean  @default(false) @map("is_read")
   createdAt      DateTime @default(now()) @map("created_at")
 
-  employee     Employee      @relation(fields: [employeeId], references: [id])
-  dpr          DPR?          @relation(fields: [dprId], references: [id])
-  leaveRequest LeaveRequest? @relation(fields: [leaveRequestId], references: [id], onDelete: SetNull)
+  employee            Employee            @relation(fields: [employeeId], references: [id])
+  dpr                 DPR?                @relation(fields: [dprId], references: [id])
+  leaveRequest        LeaveRequest?       @relation(fields: [leaveRequestId], references: [id], onDelete: SetNull)
+  trainingEnrollment  TrainingEnrollment? @relation(fields: [trainingEnrollmentId], references: [id], onDelete: SetNull)
 
   @@index([employeeId, createdAt])
   // Round-7: dpr relation is included in many read queries; index for joins.
   @@index([dprId])
   // Round-13: leave notifications join through leaveRequestId on the bell feed.
   @@index([leaveRequestId])
+  // Round-14 (training module): training notifications join through
+  // trainingEnrollmentId on the bell feed; mirror the leaveRequestId pattern.
+  @@index([trainingEnrollmentId])
   @@map("notification")
 }
 
@@ -304,4 +312,101 @@ model LeaveRequest {
   @@index([status, startDate])
   @@index([startDate, endDate])
   @@map("leave_request")
+}
+
+// ─────────────────────────────────────────────
+// Employee Training Module (Round-14)
+// ─────────────────────────────────────────────
+// Admin assigns external training courses (LinkedIn Learning, Coursera,
+// Udemy, YouTube, Vimeo, etc.) to one or more employees at once. Employees
+// watch the course embedded in the portal; the player captures watch
+// progress via the YouTube / Vimeo IFrame APIs and PATCHes it back to the
+// server every ~10s. Status auto-flips to COMPLETED when the player's
+// `ended` event fires (progress >= 100).
+//
+// Single video per course in v1 — adding multi-lesson courses later is a
+// purely additive schema change (insert a TrainingLesson table with a
+// `(courseId, order)` unique key and roll progress up from lessons to the
+// parent enrollment).
+//
+// Notification model gained a `trainingEnrollmentId` FK so the bell feed
+// shows "You have a new training: …" / "Training completed: …" entries
+// alongside the existing DPR + leave notifications.
+//
+// Indexes chosen for the hot reads:
+//   - employee "My Learning" hub → (employeeId, status)
+//   - admin dashboard "pending-by-status + due date" → (status, dueDate)
+//   - admin course catalog "active courses newest first" → (isArchived, createdAt)
+
+enum TrainingProvider {
+  YOUTUBE
+  VIMEO
+  LINKEDIN_LEARNING
+  COURSERA
+  UDEMY
+  OTHER
+}
+
+enum TrainingStatus {
+  ASSIGNED       // not yet started
+  IN_PROGRESS    // watched > 0% and < 100%
+  COMPLETED      // reached 100% (or manually marked by admin)
+}
+
+enum TrainingPriority {
+  LOW
+  NORMAL
+  HIGH
+}
+
+model TrainingCourse {
+  id           String           @id @default(uuid())
+  title        String           @db.VarChar(160)
+  description  String?
+  externalUrl  String           @db.VarChar(2048) @map("external_url")
+  provider     TrainingProvider
+  category     String?          @db.VarChar(60)
+  durationHint Int?             @map("duration_hint")
+  isArchived   Boolean          @default(false) @map("is_archived")
+  createdById  String           @map("created_by_id")
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+
+  createdBy   Employee             @relation("CourseCreatedBy", fields: [createdById], references: [id])
+  enrollments TrainingEnrollment[]
+
+  @@index([isArchived, createdAt])
+  @@index([provider])
+  @@map("training_course")
+}
+
+model TrainingEnrollment {
+  id             String           @id @default(uuid())
+  courseId       String           @map("course_id")
+  employeeId     String           @map("employee_id")
+  assignedById   String           @map("assigned_by_id")
+  assignedAt     DateTime         @default(now()) @map("assigned_at")
+  dueDate        DateTime?        @map("due_date") @db.Date
+  priority       TrainingPriority @default(NORMAL)
+  status         TrainingStatus   @default(ASSIGNED)
+  progressPct    Int              @default(0) @map("progress_pct")
+  lastWatchedSec Int              @default(0) @map("last_watched_sec")
+  startedAt      DateTime?        @map("started_at")
+  completedAt    DateTime?        @map("completed_at")
+  employeeNote   String?          @map("employee_note") @db.VarChar(500)
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  course        TrainingCourse @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  employee      Employee       @relation("EnrollEmployee", fields: [employeeId], references: [id])
+  assignedBy    Employee       @relation("EnrollAssignedBy", fields: [assignedById], references: [id])
+  notifications Notification[]
+
+  // A given employee can only have one enrollment per course — bulk-assign
+  // is idempotent on this pair (existing row is reused if present).
+  @@unique([courseId, employeeId])
+  @@index([employeeId, status])
+  @@index([status, dueDate])
+  @@index([assignedAt])
+  @@map("training_enrollment")
 }

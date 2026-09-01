@@ -19,6 +19,11 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- YouTube IFrame Player API — loaded once globally so VideoPlayer can
+         construct YT.Player on first YouTube course load. async + deferred
+         so it never blocks the React bundle. Vimeo API is lazy-loaded by
+         VideoPlayer only when needed. -->
+    <script src="https://www.youtube.com/iframe_api" defer></script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

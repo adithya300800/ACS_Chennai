@@ -21,6 +21,10 @@ import InspectionSubmit from './pages/portal/InspectionSubmit.jsx';
 import InspectionList from './pages/portal/InspectionList.jsx';
 import InspectionDetail from './pages/portal/InspectionDetail.jsx';
 import InspectionDashboard from './pages/admin/InspectionDashboard.jsx';
+import Training from './pages/portal/Training.jsx';
+import TrainingDetail from './pages/portal/TrainingDetail.jsx';
+import TrainingDashboard from './pages/admin/TrainingDashboard.jsx';
+import TrainingCourseNew from './pages/admin/TrainingCourseNew.jsx';
 
 function App() {
   const location = useLocation();
@@ -71,7 +75,15 @@ function App() {
           <Route path="inspection/my" element={<InspectionList />} />
           <Route path="inspection/:id" element={<InspectionDetail />} />
           <Route path="admin/inspection" element={<InspectionDashboard />} />
-          <Route path="training" element={<ComingSoon name="Training" />} />
+          {/* Round-14: Employee Training — employee hub, player page, and admin views.
+              /training            = employee "My Learning" hub
+              /training/:id        = single-course player page (employee owner only)
+              /admin/training      = admin dashboard (course library + enrollment queue)
+              /admin/training/new  = create course + bulk-assign */}
+          <Route path="training" element={<Training />} />
+          <Route path="training/:id" element={<TrainingDetail />} />
+          <Route path="admin/training" element={<TrainingDashboard />} />
+          <Route path="admin/training/new" element={<TrainingCourseNew />} />
           <Route path="assets" element={<ComingSoon name="Assets" />} />
           <Route path="" element={<Navigate to="attendance" replace />} />
         </Route>

@@ -2802,3 +2802,641 @@ footer {
   .leave-list-side { align-items: flex-start; width: 100%; }
   .leave-list-actions { width: 100%; }
 }
+
+/* ============================================================ */
+/* === TRAINING MODULE — Round 14                          === */
+/* ============================================================ */
+
+/* Tokens — defer to the design system where possible, only define what
+   the training-specific surfaces need. */
+
+.training-page {
+  padding: 1.5rem 2rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.training-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+}
+.training-page-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--navy, #0a2540);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+.training-page-sub {
+  color: var(--steel, #5b6b7c);
+  font-size: 0.9375rem;
+  margin: 0.25rem 0 0;
+}
+
+/* KPI strip — mirrors the leave-dashboard tiles */
+.training-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+.training-stats-admin {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.training-stat {
+  background: #fff;
+  border: 1px solid var(--border, #e5ebf0);
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  transition: border-color 0.15s ease;
+}
+.training-stat-num {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--navy, #0a2540);
+  line-height: 1.1;
+}
+.training-stat-label {
+  color: var(--steel, #5b6b7c);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.training-stat-warn {
+  border-color: #f59e0b;
+  background: #fffaf0;
+}
+.training-stat-warn .training-stat-num {
+  color: #b45309;
+}
+
+/* Filter tabs — same visual as the leave/admin module */
+.training-tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border, #e5ebf0);
+  margin-bottom: 1rem;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.training-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0.625rem 1rem;
+  font-size: 0.9375rem;
+  color: var(--steel, #5b6b7c);
+  cursor: pointer;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+  transition: color 0.15s ease, border-color 0.15s ease;
+  font-family: inherit;
+}
+.training-tab:hover {
+  color: var(--navy, #0a2540);
+}
+.training-tab.active {
+  color: var(--blue, #2563eb);
+  border-bottom-color: var(--blue, #2563eb);
+}
+.training-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.5rem;
+  height: 1.25rem;
+  padding: 0 0.375rem;
+  background: var(--border, #e5ebf0);
+  color: var(--steel, #5b6b7c);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.training-tab.active .training-tab-count {
+  background: var(--blue, #2563eb);
+  color: #fff;
+}
+
+/* Active-filter callout (when admin narrows to one course) */
+.training-active-filter {
+  font-size: 0.875rem;
+  color: var(--steel, #5b6b7c);
+  padding: 0.5rem 0;
+  margin-bottom: 0.5rem;
+}
+.training-link-btn {
+  background: none;
+  border: none;
+  color: var(--blue, #2563eb);
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+/* Section header (Course library / Enrollment queue) */
+.training-section {
+  margin-bottom: 2rem;
+}
+.training-section-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--navy, #0a2540);
+  margin: 0 0 0.75rem;
+}
+
+/* Card list */
+.training-list-card {
+  background: #fff;
+  border: 1px solid var(--border, #e5ebf0);
+  border-radius: 12px;
+  padding: 0.25rem 0;
+  overflow: hidden;
+}
+.training-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.training-list-state,
+.training-list-error {
+  padding: 2rem;
+  text-align: center;
+  color: var(--steel, #5b6b7c);
+  font-size: 0.9375rem;
+}
+.training-list-error {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+.training-list-state a {
+  color: var(--blue, #2563eb);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.training-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border, #e5ebf0);
+  transition: background 0.12s ease;
+}
+.training-card:last-child {
+  border-bottom: none;
+}
+.training-card:hover {
+  background: #fafbfc;
+}
+
+.training-card-main {
+  flex: 1;
+  min-width: 0;
+}
+.training-card-side {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.training-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  margin-bottom: 0.25rem;
+  flex-wrap: wrap;
+}
+.training-card-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--navy, #0a2540);
+  margin: 0;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+}
+.training-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  font-size: 0.8125rem;
+  color: var(--steel, #5b6b7c);
+  align-items: center;
+}
+.training-card-meta-row-2 {
+  margin-top: 0.125rem;
+}
+.training-card-dot {
+  color: var(--border, #e5ebf0);
+}
+.training-card-provider {
+  font-weight: 500;
+}
+.training-card-due-overdue {
+  color: #b45309;
+  font-weight: 600;
+}
+.training-card-desc {
+  font-size: 0.875rem;
+  color: var(--steel, #5b6b7c);
+  margin-top: 0.375rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.training-card-priority {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.125rem 0.375rem;
+  border-radius: 4px;
+}
+.training-card-priority-high {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.training-card-priority-low {
+  background: #f1f5f9;
+  color: #475569;
+}
+.training-card-priority-normal {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.training-card-employee-email {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 0.75rem;
+  color: var(--steel, #5b6b7c);
+}
+
+/* Progress bar */
+.training-progress {
+  position: relative;
+  height: 6px;
+  background: var(--border, #e5ebf0);
+  border-radius: 999px;
+  margin-top: 0.625rem;
+  overflow: hidden;
+}
+.training-progress-large {
+  height: 8px;
+  margin-top: 0.75rem;
+}
+.training-progress-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, var(--blue, #2563eb), #60a5fa);
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+.training-progress-label {
+  position: absolute;
+  right: 0;
+  top: -1.125rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--steel, #5b6b7c);
+}
+.training-progress-large .training-progress-label {
+  font-size: 0.8125rem;
+  top: -1.375rem;
+}
+
+/* Status pills */
+.training-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1875rem 0.5rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.training-pill-assigned {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.training-pill-in_progress {
+  background: #fef3c7;
+  color: #b45309;
+}
+.training-pill-completed {
+  background: #d1fae5;
+  color: #047857;
+}
+.training-pill-archived {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+/* Buttons */
+.training-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.5rem 0.875rem;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+  text-decoration: none;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+  white-space: nowrap;
+}
+.training-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.training-btn-primary {
+  background: var(--blue, #2563eb);
+  color: #fff;
+}
+.training-btn-primary:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+.training-btn-ghost {
+  background: transparent;
+  color: var(--navy, #0a2540);
+  border-color: var(--border, #e5ebf0);
+}
+.training-btn-ghost:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+.training-btn-back {
+  padding: 0.375rem 0.625rem;
+  font-weight: 500;
+}
+
+/* Detail page */
+.training-detail-page {
+  max-width: 960px;
+}
+.training-detail-header {
+  margin-bottom: 1rem;
+}
+.training-detail-meta {
+  margin-bottom: 1.25rem;
+}
+.training-detail-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--navy, #0a2540);
+  margin: 0 0 0.5rem;
+  line-height: 1.2;
+}
+.training-detail-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.9375rem;
+  color: var(--steel, #5b6b7c);
+}
+.training-detail-divider {
+  color: var(--border, #e5ebf0);
+}
+
+/* Player region */
+.training-player-region {
+  margin-bottom: 0.5rem;
+}
+.training-player-wrap {
+  position: relative;
+  width: 100%;
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+}
+.training-player-frame {
+  position: relative;
+  width: 100%;
+  padding-top: 56.25%; /* 16:9 */
+}
+.training-player-frame > div {
+  position: absolute;
+  inset: 0;
+}
+.training-player-yt,
+.training-player-vimeo {
+  width: 100%;
+  height: 100%;
+}
+.training-player-yt iframe,
+.training-player-vimeo iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+.training-player-error {
+  padding: 2rem;
+  background: #fef2f2;
+  color: #b91c1c;
+  border-radius: 12px;
+  text-align: center;
+  font-weight: 500;
+}
+
+.training-player-external {
+  background: linear-gradient(135deg, #eff6ff, #f8fafc);
+  border: 1px dashed var(--border, #e5ebf0);
+  border-radius: 12px;
+  padding: 2.5rem 2rem;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.625rem;
+}
+.training-player-external-icon {
+  color: var(--blue, #2563eb);
+}
+.training-player-external-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--navy, #0a2540);
+}
+.training-player-external-sub {
+  font-size: 0.9375rem;
+  color: var(--steel, #5b6b7c);
+  max-width: 480px;
+  line-height: 1.5;
+}
+.training-player-external .training-btn-primary {
+  margin-top: 0.5rem;
+}
+
+/* Action row */
+.training-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+.training-detail-completed {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: #d1fae5;
+  color: #047857;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.9375rem;
+}
+.training-detail-ping {
+  font-size: 0.8125rem;
+  color: var(--steel, #5b6b7c);
+  font-style: italic;
+}
+.training-detail-section {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border, #e5ebf0);
+}
+.training-detail-description {
+  color: var(--steel, #5b6b7c);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  margin: 0;
+}
+
+/* New course form */
+.training-new-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+.training-form-card {
+  background: #fff;
+  border: 1px solid var(--border, #e5ebf0);
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+}
+.training-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+.training-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin-bottom: 0.875rem;
+}
+.training-field:last-child {
+  margin-bottom: 0;
+}
+.training-field label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--navy, #0a2540);
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.training-counter {
+  font-size: 0.75rem;
+  color: var(--steel, #5b6b7c);
+  font-weight: 400;
+}
+.training-hint {
+  font-size: 0.75rem;
+  color: var(--steel, #5b6b7c);
+  font-weight: 400;
+}
+.training-field-detected {
+  font-size: 0.8125rem;
+  color: var(--blue, #2563eb);
+  margin-top: 0.125rem;
+}
+.training-field input,
+.training-field textarea,
+.training-field select {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border, #e5ebf0);
+  border-radius: 8px;
+  font-size: 0.9375rem;
+  font-family: inherit;
+  background: #fff;
+  color: var(--navy, #0a2540);
+  width: 100%;
+  box-sizing: border-box;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.training-field input:focus,
+.training-field textarea:focus,
+.training-field select:focus {
+  outline: none;
+  border-color: var(--blue, #2563eb);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+.training-form-error {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+}
+.training-form-actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+.training-emails-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-top: 0.375rem;
+}
+.training-email-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1875rem 0.5rem;
+  background: #eff6ff;
+  color: #1d4ed8;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+}
+.training-email-chip-more {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+/* === TRAINING RESPONSIVE === */
+@media (max-width: 768px) {
+  .training-page { padding: 1rem; }
+  .training-stats { grid-template-columns: repeat(3, 1fr); }
+  .training-stats-admin { grid-template-columns: repeat(2, 1fr); }
+  .training-card { flex-direction: column; align-items: stretch; }
+  .training-card-side { justify-content: flex-start; }
+  .training-form-row { grid-template-columns: 1fr; }
+}
