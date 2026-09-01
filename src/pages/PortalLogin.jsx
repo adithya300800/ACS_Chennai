@@ -94,7 +94,7 @@ export default function PortalLogin() {
     setErrorMsg('');
 
     try {
-      const data = await login(form.email, form.password);
+      const employee = await login(form.email, form.password);
       // Clear dedupe keys for the new session — so a future session-expiry
       // toast can fire again.
       try {
@@ -103,7 +103,7 @@ export default function PortalLogin() {
         });
       } catch {}
       // P0/A-02: branch landing on role post-auth.
-      const landing = data?.employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
+      const landing = employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
       navigate(landing);
     } catch (err) {
       setStatus('error');
