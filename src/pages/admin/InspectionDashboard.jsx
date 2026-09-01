@@ -83,18 +83,18 @@ export default function InspectionDashboard() {
   const [filterTo, setFilterTo] = useState('');
   const [stats, setStats] = useState({ open: 0, closedWeek: 0, today: 0, total: 0 });
 
-  // Round-17 B-06: bulk-select state for the inspection admin queue. Only
-  // reviewable statuses (SUBMITTED / UNDER_REVIEW) can be selected — once an
-  // inspection is ACKNOWLEDGED/IN_PROGRESS/PENDING_VERIFICATION/CLOSED/
-  // REJECTED, it's out of the bulk-action lane. The selectable list is
-  // computed from the loaded inspections on every render.
+  // Round-17 B-06: bulk-select state for the inspection admin queue. The
+  // inspection status enum is OPEN / ACKNOWLEDGED / IN_PROGRESS /
+  // PENDING_VERIFICATION / CLOSED / REJECTED (schema.prisma). Admin actions
+  // (acknowledge / close / reject) only allow OPEN as a starting point;
+  // the backend's REJECT_FROM set also covers IN_PROGRESS / PENDING_VERIFICATION.
+  // Mirror that here so the checkbox only appears where bulk review is legal.
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
   const [bulkRejectReason, setBulkRejectReason] = useState('');
 
-  const selectableInspections = inspections.filter(
-    (i) => i.status === 'SUBMITTED' || i.status === 'UNDER_REVIEW'
-  );
+  const REVIEWABLE_STATUSES = new Set(['OPEN', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
+  const selectableInspections = inspections.filter((i) => REVIEWABLE_STATUSES.has(i.status));
   const selectableIds = selectableInspections.map((i) => i.id);
   const allSelected =
     selectableIds.length > 0 &&
@@ -345,7 +345,7 @@ export default function InspectionDashboard() {
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem' }}>
           {inspections.map((insp) => {
-            const isSelectable = insp.status === 'SUBMITTED' || insp.status === 'UNDER_REVIEW';
+            const isSelectable = REVIEWABLE_STATUSES.has(insp.status);
             const isSelected = selectedIds.has(insp.id);
             return (
             <Link
