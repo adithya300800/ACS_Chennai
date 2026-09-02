@@ -1,11 +1,12 @@
 import React, { useEffect, Suspense } from 'react';
-import { Routes, Route, useLocation, Navigate } from 'react-router-dom';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import Header from './components/Header.jsx';
 import Footer from './components/Footer.jsx';
 import ScrollToTop from './components/ScrollToTop.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import PortalLayout from './components/PortalLayout.jsx';
 import PageLoader from './components/PageLoader.jsx';
+import RoleBranchLanding from './components/RoleBranchLanding.jsx';
 // G-03: route-level code splitting. Every page-level component is lazy-loaded
 // so the initial bundle ships only the shell + auth/portal chrome. Each route
 // pulls its own chunk on first navigation.
@@ -107,8 +108,10 @@ function App() {
           <Route path="admin/training" element={<TrainingDashboard />} />
           <Route path="admin/training/new" element={<TrainingCourseNew />} />
           <Route path="assets" element={<ComingSoon name="Assets" />} />
-          {/* P0/A-02: landing branches on role. Employees → Attendance; admins → Admin Overview. */}
-          <Route path="" element={<RoleBranchLanding />} />
+          {/* P0/A-02: landing branches on role. Employees → Attendance; admins → Admin Overview.
+              DR-020: RoleBranchLanding now reads role from AuthContext (not the stale
+              acs_employee localStorage key). */}
+          <Route path="" element={<RoleBranchLanding renderAdmin={() => <AdminOverview />} />} />
         </Route>
 
         {/* Public routes with header/footer */}
@@ -141,21 +144,10 @@ function App() {
   );
 }
 
-// P0/A-02: branches /portal/ (empty path) to Admin Overview for admins and
-// Attendance for employees. Lives here because the redirect target must be
-// rendered under <PortalLayout> (auth-gated), not the public tree.
-function RoleBranchLanding() {
-  // useAuth is provided via ProtectedRoute → PortalLayout → Outlet tree,
-  // but this component is rendered as a sibling of <PortalLayout> so it
-  // can't read context. Use the localStorage hint as a minimal signal —
-  // if employee missing or not admin, default to Attendance.
-  let isAdmin = false;
-  try {
-    const raw = localStorage.getItem('acs_employee');
-    if (raw) isAdmin = !!(JSON.parse(raw)?.isAdmin);
-  } catch (e) { /* ignore parse errors */ }
-  return isAdmin ? <AdminOverview /> : <Navigate to="attendance" replace />;
-}
+// P0/A-02: branches /portal/ (empty path) for admins vs employees. The
+// role-branch component lives in src/components/RoleBranchLanding.jsx so
+// the routing rule can be unit-tested without importing the full App
+// dependency graph. See that file for the DR-020 fix notes.
 
 // Round-17 C-14: the inline ComingSoon component was hoisted into
 // src/components/ComingSoon.jsx so the Assets stub and any future "Soon"
