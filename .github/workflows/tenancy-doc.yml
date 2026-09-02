@@ -1,0 +1,45 @@
+# Cheap guardrail for the single-tenant declaration (DR-019 / TENANCY.md).
+#
+# Asserts that TENANCY.md exists at the repo root and still references ACS.
+# Deleting the doc, renaming it, or stripping the ACS reference all require
+# deliberate removal of this workflow too — which surfaces the change in a PR.
+#
+# Runs once per push. Cheap (no checkout artifacts, no Node setup) so it
+# stays under a second on the actions runner.
+
+name: Tenancy doc guardrail
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-tenancy-doc:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assert TENANCY.md exists
+        run: |
+          if [ ! -f TENANCY.md ]; then
+            echo "::error::TENANCY.md is missing from the repo root. The portal is single-tenant — see TENANCY.md and the round-20 DR-019 decision before adding a second organization."
+            exit 1
+          fi
+          echo "TENANCY.md present."
+
+      - name: Assert TENANCY.md still references ACS
+        # The word "ACS" (case-insensitive) anchors the doc to the
+        # ACS Chennai org. A future engineer renaming / rewriting
+        # the doc must keep "ACS" somewhere — at which point the
+        # intent is visible in the PR diff. Use grep -i (case-
+        # insensitive) so accidental case edits don't false-fail.
+        run: |
+          if ! grep -qi 'ACS' TENANCY.md; then
+            echo "::error::TENANCY.md no longer contains the ACS reference. The portal's single-tenant declaration must name the organization it serves."
+            exit 1
+          fi
+          echo "ACS reference present in TENANCY.md."

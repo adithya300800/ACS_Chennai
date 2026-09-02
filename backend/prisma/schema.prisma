@@ -1,3 +1,7 @@
+// SINGLE-TENANT: ACS Chennai employee portal. See TENANCY.md before
+// adding any field that scopes by organization/project — every query,
+// storage path, OAuth admission, and admin predicate must filter.
+
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
