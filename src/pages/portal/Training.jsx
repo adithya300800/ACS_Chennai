@@ -53,7 +53,7 @@ const TrainingStatusPill = ({ status }) => {
 };
 
 export default function Training() {
-  useDocumentTitle('My Learning');
+  useDocumentTitle('My Training');
   const { accessToken } = useAuth();
   const { push } = useToast();
 
@@ -100,7 +100,7 @@ export default function Training() {
     <div className="training-page">
       <div className="training-page-header">
         <div>
-          <h1 className="training-page-title">My Learning</h1>
+          <h1 className="training-page-title">My Training</h1>
           <p className="training-page-sub">Watch assigned courses and track your progress</p>
         </div>
       </div>

@@ -1,15 +1,60 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { api } from '../../lib/api.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // P0/A-01: real admin overview — cross-module tiles linking into the
 // four admin review queues. Keeps the existing /portal/admin/attendance
 // route (org-wide attendance grid) untouched; admins reach it via the
 // "All Attendance" tile.
+//
+// R19 P1#13: each review tile shows a live count of items needing attention
+// (submitted DPRs, open inspections, pending leave). Counts fire in parallel
+// on mount, refresh when the page becomes visible again (so a quick
+// review + back shows the cleared count without a manual reload).
 export default function AdminOverview() {
   useDocumentTitle('Admin Overview');
-  const { employee } = useAuth();
+  const { employee, accessToken } = useAuth();
+  const [counts, setCounts] = useState({
+    dpr: null,        // SUBMITTED reports
+    inspection: null, // OPEN records
+    leave: null,      // PENDING requests
+    training: null,   // total active courses
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadCounts = async () => {
+      try {
+        // The list endpoints cap at 100 items. For the overview badge this is
+        // a reasonable upper bound — we render "100+" if a queue exceeds it
+        // (very unlikely at this scale, and the user can click through to
+        // the full queue anyway).
+        const [dprRes, insRes, leaveRes, courseRes] = await Promise.all([
+          api.getDprs({ status: 'SUBMITTED', limit: '100' }, accessToken).catch(() => ({ dprs: [] })),
+          api.getInspections({ status: 'OPEN', limit: '100' }, accessToken).catch(() => ({ inspections: [] })),
+          api.getAllLeaves({ status: 'PENDING' }, accessToken).catch(() => ({ requests: [] })),
+          api.getTrainingCourses({ isArchived: 'false' }, accessToken).catch(() => ({ courses: [] })),
+        ]);
+        if (cancelled) return;
+        setCounts({
+          dpr: dprRes.dprs?.length ?? 0,
+          inspection: insRes.inspections?.length ?? 0,
+          leave: leaveRes.requests?.length ?? 0,
+          training: courseRes.courses?.length ?? 0,
+        });
+      } catch {
+        // counts are best-effort — never block the page from rendering
+      }
+    };
+    loadCounts();
+    // Refresh when the tab regains focus so admins coming back from a
+    // review see the updated pending counts without a manual reload.
+    const onVis = () => { if (document.visibilityState === 'visible') loadCounts(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { cancelled = true; document.removeEventListener('visibilitychange', onVis); };
+  }, [accessToken]);
 
   // Group tiles by what admins do with them.
   const personalTiles = [
@@ -29,6 +74,8 @@ export default function AdminOverview() {
       title: 'Daily Reports to Review',
       sub: 'Field reports queue',
       desc: 'Approve or reject Daily Progress Reports submitted across all projects.',
+      badge: counts.dpr,
+      badgeLabel: counts.dpr === 1 ? 'pending' : 'pending',
     },
     {
       to: '/portal/admin/inspection',
@@ -36,6 +83,8 @@ export default function AdminOverview() {
       title: 'Inspections to Review',
       sub: 'Compliance records queue',
       desc: 'Review inspection & compliance records — material receipts, cube tests, NCRs, safety violations.',
+      badge: counts.inspection,
+      badgeLabel: 'open',
     },
   ];
 
@@ -46,6 +95,8 @@ export default function AdminOverview() {
       title: 'Leave Approvals',
       sub: 'HR workflow',
       desc: 'Approve or reject leave requests across the team.',
+      badge: counts.leave,
+      badgeLabel: 'pending',
     },
     {
       to: '/portal/admin/training',
@@ -53,6 +104,8 @@ export default function AdminOverview() {
       title: 'Training Library',
       sub: 'Course & enrollment management',
       desc: 'Create training courses, assign to employees, override-complete enrollments.',
+      badge: counts.training,
+      badgeLabel: 'courses',
     },
   ];
 
@@ -103,8 +156,25 @@ function TileSection({ title, tiles }) {
               color: 'inherit',
               display: 'block',
               transition: 'transform 0.15s, box-shadow 0.15s',
+              position: 'relative',
             }}
           >
+            {/* R19 P1#13: workload badge — shows pending count if known,
+                hidden while loading (null). Grey dot for non-actionable
+                totals (e.g. course count); red dot for queues that need
+                admin action. "100+" suffix when the API cap was hit. */}
+            {t.badge !== null && t.badge !== undefined && (
+              <div
+                className={`admin-overview-badge ${t.badge > 0 ? 'admin-overview-badge-action' : 'admin-overview-badge-quiet'}`}
+                aria-label={`${t.badge} ${t.badgeLabel}`}
+                title={`${t.badge} ${t.badgeLabel}`}
+              >
+                <span className="admin-overview-badge-number">
+                  {t.badge >= 100 ? '100+' : t.badge}
+                </span>
+                <span className="admin-overview-badge-label">{t.badgeLabel}</span>
+              </div>
+            )}
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.875rem' }}>
               <div style={{
                 fontSize: '1.75rem',
@@ -116,7 +186,7 @@ function TileSection({ title, tiles }) {
               }}>
                 {t.icon}
               </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ flex: 1, minWidth: 0, paddingRight: t.badge ? '3rem' : 0 }}>
                 <div style={{
                   fontFamily: "'Plus Jakarta Sans', sans-serif",
                   fontWeight: 700,

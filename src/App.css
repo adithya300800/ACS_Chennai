@@ -961,7 +961,9 @@ footer {
   .footer-grid { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 768px) {
-  nav a:not(.nav-cta) { display: none; }
+  /* Scope public-site nav rules to header so they don't bleed into portal
+     sidebar nav (PortalLayout.jsx) or bottom tab bar (mobile employees). */
+  header nav a:not(.nav-cta) { display: none; }
   .container { padding: 0 1rem; }
   .section { padding: 3.5rem 0; }
   .contact-split { grid-template-columns: 1fr; }
@@ -971,7 +973,7 @@ footer {
   .form-row { grid-template-columns: 1fr; }
   .footer-grid { grid-template-columns: 1fr 1fr; }
   .mobile-menu-toggle { display: flex; }
-  nav.mobile-open {
+  header nav.mobile-open {
     position: fixed;
     top: 60px;
     left: 0;
@@ -983,17 +985,17 @@ footer {
     z-index: 99;
     gap: 0.25rem;
   }
-  nav.mobile-open a {
+  header nav.mobile-open a {
     display: block !important;
     padding: 0.75rem 1rem;
   }
-  nav.mobile-open a.active {
+  header nav.mobile-open a.active {
     background: rgba(0,102,255,0.08);
     border-bottom: none;
     border-left: 3px solid var(--blue);
     border-radius: 6px;
   }
-  nav.mobile-open .nav-cta {
+  header nav.mobile-open .nav-cta {
     margin-left: 0;
     margin-top: 0.5rem;
     text-align: center;
@@ -3738,6 +3740,10 @@ footer {
   text-decoration: none;
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
   white-space: nowrap;
+  /* Don't let a flex parent (e.g. .training-page-header with space-between)
+     compress the button below its intrinsic content width — was truncating
+     "Cancel" → "Cance" when sibling took most of the row. */
+  flex-shrink: 0;
 }
 .training-btn:disabled {
   opacity: 0.55;
@@ -4020,6 +4026,24 @@ footer {
   .training-card { flex-direction: column; align-items: stretch; }
   .training-card-side { justify-content: flex-start; }
   .training-form-row { grid-template-columns: 1fr; }
+  /* P1#11: section jump-pills on DPR / Inspection submit forms. Compact on
+     mobile — slightly smaller text + horizontal scroll instead of multi-row
+     wrap so the sticky bar stays a single thin row above the form. */
+  .section-skip-nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 0.5rem 0.75rem;
+    gap: 0.375rem;
+  }
+  .section-skip-nav ul {
+    flex-wrap: nowrap;
+  }
+  .section-skip-nav a {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
 }
 
 /* === A11Y: REDUCED MOTION (WCAG 2.3.3 Animation from Interactions, Level AAA) ===
@@ -4242,4 +4266,59 @@ footer {
   font-size: 12px;
   overflow-x: auto;
   color: #fca5a5;
+}
+
+/* === ADMIN OVERVIEW BADGE (R19 P1#13) ===
+   Workload count chip in the top-right of each review tile on the admin
+   overview. Two states: action (queue has pending work, red dot) and
+   quiet (totals like course count, or zero pending, grey). */
+.admin-overview-badge {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.admin-overview-badge-action {
+  background: var(--danger-bg, #fef2f2);
+  color: var(--danger, #dc2626);
+  border: 1px solid #fecaca;
+}
+.admin-overview-badge-quiet {
+  background: #f1f5f9;
+  color: var(--steel, #475569);
+  border: 1px solid var(--border, #e5ebf0);
+}
+.admin-overview-badge-number {
+  font-size: 0.85rem;
+  font-weight: 800;
+}
+.admin-overview-badge-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+}
+@media (max-width: 480px) {
+  .admin-overview-badge {
+    top: 8px;
+    right: 8px;
+    padding: 0.15rem 0.45rem;
+  }
+  .admin-overview-badge-number {
+    font-size: 0.78rem;
+  }
+  .admin-overview-badge-label {
+    font-size: 0.6rem;
+  }
 }

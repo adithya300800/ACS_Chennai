@@ -248,7 +248,7 @@ export default function InspectionDashboard() {
         </div>
       </div>
 
-      <div className="dpr-stats-grid">
+      <div className="dpr-dashboard-stats">
         <StatCard number={stats.open} label="Open" color="#dc2626" />
         <StatCard number={stats.today} label="Filed Today" color="#2563eb" />
         <StatCard number={stats.closedWeek} label="Closed" color="#16a34a" />

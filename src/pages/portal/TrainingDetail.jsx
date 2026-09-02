@@ -175,7 +175,7 @@ export default function TrainingDetail() {
           onClick={() => navigate('/portal/training')}
           style={{ marginBottom: 12 }}
         >
-          ← Back to My Learning
+          ← Back to My Training
         </button>
         <div className="training-list-error" role="alert">
           {error || 'Course not found.'}
@@ -195,14 +195,14 @@ export default function TrainingDetail() {
             <line x1="19" y1="12" x2="5" y2="12" />
             <polyline points="12 19 5 12 12 5" />
           </svg>
-          Back to My Learning
+          Back to My Training
         </Link>
       </div>
 
       {/* Round-17 B-03: breadcrumb above the H1. Last item is current page (no `to`). */}
       <Breadcrumb
         items={[
-          { label: 'My Learning', to: '/portal/training' },
+          { label: 'My Training', to: '/portal/training' },
           { label: course.title || 'Untitled course' },
         ]}
       />
