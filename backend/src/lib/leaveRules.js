@@ -6,34 +6,50 @@
 
 'use strict';
 
+const { parseDateOnlyToUtc } = require('./dateOnly');
+
 const ALLOWED_LEAVE_TYPES = new Set(['CASUAL', 'SICK', 'EARNED', 'UNPAID', 'OPTIONAL']);
 const ALLOWED_LEAVE_STATUSES = new Set(['PENDING', 'APPROVED', 'REJECTED', 'CANCELLED']);
 
 // Parse a YYYY-MM-DD (or full ISO with time, but only the date matters)
-// into a local-midnight Date. Returns null on invalid input.
+// into a UTC-midnight Date. Returns null on invalid input.
 //
-// Important: this uses the server's LOCAL TZ (which is Asia/Kolkata per
-// index.js). `new Date('2026-08-30')` parses as UTC midnight in V8 — that
-// shifts the day bucket backward 5h30m from IST midnight, which is the
-// off-by-one bug the existing `parseLocalDate` helper in attendance.js
-// was written to avoid. We mirror that pattern.
+// DR-023: the previous implementation returned local-midnight Dates
+// (`new Date(y, mo-1, d)`). With `process.env.TZ = 'Asia/Kolkata'` set in
+// src/index.js, that produces IST-midnight instants like
+// `2026-08-30T00:00:00+05:30` (= `2026-08-29T18:30:00Z`). Prisma 5.22
+// serializes Date → @db.Date via `toISOString()` and reads `2026-08-29`,
+// off by one calendar day from what the user typed. The new path goes
+// through `parseDateOnlyToUtc` so the same canonical UTC-midnight Date
+// is returned everywhere in the app.
+//
+// DR-031 will revisit the overlap predicates that consume these Dates —
+// the half-open semantics question (gte/lte vs gte/lt) is a separate
+// audit. The Date SHAPE returned here is unchanged; only the encoding
+// is now UTC midnight.
 function parseLeaveDate(input) {
   if (input == null) return null;
   if (input instanceof Date) {
     if (Number.isNaN(input.getTime())) return null;
-    return new Date(input.getFullYear(), input.getMonth(), input.getDate());
+    // Normalize a Date to its UTC calendar day. The previous shape
+    // returned local-midnight; callers that compared two parseLeaveDate
+    // outputs via `Date.getTime()` are unaffected because both sides are
+    // normalized the same way.
+    return new Date(Date.UTC(
+      input.getUTCFullYear(),
+      input.getUTCMonth(),
+      input.getUTCDate()
+    ));
   }
   if (typeof input !== 'string') return null;
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(input.trim());
   if (!m) return null;
-  const y = Number(m[1]);
-  const mo = Number(m[2]);
-  const d = Number(m[3]);
-  if (mo < 1 || mo > 12) return null;
-  // Use the calendar's last-day check to reject 2026-02-30 etc.
-  const last = new Date(y, mo, 0).getDate();
-  if (d < 1 || d > last) return null;
-  return new Date(y, mo - 1, d);
+  try {
+    // Delegate validation + encoding to the canonical helper.
+    return parseDateOnlyToUtc(input.trim());
+  } catch (_e) {
+    return null;
+  }
 }
 
 // Inclusive day count for the leave window. Used in dayCount summaries.

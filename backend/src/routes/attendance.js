@@ -4,46 +4,12 @@ const { requireAuth } = require('../middleware/auth');
 const { buildTimesheetRows, TIMESHEET_COLUMNS } = require('../lib/timesheet');
 const { pickWriter } = require('../lib/excelWriter');
 const { hashIdentifier } = require('../lib/pii');
-
-// Helper: Get local start and end of a month (YYYY-MM format) for the
-// configured timezone (Asia/Kolkata; set in src/index.js). Returns the
-// full month inclusive of the last day's last millisecond.
-function getMonthRange(yearMonth) {
-  const [year, month] = yearMonth.split('-').map(Number);
-  // Local-time constructors — `Date.UTC(...)` would compute a UTC boundary
-  // and miss / double-count days for users east of UTC. Once TZ=Asia/Kolkata
-  // is set in src/index.js, "local midnight" IS IST midnight.
-  const startDate = new Date(year, month - 1, 1, 0, 0, 0, 0);
-  // Last day of (year, month) at 23:59:59.999 local — `new Date(y, m, 0)`
-  // is the last day of the previous index, so passing the input month
-  // (1-indexed in the query string) gives the last day of the queried
-  // month, which is what `lte` needs to be inclusive.
-  const endDate = new Date(year, month, 0, 23, 59, 59, 999);
-  return { startDate, endDate };
-}
-
-// Helper: Parse YYYY-MM-DD string to local midnight for storage.
-// Once TZ=Asia/Kolkata is set in src/index.js, "local midnight" IS
-// IST midnight — matching the calendar day the user clicked.
-function parseLocalDate(dateStr) {
-  const [year, month, day] = dateStr.split('-').map(Number);
-  return new Date(year, month - 1, day);
-}
-
-// Helper: Get date string YYYY-MM-DD from a Date object. Uses the server's
-// LOCAL timezone (which is Asia/Kolkata after src/index.js boots with
-// `process.env.TZ = 'Asia/Kolkata'`). Prisma reads `@db.Date` columns as
-// midnight-local JS Dates, so `getDate/getMonth/getFullYear` on a freshly
-// read row always returns the calendar day the user clicked — provided the
-// server's local TZ matches the user's calendar TZ (true for an Indian
-// workforce).
-function toLocalDateString(date) {
-  const d = new Date(date);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
+const {
+  parseDateOnlyToUtc,
+  getTodayBusinessDate,
+  getMonthRangeUtc,
+  formatDateOnly,
+} = require('../lib/dateOnly');
 
 // Helper: compute the attendance "day bucket" for a given instant, in the
 // user's own timezone (IANA name from `Intl.DateTimeFormat().resolvedOptions
@@ -57,10 +23,21 @@ function toLocalDateString(date) {
 // Round-14 lets the client send its IANA timezone so we extract the
 // calendar day in the user's frame instead.
 //
-// No data migration: existing rows retain their (potentially off-by-one) date
-// values. Only NEW check-ins go through this path. The recorded `checkIn`
-// instant (UTC) is unchanged either way — the fix is purely about which
-// calendar day the row is bucketed into.
+// DR-023: the returned Date is now ALWAYS UTC midnight of the resolved
+// calendar day, regardless of whether the IANA path or the fallback path
+// ran. This is the contract the canonical helper in lib/dateOnly.js
+// guarantees and is the fix for the IST off-by-one (00:30 IST check-ins
+// were being bucketed under the previous UTC date).
+//
+// TODO(DR-024): the IANA name is currently trusted from the client. That
+// trust boundary should be tightened (server-authoritative time, drop or
+// fully validate client-supplied `clientTimezone`). For DR-023, we only
+// fix the BUCKET encoding — we do not change WHO chooses the timezone.
+//
+// No data migration: existing rows retain their (potentially off-by-one)
+// date values. Only NEW check-ins go through this path. The recorded
+// `checkIn` instant (UTC) is unchanged either way — the fix is purely
+// about which calendar day the row is bucketed into.
 function computeLocalDate(instant, ianaTz) {
   if (typeof ianaTz === 'string' && ianaTz.length > 0 && ianaTz.length < 64) {
     try {
@@ -72,28 +49,23 @@ function computeLocalDate(instant, ianaTz) {
         day: '2-digit',
       });
       const parts = fmt.formatToParts(instant);
-      const y = parts.find((p) => p.type === 'year').value;
-      const m = parts.find((p) => p.type === 'month').value;
-      const d = parts.find((p) => p.type === 'day').value;
-      // Build a Date that Prisma's @db.Date will store as this calendar day
-      // regardless of the server's TZ. Using UTC midnight keeps the column
-      // value stable across deploys / TZ changes.
-      const utc = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d)));
+      const y = Number(parts.find((p) => p.type === 'year').value);
+      const m = Number(parts.find((p) => p.type === 'month').value);
+      const d = Number(parts.find((p) => p.type === 'day').value);
+      // DR-023: UTC midnight of the resolved calendar day — same encoding
+      // the helper layer guarantees everywhere else in this module.
+      const utc = new Date(Date.UTC(y, m - 1, d));
       if (!Number.isNaN(utc.getTime())) return utc;
     } catch (_e) {
       // Invalid IANA name (or Node Intl missing the tz database) — fall
       // through to the server-local computation.
     }
   }
-  return new Date(instant.getFullYear(), instant.getMonth(), instant.getDate());
-}
-
-// Helper: Get today's date in the server's local timezone for the
-// attendance-record day bucket. With TZ=Asia/Kolkata set in src/index.js,
-// this returns IST midnight today — matching the user's calendar.
-function getTodayLocalDate() {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  // Fallback: derive today in the server's configured business TZ (IST)
+  // and return its UTC midnight. DR-023 changes this from
+  // `new Date(y, m, d)` (local midnight) to the canonical helper so the
+  // bucket encoding matches the IANA path above.
+  return getTodayBusinessDate(instant);
 }
 
 // All routes require auth
@@ -109,24 +81,24 @@ router.get('/', async (req, res) => {
   }
 
   try {
-    const { startDate, endDate } = getMonthRange(month);
+    const { startDate, endDate } = getMonthRangeUtc(month);
 
     const records = await prisma.attendance.findMany({
       where: {
         employeeId: req.employeeId,
         date: {
           gte: startDate,
-          lte: endDate,
+          lt: endDate,
         },
       },
       include: { sessions: { orderBy: { checkIn: 'asc' } } },
       orderBy: { date: 'asc' },
     });
 
-    // Transform dates to local timezone strings for frontend
+    // Transform dates to YYYY-MM-DD strings (UTC components) for frontend
     const transformed = records.map(r => ({
       ...r,
-      date: toLocalDateString(r.date),
+      date: formatDateOnly(r.date),
       sessions: r.sessions.map(s => ({
         ...s,
         checkIn: s.checkIn ? s.checkIn.toISOString() : null,
@@ -146,16 +118,22 @@ router.get('/today', async (req, res) => {
   const prisma = req.app.get('prisma');
   const { localDate } = req.query;
 
-  // Use frontend-provided local date if available, otherwise fall back to server UTC date
+  // Resolve the bucket: use frontend-supplied YYYY-MM-DD if it parses,
+  // otherwise fall back to today in the business TZ (Asia/Kolkata).
+  // DR-023: both paths return UTC midnight so the lookup key matches
+  // what check-in writes (the previous local-midnight path was the
+  // IST off-by-one bug).
   let attendanceDate;
   if (localDate && /^\d{4}-\d{2}-\d{2}$/.test(localDate)) {
-    const [year, month, day] = localDate.split('-').map(Number);
-    // Local constructor — once TZ=Asia/Kolkata is set in src/index.js,
-    // this becomes IST midnight of the day the frontend sent (the user's
-    // browser-local day, also IST).
-    attendanceDate = new Date(year, month - 1, day);
+    try {
+      attendanceDate = parseDateOnlyToUtc(String(localDate));
+    } catch (_e) {
+      // Malformed date-only string from the client — fall back to today
+      // rather than 500ing. The frontend already gates this shape.
+      attendanceDate = getTodayBusinessDate();
+    }
   } else {
-    attendanceDate = getTodayLocalDate();
+    attendanceDate = getTodayBusinessDate();
   }
 
   try {
@@ -171,10 +149,10 @@ router.get('/today', async (req, res) => {
       return res.json(null);
     }
 
-    // Transform dates to local timezone strings
+    // Transform dates to YYYY-MM-DD strings (UTC components)
     const transformed = {
       ...record,
-      date: toLocalDateString(record.date),
+      date: formatDateOnly(record.date),
       sessions: record.sessions.map(s => ({
         ...s,
         checkIn: s.checkIn ? s.checkIn.toISOString() : null,
@@ -189,14 +167,35 @@ router.get('/today', async (req, res) => {
   }
 });
 
-// GET /api/attendance/status
+// GET /api/attendance/status?localDate=YYYY-MM-DD
 // P3: lightweight status ping (auth-required). Returns the current session status
 // (none / active / already-checked-out) without creating or modifying anything.
 // Express auto-handles HEAD on the same path (headers only).
+//
+// DR-023: accepts an optional `localDate` so the client can ask for a
+// specific calendar day (e.g. after a midnight rollover when the tab
+// regains focus). Defaults to today in the business TZ. All paths
+// produce UTC midnight so the lookup key matches /today and /check-in.
+//
+// DR-025: `record.sessions.find(s => !s.checkOut) || null` reads "the
+// session without a checkOut" — correct under the round-13 single-active-
+// session invariant, but a stale 0-checkOut session from a half-written
+// row could be reported here. DR-025 will tighten this with a DB-side
+// guard; for DR-023 we only fix the date key, not the session invariant.
 router.get('/status', async (req, res) => {
   const prisma = req.app.get('prisma');
   try {
-    const attendanceDate = getTodayLocalDate();
+    let attendanceDate;
+    const { localDate } = req.query;
+    if (localDate && /^\d{4}-\d{2}-\d{2}$/.test(localDate)) {
+      try {
+        attendanceDate = parseDateOnlyToUtc(String(localDate));
+      } catch (_e) {
+        attendanceDate = getTodayBusinessDate();
+      }
+    } else {
+      attendanceDate = getTodayBusinessDate();
+    }
     const record = await prisma.attendance.findFirst({
       where: { employeeId: req.employeeId, date: attendanceDate },
       include: { sessions: { orderBy: { checkIn: 'asc' } } },
@@ -330,7 +329,7 @@ router.post('/check-in', async (req, res) => {
     // Transform for frontend
     const transformed = {
       ...fullAttendance,
-      date: toLocalDateString(fullAttendance.date),
+      date: formatDateOnly(fullAttendance.date),
       sessions: fullAttendance.sessions.map(s => ({
         ...s,
         checkIn: s.checkIn ? s.checkIn.toISOString() : null,
@@ -428,7 +427,7 @@ router.put('/check-out/:sessionId', async (req, res) => {
       checkOut: updated.checkOut ? updated.checkOut.toISOString() : null,
       attendance: {
         ...updated.attendance,
-        date: toLocalDateString(updated.attendance.date),
+        date: formatDateOnly(updated.attendance.date),
         sessions: updated.attendance.sessions.map(s => ({
           ...s,
           checkIn: s.checkIn ? s.checkIn.toISOString() : null,
@@ -460,11 +459,11 @@ router.get('/all', async (req, res) => {
   }
 
   try {
-    const { startDate, endDate } = getMonthRange(month);
+    const { startDate, endDate } = getMonthRangeUtc(month);
 
     const records = await prisma.attendance.findMany({
       where: {
-        date: { gte: startDate, lte: endDate },
+        date: { gte: startDate, lt: endDate },
       },
       include: {
         employee: { select: { id: true, name: true, email: true, department: true } },
@@ -476,7 +475,7 @@ router.get('/all', async (req, res) => {
     // Transform dates for frontend
     const transformed = records.map(r => ({
       ...r,
-      date: toLocalDateString(r.date),
+      date: formatDateOnly(r.date),
       sessions: r.sessions.map(s => ({
         ...s,
         checkIn: s.checkIn ? s.checkIn.toISOString() : null,
@@ -532,7 +531,7 @@ router.get('/export', async (req, res) => {
   }
 
   try {
-    const { startDate, endDate } = getMonthRange(month);
+    const { startDate, endDate } = getMonthRangeUtc(month);
 
     // Filter to one employee if requested. Otherwise include everyone —
     // admins and non-admins both go in the timesheet.
@@ -550,19 +549,23 @@ router.get('/export', async (req, res) => {
 
     const attendanceRows = await prisma.attendance.findMany({
       where: {
-        date: { gte: startDate, lte: endDate },
+        // DR-023: half-open interval — `lt endDate` (first day of next
+        // month) keeps the last day of the queried month inclusive
+        // without a +1-ms hack that depends on server TZ.
+        date: { gte: startDate, lt: endDate },
         employeeId: { in: employees.map((e) => e.id) },
       },
       include: { sessions: { orderBy: { checkIn: 'asc' } } },
     });
 
-    // Pull APPROVED leave that overlaps the month. Overlap SQL:
-    //   startDate <= month-end AND endDate >= month-start
+    // Pull APPROVED leave that overlaps the month. Same half-open
+    // semantics on the @db.Date columns — `lt endDate` matches a leave
+    // whose startDate is the last day of the queried month.
     const leaveRows = await prisma.leaveRequest.findMany({
       where: {
         status: 'APPROVED',
         employeeId: { in: employees.map((e) => e.id) },
-        startDate: { lte: endDate },
+        startDate: { lt: endDate },
         endDate: { gte: startDate },
       },
       select: { id: true, employeeId: true, startDate: true, endDate: true, leaveType: true, status: true },

@@ -52,6 +52,25 @@ export default function Attendance() {
     try {
       const localDate = toDateString(new Date());
       const data = await api.get(`/attendance/today?localDate=${localDate}`, accessToken);
+      // DR-023: verify the server's `date` field actually matches the
+      // calendar day we asked for. After the backend refactor the
+      // server returns YYYY-MM-DD strings built from UTC components, and
+      // `toDateString` (local time) should agree on the same day for
+      // IST users. If the server somehow returns a row from a different
+      // day (stale cache, half-written DB state, mid-rollover glitch),
+      // treat it as null so the "Mark Attendance" button shows. We log
+      // a non-blocking warning — no toast, no UI noise.
+      if (data && data.date) {
+        const serverDay = toDateString(data.date);
+        if (serverDay !== localDate) {
+          console.warn('[attendance] today record date mismatch — discarding', {
+            requested: localDate,
+            returned: serverDay,
+          });
+          setTodayRecord(null);
+          return;
+        }
+      }
       setTodayRecord(data);
     } catch {
       setTodayRecord(null);
@@ -73,10 +92,17 @@ export default function Attendance() {
     fetchMonth();
   }, [fetchToday, fetchMonth]);
 
-  // Merge today's record into month display if same month
+  // Merge today's record into month display only if the dates match.
+  // DR-023: a stale "yesterday" row can otherwise stick in component state
+  // and re-render the calendar cell under today's column. The strict
+  // date-equality check (rather than `startsWith(currentMonth)` alone)
+  // catches the edge case where today is the 1st of a new month and
+  // yesterday's record would otherwise fall into last month's cell.
   useEffect(() => {
     if (!todayRecord) return;
     const todayStr = toDateString(todayRecord.date);
+    const requestedToday = toDateString(new Date());
+    if (todayStr !== requestedToday) return; // stale; will be re-fetched
     if (todayStr.startsWith(currentMonth)) {
       setMonthRecords(prev => {
         const exists = prev.some(r => r.id === todayRecord.id);
@@ -85,6 +111,41 @@ export default function Attendance() {
       });
     }
   }, [todayRecord, currentMonth]);
+
+  // DR-023: refresh today's record when the tab regains visibility.
+  // Without this, a user who backgrounds the tab across midnight would
+  // see "Attendance Marked" on the wrong day until they hit refresh.
+  // visibilitychange fires on tab focus/back-navigation, which is
+  // exactly the gap the bug report describes.
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        setTodayRecord(null); // invalidate stale state before re-fetch
+        fetchToday();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, [fetchToday]);
+
+  // DR-023: midnight-rollover refresh. The backend's canonical helper
+  // uses the business TZ (Asia/Kolkata), so this client-side check
+  // matches: `toDateString(new Date())` returns the IST calendar day
+  // string. When that changes, we re-fetch today AND roll `currentMonth`
+  // forward so the calendar header follows the page.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const nowStr = toDateString(new Date());
+      if (nowStr !== todayDateStr) {
+        setTodayRecord(null);
+        fetchToday();
+        const nowMonth = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+        setCurrentMonth(prev => (prev === nowMonth ? prev : nowMonth));
+      }
+    }, 60_000);
+    return () => clearInterval(interval);
+  }, [todayDateStr, fetchToday]);
 
   // Request geolocation with retry.
   // GeolocationPositionError numeric codes (per W3C Geolocation API spec):
