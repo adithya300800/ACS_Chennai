@@ -15,6 +15,7 @@ require('dotenv').config();
 require('express-async-errors');
 const express = require('express');
 const helmet = require('helmet');
+const { randomUUID } = require('crypto');
 const { PrismaClient } = require('@prisma/client');
 
 const authRoutes = require('./routes/auth');
@@ -33,7 +34,12 @@ const leaveRoutes = require('./routes/leave');
 // trainingWriteLimiter inside the route file; reads are not throttled.
 const trainingRoutes = require('./routes/training');
 const contactRoutes = require('./routes/contact');
-const diagRoutes = require('./routes/diag'); // Round-8: diagnostic endpoint (intentionally retained for ops — gated by admin auth)
+// DR-017: admin storage health — orphan-blob summary + on-demand sweep trigger.
+// Mounted at /api/admin/storage — the only admin-only ops surface left after
+// DR-012 removed the /api/diag routes. Auth model is requireAuth +
+// requireFreshAdmin so the storage mutation route can never run on a stale
+// JWT claim.
+const storageAdminRoutes = require('./routes/storage');
 const {
   loginLimiter, refreshLimiter, contactLimiter, sasLimiter,
   exportLimiter, leaveCreateLimiter,
@@ -82,6 +88,33 @@ app.disable('x-powered-by');
 app.use(helmet({
   crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
 }));
+
+// ─── Request ID (DR-012) ─────────────────────────────────────────────────────
+// Every response carries an `X-Request-Id` so a user reporting "it failed"
+// can hand over one token that ties their request to the server log line in
+// the error handler below. Before DR-012 the id was minted *inside* the error
+// handler, which meant it only existed on 5xx responses and was never sent to
+// the client on success — useless for correlating a report after the fact.
+//
+// Mounted before CORS (and therefore before every route) so the header is
+// present on preflight 204s, health probes, 404s, and error responses alike.
+//
+// An inbound `X-Request-Id` is honoured so a trace started at Render's edge
+// or by the SPA survives the hop — but it is validated first, not echoed
+// blind. Two reasons: (1) `res.setHeader` throws `ERR_INVALID_CHAR` on a
+// value containing CR/LF, so an unvalidated echo turns a malformed header
+// into a 500; (2) an unbounded caller-controlled value would land verbatim
+// in the log line, letting a caller forge log entries. Anything that isn't a
+// short, plain token is discarded in favour of a server-generated UUID.
+const REQUEST_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+app.use((req, res, next) => {
+  const supplied = req.headers['x-request-id'];
+  req.id = (typeof supplied === 'string' && REQUEST_ID_RE.test(supplied))
+    ? supplied
+    : randomUUID();
+  res.setHeader('X-Request-Id', req.id);
+  next();
+});
 
 // CORS — manual headers, exact origin allowlist.
 // Round-7: trimmed methods to what this API actually uses. Audited the
@@ -166,7 +199,13 @@ app.get('/version', (req, res) => {
 });
 
 app.get('/ready', async (req, res) => {
-  const checks = { db: 'fail', blob: 'fail' };
+  // DR-017: every required R2 bucket must be reachable, not just dpr-photos.
+  // The previous probe only checked dpr-photos, so /ready reported healthy
+  // even when inspection-photos / training-materials were missing — masking
+  // the very class of "bucket never provisioned" bugs round-13 fixed for
+  // the DPR side. Each probe is a HeadBucket call (no enumeration), so the
+  // readiness check stays cheap even with three buckets.
+  const checks = { db: 'fail', blob: {} };
   let ok = true;
 
   try {
@@ -180,25 +219,37 @@ app.get('/ready', async (req, res) => {
   }
 
   try {
-    // R2/S3 readiness: cheap credential + bucket reachability probe.
-    // The previous code called client.listContainers — an Azure Blob SDK
-    // method that does NOT exist on the AWS S3 v3 client the R2 client is
-    // built on. This permanently surfaced a 503 from /ready. HeadBucketCommand
-    // is the S3-equivalent (R2-compatible) credential check; it doesn't
-    // enumerate objects, so it stays cheap on the hot path.
-    const { getClient } = require('./lib/blobStorage');
+    const { getClient, REQUIRED_BUCKETS } = require('./lib/blobStorage');
     const { HeadBucketCommand } = require('@aws-sdk/client-s3');
     const client = getClient();
-    const bucket = process.env.R2_BUCKET_DPR_PHOTOS || 'dpr-photos';
-    await client.send(new HeadBucketCommand({ Bucket: bucket }));
-    checks.blob = 'ok';
+    // Run probes in parallel — three HeadBucket calls finish in well under
+    // a second even on a cold R2 path, and serial would just add latency
+    // to every Render liveness ping.
+    const probeResults = await Promise.all(REQUIRED_BUCKETS.map(async (Bucket) => {
+      try {
+        await client.send(new HeadBucketCommand({ Bucket }));
+        return { Bucket, ok: true };
+      } catch (err) {
+        // Distinguish missing-bucket (NotFound), auth/perm (Forbidden), and
+        // network failures (NetworkingError) so operators can see the cause
+        // without the error leaking credentials or bucket names.
+        const errName = err?.name || err?.Code || 'unknown';
+        return { Bucket, ok: false, error: errName };
+      }
+    }));
+    for (const r of probeResults) {
+      checks.blob[r.Bucket] = r.ok ? 'ok' : `fail: ${r.error}`;
+      if (!r.ok) ok = false;
+    }
   } catch (err) {
+    // R2 client itself failed to initialize (missing env, bad endpoint).
+    // This is a deploy-level misconfiguration; mark ALL buckets unknown
+    // rather than guessing.
     ok = false;
-    // Distinguish missing-bucket (NotFound), auth/perm (Forbidden), and
-    // network failures (NetworkingError) so operators can see the cause
-    // without the error leaking credentials or bucket names.
-    const errName = err?.name || err?.Code || 'unknown';
-    checks.blob = `fail: ${errName}`;
+    const errName = err?.name || err?.message || 'unknown';
+    for (const Bucket of (require('./lib/blobStorage').REQUIRED_BUCKETS || [])) {
+      checks.blob[Bucket] = `fail: client: ${errName}`;
+    }
   }
 
   res.status(ok ? 200 : 503).json({ status: ok ? 'ready' : 'degraded', checks });
@@ -235,16 +286,21 @@ app.use('/api/dpr', dprRoutes);
 app.use('/api/inspection/sas-url', sasLimiter);
 app.use('/api/inspection', inspectionRoutes);
 app.use('/api/contact', contactLimiter, contactRoutes);
-// Round-8 TEMPORARY: diagnostic endpoint to introspect deployed DB schema.
-// Mounted AFTER the body-parsers so it can read raw body. DELETE after F5/F6 resolved.
-app.use('/api/diag', diagRoutes);
+// DR-017: admin storage health — orphan counts + on-demand sweep trigger.
+// Routes inside use requireAuth + requireFreshAdmin; the mount itself has
+// no extra middleware.
+app.use('/api/admin/storage', storageAdminRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
 app.use((err, req, res, next) => {
-  const requestId = req.headers['x-request-id'] || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  // DR-012: reuse the server-owned id minted by the request-id middleware so
+  // the value logged here is the same one the client already received in the
+  // `X-Request-Id` response header. The `??` fallback only fires if this
+  // handler is somehow reached before that middleware ran.
+  const requestId = req.id ?? randomUUID();
   // Map known Prisma error codes to the right HTTP response so the
   // client gets actionable 4xx instead of a generic 500.
   let status = 500;
@@ -295,31 +351,68 @@ process.on('uncaughtException', (err) => {
 });
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
+// Single-tenant assumption (see TENANCY.md). If this counts more than
+// the documented ACS workforce, treat as a tenancy boundary violation
+// and refactor before adding the second org.
+prisma.employee.count()
+  .then((count) => {
+    console.log(`[tenancy] employees in DB: ${count} (single-tenant ACS; see TENANCY.md)`);
+    // Soft guardrail: if the workforce size balloons past what one
+    // construction-services org realistically employs, log a warning
+    // so the operator notices before adding a second org without a
+    // tenancy refactor. Threshold is deliberately loose so an
+    // admin-onboarded contractor doesn't trip it; tighten when
+    // multi-tenant onboarding is real.
+    if (count > 1000) {
+      console.warn(`[tenancy] WARNING: ${count} employees exceeds the single-tenant workforce expectation. ` +
+        `Before adding a second organization, complete the pre-onboarding checklist in TENANCY.md.`);
+    }
+  })
+  .catch((err) => {
+    // Non-fatal: a missing table or unreadable DB shouldn't block boot
+    // (the /ready endpoint will report DB=fail and Render will mark the
+    // service unhealthy). Log and move on.
+    console.error('[tenancy] employee count probe failed (non-fatal):', err?.message?.split('\n')[0] || err);
+  });
+
 const server = app.listen(PORT, () => {
   console.log(`ACS Portal API listening on port ${PORT}`);
   console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ') || '(none)'}`);
 });
 
-// R2 bucket CORS self-heal (round-13). Without this, browser preflight to
-// the presigned PUT URL returns 403 (no Access-Control-Allow-* headers)
-// and the browser aborts the upload with "Network error during upload"
-// before any bytes leave. Idempotent: re-running on every boot keeps the
-// policy in sync if someone hand-edits the bucket and breaks uploads
-// again. Non-fatal: a failure here must not block /ready from reporting
-// blob: ok — we still serve traffic even if R2 rejects PutBucketCors
-// (operator can add s3:PutBucketCors to the IAM key, or run the
-// equivalent wrangler r2 bucket cors put once from the dashboard).
+// R2 bucket CORS provisioning (round-13 → round-20 DR-017).
+//
+// Round-13: a one-shot CORS applier ran on every boot. Without it, the
+// browser preflight to the presigned PUT URL returned 403 with no
+// Access-Control-Allow-* headers and the browser aborted the upload
+// with "Network error during upload" before any bytes left.
+//
+// Round-20 (DR-017): canonical provisioning moved to
+// `scripts/provisionR2.js` (run once at deploy time as a preDeploy hook).
+// This boot-time call is now a NO-OP in production unless the env flag
+// `R2_CORS_SELF_HEAL=true` is set (dev convenience). The runtime IAM
+// key no longer needs `s3:PutBucketCors` / `s3:CreateBucket` — only the
+// much narrower `s3:PutObject` / `s3:GetObject` / `s3:DeleteObject` on
+// the bucket paths. See `scripts/README.md` for the deploy flow.
 const { applyR2Cors } = require('./lib/blobStorage');
-applyR2Cors(ALLOWED_ORIGINS).then((results) => {
-  const failed = results.filter((r) => !r.ok);
-  if (failed.length === 0) {
-    console.log(`[r2-cors] applied CORS policy to ${results.length} bucket(s): ${results.map((r) => r.Bucket).join(', ')}`);
-  } else {
-    console.error('[r2-cors] some buckets failed:', JSON.stringify(failed));
-  }
-}).catch((err) => {
-  console.error('[r2-cors] apply failed (non-fatal):', err?.$metadata?.httpStatusCode || err?.message || err);
-});
+const r2SelfHeal = process.env.R2_CORS_SELF_HEAL === 'true';
+if (r2SelfHeal) {
+  applyR2Cors(ALLOWED_ORIGINS).then((results) => {
+    const failed = results.filter((r) => !r.ok && !r.skipped);
+    if (failed.length === 0) {
+      console.log(`[r2-cors] self-heal applied CORS policy to ${results.length} bucket(s): ${results.map((r) => r.Bucket).join(', ')}`);
+    } else {
+      console.error('[r2-cors] self-heal: some buckets failed:', JSON.stringify(failed));
+    }
+  }).catch((err) => {
+    console.error('[r2-cors] self-heal apply failed (non-fatal):', err?.$metadata?.httpStatusCode || err?.message || err);
+  });
+} else {
+  // Confirm at boot so an operator who inspects Render logs can see
+  // that the API deliberately skipped CORS provisioning. Canonical
+  // provisioning is now a preDeploy script (see scripts/README.md).
+  console.log('[r2-cors] boot-time provisioning disabled (default). Canonical provisioning via scripts/provisionR2.js. Set R2_CORS_SELF_HEAL=true to re-enable for dev.');
+}
 
 // Graceful shutdown — close server first, then disconnect Prisma
 let shuttingDown = false;

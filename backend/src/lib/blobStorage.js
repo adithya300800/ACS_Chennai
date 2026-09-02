@@ -84,7 +84,29 @@ async function generateUploadSASUrl(containerName, employeeId, ulid, contentType
 }
 
 /**
- * Generate a presigned GET URL for reading a blob (24-hour expiry).
+ * DR-017: Read-URL TTL — default 1 hour instead of the previous 24 hours.
+ *
+ * Rationale: a presigned GET URL is a bearer token scoped to a single object.
+ * 24-hour URLs meant that an attacker who scraped one (R2 access-log leak,
+ * browser history sync, paste-bin disclosure) could fetch that exact object
+ * for an entire day before it expired. 1 hour narrows the worst-case
+ * credential-exposure window from a full day to a single shift, at the cost
+ * of more frequent client refreshes (the frontend re-fetches the GET URL
+ * whenever it mounts a DPR/inspection detail view — well within an hour).
+ *
+ * Override: set R2_READ_URL_TTL_SECONDS in the env (e.g. 1800 for 30 min,
+ * 300 for 5 min) if a tighter policy is required.
+ */
+const READ_URL_TTL_SECONDS = (() => {
+  const raw = process.env.R2_READ_URL_TTL_SECONDS;
+  const parsed = raw ? parseInt(raw, 10) : NaN;
+  if (Number.isFinite(parsed) && parsed > 0 && parsed <= 86400) return parsed;
+  return 3600; // 1 hour default
+})();
+
+/**
+ * Generate a presigned GET URL for reading a blob.
+ * Default expiry: 1 hour (override with R2_READ_URL_TTL_SECONDS).
  */
 async function generateReadSASUrl(containerName, blobName) {
   const client = getClient();
@@ -94,11 +116,11 @@ async function generateReadSASUrl(containerName, blobName) {
     Key: blobName,
   });
 
-  const sasUrl = await getSignedUrl(client, command, { expiresIn: 86400 }); // 24 hours
+  const sasUrl = await getSignedUrl(client, command, { expiresIn: READ_URL_TTL_SECONDS });
 
   return {
     sasUrl,
-    expiresAt: new Date(Date.now() + 86400 * 1000).toISOString(),
+    expiresAt: new Date(Date.now() + READ_URL_TTL_SECONDS * 1000).toISOString(),
   };
 }
 
@@ -165,6 +187,55 @@ async function deleteBlob(containerName, blobName) {
   await client.send(new DeleteObjectCommand({ Bucket: containerName, Key: blobName }));
 }
 
+/**
+ * DR-017: lightweight reachability probe for `/ready` + the orphan sweep.
+ * `headBucket` does not enumerate objects, so it stays cheap on the hot
+ * path and doesn't scale with bucket size. Returns true on 200/204,
+ * throws on any other status or network failure.
+ */
+async function probeBucket(Bucket) {
+  const client = getClient();
+  await client.send(new HeadBucketCommand({ Bucket }));
+  return true;
+}
+
+/**
+ * DR-017: paginated object listing — used by the orphan sweep to compare
+ * R2 contents against the DPR + InspectionPhoto tables. Wraps ListObjectsV2
+ * and yields every page so callers don't have to manage pagination state.
+ *
+ * `Prefix` is optional; pass it to scope the listing (e.g. only objects
+ * under `${employeeId}/`). Yields `{ Key, LastModified, Size, ETag }` rows.
+ *
+ * NOTE: `S3Client` does not support async iterators natively, so we wrap
+ * the SDK call in a plain async function that returns one full batch and
+ * recurses on ContinuationToken. For buckets with millions of objects this
+ * is fine — R2 is small — and keeps the implementation testable.
+ */
+async function listObjects(Bucket, { Prefix, MaxKeys } = {}) {
+  const client = getClient();
+  const out = [];
+  let ContinuationToken = undefined;
+  do {
+    const resp = await client.send(new (require('@aws-sdk/client-s3').ListObjectsV2Command)({
+      Bucket,
+      ...(Prefix ? { Prefix } : {}),
+      ...(MaxKeys ? { MaxKeys } : {}),
+      ...(ContinuationToken ? { ContinuationToken } : {}),
+    }));
+    for (const obj of (resp.Contents || [])) {
+      out.push({
+        Key: obj.Key,
+        LastModified: obj.LastModified instanceof Date ? obj.LastModified : new Date(obj.LastModified),
+        Size: obj.Size,
+        ETag: obj.ETag,
+      });
+    }
+    ContinuationToken = resp.IsTruncated ? resp.NextContinuationToken : undefined;
+  } while (ContinuationToken);
+  return out;
+}
+
 // R2 buckets we own — CORS policy must allow the frontend origin so the
 // browser's preflight (OPTIONS) on a presigned PUT URL doesn't return 403
 // and abort the upload before the bytes leave. Without this, the frontend
@@ -179,6 +250,25 @@ const ALLOWED_R2_BUCKETS = [
   process.env.R2_BUCKET_DPR_PHOTOS        || 'dpr-photos',
   process.env.R2_BUCKET_DPR_DOCUMENTS     || 'dpr-documents',
   process.env.R2_BUCKET_INSPECTION_PHOTOS || 'inspection-photos',
+  // training-materials: reserved for course attachments (round-14+). We
+  // don't write to it from runtime yet, but adding it here means the
+  // provisioning script applies CORS to it NOW so the gap doesn't reopen
+  // the round-13 "Network error during upload" class of bug the day a
+  // course-attachment feature ships.
+  process.env.R2_BUCKET_TRAINING_MATERIALS || 'training-materials',
+].filter(Boolean);
+
+// DR-017: the buckets the `/ready` probe MUST see. Subset of
+// ALLOWED_R2_BUCKETS — we don't require dpr-documents to be present because
+// nothing in the runtime path writes to it today. Extend this list when a
+// new runtime upload target ships.
+const REQUIRED_BUCKETS = [
+  process.env.R2_BUCKET_DPR_PHOTOS        || 'dpr-photos',
+  process.env.R2_BUCKET_INSPECTION_PHOTOS || 'inspection-photos',
+  // training-materials is reserved for future course-attachment uploads; we
+  // don't write to it yet, but a missing bucket should fail readiness now so
+  // the gap shows up in CI rather than at first upload attempt.
+  process.env.R2_BUCKET_TRAINING_MATERIALS || 'training-materials',
 ].filter(Boolean);
 
 /**
@@ -188,16 +278,31 @@ const ALLOWED_R2_BUCKETS = [
  * `inspection-photos` route but the bucket was never provisioned in R2,
  * so uploads silently failed with "Network error during upload").
  *
- * Idempotent — safe to call on every boot. CreateBucket errors with
- * `BucketAlreadyOwnedByYou` / `BucketAlreadyExists` are treated as success
- * (the bucket is there, which is what we wanted).
+ * DR-017: this function is now a NO-OP in production unless the env flag
+ * `R2_CORS_SELF_HEAL=true` is set. Canonical provisioning moved to
+ * `scripts/provisionR2.js` (run once at deploy time) so:
+ *   - the runtime IAM key only needs `s3:PutObject` / `s3:GetObject` /
+ *     `s3:DeleteObject` on the bucket paths, NOT `s3:PutBucketCors` /
+ *     `s3:CreateBucket` (least privilege);
+ *   - the boot layer never blocks on R2 control-plane calls;
+ *   - if the CORS policy ever drifts, an operator runs the IaC script
+ *     instead of restarting the API.
  *
- * Non-fatal at the boot layer: caller logs errors and continues serving
- * traffic even if a bucket can't be created (operator must add the
- * missing permissions to the R2 access key, or create buckets manually
- * via the Cloudflare dashboard / wrangler CLI).
+ * When `R2_CORS_SELF_HEAL=true`, this function still works the way it
+ * always did — used for dev/local where the operator wants uploads to
+ * "just work" without remembering to run the script.
  */
 async function applyR2Cors(allowedOrigins) {
+  const selfHeal = process.env.R2_CORS_SELF_HEAL === 'true';
+  if (!selfHeal) {
+    // No-op in prod. Return an empty results array so callers (boot log)
+    // have a stable shape to render.
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[r2-cors] applyR2Cors skipped — set R2_CORS_SELF_HEAL=true to enable boot-time CORS provisioning (dev convenience). Canonical provisioning lives in scripts/provisionR2.js.');
+    }
+    return ALLOWED_R2_BUCKETS.map((Bucket) => ({ Bucket, ok: true, skipped: true }));
+  }
+
   const client = getClient();
   const origins = (Array.isArray(allowedOrigins) && allowedOrigins.length > 0)
     ? allowedOrigins
@@ -256,7 +361,11 @@ module.exports = {
   uploadBufferToBlob,
   deleteBlob,
   applyR2Cors,
+  probeBucket,
+  listObjects,
   ALLOWED_R2_BUCKETS,
+  REQUIRED_BUCKETS,
+  READ_URL_TTL_SECONDS,
   CONTENT_TYPE_EXT,
 };
 
