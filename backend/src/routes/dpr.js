@@ -5,6 +5,7 @@ const { requireAuth } = require('../middleware/auth');
 const { generateULID, generateUploadSASUrl, generateReadSASUrl, verifyBlobExists, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
+const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
 
 // Tiny asyncHandler so unhandled rejections in async route handlers reach
 // the global error handler instead of hanging the request or crashing the
@@ -601,26 +602,27 @@ router.get('/', asyncHandler(async (req, res) => {
 
   const take = Math.min(parseInt(limit) || 20, 100);
 
-  // Validate cursor: base64(reportDate|id). Reject malformed cursors instead
-  // of letting `new Date('garbage')` produce Invalid Date and crash the query.
+  // Validate cursor. Reject malformed cursors instead of letting
+  // `new Date('garbage')` produce Invalid Date and crash the query.
+  // DR-008: use the unified cursor codec so encoder + decoder agree on
+  // `base64url(JSON.stringify({ date: 'YYYY-MM-DD', id }))`.
   let cursorWhere = {};
   if (cursor) {
+    let decoded;
     try {
-      const decoded = Buffer.from(cursor, 'base64').toString();
-      const [cDate, cId] = decoded.split('|');
-      const dp = parseStrictISODate(cDate);
-      if (!cId || !dp.ok) {
-        return res.status(400).json({ error: 'INVALID_CURSOR', message: 'Cursor is malformed or expired' });
-      }
-      cursorWhere = {
-        OR: [
-          { reportDate: { lt: dp.date } },
-          { reportDate: dp.date, id: { lt: cId } },
-        ],
-      };
+      decoded = decodeCursor(cursor);
     } catch (e) {
+      if (e instanceof InvalidCursorError) {
+        return res.status(400).json({ error: 'INVALID_CURSOR', message: e.message || 'Cursor is malformed or expired' });
+      }
       return res.status(400).json({ error: 'INVALID_CURSOR', message: 'Cursor could not be decoded' });
     }
+    cursorWhere = {
+      OR: [
+        { reportDate: { lt: decoded.date } },
+        { reportDate: decoded.date, id: { lt: decoded.id } },
+      ],
+    };
   }
 
   // Validate date-range filters (used by frontend list UI). Accept either
@@ -681,12 +683,17 @@ router.get('/', asyncHandler(async (req, res) => {
     // and Prisma client version). Coerce defensively so cursor building
     // doesn't throw "reportDate.toISOString is not a function" and turn a
     // >20-row result set into a 500 (Code Reviewer P2-3).
-    const lastDate = lastItem && (lastItem.reportDate instanceof Date
-      ? lastItem.reportDate
-      : new Date(lastItem.reportDate));
-    const nextCursor = hasMore && lastItem && lastDate && !isNaN(lastDate.getTime())
-      ? Buffer.from(`${lastDate.toISOString()}|${lastItem.id}`).toString('base64')
-      : null;
+    // DR-008: route the encoder through the unified cursor codec so the
+    // wire format round-trips through the same decoder.
+    let nextCursor = null;
+    if (hasMore && lastItem && lastItem.reportDate != null && lastItem.id) {
+      try {
+        nextCursor = encodeCursor(lastItem.reportDate, lastItem.id);
+      } catch (e) {
+        console.error('DPR cursor encode failed', { err: e.message });
+        nextCursor = null;
+      }
+    }
 
     res.setHeader('X-Total-Count', items.length);
     res.setHeader('X-Has-More', hasMore ? 'true' : 'false');
