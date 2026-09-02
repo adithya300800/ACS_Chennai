@@ -3725,6 +3725,32 @@ footer {
   color: #475569;
 }
 
+/* Round-20 (DR-010): evidence-class badges. Sits next to the status pill
+   on completed rows so admins can tell at a glance whether the row came
+   from a watched-to-end player, a self-attest click, a provider webhook,
+   or an admin override. Outlined (vs filled) variant so it doesn't
+   visually compete with the filled status pill.
+   The four class-name suffixes mirror EVIDENCE_CLASSES in
+   src/pages/admin/TrainingDashboard.jsx. */
+.training-pill-evidence {
+  background: transparent;
+  border: 1px solid currentColor;
+  font-size: 0.625rem;
+  padding: 0.125rem 0.4375rem;
+}
+.training-pill-evidence-self_attested {
+  color: #6d28d9; /* purple — manual click */
+}
+.training-pill-evidence-player_observed {
+  color: #0369a1; /* sky — watched to end */
+}
+.training-pill-evidence-provider_verified {
+  color: #047857; /* green-700 — third-party vetted */
+}
+.training-pill-evidence-admin_override {
+  color: #b45309; /* amber — manual override */
+}
+
 /* Buttons */
 .training-btn {
   display: inline-flex;

@@ -1,38 +1,45 @@
-// Employee Training routes — Round-14.
+// Employee Training routes — Round-14 + Round-20 (DR-010).
 //
 // Endpoints:
-//   GET    /api/training/courses                   — admin lists courses
-//   POST   /api/training/courses                   — admin creates a course
-//   GET    /api/training/courses/:id               — admin/owner reads a course + own enrollment
-//   PUT    /api/training/courses/:id               — admin updates a course
-//   POST   /api/training/enrollments               — admin bulk-assigns (courseId + employeeIds[])
-//   GET    /api/training/enrollments/my            — employee's own enrollments
-//   GET    /api/training/enrollments               — admin queue (filterable)
-//   GET    /api/training/enrollments/:id           — owner or admin reads one
-//   PUT    /api/training/enrollments/:id/progress  — employee pings watch progress (auto-completes at >=100)
-//   PUT    /api/training/enrollments/:id/complete  — owner/admin manual mark-complete
+//   GET    /api/training/courses                       — admin lists courses
+//   POST   /api/training/courses                       — admin creates a course
+//   GET    /api/training/courses/:id                   — admin/owner reads a course + own enrollment
+//   PUT    /api/training/courses/:id                   — admin updates a course
+//   POST   /api/training/enrollments                   — admin bulk-assigns (courseId + employeeIds[])
+//   GET    /api/training/enrollments/my                — employee's own enrollments
+//   GET    /api/training/enrollments                   — admin queue (filterable)
+//   GET    /api/training/enrollments/:id               — owner or admin reads one
+//   PUT    /api/training/enrollments/:id/progress      — employee pings watch progress (auto-completes at >=100 for player-observable providers, requires session payload)
+//   PUT    /api/training/enrollments/:id/complete      — owner manual mark-complete (defaults to SELF_ATTESTED) or admin PLAYER_OBSERVED rewrite
+//   POST   /api/training/enrollments/:id/admin-override — admin-only override (ADMIN_OVERRIDE_COMPLETED)
+//   GET    /api/training/reports/completion            — completion rollup with optional ?evidenceClass= filter
 //
 // Auth model:
 //   - requireAuth on all routes.
-//   - Admin-only for: course CRUD + enrollment list + bulk assign + admin override complete.
+//   - Admin-only for: course CRUD + enrollment list + bulk assign + admin override complete + reports.
 //   - Owner-only for: progress pings + manual complete (admin can override complete).
 
 'use strict';
 
 const express = require('express');
 const router = express.Router();
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireFreshAdmin } = require('../middleware/auth');
 const { trainingWriteLimiter } = require('../middleware/rateLimit');
 const {
   ALLOWED_PROVIDERS,
   ALLOWED_STATUSES,
-  ALLOWED_PRIORITIES,
+  EVIDENCE_CLASSES,
+  EVIDENCE_TO_STATUS,
+  STATUS_TO_EVIDENCE,
   validateCreateCourse,
   validateUpdateCourse,
   validateAssignEnrollments,
   validateProgressPayload,
   validateCompletePayload,
   canTransition,
+  canAutoCompleteFromPlayer,
+  isCompleted,
+  markComplete,
   httpStatusForCode,
 } = require('../lib/trainingRules');
 const { mapPrismaError } = require('../lib/errors');
@@ -79,6 +86,10 @@ function serializeEnrollment(row) {
     dueDate: rest.dueDate instanceof Date ? toDateStr(rest.dueDate) : rest.dueDate,
     createdAt: rest.createdAt instanceof Date ? rest.createdAt.toISOString() : rest.createdAt,
     updatedAt: rest.updatedAt instanceof Date ? rest.updatedAt.toISOString() : rest.updatedAt,
+    // Round-20 (DR-010): expose evidenceClass as the human-meaningful
+    // column (one of SELF_ATTESTED / PLAYER_OBSERVED / PROVIDER_VERIFIED /
+    // ADMIN_OVERRIDE) instead of leaking the enum-suffix to the client.
+    evidenceClass: rest.evidenceClass || (STATUS_TO_EVIDENCE[rest.status] || null),
     employee: employee ? {
       id: employee.id,
       name: employee.name,
@@ -250,8 +261,12 @@ router.put('/courses/:id', trainingWriteLimiter, asyncHandler(async (req, res) =
 // ─────────────────────────────────────────────────────────────────────────────
 
 // POST /api/training/enrollments — admin bulk-assigns a course to N employees
-router.post('/enrollments', trainingWriteLimiter, asyncHandler(async (req, res) => {
-  if (!req.isAdmin) return res.status(403).json({ error: 'Admin access required' });
+//
+// Round-20 (DR-005): requireFreshAdmin instead of the `req.isAdmin` JWT claim.
+// Assigning training is a mutation, so it re-reads Employee.isAdmin from the
+// database — a demoted admin loses the ability to assign immediately rather
+// than when their access token happens to expire.
+router.post('/enrollments', trainingWriteLimiter, requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const result = validateAssignEnrollments(req.body);
   if (!result.ok) {
@@ -466,13 +481,25 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
   const prisma = getPrisma(req);
   const { id } = req.params;
 
-  const existing = await prisma.trainingEnrollment.findUnique({ where: { id } });
+  const existing = await prisma.trainingEnrollment.findUnique({
+    where: { id },
+    include: {
+      course: {
+        select: {
+          id: true, title: true, description: true,
+          externalUrl: true, provider: true, category: true, durationHint: true,
+        },
+      },
+    },
+  });
   if (!existing) return res.status(404).json({ error: 'Enrollment not found', code: 'NOT_FOUND' });
   if (existing.employeeId !== req.employeeId) {
     return res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
   }
-  if (existing.status === 'COMPLETED') {
-    // Idempotent — already done. Echo the existing row so the client can stop pinging.
+  // DR-010 (round-20): once a row hits any of the four completed-states, the
+  // progress route is a noop (we don't auto-downgrade). Idempotent echo so
+  // the player can stop pinging.
+  if (isCompleted(existing.status) || existing.status === 'CANCELLED' || existing.status === 'OVERDUE') {
     return res.json({
       ok: true,
       noop: true,
@@ -489,27 +516,64 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
       code: result.code,
     });
   }
-  const { progressPct, lastWatchedSec } = result.value;
+  const { progressPct, lastWatchedSec, evidenceMetadata } = result.value;
 
-  // Decide target status:
-  //   100 → COMPLETED (auto), startedAt stays at first progress ping
-  //   > 0 and < 100 → IN_PROGRESS (and stamp startedAt on first transition)
-  //   0 (re-ping after a refresh) → keep current status, no startedAt update
+  // DR-010 (round-20): when the player reports progressPct >= 100, only the
+  // PLAYER_OBSERVED path may auto-flip to a completed-state, and ONLY for
+  // providers with a working IFrame API (YOUTUBE / VIMEO). For everything
+  // else (LinkedIn Learning / Coursera / Udemy / OTHER), the client must
+  // not be able to claim "I watched to the end" — the course must be
+  // completed via the manual PUT /complete endpoint (SELF_ATTESTED) or the
+  // admin override endpoint (ADMIN_OVERRIDE).
+  //
+  // We additionally require the client to send a session payload proving
+  // it really did hook into the player API. A tampered client that just
+  // fakes `progressPct: 100` with no `evidenceMetadata.sessionId` will be
+  // rejected with PLAYER_DATA_REQUIRED.
   const now = new Date();
   const data = {
     progressPct,
     lastWatchedSec,
-    status: progressPct >= 100 ? 'COMPLETED' : 'IN_PROGRESS',
   };
-  if (progressPct >= 100) data.completedAt = now;
-  if (existing.status === 'ASSIGNED' && progressPct > 0) data.startedAt = now;
+  if (progressPct >= 100) {
+    if (!canAutoCompleteFromPlayer(existing.course.provider)) {
+      return res.status(400).json({
+        error: `Provider ${existing.course.provider} is not player-observable; use PUT /complete (SELF_ATTESTED) or POST /admin-override instead.`,
+        code: 'PLAYER_DATA_REQUIRED',
+      });
+    }
+    if (!evidenceMetadata || typeof evidenceMetadata !== 'object' || !evidenceMetadata.sessionId) {
+      return res.status(400).json({
+        error: 'progressPct >= 100 from a player-observable provider requires evidenceMetadata.sessionId (the IFrame session token).',
+        code: 'PLAYER_DATA_REQUIRED',
+      });
+    }
+    data.status = 'PLAYER_OBSERVED_COMPLETED';
+    data.completedAt = now;
+    data.startedAt = existing.startedAt || now;
+    data.evidenceClass = 'PLAYER_OBSERVED';
+    data.completedBy = existing.employeeId;
+    data.evidenceMetadata = evidenceMetadata;
+  } else if (progressPct > 0) {
+    data.status = 'IN_PROGRESS';
+    if (existing.status === 'ASSIGNED') data.startedAt = now;
+  } else {
+    // 0% re-ping — keep current status, just update the timestamp.
+    data.status = existing.status;
+  }
 
   // Conditional UPDATE on status-not-completed so a racing "complete" call
   // can't double-write. P2025 means someone else (or this same call) just
   // completed it — treat as noop success.
   try {
     const updated = await prisma.trainingEnrollment.update({
-      where: { id, status: { not: 'COMPLETED' } },
+      where: { id, status: { notIn: [
+        'SELF_ATTESTED_COMPLETED',
+        'PLAYER_OBSERVED_COMPLETED',
+        'PROVIDER_VERIFIED_COMPLETED',
+        'ADMIN_OVERRIDE_COMPLETED',
+        'CANCELLED',
+      ] } },
       data,
       include: {
         course: {
@@ -521,7 +585,7 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
       },
     });
 
-    // Best-effort notifications on first IN_PROGRESS transition + COMPLETED.
+    // Best-effort notifications on first IN_PROGRESS transition + completed.
     if (existing.status === 'ASSIGNED' && updated.status === 'IN_PROGRESS') {
       try {
         await prisma.notification.create({
@@ -538,7 +602,7 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
           prismaCode: notifyErr.code,
         });
       }
-    } else if (updated.status === 'COMPLETED' && existing.status !== 'COMPLETED') {
+    } else if (isCompleted(updated.status) && !isCompleted(existing.status)) {
       try {
         await prisma.notification.create({
           data: {
@@ -561,6 +625,7 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
       enrollmentId: updated.id,
       pct: updated.progressPct,
       status: updated.status,
+      evidenceClass: updated.evidenceClass,
     });
 
     res.json(serializeEnrollment(updated));
@@ -577,8 +642,10 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
   }
 }));
 
-// PUT /api/training/enrollments/:id/complete — manual mark-complete
-// (employee for non-trackable providers, or admin override)
+// PUT /api/training/enrollments/:id/complete — manual mark-complete.
+// Owner defaults to SELF_ATTESTED; admin defaults to ADMIN_OVERRIDE.
+// Caller can pass `{ evidenceClass: 'PLAYER_OBSERVED', evidenceMetadata: { sessionId } }`
+// to rewrite a row that was previously completed via the progress route.
 router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
@@ -600,7 +667,7 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
   if (!isOwner && !req.isAdmin) {
     return res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
   }
-  if (existing.status === 'COMPLETED') {
+  if (isCompleted(existing.status)) {
     return res.status(409).json({
       error: 'Already completed',
       code: 'ENROLLMENT_LOCKED',
@@ -621,17 +688,53 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
     if (!fresh) return res.status(403).json({ error: 'Admin access required' });
   }
 
-  const now = new Date();
+  // Decide evidence class:
+  //   - explicit (caller-passed) wins
+  //   - owner → SELF_ATTESTED (no player data on this path)
+  //   - admin on non-owner → ADMIN_OVERRIDE
+  // PLAYER_OBSERVED cannot be set from this endpoint — the player path is
+  // exclusive to PUT /progress so we have a single canonical writer for
+  // each evidence class.
+  let evidenceClass = result.value.evidenceClass;
+  if (!evidenceClass) {
+    evidenceClass = isOwner ? 'SELF_ATTESTED' : 'ADMIN_OVERRIDE';
+  } else if (evidenceClass === 'PLAYER_OBSERVED' || evidenceClass === 'PROVIDER_VERIFIED') {
+    return res.status(400).json({
+      error: `${evidenceClass} can only be set via the player or provider path, not manual mark-complete`,
+      code: 'EVIDENCE_REQUIRED',
+    });
+  }
+
+  // PLAYER_OBSERVED requires player payload — refuse to set without it.
+  if (evidenceClass === 'PLAYER_OBSERVED' && (!result.value.evidenceMetadata || !result.value.evidenceMetadata.sessionId)) {
+    return res.status(400).json({
+      error: 'PLAYER_OBSERVED requires evidenceMetadata.sessionId',
+      code: 'PLAYER_DATA_REQUIRED',
+    });
+  }
+
+  const patch = markComplete(existing, {
+    evidenceClass,
+    completedBy: isOwner ? existing.employeeId : req.employeeId,
+    evidenceMetadata: result.value.evidenceMetadata,
+  }, req.employeeId);
+  if (result.value.note) patch.employeeNote = result.value.note;
+
   try {
     const updated = await prisma.trainingEnrollment.update({
-      where: { id, status: { not: 'COMPLETED' } },
-      data: {
-        status: 'COMPLETED',
-        progressPct: 100,
-        completedAt: now,
-        startedAt: existing.startedAt || now,
-        employeeNote: result.value.note,
+      where: {
+        id,
+        // Locking guard: if someone else already completed between the read
+        // and the write, refuse — the client will re-fetch and observe the
+        // winning state.
+        status: { notIn: [
+          'SELF_ATTESTED_COMPLETED',
+          'PLAYER_OBSERVED_COMPLETED',
+          'PROVIDER_VERIFIED_COMPLETED',
+          'ADMIN_OVERRIDE_COMPLETED',
+        ] },
       },
+      data: patch,
       include: {
         employee: { select: { id: true, name: true, email: true, department: true } },
         assignedBy: { select: { id: true, name: true, email: true } },
@@ -644,7 +747,7 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
       },
     });
 
-    // Best-effort notification on COMPLETED.
+    // Best-effort notification on completed transition.
     try {
       await prisma.notification.create({
         data: {
@@ -665,6 +768,7 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
       actor: hashIdentifier(req.employeeId),
       enrollmentId: updated.id,
       isOwner,
+      evidenceClass: updated.evidenceClass,
     });
 
     res.json(serializeEnrollment(updated));
@@ -680,6 +784,204 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to mark complete' });
   }
+}));
+
+// POST /api/training/enrollments/:id/admin-override — admin-only override.
+// Always sets evidenceClass = ADMIN_OVERRIDE, completedBy = the acting
+// admin. Use this when the auto-capture missed (browser killed mid-play)
+// or for non-trackable providers where the employee forgot to click.
+router.post('/enrollments/:id/admin-override', trainingWriteLimiter, asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  const { id } = req.params;
+
+  if (!req.isAdmin) return res.status(403).json({ error: 'Admin access required' });
+  const fresh = await assertFreshAdmin(req, prisma);
+  if (!fresh) return res.status(403).json({ error: 'Admin access required' });
+
+  const existing = await prisma.trainingEnrollment.findUnique({
+    where: { id },
+    include: {
+      course: {
+        select: {
+          id: true, title: true, description: true,
+          externalUrl: true, provider: true, category: true, durationHint: true,
+        },
+      },
+    },
+  });
+  if (!existing) return res.status(404).json({ error: 'Enrollment not found', code: 'NOT_FOUND' });
+
+  if (isCompleted(existing.status)) {
+    return res.status(409).json({
+      error: 'Already completed',
+      code: 'ENROLLMENT_LOCKED',
+    });
+  }
+
+  const result = validateCompletePayload(req.body);
+  if (!result.ok) {
+    return res.status(httpStatusForCode(result.code)).json({
+      error: result.message,
+      code: result.code,
+    });
+  }
+
+  // Always ADMIN_OVERRIDE here — refuse if caller tries to set something else.
+  if (result.value.evidenceClass && result.value.evidenceClass !== 'ADMIN_OVERRIDE') {
+    return res.status(400).json({
+      error: `admin-override endpoint always sets evidenceClass=ADMIN_OVERRIDE (got ${result.value.evidenceClass})`,
+      code: 'EVIDENCE_REQUIRED',
+    });
+  }
+
+  const patch = markComplete(existing, {
+    evidenceClass: 'ADMIN_OVERRIDE',
+    completedBy: req.employeeId,
+    evidenceMetadata: result.value.evidenceMetadata,
+  }, req.employeeId);
+  if (result.value.note) patch.employeeNote = result.value.note;
+
+  try {
+    const updated = await prisma.trainingEnrollment.update({
+      where: {
+        id,
+        status: { notIn: [
+          'SELF_ATTESTED_COMPLETED',
+          'PLAYER_OBSERVED_COMPLETED',
+          'PROVIDER_VERIFIED_COMPLETED',
+          'ADMIN_OVERRIDE_COMPLETED',
+        ] },
+      },
+      data: patch,
+      include: {
+        employee: { select: { id: true, name: true, email: true, department: true } },
+        assignedBy: { select: { id: true, name: true, email: true } },
+        course: {
+          select: {
+            id: true, title: true, description: true,
+            externalUrl: true, provider: true, category: true, durationHint: true,
+          },
+        },
+      },
+    });
+
+    // Best-effort notification on override.
+    try {
+      await prisma.notification.create({
+        data: {
+          employeeId: updated.employeeId,
+          type: 'TRAINING_COMPLETED',
+          trainingEnrollmentId: updated.id,
+          message: `Training completed: ${updated.course.title}`,
+        },
+      });
+    } catch (notifyErr) {
+      console.error('[training/admin-override] notification failed', {
+        enrollmentId: updated.id,
+        prismaCode: notifyErr.code,
+      });
+    }
+
+    console.log('[training/admin-override]', {
+      actor: hashIdentifier(req.employeeId),
+      enrollmentId: updated.id,
+      reason: result.value.reason,
+    });
+
+    res.json(serializeEnrollment(updated));
+  } catch (err) {
+    if (err.code === 'P2025') {
+      return res.status(409).json({
+        error: 'Already completed',
+        code: 'ENROLLMENT_LOCKED',
+      });
+    }
+    console.error('[training/admin-override]', { prismaCode: err.code, message: err.message?.split('\n')[0] });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to admin-override enrollment' });
+  }
+}));
+
+// GET /api/training/reports/completion — admin-only completion rollup.
+//
+// Query params:
+//   evidenceClass  filter to one of SELF_ATTESTED | PLAYER_OBSERVED |
+//                   PROVIDER_VERIFIED | ADMIN_OVERRIDE
+//   courseId       optional — narrow to one course
+//   employeeId     optional — narrow to one employee
+//   since          optional ISO date — only count completedAt >= since
+//
+// Returns:
+//   { totals: { byEvidenceClass, byCourse, byEmployee }, rows: [...] }
+router.get('/reports/completion', asyncHandler(async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ error: 'Admin access required' });
+  const prisma = getPrisma(req);
+
+  let evidenceClassFilter = null;
+  if (req.query.evidenceClass) {
+    if (!EVIDENCE_CLASSES.has(req.query.evidenceClass)) {
+      return res.status(400).json({
+        error: `evidenceClass must be one of: ${[...EVIDENCE_CLASSES].join(', ')}`,
+        code: 'INVALID_EVIDENCE_CLASS',
+      });
+    }
+    evidenceClassFilter = req.query.evidenceClass;
+  }
+
+  const where = { evidenceClass: evidenceClassFilter || { not: null } };
+  if (req.query.courseId) where.courseId = String(req.query.courseId);
+  if (req.query.employeeId) where.employeeId = String(req.query.employeeId);
+  if (req.query.since) {
+    const since = new Date(req.query.since);
+    if (Number.isNaN(since.getTime())) {
+      return res.status(400).json({ error: 'since must be an ISO date', code: 'INVALID_SINCE' });
+    }
+    where.completedAt = { gte: since };
+  }
+
+  const rows = await prisma.trainingEnrollment.findMany({
+    where,
+    orderBy: { completedAt: 'desc' },
+    take: 1000,
+    include: {
+      employee: { select: { id: true, name: true, email: true, department: true } },
+      course: { select: { id: true, title: true, provider: true } },
+    },
+  });
+
+  // Roll up the four counts even when filtered — useful for "out of N
+  // completed, how many were player-observed vs self-attested".
+  const byEvidenceClass = Object.fromEntries(
+    [...EVIDENCE_CLASSES].map((k) => [k, 0])
+  );
+  const byCourse = {};
+  const byEmployee = {};
+  for (const r of rows) {
+    if (r.evidenceClass) byEvidenceClass[r.evidenceClass] = (byEvidenceClass[r.evidenceClass] || 0) + 1;
+    if (r.course?.id) byCourse[r.course.id] = byCourse[r.course.id] || { title: r.course.title, count: 0 };
+    if (r.course?.id) byCourse[r.course.id].count += 1;
+    if (r.employee?.id) byEmployee[r.employee.id] = byEmployee[r.employee.id] || { name: r.employee.name, count: 0 };
+    if (r.employee?.id) byEmployee[r.employee.id].count += 1;
+  }
+
+  res.json({
+    totals: {
+      byEvidenceClass,
+      byCourse,
+      byEmployee,
+      total: rows.length,
+    },
+    rows: rows.map((r) => ({
+      id: r.id,
+      status: r.status,
+      evidenceClass: r.evidenceClass,
+      completedBy: r.completedBy,
+      completedAt: r.completedAt instanceof Date ? r.completedAt.toISOString() : r.completedAt,
+      employee: r.employee ? { id: r.employee.id, name: r.employee.name, email: r.employee.email } : null,
+      course: r.course ? { id: r.course.id, title: r.course.title, provider: r.course.provider } : null,
+    })),
+  });
 }));
 
 module.exports = router;

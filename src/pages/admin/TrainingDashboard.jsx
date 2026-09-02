@@ -26,8 +26,32 @@ import { getBusinessToday, useBusinessDateKey } from '../../lib/businessDate.js'
 const STATUS_LABEL = {
   ASSIGNED: 'Assigned',
   IN_PROGRESS: 'In Progress',
-  COMPLETED: 'Completed',
+  SELF_ATTESTED_COMPLETED: 'Completed',
+  PLAYER_OBSERVED_COMPLETED: 'Completed',
+  PROVIDER_VERIFIED_COMPLETED: 'Completed',
+  ADMIN_OVERRIDE_COMPLETED: 'Completed',
+  OVERDUE: 'Overdue',
+  CANCELLED: 'Cancelled',
 };
+
+// Round-20 (DR-010): each completion carries one of four evidence classes.
+// Show a small badge next to the status pill so admins can tell at a glance
+// whether the row came from a watched-to-end player, a self-attest click,
+// an admin override, or (future) a provider webhook. The full evidence
+// taxonomy lives in backend/src/lib/trainingRules.js EVIDENCE_CLASSES.
+const EVIDENCE_LABEL = {
+  SELF_ATTESTED: 'Self-attested',
+  PLAYER_OBSERVED: 'Player-observed',
+  PROVIDER_VERIFIED: 'Provider-verified',
+  ADMIN_OVERRIDE: 'Admin override',
+};
+
+const COMPLETED_STATUSES = new Set([
+  'SELF_ATTESTED_COMPLETED',
+  'PLAYER_OBSERVED_COMPLETED',
+  'PROVIDER_VERIFIED_COMPLETED',
+  'ADMIN_OVERRIDE_COMPLETED',
+]);
 
 const FILTERS = [
   { key: 'ALL', label: 'All' },
@@ -57,11 +81,35 @@ const isOverdue = (e) => {
   return due < today;
 };
 
-const StatusPill = ({ status }) => (
-  <span className={`training-pill training-pill-${(status || 'ASSIGNED').toLowerCase()}`} aria-label={`Status: ${STATUS_LABEL[status] || status}`}>
-    {STATUS_LABEL[status] || status}
-  </span>
-);
+const StatusPill = ({ status }) => {
+  // Round-20 (DR-010): all four completed-states collapse to one pill label
+  // ("Completed") so the queue reads cleanly. The distinguishing info moves
+  // to the EvidenceBadge below — see EVIDENCE_LABEL for the four classes.
+  const cssStatus = COMPLETED_STATUSES.has(status) ? 'COMPLETED' : status;
+  return (
+    <span className={`training-pill training-pill-${(cssStatus || 'ASSIGNED').toLowerCase()}`} aria-label={`Status: ${STATUS_LABEL[status] || status}`}>
+      {STATUS_LABEL[status] || status}
+    </span>
+  );
+};
+
+// Round-20 (DR-010): badge that surfaces how the row was completed.
+// Renders only when the enrollment has a meaningful evidenceClass — i.e.
+// for the four completed-states. ARIA label ties the visual badge back to
+// the evidence class name so a screen-reader user gets the same info.
+const EvidenceBadge = ({ evidenceClass }) => {
+  if (!evidenceClass) return null;
+  const label = EVIDENCE_LABEL[evidenceClass] || evidenceClass;
+  return (
+    <span
+      className={`training-pill training-pill-evidence training-pill-evidence-${evidenceClass.toLowerCase()}`}
+      aria-label={`Evidence: ${label}`}
+      title={`Completion evidence: ${label}`}
+    >
+      {label}
+    </span>
+  );
+};
 
 export default function TrainingDashboard() {
   useDocumentTitle('Training Library');
@@ -295,6 +343,14 @@ export default function TrainingDashboard() {
                   <div className="training-card-title-row">
                     <h3 className="training-card-title">{e.employee?.name || 'Unknown employee'}</h3>
                     <StatusPill status={e.status} />
+                    {/* Round-20 (DR-010): show the evidence class for completed rows
+                        so admins can tell at a glance whether the row was
+                        self-attested, player-observed, provider-verified, or
+                        admin-overridden. Renders nothing for in-progress /
+                        overdue / cancelled rows. */}
+                    {COMPLETED_STATUSES.has(e.status) && (
+                      <EvidenceBadge evidenceClass={e.evidenceClass} />
+                    )}
                   </div>
                   <div className="training-card-meta">
                     <span className="training-card-employee-email">{e.employee?.email}</span>

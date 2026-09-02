@@ -25,9 +25,15 @@ const {
   validateProgressPayload,
   validateCompletePayload,
   canTransition,
+  canAutoCompleteFromPlayer,
+  isCompleted,
+  markComplete,
   httpStatusForCode,
   ALLOWED_PROVIDERS,
   ALLOWED_STATUSES,
+  EVIDENCE_CLASSES,
+  EVIDENCE_TO_STATUS,
+  STATUS_TO_EVIDENCE,
   ALLOWED_PRIORITIES,
   ALLOWED_COURSE_UPDATE_FIELDS,
   MAX_TITLE_LEN,
@@ -406,22 +412,40 @@ describe('trainingRules — canTransition', () => {
   it('allows ASSIGNED → IN_PROGRESS', () => {
     expect(canTransition('ASSIGNED', 'IN_PROGRESS')).toBe(true);
   });
-  it('allows ASSIGNED → COMPLETED', () => {
-    expect(canTransition('ASSIGNED', 'COMPLETED')).toBe(true);
+  it('allows ASSIGNED → SELF_ATTESTED_COMPLETED (manual mark-complete)', () => {
+    expect(canTransition('ASSIGNED', 'SELF_ATTESTED_COMPLETED')).toBe(true);
   });
-  it('allows IN_PROGRESS → COMPLETED', () => {
-    expect(canTransition('IN_PROGRESS', 'COMPLETED')).toBe(true);
+  it('allows ASSIGNED → ADMIN_OVERRIDE_COMPLETED', () => {
+    expect(canTransition('ASSIGNED', 'ADMIN_OVERRIDE_COMPLETED')).toBe(true);
+  });
+  it('allows IN_PROGRESS → PLAYER_OBSERVED_COMPLETED', () => {
+    expect(canTransition('IN_PROGRESS', 'PLAYER_OBSERVED_COMPLETED')).toBe(true);
+  });
+  it('allows IN_PROGRESS → SELF_ATTESTED_COMPLETED', () => {
+    expect(canTransition('IN_PROGRESS', 'SELF_ATTESTED_COMPLETED')).toBe(true);
+  });
+  it('allows IN_PROGRESS → ADMIN_OVERRIDE_COMPLETED', () => {
+    expect(canTransition('IN_PROGRESS', 'ADMIN_OVERRIDE_COMPLETED')).toBe(true);
+  });
+  it('allows IN_PROGRESS → PROVIDER_VERIFIED_COMPLETED (future webhook path)', () => {
+    expect(canTransition('IN_PROGRESS', 'PROVIDER_VERIFIED_COMPLETED')).toBe(true);
   });
   it('allows idempotent same-status writes', () => {
     expect(canTransition('IN_PROGRESS', 'IN_PROGRESS')).toBe(true);
     expect(canTransition('ASSIGNED', 'ASSIGNED')).toBe(true);
+    expect(canTransition('SELF_ATTESTED_COMPLETED', 'SELF_ATTESTED_COMPLETED')).toBe(true);
   });
   it('forbids backward transitions', () => {
     expect(canTransition('IN_PROGRESS', 'ASSIGNED')).toBe(false);
   });
-  it('forbids transitions out of COMPLETED', () => {
-    expect(canTransition('COMPLETED', 'IN_PROGRESS')).toBe(false);
-    expect(canTransition('COMPLETED', 'ASSIGNED')).toBe(false);
+  it('forbids transitions out of any completed-state', () => {
+    expect(canTransition('SELF_ATTESTED_COMPLETED', 'IN_PROGRESS')).toBe(false);
+    expect(canTransition('PLAYER_OBSERVED_COMPLETED', 'ASSIGNED')).toBe(false);
+    expect(canTransition('ADMIN_OVERRIDE_COMPLETED', 'SELF_ATTESTED_COMPLETED')).toBe(false);
+  });
+  it('forbids transitions from OVERDUE / CANCELLED', () => {
+    expect(canTransition('OVERDUE', 'IN_PROGRESS')).toBe(false);
+    expect(canTransition('CANCELLED', 'ASSIGNED')).toBe(false);
   });
   it('forbids transitions from unknown statuses', () => {
     expect(canTransition('UNKNOWN', 'ASSIGNED')).toBe(false);
@@ -439,6 +463,12 @@ describe('trainingRules — httpStatusForCode', () => {
     expect(httpStatusForCode('INVALID_URL')).toBe(400);
     expect(httpStatusForCode('TITLE_TOO_LONG')).toBe(400);
     expect(httpStatusForCode('NO_CHANGES')).toBe(400);
+    expect(httpStatusForCode('INVALID_EVIDENCE_CLASS')).toBe(400);
+    expect(httpStatusForCode('INVALID_REASON')).toBe(400);
+    expect(httpStatusForCode('REASON_TOO_LONG')).toBe(400);
+    expect(httpStatusForCode('INVALID_METADATA')).toBe(400);
+    expect(httpStatusForCode('EVIDENCE_REQUIRED')).toBe(400);
+    expect(httpStatusForCode('PLAYER_DATA_REQUIRED')).toBe(400);
   });
   it('maps 409 conflict codes', () => {
     expect(httpStatusForCode('DUPLICATE')).toBe(409);
@@ -463,8 +493,17 @@ describe('trainingRules — allowlist constants', () => {
       'YOUTUBE', 'VIMEO', 'LINKEDIN_LEARNING', 'COURSERA', 'UDEMY', 'OTHER',
     ]));
   });
-  it('ALLOWED_STATUSES has ASSIGNED / IN_PROGRESS / COMPLETED', () => {
-    expect(ALLOWED_STATUSES).toEqual(new Set(['ASSIGNED', 'IN_PROGRESS', 'COMPLETED']));
+  it('ALLOWED_STATUSES has the 8 documented states (round-20)', () => {
+    expect(ALLOWED_STATUSES).toEqual(new Set([
+      'ASSIGNED',
+      'IN_PROGRESS',
+      'SELF_ATTESTED_COMPLETED',
+      'PLAYER_OBSERVED_COMPLETED',
+      'PROVIDER_VERIFIED_COMPLETED',
+      'ADMIN_OVERRIDE_COMPLETED',
+      'OVERDUE',
+      'CANCELLED',
+    ]));
   });
   it('ALLOWED_PRIORITIES has LOW / NORMAL / HIGH', () => {
     expect(ALLOWED_PRIORITIES).toEqual(new Set(['LOW', 'NORMAL', 'HIGH']));
@@ -477,5 +516,238 @@ describe('trainingRules — allowlist constants', () => {
   });
   it('MAX_EMPLOYEE_IDS_PER_BULK is 500', () => {
     expect(MAX_EMPLOYEE_IDS_PER_BULK).toBe(500);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Round-20 (DR-010): evidence provenance — new helpers, new constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('trainingRules — EVIDENCE_CLASSES (DR-010)', () => {
+  it('has the four documented evidence classes', () => {
+    expect(EVIDENCE_CLASSES).toEqual(new Set([
+      'SELF_ATTESTED',
+      'PLAYER_OBSERVED',
+      'PROVIDER_VERIFIED',
+      'ADMIN_OVERRIDE',
+    ]));
+  });
+
+  it('EVIDENCE_TO_STATUS maps every class to a unique completed-state', () => {
+    const statuses = Object.values(EVIDENCE_TO_STATUS);
+    expect(statuses).toHaveLength(4);
+    expect(new Set(statuses).size).toBe(4);
+    expect(EVIDENCE_TO_STATUS.SELF_ATTESTED).toBe('SELF_ATTESTED_COMPLETED');
+    expect(EVIDENCE_TO_STATUS.PLAYER_OBSERVED).toBe('PLAYER_OBSERVED_COMPLETED');
+    expect(EVIDENCE_TO_STATUS.PROVIDER_VERIFIED).toBe('PROVIDER_VERIFIED_COMPLETED');
+    expect(EVIDENCE_TO_STATUS.ADMIN_OVERRIDE).toBe('ADMIN_OVERRIDE_COMPLETED');
+  });
+
+  it('STATUS_TO_EVIDENCE is the inverse of EVIDENCE_TO_STATUS', () => {
+    for (const ev of Object.keys(EVIDENCE_TO_STATUS)) {
+      expect(STATUS_TO_EVIDENCE[EVIDENCE_TO_STATUS[ev]]).toBe(ev);
+    }
+  });
+});
+
+describe('trainingRules — isCompleted (DR-010)', () => {
+  it('returns true for every one of the four completed-states', () => {
+    expect(isCompleted('SELF_ATTESTED_COMPLETED')).toBe(true);
+    expect(isCompleted('PLAYER_OBSERVED_COMPLETED')).toBe(true);
+    expect(isCompleted('PROVIDER_VERIFIED_COMPLETED')).toBe(true);
+    expect(isCompleted('ADMIN_OVERRIDE_COMPLETED')).toBe(true);
+  });
+
+  it('returns false for in-progress / open / bookkeeping states', () => {
+    expect(isCompleted('ASSIGNED')).toBe(false);
+    expect(isCompleted('IN_PROGRESS')).toBe(false);
+    expect(isCompleted('OVERDUE')).toBe(false);
+    expect(isCompleted('CANCELLED')).toBe(false);
+  });
+
+  it('returns false for unknown statuses', () => {
+    expect(isCompleted('COMPLETED')).toBe(false); // legacy enum value, gone
+    expect(isCompleted(null)).toBe(false);
+    expect(isCompleted(undefined)).toBe(false);
+  });
+});
+
+describe('trainingRules — canAutoCompleteFromPlayer (DR-010)', () => {
+  it('allows YOUTUBE and VIMEO (working IFrame API)', () => {
+    expect(canAutoCompleteFromPlayer('YOUTUBE')).toBe(true);
+    expect(canAutoCompleteFromPlayer('VIMEO')).toBe(true);
+  });
+  it('forbids LINKEDIN_LEARNING / COURSERA / UDEMY / OTHER', () => {
+    expect(canAutoCompleteFromPlayer('LINKEDIN_LEARNING')).toBe(false);
+    expect(canAutoCompleteFromPlayer('COURSERA')).toBe(false);
+    expect(canAutoCompleteFromPlayer('UDEMY')).toBe(false);
+    expect(canAutoCompleteFromPlayer('OTHER')).toBe(false);
+  });
+});
+
+describe('trainingRules — markComplete (DR-010)', () => {
+  const baseEnrollment = {
+    id: 'enr-1',
+    employeeId: 'emp-1',
+    status: 'IN_PROGRESS',
+    progressPct: 50,
+    startedAt: new Date('2026-09-01T10:00:00Z'),
+  };
+
+  it('SELF_ATTESTED: defaults completedBy to employeeId when caller is the owner', () => {
+    const patch = markComplete(baseEnrollment, {}, 'emp-1');
+    expect(patch.status).toBe('SELF_ATTESTED_COMPLETED');
+    expect(patch.evidenceClass).toBe('SELF_ATTESTED');
+    expect(patch.completedBy).toBe('emp-1');
+    expect(patch.progressPct).toBe(100);
+    expect(patch.completedAt).toBeInstanceOf(Date);
+    expect(patch.startedAt).toEqual(baseEnrollment.startedAt);
+  });
+
+  it('ADMIN_OVERRIDE: defaults when caller is NOT the owner', () => {
+    const patch = markComplete(baseEnrollment, {}, 'admin-7');
+    expect(patch.status).toBe('ADMIN_OVERRIDE_COMPLETED');
+    expect(patch.evidenceClass).toBe('ADMIN_OVERRIDE');
+    expect(patch.completedBy).toBe('admin-7');
+  });
+
+  it('PLAYER_OBSERVED: explicit evidence + completedBy on caller request', () => {
+    const patch = markComplete(baseEnrollment, {
+      evidenceClass: 'PLAYER_OBSERVED',
+      completedBy: 'emp-1',
+      evidenceMetadata: { sessionId: 'yt-abc123', durationSec: 600 },
+    }, 'emp-1');
+    expect(patch.status).toBe('PLAYER_OBSERVED_COMPLETED');
+    expect(patch.evidenceClass).toBe('PLAYER_OBSERVED');
+    expect(patch.evidenceMetadata).toEqual({ sessionId: 'yt-abc123', durationSec: 600 });
+  });
+
+  it('preserves startedAt when present, otherwise stamps now', () => {
+    const patch1 = markComplete(baseEnrollment, {}, 'emp-1');
+    expect(patch1.startedAt).toEqual(baseEnrollment.startedAt);
+    const noStart = { ...baseEnrollment, startedAt: null };
+    const patch2 = markComplete(noStart, {}, 'emp-1');
+    expect(patch2.startedAt).toBeInstanceOf(Date);
+  });
+
+  it('throws on unknown evidence class', () => {
+    expect(() => markComplete(baseEnrollment, { evidenceClass: 'BOGUS' }, 'emp-1')).toThrow();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// validateCompletePayload — extended for evidence provenance
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('trainingRules — validateCompletePayload (DR-010)', () => {
+  it('accepts null/empty body', () => {
+    expect(validateCompletePayload(null).ok).toBe(true);
+    expect(validateCompletePayload({}).ok).toBe(true);
+    expect(validateCompletePayload({}).value.evidenceClass).toBe(null);
+  });
+
+  it('accepts a short note (legacy field)', () => {
+    const r = validateCompletePayload({ note: 'finished it' });
+    expect(r.ok).toBe(true);
+    expect(r.value.note).toBe('finished it');
+  });
+
+  it('accepts a valid evidenceClass', () => {
+    const r = validateCompletePayload({ evidenceClass: 'SELF_ATTESTED' });
+    expect(r.ok).toBe(true);
+    expect(r.value.evidenceClass).toBe('SELF_ATTESTED');
+  });
+
+  it('rejects an unknown evidenceClass', () => {
+    const r = validateCompletePayload({ evidenceClass: 'GUESS' });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('INVALID_EVIDENCE_CLASS');
+  });
+
+  it('accepts a reason string within length limit', () => {
+    const r = validateCompletePayload({ reason: 'browser died mid-watch' });
+    expect(r.ok).toBe(true);
+    expect(r.value.reason).toBe('browser died mid-watch');
+  });
+
+  it('rejects an over-long reason', () => {
+    const r = validateCompletePayload({ reason: 'a'.repeat(MAX_EMPLOYEE_NOTE_LEN + 1) });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('REASON_TOO_LONG');
+  });
+
+  it('accepts an evidenceMetadata object (player payload)', () => {
+    const r = validateCompletePayload({
+      evidenceMetadata: { sessionId: 'yt-abc', durationSec: 600 },
+    });
+    expect(r.ok).toBe(true);
+    expect(r.value.evidenceMetadata).toEqual({ sessionId: 'yt-abc', durationSec: 600 });
+  });
+
+  it('rejects a non-object evidenceMetadata', () => {
+    expect(validateCompletePayload({ evidenceMetadata: 'string' }).ok).toBe(false);
+    expect(validateCompletePayload({ evidenceMetadata: 42 }).ok).toBe(false);
+    expect(validateCompletePayload({ evidenceMetadata: [1, 2, 3] }).ok).toBe(false);
+  });
+
+  it('rejects over-long note (legacy)', () => {
+    const r = validateCompletePayload({ note: 'a'.repeat(MAX_EMPLOYEE_NOTE_LEN + 1) });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('NOTE_TOO_LONG');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// validateProgressPayload — extended for evidenceMetadata on player-complete
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('trainingRules — validateProgressPayload (DR-010)', () => {
+  it('accepts valid in-range values', () => {
+    const r = validateProgressPayload({ progressPct: 47.6, lastWatchedSec: 120 }, 30);
+    expect(r.ok).toBe(true);
+    expect(r.value.progressPct).toBe(48);
+    expect(r.value.lastWatchedSec).toBe(120);
+  });
+
+  it('rejects out-of-range pct', () => {
+    expect(validateProgressPayload({ progressPct: -1, lastWatchedSec: 1 }, 0).ok).toBe(false);
+    expect(validateProgressPayload({ progressPct: 101, lastWatchedSec: 1 }, 0).ok).toBe(false);
+  });
+
+  it('rejects non-numeric pct', () => {
+    expect(validateProgressPayload({ progressPct: 'abc', lastWatchedSec: 0 }, 0).ok).toBe(false);
+  });
+
+  it('rejects negative lastWatchedSec', () => {
+    expect(validateProgressPayload({ progressPct: 50, lastWatchedSec: -5 }, 0).ok).toBe(false);
+  });
+
+  it('allows a 5% backward step (refresh tolerance)', () => {
+    const r = validateProgressPayload({ progressPct: 48, lastWatchedSec: 100 }, 50);
+    expect(r.ok).toBe(true);
+  });
+
+  it('rejects a > 5% backward step (regression guard)', () => {
+    const r = validateProgressPayload({ progressPct: 30, lastWatchedSec: 60 }, 50);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('PROGRESS_REGRESSED');
+  });
+
+  it('accepts an evidenceMetadata object (player session payload)', () => {
+    const r = validateProgressPayload({
+      progressPct: 100,
+      lastWatchedSec: 600,
+      evidenceMetadata: { sessionId: 'yt-abc', durationSec: 600 },
+    }, 50);
+    expect(r.ok).toBe(true);
+    expect(r.value.evidenceMetadata).toEqual({ sessionId: 'yt-abc', durationSec: 600 });
+  });
+
+  it('rejects a non-object evidenceMetadata', () => {
+    expect(validateProgressPayload({
+      progressPct: 100,
+      lastWatchedSec: 600,
+      evidenceMetadata: 'string',
+    }, 50).ok).toBe(false);
   });
 });

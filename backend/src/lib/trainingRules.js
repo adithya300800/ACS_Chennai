@@ -21,8 +21,51 @@ const ALLOWED_PROVIDERS = new Set([
 const ALLOWED_STATUSES = new Set([
   'ASSIGNED',
   'IN_PROGRESS',
-  'COMPLETED',
+  // Four completed-states — distinguished by evidenceClass, but listed here
+  // so legacy `?status=COMPLETED` filters and the canTransition() allowlist
+  // keep working for callers that don't yet know about evidence classes.
+  'SELF_ATTESTED_COMPLETED',
+  'PLAYER_OBSERVED_COMPLETED',
+  'PROVIDER_VERIFIED_COMPLETED',
+  'ADMIN_OVERRIDE_COMPLETED',
+  // Bookkeeping states driven by the admin / a future cron, not the
+  // employee. The progress route never writes either of these directly.
+  'OVERDUE',
+  'CANCELLED',
 ]);
+
+// Round-20 (DR-010): the four "how did this enrollment end up completed?"
+// evidence classes. The COMPLETED-status column holds the union of all four;
+// `evidenceClass` records which one fired for a given row.
+const EVIDENCE_CLASSES = new Set([
+  'SELF_ATTESTED',
+  'PLAYER_OBSERVED',
+  'PROVIDER_VERIFIED',
+  'ADMIN_OVERRIDE',
+]);
+
+// Map evidence class → the canonical completed-status enum value.
+const EVIDENCE_TO_STATUS = {
+  SELF_ATTESTED: 'SELF_ATTESTED_COMPLETED',
+  PLAYER_OBSERVED: 'PLAYER_OBSERVED_COMPLETED',
+  PROVIDER_VERIFIED: 'PROVIDER_VERIFIED_COMPLETED',
+  ADMIN_OVERRIDE: 'ADMIN_OVERRIDE_COMPLETED',
+};
+
+// Reverse lookup — for the badge / reports to show "PLAYER_OBSERVED" given a
+// stored status like "PLAYER_OBSERVED_COMPLETED".
+const STATUS_TO_EVIDENCE = Object.fromEntries(
+  Object.entries(EVIDENCE_TO_STATUS).map(([k, v]) => [v, k])
+);
+
+// Returns true for any of the four completed-states. (Overdue + Cancelled
+// are NOT completed — they're terminal-but-not-done states.)
+function isCompleted(status) {
+  return status === 'SELF_ATTESTED_COMPLETED'
+    || status === 'PLAYER_OBSERVED_COMPLETED'
+    || status === 'PROVIDER_VERIFIED_COMPLETED'
+    || status === 'ADMIN_OVERRIDE_COMPLETED';
+}
 
 const ALLOWED_PRIORITIES = new Set([
   'LOW',
@@ -394,6 +437,13 @@ function validateAssignEnrollments(body) {
 // progressPct must be 0..100; lastWatchedSec must be >= 0 and >= previous -5
 // (the -5 tolerance allows resume after a refresh; anything beyond that is
 // treated as a malicious skip).
+//
+// `provider` and `evidenceMetadata` are optional but, when present, let the
+// route handler decide whether `progressPct >= 100` is allowed to auto-flip
+// the row to PLAYER_OBSERVED_COMPLETED. For YOUTUBE / VIMEO providers the
+// client MUST send a non-empty `metadata.sessionId` (the IFrame API
+// session token) before 100% will be accepted — this is the DR-010
+// defense against a tampered client claiming "I watched to the end".
 function validateProgressPayload(body, previousPct = 0) {
   if (!body || typeof body !== 'object') {
     return { ok: false, code: 'INVALID_BODY', message: 'Body required' };
@@ -427,13 +477,43 @@ function validateProgressPayload(body, previousPct = 0) {
     };
   }
 
-  return { ok: true, value: { progressPct: pct, lastWatchedSec: sec } };
+  let evidenceMetadata = null;
+  if (body.evidenceMetadata != null) {
+    if (typeof body.evidenceMetadata !== 'object') {
+      return { ok: false, code: 'INVALID_METADATA', message: 'evidenceMetadata must be an object' };
+    }
+    evidenceMetadata = body.evidenceMetadata;
+  }
+
+  return {
+    ok: true,
+    value: {
+      progressPct: pct,
+      lastWatchedSec: sec,
+      evidenceMetadata,
+    },
+  };
+}
+
+// DR-010 (round-20): decides if `progressPct >= 100` is allowed to auto-
+// promote an enrollment to a PLAYER_OBSERVED_COMPLETED state, given the
+// course provider. YOUTUBE and VIMEO are player-observable; the others
+// have no working IFrame API and so the auto-complete path is not
+// available — those courses are completed via admin override or the
+// employee's manual "I'm done" click (SELF_ATTESTED).
+function canAutoCompleteFromPlayer(provider) {
+  return provider === 'YOUTUBE' || provider === 'VIMEO';
 }
 
 // Validate the body for PUT /api/training/enrollments/:id/complete
 // (employee manual mark-complete OR admin override).
+//
+// Round-20 (DR-010): adds `evidenceClass` to let callers explicitly tag
+// which completion path they're invoking. The route handler resolves the
+// default (SELF_ATTESTED for the employee self-click, ADMIN_OVERRIDE for
+// the admin path) if the caller leaves it null.
 function validateCompletePayload(body) {
-  if (body == null) return { ok: true, value: { note: null } };
+  if (body == null) return { ok: true, value: { note: null, evidenceClass: null, reason: null, evidenceMetadata: null } };
   if (typeof body !== 'object') {
     return { ok: false, code: 'INVALID_BODY', message: 'Body required' };
   }
@@ -451,24 +531,110 @@ function validateCompletePayload(body) {
       };
     }
   }
-  return { ok: true, value: { note } };
+  let evidenceClass = null;
+  if (body.evidenceClass != null) {
+    if (typeof body.evidenceClass !== 'string' || !EVIDENCE_CLASSES.has(body.evidenceClass)) {
+      return {
+        ok: false,
+        code: 'INVALID_EVIDENCE_CLASS',
+        message: `evidenceClass must be one of: ${[...EVIDENCE_CLASSES].join(', ')}`,
+      };
+    }
+    evidenceClass = body.evidenceClass;
+  }
+  let reason = null;
+  if (body.reason != null) {
+    if (typeof body.reason !== 'string') {
+      return { ok: false, code: 'INVALID_REASON', message: 'reason must be a string or null' };
+    }
+    reason = body.reason.trim() || null;
+    if (reason && reason.length > MAX_EMPLOYEE_NOTE_LEN) {
+      return {
+        ok: false,
+        code: 'REASON_TOO_LONG',
+        message: `reason must be at most ${MAX_EMPLOYEE_NOTE_LEN} characters`,
+      };
+    }
+  }
+  let evidenceMetadata = null;
+  if (body.evidenceMetadata != null) {
+    if (typeof body.evidenceMetadata !== 'object' || Array.isArray(body.evidenceMetadata)) {
+      return { ok: false, code: 'INVALID_METADATA', message: 'evidenceMetadata must be a JSON object' };
+    }
+    evidenceMetadata = body.evidenceMetadata;
+  }
+  return {
+    ok: true,
+    value: { note, evidenceClass, reason, evidenceMetadata },
+  };
+}
+
+// DR-010 (round-20): given an existing enrollment and a chosen evidence
+// class, return the data patch that the route handler should pass to
+// Prisma.update. Pure function — no I/O. The route handler is responsible
+// for (a) locking the row from concurrent writes, (b) writing the audit
+// log, (c) emitting the notification.
+//
+// Inputs:
+//   enrollment — { status, evidenceClass, progressPct, employeeId, ...}
+//   evidence   — { evidenceClass, completedBy, evidenceMetadata, providerSessionId }
+//   actorId    — employeeId of the requester (used to default SELF_ATTESTED's completedBy)
+//
+// Returns: { status, progressPct, completedAt, startedAt?, evidenceClass,
+//           completedBy, evidenceMetadata, providerSessionId }
+function markComplete(enrollment, evidence, actorId) {
+  const evidenceClass = evidence.evidenceClass
+    || (enrollment.employeeId === actorId ? 'SELF_ATTESTED' : 'ADMIN_OVERRIDE');
+  if (!EVIDENCE_CLASSES.has(evidenceClass)) {
+    throw new Error(`Unknown evidenceClass: ${evidenceClass}`);
+  }
+  const status = EVIDENCE_TO_STATUS[evidenceClass];
+  const now = new Date();
+  return {
+    status,
+    progressPct: 100,
+    completedAt: now,
+    startedAt: enrollment.startedAt || now,
+    evidenceClass,
+    completedBy: evidence.completedBy || actorId,
+    evidenceMetadata: evidence.evidenceMetadata || null,
+    providerSessionId: evidence.providerSessionId || null,
+  };
 }
 
 // Status transitions the system can perform:
 //
-//   ASSIGNED   → IN_PROGRESS  (first progress ping with progressPct > 0)
-//   ASSIGNED   → COMPLETED    (manual mark-complete)
-//   IN_PROGRESS → COMPLETED   (progress ping with progressPct >= 100, or manual)
-//   IN_PROGRESS → IN_PROGRESS (subsequent progress pings)
+//   ASSIGNED    → IN_PROGRESS              (first progress ping with progressPct > 0)
+//   ASSIGNED    → SELF_ATTESTED_COMPLETED  (employee manual "I'm done")
+//   ASSIGNED    → ADMIN_OVERRIDE_COMPLETED (admin override path)
+//   IN_PROGRESS → PLAYER_OBSERVED_COMPLETED (player reached ended=true)
+//   IN_PROGRESS → SELF_ATTESTED_COMPLETED  (employee manual on a non-video course)
+//   IN_PROGRESS → ADMIN_OVERRIDE_COMPLETED (admin override)
+//   ANY_COMPLETED → same value             (idempotent — re-write is a noop)
 //
-// All other transitions are invalid (admin "reset to ASSIGNED" is post-v1).
+// All other transitions are invalid. Completed-states are terminal in v1.
 function canTransition(fromStatus, toStatus) {
   if (!ALLOWED_STATUSES.has(fromStatus)) return false;
   if (!ALLOWED_STATUSES.has(toStatus)) return false;
   if (fromStatus === toStatus) return true; // idempotent writes
-  if (fromStatus === 'ASSIGNED') return toStatus === 'IN_PROGRESS' || toStatus === 'COMPLETED';
-  if (fromStatus === 'IN_PROGRESS') return toStatus === 'COMPLETED';
-  // COMPLETED is terminal in v1.
+
+  if (isCompleted(fromStatus)) return false; // completed is terminal
+
+  if (fromStatus === 'ASSIGNED') {
+    return toStatus === 'IN_PROGRESS'
+      || toStatus === 'SELF_ATTESTED_COMPLETED'
+      || toStatus === 'PLAYER_OBSERVED_COMPLETED'
+      || toStatus === 'ADMIN_OVERRIDE_COMPLETED';
+  }
+  if (fromStatus === 'IN_PROGRESS') {
+    return toStatus === 'SELF_ATTESTED_COMPLETED'
+      || toStatus === 'PLAYER_OBSERVED_COMPLETED'
+      || toStatus === 'PROVIDER_VERIFIED_COMPLETED'
+      || toStatus === 'ADMIN_OVERRIDE_COMPLETED';
+  }
+  // OVERDUE / CANCELLED: terminal-ish; an admin could in theory re-open by
+  // hand. Re-opening is post-v1 — for now only `?status=OVERDUE` audit
+  // queries are read paths.
   return false;
 }
 
@@ -498,6 +664,12 @@ function httpStatusForCode(code) {
     case 'INVALID_WATCHED_SEC':
     case 'INVALID_NOTE':
     case 'NOTE_TOO_LONG':
+    case 'INVALID_EVIDENCE_CLASS':
+    case 'INVALID_REASON':
+    case 'REASON_TOO_LONG':
+    case 'INVALID_METADATA':
+    case 'EVIDENCE_REQUIRED':
+    case 'PLAYER_DATA_REQUIRED':
     case 'UNKNOWN_FIELDS':
     case 'NO_CHANGES':
       return 400;
@@ -517,6 +689,9 @@ function httpStatusForCode(code) {
 module.exports = {
   ALLOWED_PROVIDERS,
   ALLOWED_STATUSES,
+  EVIDENCE_CLASSES,
+  EVIDENCE_TO_STATUS,
+  STATUS_TO_EVIDENCE,
   ALLOWED_PRIORITIES,
   ALLOWED_COURSE_UPDATE_FIELDS,
   MAX_TITLE_LEN,
@@ -535,5 +710,8 @@ module.exports = {
   validateProgressPayload,
   validateCompletePayload,
   canTransition,
+  canAutoCompleteFromPlayer,
+  isCompleted,
+  markComplete,
   httpStatusForCode,
 };
