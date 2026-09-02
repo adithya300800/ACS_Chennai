@@ -5,6 +5,18 @@ const crypto = require('crypto');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
 const { hashIdentifier } = require('../lib/pii');
+const {
+  ACCESS_TOKEN_TTL,
+  recordRefreshToken,
+  findRefreshTokenRow,
+  claimRefreshToken,
+  revokeAccessToken,
+  revokeAllRefreshTokensForEmployee,
+  revokeRefreshTokenByValue,
+  rememberRotation,
+  takeRotationReplay,
+  pruneExpired,
+} = require('../lib/revocation');
 
 // Fail fast if secrets are not set in production
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -54,12 +66,6 @@ const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN
 const oauthStateStore = new Map();
 const STATE_TTL_MS = 5 * 60 * 1000; // 5 minutes — tightened from 10 in round-9
 
-// Per-jti access-token blacklist for /api/auth/logout. Same TTL as the
-// access token itself (24h). requireAuth() consults it on every request —
-// keep the lookup cheap. NOTE: in-memory and per-process. For multi-instance
-// deployments move to Redis. (Tracked as a known P3 limitation.)
-const tokenBlacklist = new Map(); // jti → expiresAt (ms)
-
 // Email-domain allowlist for self-provisioning (Zoho-verified emails only).
 // Adjust as needed; defaults to the customer domain + common test domains.
 const ALLOWED_EMAIL_DOMAINS = (process.env.ALLOWED_EMAIL_DOMAINS
@@ -67,21 +73,27 @@ const ALLOWED_EMAIL_DOMAINS = (process.env.ALLOWED_EMAIL_DOMAINS
   : ['acschennai.com']
 );
 
-// Sign access (24h) and refresh (7d) tokens. Returns { accessToken, refreshToken }.
-// Access token is 24h so a single workday doesn't trigger expiry mid-upload. The
-// real defence against expiry is the frontend's auto-refresh interceptor — once
-// that's in place we can shorten this back to ~1h.
+// Sign access (15m) and refresh (7d) tokens. Returns
+// { accessToken, refreshToken, accessJti }.
 //
-// Round-9: access tokens now carry a `jti` so the logout endpoint can revoke
-// them via tokenBlacklist. We don't include jti on refresh tokens; logout
-// clears the blacklist entry but the refresh token itself is JWT-only —
-// full refresh-token revocation is out of scope for this round (P2).
+// Round-20 (DR-005): the access token TTL dropped from 24h to 15m. The old
+// 24h value was a workaround for expiry mid-upload, but it also meant a
+// stolen token — or a stale `isAdmin` claim after a demotion — stayed usable
+// for a full day. The frontend's auto-refresh interceptor (api.js) plus
+// AuthContext's preemptive refresh now cover long sessions, and rotation
+// below makes each refresh cheap and revocable.
+//
+// Access tokens carry a `jti` so logout can revoke them durably (see
+// lib/revocation.js). Refresh tokens carry one too, purely to guarantee two
+// refresh tokens minted in the same second for the same employee hash
+// differently — `tokenHash` is UNIQUE, and without the jti a same-second
+// re-issue could collide on the digest.
 function signTokens(employee) {
   const accessJti = crypto.randomBytes(16).toString('base64url');
   const accessToken = jwt.sign(
     { employeeId: employee.id, email: employee.email, isAdmin: !!employee.isAdmin, jti: accessJti },
     JWT_SECRET,
-    { algorithm: 'HS256', expiresIn: '24h' }
+    { algorithm: 'HS256', expiresIn: ACCESS_TOKEN_TTL }
   );
   const refreshToken = jwt.sign(
     { employeeId: employee.id, jti: crypto.randomBytes(16).toString('base64url') },
@@ -89,6 +101,22 @@ function signTokens(employee) {
     { algorithm: 'HS256', expiresIn: '7d' }
   );
   return { accessToken, refreshToken, accessJti };
+}
+
+// Mint a token pair AND persist the refresh token's digest, so the refresh
+// endpoint can rotate it and logout can terminate it.
+//
+// Every path that hands a refresh token to a client must go through here.
+// A refresh token with no `refresh_token` row is rejected at /refresh (see
+// the REFRESH_UNKNOWN branch), so a call site that forgets this would hand
+// out a session that dies at its first refresh.
+async function issueSession(prisma, employee) {
+  const tokens = signTokens(employee);
+  await recordRefreshToken(prisma, {
+    employeeId: employee.id,
+    token: tokens.refreshToken,
+  });
+  return tokens;
 }
 
 // Strip sensitive fields before returning employee to client.
@@ -326,7 +354,7 @@ router.get('/zoho/callback', async (req, res) => {
       refreshToken: refresh_token,
     });
 
-    const { accessToken, refreshToken } = signTokens(employee);
+    const { accessToken, refreshToken } = await issueSession(prisma, employee);
 
     sendPopupPage(res, {
       payload: {
@@ -421,7 +449,7 @@ router.post('/zoho/callback', async (req, res) => {
       refreshToken: refresh_token,
     });
 
-    const { accessToken, refreshToken } = signTokens(employee);
+    const { accessToken, refreshToken } = await issueSession(prisma, employee);
 
     res.json({
       accessToken,
@@ -474,88 +502,185 @@ router.post('/login', async (req, res) => {
   const valid = await bcrypt.compare(password, employee.password);
   if (!valid) return res.status(401).json(GENERIC_INVALID);
 
-  const { accessToken, refreshToken } = signTokens(employee);
+  let tokens;
+  try {
+    tokens = await issueSession(prisma, employee);
+  } catch (err) {
+    // The refresh-token row is not optional: without it the session cannot be
+    // rotated or revoked, so a partially-issued session is worse than a failed
+    // login. Fail the login rather than hand back an unmanaged token pair.
+    console.error('[login] session persist failed', err.message);
+    return res.status(500).json({ error: 'Could not start session' });
+  }
+
   res.json({
-    accessToken,
-    refreshToken,
+    accessToken: tokens.accessToken,
+    refreshToken: tokens.refreshToken,
     employee: sanitizeEmployee(employee),
   });
 });
 
 // POST /api/auth/refresh
-// Pin HS256. Verify the employee still exists.
+//
+// Round-20 (DR-005): refresh tokens are now STATEFUL and ROTATING.
+//
+// Before: a refresh token was a bare 7-day JWT. Nothing recorded it, so it
+// could be replayed forever, survived logout, and a copy lifted from
+// localStorage was worth a week of access. Now:
+//
+//   1. The presented token is looked up by sha256 digest.
+//   2. An already-spent row means the token leaked — the legitimate client
+//      discarded it at rotation, so whoever is presenting it now shouldn't
+//      have it. Response: kill EVERY session for that employee (RFC 6819
+//      §5.2.2.3 refresh-token replay detection) and 401.
+//   3. Otherwise the row is atomically spent and a replacement is issued,
+//      chained through `rotatedFromId`.
+//
+// The response now includes a NEW `refreshToken`. Clients MUST store it; the
+// one they sent is dead the moment this returns 200. (src/lib/api.js and
+// src/contexts/AuthContext.jsx were updated in the same commit.)
 router.post('/refresh', async (req, res) => {
-  const { refreshToken } = req.body;
+  const { refreshToken } = req.body || {};
   if (!refreshToken) return res.status(400).json({ error: 'Refresh token required' });
 
+  const prisma = req.app.get('prisma');
+
+  let decoded;
   try {
-    const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET, { algorithms: ['HS256'] });
-    const prisma = req.app.get('prisma');
-
-    const employee = await prisma.employee.findUnique({
-      where: { id: decoded.employeeId },
-      select: { id: true, email: true, isAdmin: true },
-    });
-    if (!employee) return res.status(401).json({ error: 'Employee not found' });
-
-    const newJti = crypto.randomBytes(16).toString('base64url');
-    const accessToken = jwt.sign(
-      { employeeId: employee.id, email: employee.email, isAdmin: !!employee.isAdmin, jti: newJti },
-      JWT_SECRET,
-      { algorithm: 'HS256', expiresIn: '24h' }
-    );
-    res.json({ accessToken });
+    decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET, { algorithms: ['HS256'] });
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
       return res.status(401).json({ error: 'Refresh token expired', code: 'REFRESH_EXPIRED' });
     }
-    res.status(401).json({ error: 'Invalid refresh token', code: 'REFRESH_INVALID' });
+    return res.status(401).json({ error: 'Invalid refresh token', code: 'REFRESH_INVALID' });
+  }
+
+  try {
+    const row = await findRefreshTokenRow(prisma, refreshToken);
+
+    // Signature is valid but we have no record of this token. Either it was
+    // issued before DR-005 shipped (no rows existed yet) or its row was
+    // pruned. We cannot rotate or revoke what we can't see, so refuse and make
+    // the client re-authenticate. NOTE: this forces a one-time re-login for
+    // every session that was live at deploy time — intentional, and the reason
+    // the frontend already treats REFRESH_* codes as "bounce to login".
+    if (!row) {
+      return res.status(401).json({ error: 'Invalid refresh token', code: 'REFRESH_UNKNOWN' });
+    }
+
+    if (row.expiresAt.getTime() <= Date.now()) {
+      return res.status(401).json({ error: 'Refresh token expired', code: 'REFRESH_EXPIRED' });
+    }
+
+    // Atomically spend the row. Losing this compare-and-swap means somebody
+    // else already used this exact token.
+    const won = await claimRefreshToken(prisma, row.id);
+
+    if (!won) {
+      // Benign case first: two tabs of the same browser share one refresh
+      // token and raced. The winner's tokens are cached for a few seconds, so
+      // hand the loser the same pair instead of nuking a healthy session.
+      const replay = takeRotationReplay(row.id);
+      if (replay) {
+        return res.json(replay);
+      }
+
+      // No replay entry → this is a genuine replay of a long-spent token.
+      // Treat as theft: revoke every live refresh token for the employee so
+      // the attacker's chain dies along with the victim's.
+      const killed = await revokeAllRefreshTokensForEmployee(prisma, row.employeeId, {
+        reason: 'refresh_token_reuse',
+      });
+      console.warn('[refresh] token reuse detected — all sessions revoked', {
+        employeeIdHash: hashIdentifier(row.employeeId),
+        sessionsRevoked: killed,
+      });
+      return res.status(401).json({
+        error: 'Refresh token already used — all sessions have been signed out',
+        code: 'REFRESH_REUSED',
+      });
+    }
+
+    // The employee must still exist (and we need their CURRENT isAdmin, not
+    // the value baked into the token they logged in with).
+    const employee = await prisma.employee.findUnique({
+      where: { id: row.employeeId || decoded.employeeId },
+      select: { id: true, email: true, isAdmin: true },
+    });
+    if (!employee) return res.status(401).json({ error: 'Employee not found' });
+
+    const tokens = signTokens(employee);
+    await recordRefreshToken(prisma, {
+      employeeId: employee.id,
+      token: tokens.refreshToken,
+      rotatedFromId: row.id,
+    });
+
+    const payload = { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken };
+    rememberRotation(row.id, payload);
+    res.json(payload);
+  } catch (err) {
+    console.error('[refresh] error', err.message);
+    // Do NOT collapse an infrastructure failure into 401: that would make the
+    // frontend destroy a session that is actually still valid.
+    res.status(503).json({ error: 'Could not refresh session', code: 'REFRESH_UNAVAILABLE' });
   }
 });
 
 // POST /api/auth/logout
-// Round-9: revokes the supplied access token via the in-memory blacklist.
-// requireAuth consults tokenBlacklist on every request, so any further use
-// of the same bearer token returns 401 TOKEN_REVOKED. Returns 204.
 //
-// Note: the refresh-token JWT itself is not on a deny-list (out of scope);
-// for full revocation move to a tokenVersion column on Employee.
+// Round-20 (DR-005): actually ends the session, durably.
+//
+//   - the access token's `jti` goes into `revoked_token`, which requireAuth
+//     checks on every request (the round-9 version wrote to an in-process Map
+//     that no middleware ever read, so logout revoked precisely nothing);
+//   - the presented refresh token's row is marked revoked, so it can't be
+//     rotated into a fresh session afterwards.
+//
+// Idempotent, and always 204: a client that is signing out must never be left
+// stuck because its token was already dead.
 router.post('/logout', requireAuth, async (req, res) => {
-  const authHeader = req.headers.authorization || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-  if (token) {
+  const prisma = req.app.get('prisma');
+  const { refreshToken } = req.body || {};
+
+  // requireAuth already verified the bearer token and stashed these.
+  if (req.tokenJti) {
     try {
-      const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
-      if (decoded && decoded.jti && decoded.exp) {
-        // exp is in seconds; convert to ms and store with a small grace so
-        // a token already expired is harmlessly garbage-collected.
-        tokenBlacklist.set(decoded.jti, decoded.exp * 1000);
-      }
-    } catch (e) {
-      // Token already invalid — still return 204; logout is idempotent.
+      await revokeAccessToken(prisma, {
+        jti: req.tokenJti,
+        employeeId: req.employeeId,
+        expSeconds: req.tokenExp,
+      });
+    } catch (err) {
+      console.error('[logout] access token revoke failed', err.message);
     }
   }
-  // Opportunistic GC of expired blacklist entries so the Map can't grow
-  // unbounded across long-running processes.
-  const nowMs = Date.now();
-  for (const [jti, exp] of tokenBlacklist.entries()) {
-    if (exp <= nowMs) tokenBlacklist.delete(jti);
+
+  try {
+    if (refreshToken) {
+      // Precise: kill only the session being signed out, leaving the user's
+      // other devices alone.
+      await revokeRefreshTokenByValue(prisma, refreshToken);
+    } else {
+      // No refresh token supplied (older cached frontend build, or a direct
+      // API caller). We can't identify which row to kill, and leaving a live
+      // 7-day token behind after an explicit sign-out is the DR-005 bug. Err
+      // toward over-revoking: end all of this employee's sessions.
+      await revokeAllRefreshTokensForEmployee(prisma, req.employeeId, {
+        reason: 'logout_without_refresh_token',
+      });
+    }
+  } catch (err) {
+    console.error('[logout] refresh token revoke failed', err.message);
   }
+
+  // Opportunistic prune of rows that can no longer deny anything. Done here
+  // rather than on a setInterval so there's no timer to leak in tests or to
+  // fire during shutdown. Failure is irrelevant to the caller.
+  pruneExpired(prisma).catch(() => {});
+
   res.status(204).end();
 });
-
-// Helper exported for middleware/auth.js to consult the blacklist on every
-// authenticated request. Returns true if the jti has been revoked.
-function isTokenRevoked(jti) {
-  if (!jti) return false;
-  const exp = tokenBlacklist.get(jti);
-  if (exp === undefined) return false;
-  if (exp <= Date.now()) {
-    tokenBlacklist.delete(jti);
-    return false;
-  }
-  return true;
-}
 
 // GET /api/auth/me
 // Round-9: returns the minimal { id, email, name, isAdmin } the frontend
@@ -580,4 +705,3 @@ router.get('/me', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
-module.exports.isTokenRevoked = isTokenRevoked;

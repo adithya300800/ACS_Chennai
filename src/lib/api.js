@@ -81,6 +81,16 @@ function doRefresh() {
           const parsed = JSON.parse(stored);
           localStorage.setItem('acs_auth', JSON.stringify({ ...parsed, accessToken: newToken }));
         }
+        // Round-20 (DR-005): the backend now ROTATES refresh tokens — the one
+        // we just sent was spent server-side and a replacement came back in
+        // this response. Persist it. If we kept using the old value, the next
+        // refresh would look like a replayed (stolen) token and the server
+        // would revoke every session for this employee, logging the user out
+        // of every device. Guarded on presence so this build still works
+        // against a backend that predates rotation.
+        if (data.refreshToken) {
+          localStorage.setItem('acs_refresh', data.refreshToken);
+        }
       } catch {}
       window.dispatchEvent(new CustomEvent('auth:token-refreshed', { detail: { accessToken: newToken } }));
       return newToken;
@@ -260,9 +270,17 @@ export const api = {
 
   // Auth helpers (BE4 added /api/auth/logout and /api/auth/me)
   // postLogout revokes the refresh token server-side so a stolen token stops
-  // being valid after the user signs out (round-8 P2). Call this BEFORE
-  // clearing localStorage so the request can still use the access token.
-  postLogout: (token) => api.post('/auth/logout', null, token),
+  // being valid after the user signs out (round-8 P2). Round-20 (DR-005):
+  // takes the refresh token in addition to the access token, and sends it in
+  // the request body so the backend can precisely revoke THIS device's
+  // refresh row instead of over-revoking every session the user has open on
+  // other tabs/devices. Call BEFORE clearing localStorage so the request can
+  // still use the access token. refreshToken is optional — if missing (e.g.
+  // already-expired session where someone cleared it manually) the backend
+  // falls back to revoking all of this employee's refresh rows, which is the
+  // safe direction to fail.
+  postLogout: (token, refreshToken) =>
+    api.post('/auth/logout', refreshToken ? { refreshToken } : null, token),
   // fetchMe returns the current employee; used by AuthContext for preemptive
   // refresh when the access token is about to expire (round-8 P1).
   fetchMe: (token) => api.get('/auth/me', token),

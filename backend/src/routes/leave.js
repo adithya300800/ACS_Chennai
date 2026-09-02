@@ -13,12 +13,16 @@
 //   - requireAuth on all routes.
 //   - Admin-only for: list-all, approve, reject.
 //   - Owner-only for: cancel. Read for: owner or admin.
+//   - Round-20 (DR-005): approve/reject mutate, so they use requireFreshAdmin
+//     (live Employee.isAdmin read). The read-only admin queue keeps the cached
+//     JWT claim — a 15-minute-stale claim can only over-share a listing, not
+//     let a demoted admin decide someone's leave.
 
 'use strict';
 
 const express = require('express');
 const router = express.Router();
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireFreshAdmin } = require('../middleware/auth');
 const { leaveCreateLimiter } = require('../middleware/rateLimit');
 const {
   ALLOWED_LEAVE_STATUSES,
@@ -216,11 +220,13 @@ router.get('/:id', asyncHandler(async (req, res) => {
 }));
 
 // ─── POST /api/leave/:id/approve ───────────────────────────────────────────
-router.post('/:id/approve', asyncHandler(async (req, res) => {
+// Round-20 (DR-005): admin status is enforced by requireFreshAdmin (a live
+// Employee.isAdmin read) rather than the JWT claim. This replaces the inline
+// re-check that used to sit below the payload validation — same guarantee, but
+// it now runs BEFORE we touch the request body, and it is the same middleware
+// every other admin mutation uses instead of a copy-pasted two-liner.
+router.post('/:id/approve', requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
-  if (!req.isAdmin) {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
 
   const { id } = req.params;
   const { reviewNotes } = req.body || {};
@@ -229,10 +235,7 @@ router.post('/:id/approve', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'reviewNotes too long (max 500)', code: 'REASON_TOO_LONG' });
   }
 
-  // Re-check admin status from DB so a freshly-granted admin works.
-  const me = await prisma.employee.findUnique({ where: { id: req.employeeId }, select: { isAdmin: true } });
-  if (!me || !me.isAdmin) return res.status(403).json({ error: 'Admin access required' });
-
+  // Admin status already re-read from the DB by requireFreshAdmin.
   const existing = await prisma.leaveRequest.findUnique({ where: { id } });
   if (!existing) return res.status(404).json({ error: 'Leave request not found', code: 'NOT_FOUND' });
   if (!canTransition(existing.status, 'APPROVED')) {
@@ -301,11 +304,10 @@ router.post('/:id/approve', asyncHandler(async (req, res) => {
 }));
 
 // ─── POST /api/leave/:id/reject ────────────────────────────────────────────
-router.post('/:id/reject', asyncHandler(async (req, res) => {
+// Round-20 (DR-005): see the note on /approve — requireFreshAdmin replaces both
+// the JWT-claim check and the inline DB re-check.
+router.post('/:id/reject', requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
-  if (!req.isAdmin) {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
 
   const { id } = req.params;
   const { reviewNotes } = req.body || {};
@@ -316,9 +318,6 @@ router.post('/:id/reject', asyncHandler(async (req, res) => {
   if (noteText.length > 500) {
     return res.status(400).json({ error: 'reviewNotes too long (max 500)', code: 'REASON_TOO_LONG' });
   }
-
-  const me = await prisma.employee.findUnique({ where: { id: req.employeeId }, select: { isAdmin: true } });
-  if (!me || !me.isAdmin) return res.status(403).json({ error: 'Admin access required' });
 
   const existing = await prisma.leaveRequest.findUnique({ where: { id } });
   if (!existing) return res.status(404).json({ error: 'Leave request not found', code: 'NOT_FOUND' });

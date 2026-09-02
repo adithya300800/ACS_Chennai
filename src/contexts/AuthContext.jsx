@@ -27,6 +27,14 @@ export function AuthProvider({ children }) {
       const parsed = JSON.parse(stored);
       localStorage.setItem('acs_auth', JSON.stringify({ ...parsed, accessToken: newAccessToken }));
     }
+    // Round-20 (DR-005): backend rotates refresh tokens. The one we just sent
+    // is dead server-side; the response carries a replacement. Persist it
+    // before doing anything else so a 401 on the next page doesn't see the
+    // spent value. Guarded on presence so we still work against a backend
+    // that hasn't rolled the rotation out yet.
+    if (data.refreshToken) {
+      localStorage.setItem('acs_refresh', data.refreshToken);
+    }
     setAccessToken(newAccessToken);
     return newAccessToken;
   }, []);
@@ -47,11 +55,11 @@ export function AuthProvider({ children }) {
   }, []);
 
   // Round-10: preemptive refresh so a daily-active user isn't bounced to
-  // /portal/login at 23h59m. Decode the stored access token's `exp` claim
-  // and schedule a refresh 1 hour before it. The api.js interceptor handles
-  // 401s on the fly, but a proactive refresh avoids the user seeing a flash
-  // of "session expired" right when they're trying to submit something
-  // important (DPR, attendance). Cancelled on logout.
+  // /portal/login right when they're trying to submit something important.
+  // Round-20 (DR-005): the access token is now 15 minutes, so a fixed
+  // "1 hour before expiry" lead would degenerate to "60s before expiry" —
+  // way too late. Refresh at half-life instead, with a 60s floor (very short
+  // tokens) and a 10-minute ceiling (pathologically long tokens).
   const preemptiveTimerRef = useRef(null);
   useEffect(() => {
     // Don't schedule if no token or no logout in flight
@@ -70,7 +78,9 @@ export function AuthProvider({ children }) {
       const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
       if (!payload || typeof payload.exp !== 'number') return;
       const expiresAtMs = payload.exp * 1000;
-      const msUntilRefresh = Math.max(60_000, expiresAtMs - Date.now() - 60 * 60 * 1000); // 1h before
+      const lifetimeMs = expiresAtMs - Date.now();
+      const halfLifeMs = Math.floor(lifetimeMs / 2);
+      const msUntilRefresh = Math.min(10 * 60 * 1000, Math.max(60_000, halfLifeMs));
       // Skip if exp is already past (shouldn't happen — interceptor handles)
       if (msUntilRefresh > 24 * 60 * 60 * 1000) return;
 
@@ -163,14 +173,17 @@ export function AuthProvider({ children }) {
   // so the access token is still available for the Authorization header.
   // BE4 added POST /api/auth/logout to revoke refresh tokens server-side —
   // without this a stolen refresh token stays valid for the full 7-day TTL
-  // after the user signs out. We swallow failures (network already dead,
-  // token already expired, etc.) — the local clear is the source of truth
-  // for the UI.
+  // after the user signs out. Round-20 (DR-005): we now also send the
+  // current refresh token in the body so the backend can revoke THIS
+  // device's refresh row instead of nuking every other tab/device the user
+  // has open. We swallow failures (network already dead, token already
+  // expired, etc.) — the local clear is the source of truth for the UI.
   const logout = useCallback(async () => {
     const token = accessToken;
+    const refresh = localStorage.getItem('acs_refresh');
     try {
       if (token) {
-        await api.postLogout(token);
+        await api.postLogout(token, refresh);
       }
     } catch {
       // Swallowed — see comment above; the local clear is the source of truth.
