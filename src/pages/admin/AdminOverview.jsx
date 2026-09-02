@@ -106,6 +106,8 @@ export default function AdminOverview() {
       desc: 'Create training courses, assign to employees, override-complete enrollments.',
       badge: counts.training,
       badgeLabel: 'courses',
+      // Course count is informational, not an action queue — always quiet.
+      quiet: true,
     },
   ];
 
@@ -165,7 +167,7 @@ function TileSection({ title, tiles }) {
                 admin action. "100+" suffix when the API cap was hit. */}
             {t.badge !== null && t.badge !== undefined && (
               <div
-                className={`admin-overview-badge ${t.badge > 0 ? 'admin-overview-badge-action' : 'admin-overview-badge-quiet'}`}
+                className={`admin-overview-badge ${t.quiet || t.badge === 0 ? 'admin-overview-badge-quiet' : 'admin-overview-badge-action'}`}
                 aria-label={`${t.badge} ${t.badgeLabel}`}
                 title={`${t.badge} ${t.badgeLabel}`}
               >
