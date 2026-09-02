@@ -111,16 +111,26 @@ app.use((req, res, next) => {
   next();
 });
 
-// Body parser — per-route mounts instead of a global default. Round-7 fix:
-// the previous global `express.json({ limit: '1mb' })` made the tighter
-// per-route limits (32kb auth, 16kb contact) no-ops, because Express 4's
-// json middleware skips re-parsing once the body is populated. Now the
-// default body-parser limit is 16kb applied globally, and the DPR mount
-// (which legitimately needs larger photo-metadata payloads) opts in to 1mb.
+// Body parser — single global 1 MB limit (DR-007 fix).
+// Round-7 had a 16 KB global default + per-route 1 MB opt-ins for DPR and
+// inspection. The intent was "tight limit globally, looser limit per route".
+// In practice that didn't work: Express 4's json middleware skips re-parsing
+// once the body is populated, so a 17 KB payload hitting the global parser
+// 413'd before the route-specific parser could ever run.
+//
+// The route-level overrides are now collapsed into this single 1 MB global.
+// Rationale: DPR and inspection `data` blobs (workEntries + photo metadata,
+// NCR / cube test / material receipt structured JSON) legitimately exceed
+// the 16 KB default, but nothing in the API accepts more than ~1 MB of JSON
+// — uploads are presigned PUT to R2, not JSON bodies. Per-route tighter
+// limits (e.g. auth at 32 KB, contact at 16 KB) are NOT re-introduced here:
+// they were never enforced in Round-7 either (parser-order bug), and adding
+// them now would re-introduce the same ordering trap. If a route genuinely
+// needs a tighter limit in the future, mount its parser BEFORE this one and
+// document why.
 //
 // Mount order matters: parser must be before the route handler.
-const defaultBodyLimit = '16kb';
-const dprBodyLimit = '1mb';
+const defaultBodyLimit = '1mb';
 app.use(express.json({ limit: defaultBodyLimit }));
 
 app.set('prisma', prisma);
@@ -212,17 +222,18 @@ app.use('/api/leave', leaveRoutes);
 // Round-14: employee training. Same pattern as leave — write-limiter is
 // mounted inside the route file on POST/PUT only, so the dashboard reads
 // stay cheap. No body-limit override: payloads are tiny (one URL + small
-// metadata), well under the global 16kb default.
+// metadata), well under the global 1mb default.
 app.use('/api/training', trainingRoutes);
 app.use('/api/dpr/sas-url', sasLimiter);
-// DPR mount opts in to a 1mb body limit (work entries + photo metadata
-// payloads can legitimately exceed the 16kb default).
-app.use('/api/dpr', express.json({ limit: dprBodyLimit }), dprRoutes);
-// Round-12: Inspection & Compliance Records. Same 1mb limit as DPR —
-// inspection `data` is a structured JSON blob (NCR / cube test / material
-// receipt) and can legitimately exceed the 16kb default.
+// DPR mount uses the global 1mb body limit (DR-007). Photo metadata +
+// workEntries payloads can legitimately approach 1 MB; actual binary
+// uploads go via R2 presigned PUT, not JSON bodies.
+app.use('/api/dpr', dprRoutes);
+// Round-12: Inspection & Compliance Records. Uses the global 1mb body
+// limit — inspection `data` is a structured JSON blob (NCR / cube test /
+// material receipt) and can legitimately approach 1 MB.
 app.use('/api/inspection/sas-url', sasLimiter);
-app.use('/api/inspection', express.json({ limit: dprBodyLimit }), inspectionRoutes);
+app.use('/api/inspection', inspectionRoutes);
 app.use('/api/contact', contactLimiter, contactRoutes);
 // Round-8 TEMPORARY: diagnostic endpoint to introspect deployed DB schema.
 // Mounted AFTER the body-parsers so it can read raw body. DELETE after F5/F6 resolved.
