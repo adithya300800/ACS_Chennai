@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
+import { formatDateOnly } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
@@ -290,7 +291,7 @@ export default function DprList() {
                 <div style={{ flex: 2 }}>
                   <div style={{ fontWeight: 600, color: 'var(--navy)', marginBottom: '0.25rem' }}>{dpr.projectName}</div>
                   <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
-                    {new Date(dpr.reportDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                    {formatDateOnly(dpr.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })}
                     {dpr.contractor ? ` · ${dpr.contractor}` : ''}
                   </div>
                 </div>
@@ -359,7 +360,7 @@ export default function DprList() {
                       // the breadcrumb always carries context even if the project
                       // name is empty (defensive — modal already gates on `expandedDpr`).
                       label: expandedDpr.projectName
-                        || new Date(expandedDpr.reportDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+                        || formatDateOnly(expandedDpr.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })
                         || 'Daily Report',
                     },
                   ]}
@@ -371,7 +372,7 @@ export default function DprList() {
                   {expandedDpr.projectName}
                 </h1>
                 <div style={{ marginTop: '0.25rem', fontSize: '0.85rem', color: 'var(--steel)' }}>
-                  {new Date(expandedDpr.reportDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                  {formatDateOnly(expandedDpr.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })}
                   {' · '}{expandedDpr.location}
                 </div>
               </div>

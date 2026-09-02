@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { formatDateOnly } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import { SUB_WORK_TYPE_OPTIONS } from '../portal/WorkTypes.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
@@ -56,9 +57,10 @@ function StatCard({ number, label, color }) {
 
 function formatIndianDate(iso) {
   if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return String(iso);
-  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  // DR-032: component-based parsing so a bare YYYY-MM-DD value doesn't
+  // shift into the previous calendar day in negative-offset timezones.
+  const formatted = formatDateOnly(iso, { day: 'numeric', month: 'short', year: 'numeric' });
+  return formatted || String(iso);
 }
 
 function getLocalDate() {

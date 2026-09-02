@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { formatDateOnly } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
@@ -355,7 +356,7 @@ export default function DprDashboard() {
                   <h3 className="dpr-card-title">{dpr.projectName}</h3>
                   <div className="dpr-card-meta" style={{ marginTop: '0.5rem' }}>
                     <span>📍 {dpr.location}</span>
-                    <span>📅 {new Date(dpr.reportDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                    <span>📅 {formatDateOnly(dpr.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })}</span>
                   </div>
                 </div>
                 <StatusBadge status={dpr.status} map={DPR_STATUS_MAP} />

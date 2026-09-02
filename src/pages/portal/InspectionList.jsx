@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { formatDateOnly } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
@@ -42,9 +43,11 @@ function InspectionTypeLabel({ type }) {
 
 function formatIndianDate(iso) {
   if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return String(iso);
-  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  // DR-032: `reportDate` arrives as a calendar-date string (YYYY-MM-DD or
+  // Prisma DateTime @ midnight). Use the component-based helper so a bare
+  // ISO date doesn't shift into the previous day in negative-offset timezones.
+  const formatted = formatDateOnly(iso, { day: 'numeric', month: 'short', year: 'numeric' });
+  return formatted || String(iso);
 }
 
 export default function InspectionList() {

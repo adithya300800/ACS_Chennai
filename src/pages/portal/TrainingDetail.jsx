@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { formatDateOnly } from '../../lib/format.js';
 import VideoPlayer from '../../components/VideoPlayer.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import {
@@ -13,8 +14,10 @@ import {
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 const formatDate = (dateStr) => {
-  if (!dateStr) return '';
-  return new Date(dateStr).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  // DR-032: `dueDate` arrives as a calendar-date string (YYYY-MM-DD or
+  // Prisma DateTime @ midnight). Use the component-based formatter so the
+  // due date doesn't shift into the previous day in negative-offset locales.
+  return formatDateOnly(dateStr, { day: 'numeric', month: 'short', year: 'numeric' });
 };
 
 const formatDateTime = (dateStr) => {

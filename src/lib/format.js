@@ -56,6 +56,64 @@ export function formatTimeOrDash(dateStr) {
   });
 }
 
+// DR-032 (round-20): format a *date-only* value without the UTC-midnight
+// timezone shift that bites `new Date('YYYY-MM-DD').toLocaleDateString(...)`
+// in negative-offset locales (e.g. America/Los_Angeles: 2026-09-02 prints
+// as 9/1/2026 because the bare ISO string is parsed as UTC 00:00, which
+// is still the previous calendar day locally).
+//
+// Three input shapes are supported:
+//   1. string matching `YYYY-MM-DD`             → split into components
+//   2. string matching `YYYY-MM-DDTHH:MM:SS...` → also split the date half
+//      (DBs commonly return DateTime columns as ISO with a time component
+//      that happens to be midnight; we want calendar correctness either way)
+//   3. Date instance whose time is 00:00:00.000 → use local calendar components
+//      (matches `new Date(year, 0, 1)` and round-tripped calendar dates)
+// Anything else (a real timestamp, an unparseable string) falls through to
+// the regular `new Date(...).toLocaleDateString(...)` path so callers that
+// previously relied on that behaviour keep working.
+//
+// Returns '' for null/undefined and '' for unparseable strings — matches the
+// `formatDate`/`formatTime` convention used throughout the codebase.
+export function formatDateOnly(value, options) {
+  if (value == null || value === '') return '';
+
+  // Strings: extract the calendar-date prefix.
+  if (typeof value === 'string') {
+    const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+    if (dateOnlyMatch) {
+      const year = Number(dateOnlyMatch[1]);
+      const month = Number(dateOnlyMatch[2]);
+      const day = Number(dateOnlyMatch[3]);
+      return new Date(year, month - 1, day).toLocaleDateString('en-IN', options);
+    }
+    // Unparseable — keep the same defensive behaviour as formatTime: return ''.
+    return '';
+  }
+
+  // Date instances with a midnight time component → treat as calendar date.
+  if (value instanceof Date) {
+    if (
+      value.getHours() === 0 &&
+      value.getMinutes() === 0 &&
+      value.getSeconds() === 0 &&
+      value.getMilliseconds() === 0
+    ) {
+      return new Date(
+        value.getFullYear(),
+        value.getMonth(),
+        value.getDate()
+      ).toLocaleDateString('en-IN', options);
+    }
+    // Real timestamp — fall back to the original toLocaleDateString call
+    // so callers passing an explicit timestamp still get timezone-correct
+    // rendering (unchanged behaviour for IST/PST/UTC browsers).
+    return value.toLocaleDateString('en-IN', options);
+  }
+
+  return '';
+}
+
 // Convert any Date to a YYYY-MM-DD local string. The calendar grid uses this
 // to bucket "today" by local date, not UTC (round-14 bugfix: an Indian user
 // checking in at 1:30am IST was previously counted as the prior day).
