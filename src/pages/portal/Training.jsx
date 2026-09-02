@@ -5,6 +5,7 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { TRAINING_PROVIDER_LABELS, TRAINING_STATUSES, TRACKABLE_PROVIDERS } from '../../lib/constants.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import { getBusinessToday, useBusinessDateKey } from '../../lib/businessDate.js';
 
 // "My Learning" hub for the employee. Mirrors the Leave page's
 // structure (state, fetch + error/loading/empty triple, pill pattern)
@@ -39,7 +40,7 @@ const isOverdue = (enrollment) => {
   if (!enrollment?.dueDate) return false;
   if (enrollment.status === TRAINING_STATUSES.COMPLETED) return false;
   const due = String(enrollment.dueDate).split('T')[0];
-  const today = new Date().toISOString().split('T')[0];
+  const today = getBusinessToday();
   return due < today;
 };
 
@@ -56,6 +57,10 @@ export default function Training() {
   useDocumentTitle('My Training');
   const { accessToken } = useAuth();
   const { push } = useToast();
+  // DR-026: refresh "today" on midnight + tab focus so memoized counts/filters
+  // re-evaluate when the business date rolls over (or the user comes back
+  // after leaving the tab open overnight).
+  const businessDateKey = useBusinessDateKey();
 
   const [enrollments, setEnrollments] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -88,13 +93,13 @@ export default function Training() {
       if (isOverdue(e)) c.OVERDUE += 1;
     });
     return c;
-  }, [enrollments]);
+  }, [enrollments, businessDateKey]);
 
   const visible = useMemo(() => {
     if (filter === 'ALL') return enrollments;
     if (filter === 'OVERDUE') return enrollments.filter(isOverdue);
     return enrollments.filter((e) => e.status === filter);
-  }, [enrollments, filter]);
+  }, [enrollments, filter, businessDateKey]);
 
   return (
     <div className="training-page">

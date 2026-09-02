@@ -8,6 +8,7 @@ import {
   TRAINING_STATUSES,
 } from '../../lib/constants.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import { getBusinessToday, useBusinessDateKey } from '../../lib/businessDate.js';
 
 /**
  * Admin training dashboard. Two sections stacked vertically:
@@ -52,7 +53,7 @@ const isOverdue = (e) => {
   if (!e?.dueDate) return false;
   if (e.status === TRAINING_STATUSES.COMPLETED) return false;
   const due = String(e.dueDate).split('T')[0];
-  const today = new Date().toISOString().split('T')[0];
+  const today = getBusinessToday();
   return due < today;
 };
 
@@ -67,6 +68,10 @@ export default function TrainingDashboard() {
   const { employee, accessToken } = useAuth();
   const { push } = useToast();
   const navigate = useNavigate();
+  // DR-026: refresh "today" on midnight + tab focus so memoized counts/filters
+  // re-evaluate when the business date rolls over (or the user comes back
+  // after leaving the tab open overnight).
+  const businessDateKey = useBusinessDateKey();
 
   // Guard — admin only. Mirrors Admin.jsx:91-94 pattern.
   useEffect(() => {
@@ -125,7 +130,7 @@ export default function TrainingDashboard() {
   const visibleEnrollments = useMemo(() => {
     if (filter !== 'OVERDUE') return enrollments;
     return enrollments.filter(isOverdue);
-  }, [enrollments, filter]);
+  }, [enrollments, filter, businessDateKey]);
 
   const counts = useMemo(() => {
     const c = { ALL: enrollments.length, ASSIGNED: 0, IN_PROGRESS: 0, COMPLETED: 0, OVERDUE: 0 };
@@ -134,7 +139,7 @@ export default function TrainingDashboard() {
       if (isOverdue(e)) c.OVERDUE += 1;
     });
     return c;
-  }, [enrollments]);
+  }, [enrollments, businessDateKey]);
 
   const courseCounts = useMemo(() => {
     const m = {};
