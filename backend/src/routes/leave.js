@@ -92,11 +92,20 @@ router.post('/', leaveCreateLimiter, asyncHandler(async (req, res) => {
   const { startDate, endDate, leaveType, reason } = result.value;
 
   // Overlap check: any existing PENDING or APPROVED leave for this employee
-  // that overlaps [startDate, endDate] blocks the new submission. We do this
-  // application-side because the overlap test is range math, not equality,
-  // and GiST/btree exclusion constraints aren't enabled on this column.
-  // Two near-simultaneous submits that both pass this check would race the
-  // DB insert; we mitigate with a try/catch + 409 on P2002 below.
+  // that overlaps [startDate, endDate] blocks the new submission.
+  //
+  // We do this application-side too because it produces better error messages
+  // (which request conflicts, by id + dates + status) than the raw exclusion
+  // constraint violation can. The CONSTRAINT is the authority though — see
+  // prisma/migrations/20260902220220_dr009_leave_overlap_constraint/. Two
+  // near-simultaneous submits that both pass this precheck will still be
+  // stopped at the DB layer; the try/catch below turns the raw constraint
+  // violation into the same 409 LEAVE_OVERLAP the precheck would have
+  // produced.
+  //
+  // The precheck AND the constraint both filter to PENDING / APPROVED
+  // (excluding REJECTED / CANCELLED), so a previously-rejected leave in the
+  // same window does not block a fresh submission.
   const overlapping = await prisma.leaveRequest.findMany({
     where: {
       employeeId: req.employeeId,
@@ -144,12 +153,47 @@ router.post('/', leaveCreateLimiter, asyncHandler(async (req, res) => {
 
     res.status(201).json(serializeLeave(created));
   } catch (err) {
+    // DR-009: the PostgreSQL exclusion constraint `no_overlap_leave` is the
+    // authority for "no two overlapping PENDING/APPROVED leaves for the same
+    // employee". The precheck above usually catches overlaps, but a concurrent
+    // submission can slip past it. Prisma surfaces the raw constraint
+    // violation as P2010 (raw query failed) with the constraint name in
+    // err.meta.constraint or the message body. Re-map it to the same 409
+    // LEAVE_OVERLAP the precheck would have produced so clients see one
+    // consistent error path.
+    if (isLeaveOverlapConstraintError(err)) {
+      console.warn('[leave/create] overlap rejected by no_overlap_leave constraint', {
+        requester: hashIdentifier(req.employeeId),
+        startDate: toDateStr(startDate),
+        endDate: toDateStr(endDate),
+      });
+      return res.status(409).json({
+        error: 'This leave overlaps an existing request',
+        code: 'LEAVE_OVERLAP',
+      });
+    }
     console.error('[leave/create]', { prismaCode: err.code, message: err.message?.split('\n')[0] });
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to create leave request' });
   }
 }));
+
+// Detect the EXCLUDE constraint violation by Prisma error code (P2010 = raw
+// query failed) and the constraint name in either err.meta or the message
+// body. We accept either signal because different Prisma versions surface
+// the constraint name in different places.
+function isLeaveOverlapConstraintError(err) {
+  if (!err || err.code !== 'P2010') return false;
+  const metaConstraint = typeof err.meta === 'object' && err.meta
+    ? (err.meta.constraint || err.meta.constraintName)
+    : null;
+  if (typeof metaConstraint === 'string' && metaConstraint.includes('no_overlap_leave')) {
+    return true;
+  }
+  const msg = typeof err.message === 'string' ? err.message : '';
+  return msg.includes('no_overlap_leave');
+}
 
 // ─── GET /api/leave/my ──────────────────────────────────────────────────────
 // Employee's own leave requests. Newest first.
@@ -175,17 +219,52 @@ router.get('/', asyncHandler(async (req, res) => {
   const where = {};
   if (status && ALLOWED_LEAVE_STATUSES.has(status)) where.status = status;
   if (employeeId) where.employeeId = String(employeeId);
+
+  // DR-009: admin date-range filter. Two ranges overlap iff
+  //   a.start <= b.end AND b.start <= a.end
+  // — the same predicate the per-employee precheck uses. The previous
+  // implementation OR'd these together, which let through any record that
+  // touched the range on either end (e.g. a leave ending 2026-09-08 was
+  // returned when the filter ended 2026-09-15, and a leave starting
+  // 2026-09-20 was returned when the filter started 2026-09-15). Both are
+  // leaves that are entirely OUTSIDE the requested window.
+  //
+  // Validate inputs before touching the where clause: reject reversed
+  // ranges (from > to) and malformed dates with a 400, not a silently
+  // empty result set.
   if (from || to) {
-    where.OR = [];
-    if (from) {
-      const fp = parseLeaveDate(from);
-      if (fp) where.OR.push({ endDate: { gte: fp } });
+    let fromDate = null;
+    let toDate = null;
+    if (from !== undefined) {
+      fromDate = parseLeaveDate(from);
+      if (!fromDate) {
+        return res.status(400).json({
+          error: 'from must be a valid YYYY-MM-DD',
+          code: 'INVALID_FROM_DATE',
+        });
+      }
     }
-    if (to) {
-      const tp = parseLeaveDate(to);
-      if (tp) where.OR.push({ startDate: { lte: tp } });
+    if (to !== undefined) {
+      toDate = parseLeaveDate(to);
+      if (!toDate) {
+        return res.status(400).json({
+          error: 'to must be a valid YYYY-MM-DD',
+          code: 'INVALID_TO_DATE',
+        });
+      }
     }
-    if (where.OR.length === 0) delete where.OR;
+    if (fromDate && toDate && fromDate > toDate) {
+      return res.status(400).json({
+        error: 'from must be on or before to',
+        code: 'INVALID_DATE_RANGE',
+      });
+    }
+    // Interval overlap predicate: leave [startDate, endDate] intersects the
+    // filter window [fromDate, toDate] iff startDate <= toDate AND
+    // endDate >= fromDate. Apply only the bound(s) the client supplied —
+    // a missing bound means "no constraint on that side".
+    if (fromDate) where.endDate = { gte: fromDate };
+    if (toDate) where.startDate = { lte: toDate };
   }
 
   const rows = await prisma.leaveRequest.findMany({
