@@ -23,10 +23,18 @@ const ALLOWED_LEAVE_STATUSES = new Set(['PENDING', 'APPROVED', 'REJECTED', 'CANC
 // through `parseDateOnlyToUtc` so the same canonical UTC-midnight Date
 // is returned everywhere in the app.
 //
-// DR-031 will revisit the overlap predicates that consume these Dates —
-// the half-open semantics question (gte/lte vs gte/lt) is a separate
-// audit. The Date SHAPE returned here is unchanged; only the encoding
-// is now UTC midnight.
+// DR-031 (round-20): the audit reviewed every leave-overlap predicate
+// that consumes these Dates and confirmed the **inclusive** `lte`/`gte`
+// form is correct for `@db.Date` columns. Each value represents a
+// CALENDAR DAY the employee is on leave, not a half-open time range —
+// a leave with startDate=endDate=Sept 4 is a one-day leave covering
+// Sept 4, and a separate leave starting Sept 4 conflicts with it. A
+// half-open `lt`/`gt` rewrite would break this: two leaves touching
+// on day 4 would silently stop conflicting. The application-level
+// precheck at leave.js and the PostgreSQL EXCLUDE constraint at
+// `no_overlap_leave` (migration 20260902220220_dr009_leave_overlap_constraint)
+// both use inclusive semantics; they MUST stay aligned. Tests in
+// __tests__/leaveRules.test.js pin this.
 function parseLeaveDate(input) {
   if (input == null) return null;
   if (input instanceof Date) {
@@ -53,6 +61,12 @@ function parseLeaveDate(input) {
 }
 
 // Inclusive day count for the leave window. Used in dayCount summaries.
+//
+// DR-031 (round-20): both inputs are UTC-midnight Dates from
+// `parseLeaveDate` (via `parseDateOnlyToUtc`). Reading UTC components
+// here would be more direct, but the previous local-midnight shape is
+// preserved so anyone reading the diff doesn't have to chase a
+// follow-up. The values are equivalent for the day count.
 function inclusiveDayCount(startDate, endDate) {
   if (!startDate || !endDate) return 0;
   const s = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate()).getTime();
@@ -62,9 +76,16 @@ function inclusiveDayCount(startDate, endDate) {
 }
 
 // Inclusive overlap test: two ranges overlap iff a.start <= b.end AND
-// b.start <= a.end. Treats single-day ranges correctly:
-//   [1–5] vs [5–9] → TRUE (day 5 is shared)
-//   [1–5] vs [6–9] → FALSE
+// b.start <= a.end.
+//
+// DR-031 (round-20): the inclusive form is REQUIRED for `@db.Date`
+// columns. Each value is a calendar day (UTC midnight) the employee is
+// on leave — a half-open `lt`/`gt` rewrite would silently let two
+// leaves that touch on the same day stop conflicting. See the tests
+// in __tests__/leaveRules.test.js for the cases:
+//   [1–5] vs [5–9] → TRUE  (day 5 is shared)
+//   [1–5] vs [6–9] → FALSE (no shared day)
+//   [4–4] vs [4–6] → TRUE  (one-day leave on day 4 conflicts with day 4-6)
 function rangesOverlap(aStart, aEnd, bStart, bEnd) {
   if (!aStart || !aEnd || !bStart || !bEnd) return false;
   return aStart <= bEnd && bStart <= aEnd;
