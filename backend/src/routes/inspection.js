@@ -499,6 +499,105 @@ router.get('/', asyncHandler(async (req, res) => {
   }
 }));
 
+// ─── GET /api/inspection/stats ──────────────────────────────────────────────
+// DR-029 (round-20): explicit aggregate counts for the admin inspection
+// dashboard. Mirrors the /api/dpr/stats shape so the frontend treats both
+// endpoints uniformly.
+//
+// Before this endpoint existed, InspectionDashboard sent three requests
+// with limit=1 and used response length as the count. That meant "Open",
+// "Filed Today", and "Closed" could never display more than 1, and "Total
+// Visible" never more than 2. Same anti-pattern as DPR but worse because
+// limit=1 made it obviously broken at scale (admin at the live portal
+// testing round-19 reported "the dashboard says 1 open inspection when
+// there are clearly more in the queue").
+//
+// Six targeted COUNT queries against indexed columns (reportDate, status),
+// all in parallel. Admin-only via requireFreshAdmin (falls back to
+// requireAdmin in older builds). See docs/dashboard-metrics.md.
+//
+// LIVE-DISCOVERED (round-20): /stats MUST be registered BEFORE /:id or
+// Express routes GET /api/inspection/stats through :id with id='stats',
+// triggering a prisma.inspectionRecord.findUnique miss and a 404. Mirror
+// of the dpr.js fix above.
+const inspectionStatsAdminGuard = requireFreshAdmin || requireAdmin;
+
+router.get('/stats', inspectionStatsAdminGuard, asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  // Same UTC [start, end) window convention as /api/dpr/stats. reportDate
+  // is @db.Date so { gte: today, lt: tomorrow } covers the full day.
+  const startOfToday = new Date();
+  startOfToday.setUTCHours(0, 0, 0, 0);
+  const endOfToday = new Date(startOfToday);
+  endOfToday.setUTCDate(endOfToday.getUTCDate() + 1);
+
+  const [
+    openNow,
+    filedToday,
+    closedToday,
+    acknowledged,
+    pendingReview,
+    totalActive,
+  ] = await Promise.all([
+    // openNow: every OPEN record across the org (no date window — this is
+    // the "how big is the current queue" tile).
+    prisma.inspectionRecord.count({ where: { status: 'OPEN' } }),
+    // filedToday: any record whose reportDate is today, regardless of
+    // status. "Filed Today" means "engineer submitted today" — once it's
+    // filed, even if it transitions to CLOSED later, it counts here.
+    prisma.inspectionRecord.count({
+      where: { reportDate: { gte: startOfToday, lt: endOfToday } },
+    }),
+    // closedToday: rows that TRANSITIONED to CLOSED today. Inspection
+    // records don't have a dedicated closedAt column; we use updatedAt as
+    // the best proxy because the close transition sets status='CLOSED' +
+    // updatedAt=now inside a $transaction. (A re-edit on a CLOSED row
+    // would bump updatedAt again — acceptable; the label is "Closed Today"
+    // not "Closed and not edited today".)
+    prisma.inspectionRecord.count({
+      where: {
+        status: 'CLOSED',
+        updatedAt: { gte: startOfToday, lt: endOfToday },
+      },
+    }),
+    // acknowledged: org-wide count of records an admin has explicitly
+    // ACK'd. Status 'ACKNOWLEDGED' is the entry-point state for review
+    // (vs OPEN which is the engineer's submission state).
+    prisma.inspectionRecord.count({ where: { status: 'ACKNOWLEDGED' } }),
+    // pendingReview: rows an admin can still pick up. Inspection reviewable
+    // states (matching B-06's REVIEWABLE_STATUSES) are
+    // OPEN / IN_PROGRESS / PENDING_VERIFICATION. ACKNOWLEDGED is the
+    // "I've seen it" state — it's no longer pending action from the admin
+    // until it moves to IN_PROGRESS.
+    prisma.inspectionRecord.count({
+      where: { status: { in: ['OPEN', 'IN_PROGRESS', 'PENDING_VERIFICATION'] } },
+    }),
+    // totalActive: every non-terminal record. Terminal states are CLOSED
+    // and REJECTED — same model as DPR's totalActive.
+    prisma.inspectionRecord.count({
+      where: { status: { in: ['OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION'] } },
+    }),
+  ]);
+
+  res.json({
+    openNow,
+    filedToday,
+    closedToday,
+    acknowledged,
+    pendingReview,
+    totalActive,
+    window: {
+      start: startOfToday.toISOString(),
+      end: endOfToday.toISOString(),
+      timezone: 'UTC',
+    },
+  });
+}));
+
 // ─── GET /api/inspection/:id ────────────────────────────────────────────────
 router.get('/:id', async (req, res) => {
   const prisma = getPrisma(req);
@@ -1045,98 +1144,5 @@ router.post('/bulk-review', async (req, res) => {
   });
 });
 
-// ─── GET /api/inspection/stats ──────────────────────────────────────────────
-// DR-029 (round-20): explicit aggregate counts for the admin inspection
-// dashboard. Mirrors the /api/dpr/stats shape so the frontend treats both
-// endpoints uniformly.
-//
-// Before this endpoint existed, InspectionDashboard sent three requests
-// with limit=1 and used response length as the count. That meant "Open",
-// "Filed Today", and "Closed" could never display more than 1, and "Total
-// Visible" never more than 2. Same anti-pattern as DPR but worse because
-// limit=1 made it obviously broken at scale (admin at the live portal
-// testing round-19 reported "the dashboard says 1 open inspection when
-// there are clearly more in the queue").
-//
-// Six targeted COUNT queries against indexed columns (reportDate, status),
-// all in parallel. Admin-only via requireFreshAdmin (falls back to
-// requireAdmin in older builds). See docs/dashboard-metrics.md.
-const inspectionStatsAdminGuard = requireFreshAdmin || requireAdmin;
-
-router.get('/stats', inspectionStatsAdminGuard, asyncHandler(async (req, res) => {
-  const prisma = getPrisma(req);
-  if (!prisma) {
-    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
-  }
-
-  // Same UTC [start, end) window convention as /api/dpr/stats. reportDate
-  // is @db.Date so { gte: today, lt: tomorrow } covers the full day.
-  const startOfToday = new Date();
-  startOfToday.setUTCHours(0, 0, 0, 0);
-  const endOfToday = new Date(startOfToday);
-  endOfToday.setUTCDate(endOfToday.getUTCDate() + 1);
-
-  const [
-    openNow,
-    filedToday,
-    closedToday,
-    acknowledged,
-    pendingReview,
-    totalActive,
-  ] = await Promise.all([
-    // openNow: every OPEN record across the org (no date window — this is
-    // the "how big is the current queue" tile).
-    prisma.inspectionRecord.count({ where: { status: 'OPEN' } }),
-    // filedToday: any record whose reportDate is today, regardless of
-    // status. "Filed Today" means "engineer submitted today" — once it's
-    // filed, even if it transitions to CLOSED later, it counts here.
-    prisma.inspectionRecord.count({
-      where: { reportDate: { gte: startOfToday, lt: endOfToday } },
-    }),
-    // closedToday: rows that TRANSITIONED to CLOSED today. Inspection
-    // records don't have a dedicated closedAt column; we use updatedAt as
-    // the best proxy because the close transition sets status='CLOSED' +
-    // updatedAt=now inside a $transaction. (A re-edit on a CLOSED row
-    // would bump updatedAt again — acceptable; the label is "Closed Today"
-    // not "Closed and not edited today".)
-    prisma.inspectionRecord.count({
-      where: {
-        status: 'CLOSED',
-        updatedAt: { gte: startOfToday, lt: endOfToday },
-      },
-    }),
-    // acknowledged: org-wide count of records an admin has explicitly
-    // ACK'd. Status 'ACKNOWLEDGED' is the entry-point state for review
-    // (vs OPEN which is the engineer's submission state).
-    prisma.inspectionRecord.count({ where: { status: 'ACKNOWLEDGED' } }),
-    // pendingReview: rows an admin can still pick up. Inspection reviewable
-    // states (matching B-06's REVIEWABLE_STATUSES) are
-    // OPEN / IN_PROGRESS / PENDING_VERIFICATION. ACKNOWLEDGED is the
-    // "I've seen it" state — it's no longer pending action from the admin
-    // until it moves to IN_PROGRESS.
-    prisma.inspectionRecord.count({
-      where: { status: { in: ['OPEN', 'IN_PROGRESS', 'PENDING_VERIFICATION'] } },
-    }),
-    // totalActive: every non-terminal record. Terminal states are CLOSED
-    // and REJECTED — same model as DPR's totalActive.
-    prisma.inspectionRecord.count({
-      where: { status: { in: ['OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION'] } },
-    }),
-  ]);
-
-  res.json({
-    openNow,
-    filedToday,
-    closedToday,
-    acknowledged,
-    pendingReview,
-    totalActive,
-    window: {
-      start: startOfToday.toISOString(),
-      end: endOfToday.toISOString(),
-      timezone: 'UTC',
-    },
-  });
-}));
 
 module.exports = router;

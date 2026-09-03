@@ -682,6 +682,137 @@ router.get('/', asyncHandler(async (req, res) => {
   }
 }));
 
+// ─── GET /api/dpr/stats ────────────────────────────────────────────────────
+// DR-029 (round-20): explicit aggregate counts for the admin dashboard.
+//
+// Before this endpoint existed, the DprDashboard read four paginated lists
+// (limit=20) and used the response length as the count. With more than 20
+// records the numbers were silently capped at 20; the labels claimed "Today"
+// / "Approved" / "Total Active" but the request had no date or status scope,
+// so the counts were whatever 20 records happened to come back.
+//
+// This endpoint runs six targeted COUNT queries against indexed columns
+// (reportDate, status) using an explicit [today UTC, tomorrow UTC) window so
+// the count matches the user-visible label. Counts run in parallel.
+//
+// Admin-only — a non-admin can derive similar numbers via /api/dpr with
+// submittedById=me, but the admin dashboard tiles are scope-less and the
+// wider org totals are not something a regular engineer should be able to
+// scrape. requireFreshAdmin is used (falls back to requireAdmin if the
+// import was unavailable in older builds) so a demoted admin can't read
+// org totals from a stale JWT.
+//
+// Response shape is the documented contract — see docs/dashboard-metrics.md.
+// Any change here MUST be mirrored there so the labels stay honest.
+// requireFreshAdmin is exported from middleware/auth.js; if a future build
+// drops it (or tests mount this module without it) we fall back to
+// requireAdmin — both reject non-admin tokens, only requireFreshAdmin
+// re-reads isAdmin from the DB on each call.
+const dprStatsAdminGuard = requireFreshAdmin || requireAdmin;
+
+// LIVE-DISCOVERED (round-20): /stats MUST be registered BEFORE /:id or
+// Express routes GET /api/dpr/stats through :id with id='stats', which
+// runs `prisma.dPR.findUnique({where:{id:'stats'}})` → null → 404. That
+// 404 was firing on every poll cycle from the admin DPR dashboard, which
+// surfaced as a "NOT_FOUND" toast-spam storm on /portal/admin/dpr. The
+// old location (after /:id) was load-bearing-broken in production.
+// Inspection routes need the same fix (see inspection.js).
+//
+// We use a single [start, end) UTC window for "today". reportDate is
+// @db.Date in Postgres, so the comparison is on the date portion only.
+// start = today UTC midnight; end = tomorrow UTC midnight. Anything dated
+// earlier than today but transitioned today (APPROVED, REJECTED) is counted
+// in the *Today variants via the transition timestamps on the same row.
+// Mounted AFTER `router.use(requireAuth)` at line 256, so the token is
+// already verified by the time this handler runs — dprStatsAdminGuard
+// only needs to confirm the admin claim.
+router.get('/stats', dprStatsAdminGuard, asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  // Build the [start, end) window for "today" once and reuse for all six
+  // counts. Date.now() inside the request handler — we don't need exact
+  // midnight math because reportDate is a date column (no time portion).
+  const startOfToday = new Date();
+  startOfToday.setUTCHours(0, 0, 0, 0);
+  const endOfToday = new Date(startOfToday);
+  endOfToday.setUTCDate(endOfToday.getUTCDate() + 1);
+
+  // Count queries run in parallel — each is a single COUNT() against an
+  // indexed column. Worst case: six tiny aggregates, ~tens of ms total.
+  // `transition` timestamps use `gte`/`lt` against today, not the date
+  // column — those are DateTime columns, so the equality semantics differ.
+  const [
+    submittedToday,
+    approvedToday,
+    rejectedToday,
+    pendingReview,
+    draftCount,
+    totalActive,
+  ] = await Promise.all([
+    // submittedToday: reportDate = today AND status = SUBMITTED.
+    // reportDate is a Date column, so { gte: today, lt: tomorrow } matches
+    // the whole day.
+    prisma.dPR.count({
+      where: {
+        status: 'SUBMITTED',
+        reportDate: { gte: startOfToday, lt: endOfToday },
+      },
+    }),
+    // approvedToday: rows that TRANSITIONED to APPROVED today. The
+    // transition timestamp is approvedAt, not reportDate — a DPR filed last
+    // week can be approved today, and a DPR filed today can be approved
+    // tomorrow. Matching the label "Approved Today" requires the
+    // transition timestamp.
+    prisma.dPR.count({
+      where: {
+        status: 'APPROVED',
+        approvedAt: { gte: startOfToday, lt: endOfToday },
+      },
+    }),
+    // rejectedToday: rows transitioned to REJECTED today (reviewedAt is
+    // the terminal transition timestamp for both APPROVED and REJECTED —
+    // the reject path sets reviewedAt alongside status=REJECTED).
+    prisma.dPR.count({
+      where: {
+        status: 'REJECTED',
+        reviewedAt: { gte: startOfToday, lt: endOfToday },
+      },
+    }),
+    // pendingReview: anything not in a terminal state. Counts every DPR in
+    // the org that an admin could still pick up — SUBMITTED + UNDER_REVIEW.
+    prisma.dPR.count({
+      where: { status: { in: ['SUBMITTED', 'UNDER_REVIEW'] } },
+    }),
+    // draftCount: drafts in the org (engineers still typing).
+    prisma.dPR.count({ where: { status: 'DRAFT' } }),
+    // totalActive: every non-terminal DPR (DRAFT + SUBMITTED + UNDER_REVIEW).
+    // The dashboard label is "Total Active DPRs" — terminal rows (APPROVED /
+    // REJECTED) are excluded because they're done.
+    prisma.dPR.count({
+      where: { status: { in: ['DRAFT', 'SUBMITTED', 'UNDER_REVIEW'] } },
+    }),
+  ]);
+
+  res.json({
+    submittedToday,
+    approvedToday,
+    rejectedToday,
+    pendingReview,
+    draftCount,
+    totalActive,
+    window: {
+      // Echo back the window so the client can render "as of <ts>" if it
+      // wants to — useful for diagnosing clock-skew between server and DB.
+      start: startOfToday.toISOString(),
+      end: endOfToday.toISOString(),
+      timezone: 'UTC',
+    },
+  });
+}));
+
 // ─── GET /api/dpr/:id ────────────────────────────────────────────────────────
 router.get('/:id', async (req, res) => {
   const prisma = getPrisma(req);
@@ -1580,127 +1711,5 @@ router.post('/:id/pdf', (req, res) => {
   });
 });
 
-// ─── GET /api/dpr/stats ────────────────────────────────────────────────────
-// DR-029 (round-20): explicit aggregate counts for the admin dashboard.
-//
-// Before this endpoint existed, the DprDashboard read four paginated lists
-// (limit=20) and used the response length as the count. With more than 20
-// records the numbers were silently capped at 20; the labels claimed "Today"
-// / "Approved" / "Total Active" but the request had no date or status scope,
-// so the counts were whatever 20 records happened to come back.
-//
-// This endpoint runs six targeted COUNT queries against indexed columns
-// (reportDate, status) using an explicit [today UTC, tomorrow UTC) window so
-// the count matches the user-visible label. Counts run in parallel.
-//
-// Admin-only — a non-admin can derive similar numbers via /api/dpr with
-// submittedById=me, but the admin dashboard tiles are scope-less and the
-// wider org totals are not something a regular engineer should be able to
-// scrape. requireFreshAdmin is used (falls back to requireAdmin if the
-// import was unavailable in older builds) so a demoted admin can't read
-// org totals from a stale JWT.
-//
-// Response shape is the documented contract — see docs/dashboard-metrics.md.
-// Any change here MUST be mirrored there so the labels stay honest.
-// requireFreshAdmin is exported from middleware/auth.js; if a future build
-// drops it (or tests mount this module without it) we fall back to
-// requireAdmin — both reject non-admin tokens, only requireFreshAdmin
-// re-reads isAdmin from the DB on each call.
-const dprStatsAdminGuard = requireFreshAdmin || requireAdmin;
-
-// We use a single [start, end) UTC window for "today". reportDate is
-// @db.Date in Postgres, so the comparison is on the date portion only.
-// start = today UTC midnight; end = tomorrow UTC midnight. Anything dated
-// earlier than today but transitioned today (APPROVED, REJECTED) is counted
-// in the *Today variants via the transition timestamps on the same row.
-// Mounted AFTER `router.use(requireAuth)` at line 256, so the token is
-// already verified by the time this handler runs — dprStatsAdminGuard
-// only needs to confirm the admin claim.
-router.get('/stats', dprStatsAdminGuard, asyncHandler(async (req, res) => {
-  const prisma = getPrisma(req);
-  if (!prisma) {
-    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
-  }
-
-  // Build the [start, end) window for "today" once and reuse for all six
-  // counts. Date.now() inside the request handler — we don't need exact
-  // midnight math because reportDate is a date column (no time portion).
-  const startOfToday = new Date();
-  startOfToday.setUTCHours(0, 0, 0, 0);
-  const endOfToday = new Date(startOfToday);
-  endOfToday.setUTCDate(endOfToday.getUTCDate() + 1);
-
-  // Count queries run in parallel — each is a single COUNT() against an
-  // indexed column. Worst case: six tiny aggregates, ~tens of ms total.
-  // `transition` timestamps use `gte`/`lt` against today, not the date
-  // column — those are DateTime columns, so the equality semantics differ.
-  const [
-    submittedToday,
-    approvedToday,
-    rejectedToday,
-    pendingReview,
-    draftCount,
-    totalActive,
-  ] = await Promise.all([
-    // submittedToday: reportDate = today AND status = SUBMITTED.
-    // reportDate is a Date column, so { gte: today, lt: tomorrow } matches
-    // the whole day.
-    prisma.dPR.count({
-      where: {
-        status: 'SUBMITTED',
-        reportDate: { gte: startOfToday, lt: endOfToday },
-      },
-    }),
-    // approvedToday: rows that TRANSITIONED to APPROVED today. The
-    // transition timestamp is approvedAt, not reportDate — a DPR filed last
-    // week can be approved today, and a DPR filed today can be approved
-    // tomorrow. Matching the label "Approved Today" requires the
-    // transition timestamp.
-    prisma.dPR.count({
-      where: {
-        status: 'APPROVED',
-        approvedAt: { gte: startOfToday, lt: endOfToday },
-      },
-    }),
-    // rejectedToday: rows transitioned to REJECTED today (reviewedAt is
-    // the terminal transition timestamp for both APPROVED and REJECTED —
-    // the reject path sets reviewedAt alongside status=REJECTED).
-    prisma.dPR.count({
-      where: {
-        status: 'REJECTED',
-        reviewedAt: { gte: startOfToday, lt: endOfToday },
-      },
-    }),
-    // pendingReview: anything not in a terminal state. Counts every DPR in
-    // the org that an admin could still pick up — SUBMITTED + UNDER_REVIEW.
-    prisma.dPR.count({
-      where: { status: { in: ['SUBMITTED', 'UNDER_REVIEW'] } },
-    }),
-    // draftCount: drafts in the org (engineers still typing).
-    prisma.dPR.count({ where: { status: 'DRAFT' } }),
-    // totalActive: every non-terminal DPR (DRAFT + SUBMITTED + UNDER_REVIEW).
-    // The dashboard label is "Total Active DPRs" — terminal rows (APPROVED /
-    // REJECTED) are excluded because they're done.
-    prisma.dPR.count({
-      where: { status: { in: ['DRAFT', 'SUBMITTED', 'UNDER_REVIEW'] } },
-    }),
-  ]);
-
-  res.json({
-    submittedToday,
-    approvedToday,
-    rejectedToday,
-    pendingReview,
-    draftCount,
-    totalActive,
-    window: {
-      // Echo back the window so the client can render "as of <ts>" if it
-      // wants to — useful for diagnosing clock-skew between server and DB.
-      start: startOfToday.toISOString(),
-      end: endOfToday.toISOString(),
-      timezone: 'UTC',
-    },
-  });
-}));
 
 module.exports = router;
