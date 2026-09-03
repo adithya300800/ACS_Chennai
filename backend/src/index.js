@@ -40,6 +40,10 @@ const contactRoutes = require('./routes/contact');
 // requireFreshAdmin so the storage mutation route can never run on a stale
 // JWT claim.
 const storageAdminRoutes = require('./routes/storage');
+// SOL-P1#12: admin employee directory — powers the training bulk-assign
+// picker. Lives at /api/admin/employees alongside the other admin
+// surfaces so the URL pattern matches the "admin = picker" mental model.
+const adminEmployeesRoutes = require('./routes/adminEmployees');
 const {
   loginLimiter, refreshLimiter, contactLimiter, sasLimiter,
   exportLimiter, leaveCreateLimiter,
@@ -327,6 +331,9 @@ function createApp(deps = {}) {
   // Routes inside use requireAuth + requireFreshAdmin; the mount itself has
   // no extra middleware.
   app.use('/api/admin/storage', storageAdminRoutes);
+  // SOL-P1#12: admin employee directory — powers the training bulk-assign
+  // picker. Same requireAuth + requireFreshAdmin envelope.
+  app.use('/api/admin', adminEmployeesRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ error: 'Not found' });

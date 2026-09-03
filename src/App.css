@@ -4214,6 +4214,63 @@ footer {
   background: var(--light-gray);
   color: #475569;
 }
+.training-email-chip-remove {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 0 0 0.25rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+.training-btn-xs {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.72rem;
+}
+/* SOL-P1#12: employee directory picker. Search box on top, scrollable
+   list of checkbox rows below. Replaces the email-paste textarea. */
+.training-employee-picker {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--white);
+}
+.training-employee-picker-row {
+  border-bottom: 1px solid var(--border);
+}
+.training-employee-picker-row:last-child { border-bottom: none; }
+.training-employee-picker-row.selected { background: #eff6ff; }
+.training-employee-picker-label {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.5rem 0.75rem;
+  cursor: pointer;
+  /* SOL-P1#10: 44px minimum touch target. */
+  min-height: 44px;
+}
+.training-employee-picker-label input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+.training-employee-picker-name { font-weight: 500; color: var(--navy); }
+.training-employee-picker-email {
+  font-size: 0.78rem;
+  color: var(--steel);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+}
+.training-employee-picker-empty {
+  padding: 1rem;
+  color: var(--steel);
+  font-size: 0.85rem;
+  text-align: center;
+}
 
 /* === TRAINING RESPONSIVE === */
 @media (max-width: 768px) {

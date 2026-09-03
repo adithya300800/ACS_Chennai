@@ -384,6 +384,11 @@ export const api = {
   createTrainingCourse: (data, token) => api.post('/training/courses', data, token),
   updateTrainingCourse: (id, data, token) =>
     api.put(`/training/courses/${id}`, data, token),
+  // SOL-P1#12: admin employee directory — powers the bulk-assign picker.
+  listAdminEmployees: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/admin/employees${qs ? '?' + qs : ''}`, token);
+  },
   // Bulk assign — backend accepts either employeeIds (cuids) OR
   // employeeEmails and resolves them server-side. We pass emails because
   // admins paste a textarea of emails, not a list of cuids. The backend

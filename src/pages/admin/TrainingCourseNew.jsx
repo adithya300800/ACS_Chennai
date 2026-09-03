@@ -75,14 +75,66 @@ export default function TrainingCourseNew() {
   const [providerAuto, setProviderAuto] = useState(true);
   const [category, setCategory] = useState('');
 
-  // Assign form state
-  const [selectedIds, setSelectedIds] = useState(new Set());
-  const [employeeSearch, setEmployeeSearch] = useState('');
+  // SOL-P1#12: employee directory picker replaces the email-paste flow.
+  // The picker queries the new /api/admin/employees endpoint, lets the
+  // admin search by name OR email, and tracks selected employees in a Set
+  // of ids (not emails) so the backend's cuid resolution path is the
+  // single source of truth.
+  const [allEmployees, setAllEmployees] = useState([]);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [employeeQuery, setEmployeeQuery] = useState('');
+  const [employeesLoading, setEmployeesLoading] = useState(true);
+  const [employeesError, setEmployeesError] = useState('');
   const [dueDate, setDueDate] = useState(addDaysInputValue(14));
   const [priority, setPriority] = useState('NORMAL');
 
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
+
+  // Load the employee directory once on mount. Backend enforces admin
+  // auth — App.jsx route guard ensures only admins reach this page.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await api.listAdminEmployees({ limit: 500 }, accessToken);
+        if (cancelled) return;
+        setAllEmployees(data.employees || []);
+        setEmployeesError('');
+      } catch (err) {
+        if (cancelled) return;
+        setEmployeesError(err.message || 'Failed to load employee directory');
+      } finally {
+        if (!cancelled) setEmployeesLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [accessToken]);
+
+  // Filtered picker list — case-insensitive substring across name + email.
+  const filteredEmployees = useMemo(() => {
+    const q = employeeQuery.trim().toLowerCase();
+    if (!q) return allEmployees.slice(0, 50);
+    return allEmployees.filter(
+      (e) => e.name?.toLowerCase().includes(q) || e.email?.toLowerCase().includes(q)
+    ).slice(0, 50);
+  }, [allEmployees, employeeQuery]);
+
+  const selectedEmployees = useMemo(
+    () => allEmployees.filter((e) => selectedIds.has(e.id)),
+    [allEmployees, selectedIds]
+  );
+
+  const toggleEmployee = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const clearSelection = () => setSelectedIds(new Set());
 
   // Guard — admin only. v1 deliberately skips employee enumeration (no
   // /api/admin/employees route yet) and uses email-paste bulk assignment
@@ -107,21 +159,9 @@ export default function TrainingCourseNew() {
     setProviderAuto(false); // explicit choice — stop auto-detecting
   };
 
-  // Email-based bulk selection: one employee per non-empty line. We parse
-  // them on submit (after light trimming + dedupe) rather than every keystroke
-  // so the input doesn't stutter on long lists.
-  const [emailList, setEmailList] = useState('');
-  const parsedEmails = useMemo(() => {
-    const out = [];
-    const seen = new Set();
-    emailList.split(/[\s,;]+/).forEach((line) => {
-      const trimmed = line.trim().toLowerCase();
-      if (!trimmed || seen.has(trimmed)) return;
-      seen.add(trimmed);
-      out.push(trimmed);
-    });
-    return out;
-  }, [emailList]);
+  // Email-based bulk selection has been removed (SOL-P1#12). The picker
+  // below owns selection state directly via `selectedIds: Set<cuid>`.
+  const selectedCount = selectedIds.size;
 
   const liveError = useMemo(() => {
     if (title.trim().length === 0) return 'Course title is required.';
@@ -136,13 +176,10 @@ export default function TrainingCourseNew() {
     } catch {
       return 'URL is not a valid http(s) URL.';
     }
-    if (parsedEmails.length === 0) return 'Add at least one employee email to assign.';
-    if (parsedEmails.length > MAX_EMPLOYEE_IDS_PER_BULK) return `Too many employees (max ${MAX_EMPLOYEE_IDS_PER_BULK}).`;
-    // Lightweight email shape check — server re-validates the employee row.
-    const badEmail = parsedEmails.find((e) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e));
-    if (badEmail) return `Invalid email format: ${badEmail}`;
+    if (selectedCount === 0) return 'Pick at least one employee to assign.';
+    if (selectedCount > MAX_EMPLOYEE_IDS_PER_BULK) return `Too many employees (max ${MAX_EMPLOYEE_IDS_PER_BULK}).`;
     return '';
-  }, [title, description, category, externalUrl, parsedEmails]);
+  }, [title, description, category, externalUrl, selectedCount]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -162,28 +199,21 @@ export default function TrainingCourseNew() {
         category: category.trim() || null,
       }, accessToken);
 
-      // Step 2 — bulk-assign by email. The backend resolves emails → ids
-      // server-side (we pass employeeIds, but the admin doesn't have IDs
-      // handy, so we look up via a tiny helper that hits the existing
-      // /api/auth/login-shaped endpoint? — no, simpler: we'll need an
-      // admin-only employee lookup OR we accept emails and resolve them
-      // server-side. To keep the v1 scope tight, we accept emails as IDs
-      // for now; backend needs an email→id helper.
-      //
-      // For now we send the parsed emails AS-IS. The backend will reject
-      // anything that isn't a valid cuid; the proper fix (added below) is
-      // to have the backend accept emails and resolve them internally.
-      // Until that lands, we send only the cuid form by looking each
-      // email up via /api/admin/employees — but that endpoint doesn't
-      // exist yet. So we surface a friendly error if the bulk-assign fails.
+      // Step 2 — bulk-assign by cuid. The picker feeds us employee ids
+      // (cuids) directly, so we never round-trip through email parsing.
       try {
-        const result = await api.assignTraining(course.id, parsedEmails, { dueDate, priority }, accessToken);
+        const result = await api.assignTraining(
+          course.id,
+          Array.from(selectedIds),
+          { dueDate, priority },
+          accessToken
+        );
         const createdCount = (result.created || []).length;
         const skippedCount = (result.skipped || []).length;
         const invalidCount = (result.invalidIds || []).length;
         let msg = `Course created and assigned to ${createdCount} employee${createdCount === 1 ? '' : 's'}.`;
         if (skippedCount > 0) msg += ` ${skippedCount} already assigned.`;
-        if (invalidCount > 0) msg += ` ${invalidCount} email${invalidCount === 1 ? ' is' : 's are'} not recognised.`;
+        if (invalidCount > 0) msg += ` ${invalidCount} id${invalidCount === 1 ? ' was' : 's were'} not recognised.`;
         push(msg, 'success');
         navigate('/portal/admin/training');
       } catch (assignErr) {
@@ -311,27 +341,94 @@ export default function TrainingCourseNew() {
           <h2 className="training-section-title">Assign to employees</h2>
 
           <div className="training-field">
-            <label htmlFor="course-emails">
-              Employee emails
-              <span className="training-counter">{parsedEmails.length} parsed</span>
+            <label htmlFor="course-employee-search">
+              Assign to employees
+              <span className="training-counter">
+                {selectedCount} selected
+                {selectedCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={clearSelection}
+                    className="training-btn training-btn-ghost training-btn-xs"
+                    style={{ marginLeft: '0.5rem' }}
+                    aria-label="Clear employee selection"
+                  >
+                    Clear
+                  </button>
+                )}
+              </span>
             </label>
-            <textarea
-              id="course-emails"
-              value={emailList}
-              onChange={(e) => setEmailList(e.target.value)}
-              rows={5}
-              placeholder={'Paste one email per line, or comma-separated.\ne.g. alice@acs.com\nbob@acs.com'}
+
+            {/* SOL-P1#12: searchable employee directory picker. Replaces
+                the email-paste textarea. Keyboard accessible via standard
+                input + checkbox patterns. */}
+            <input
+              id="course-employee-search"
+              type="search"
+              value={employeeQuery}
+              onChange={(e) => setEmployeeQuery(e.target.value)}
+              placeholder="Search by name or email"
+              aria-label="Search employees"
+              aria-controls="course-employee-listbox"
             />
-            <span className="training-hint">
-              Duplicates are removed automatically. Invalid emails are flagged in the result toast.
-            </span>
-            {parsedEmails.length > 0 && (
-              <div className="training-emails-preview">
-                {parsedEmails.slice(0, 10).map((e) => (
-                  <span key={e} className="training-email-chip">{e}</span>
+
+            {employeesLoading && (
+              <div className="training-hint">Loading employee directory…</div>
+            )}
+            {employeesError && (
+              <div className="training-form-error" role="alert">{employeesError}</div>
+            )}
+
+            {!employeesLoading && !employeesError && (
+              <ul
+                id="course-employee-listbox"
+                className="training-employee-picker"
+                aria-label="Employees"
+              >
+                {filteredEmployees.length === 0 && (
+                  <li className="training-employee-picker-empty">
+                    No employees match “{employeeQuery}”.
+                  </li>
+                )}
+                {filteredEmployees.map((emp) => {
+                  const isSelected = selectedIds.has(emp.id);
+                  return (
+                    <li key={emp.id} className={`training-employee-picker-row ${isSelected ? 'selected' : ''}`}>
+                      <label className="training-employee-picker-label">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleEmployee(emp.id)}
+                          aria-label={`Assign course to ${emp.name || emp.email}`}
+                        />
+                        <span className="training-employee-picker-name">{emp.name || '—'}</span>
+                        <span className="training-employee-picker-email">{emp.email}</span>
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            {selectedEmployees.length > 0 && (
+              <div className="training-emails-preview" aria-live="polite">
+                {selectedEmployees.slice(0, 12).map((e) => (
+                  <span key={e.id} className="training-email-chip">
+                    {e.name || e.email}
+                    <button
+                      type="button"
+                      onClick={() => toggleEmployee(e.id)}
+                      aria-label={`Remove ${e.name || e.email}`}
+                      className="training-email-chip-remove"
+                    >
+                      ×
+                    </button>
+                  </span>
                 ))}
-                {parsedEmails.length > 10 && (
-                  <span className="training-email-chip training-email-chip-more">+{parsedEmails.length - 10} more</span>
+                {selectedEmployees.length > 12 && (
+                  <span className="training-email-chip training-email-chip-more">
+                    +{selectedEmployees.length - 12} more
+                  </span>
                 )}
               </div>
             )}
@@ -381,7 +478,7 @@ export default function TrainingCourseNew() {
             className="training-btn training-btn-primary"
             disabled={submitting || !!liveError}
           >
-            {submitting ? 'Creating…' : `Create & Assign to ${parsedEmails.length} ${parsedEmails.length === 1 ? 'employee' : 'employees'}`}
+            {submitting ? 'Creating…' : `Create & Assign to ${selectedCount} ${selectedCount === 1 ? 'employee' : 'employees'}`}
           </button>
         </div>
       </form>
