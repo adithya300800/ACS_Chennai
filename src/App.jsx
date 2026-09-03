@@ -38,8 +38,6 @@ const Training = React.lazy(() => import('./pages/portal/Training.jsx'));
 const TrainingDetail = React.lazy(() => import('./pages/portal/TrainingDetail.jsx'));
 const TrainingDashboard = React.lazy(() => import('./pages/admin/TrainingDashboard.jsx'));
 const TrainingCourseNew = React.lazy(() => import('./pages/admin/TrainingCourseNew.jsx'));
-// Round-17 C-14: shared Coming Soon placeholder (was inline in App.jsx).
-import ComingSoon from './components/ComingSoon.jsx';
 
 function App() {
   const location = useLocation();
@@ -112,8 +110,9 @@ function App() {
           <Route path="training/:id" element={<TrainingDetail />} />
           <Route path="admin/training" element={<TrainingDashboard />} />
           <Route path="admin/training/new" element={<TrainingCourseNew />} />
-          <Route path="assets" element={<ComingSoon name="Assets" />} />
-          {/* P0/A-02: landing branches on role. Employees → Attendance; admins → Admin Overview.
+          {/* P0/A-02: landing branches on role. Employees → Dashboard; admins → Admin Overview.
+              SOL-P2#17: removed /portal/assets stub (and ComingSoon component) —
+              the item was advertised as "coming soon" but had no roadmap date.
               DR-020: RoleBranchLanding now reads role from AuthContext (not the stale
               acs_employee localStorage key). */}
           <Route path="" element={<RoleBranchLanding renderAdmin={() => <AdminOverview />} />} />

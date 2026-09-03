@@ -1,7 +1,9 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
-import { useToast } from '../contexts/ToastContext.jsx';
+// SOL-P2#17: removed the useToast import; pushToast was only used by
+// the now-removed Assets coming-soon branch. Re-introduce when a
+// sidebar item genuinely needs a toast.
 import NotificationBell from './NotificationBell.jsx';
 // Round-17: shared skip-nav + focus-trap + keyboard-shortcut primitives.
 import SkipNav from './SkipNav.jsx';
@@ -11,7 +13,6 @@ import useKeyboardShortcut from '../hooks/useKeyboardShortcut.js';
 export default function PortalLayout() {
   const { employee, logout } = useAuth();
   const navigate = useNavigate();
-  const { push: pushToast } = useToast();
   const [sidebarOpen, setSidebarOpen] = useState(false); // Start collapsed on mobile
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const sidebarRef = useRef(null);
@@ -190,21 +191,6 @@ export default function PortalLayout() {
         },
       ],
     }] : []),
-    {
-      label: 'Coming soon',
-      items: [
-        {
-          to: '/portal/assets',
-          label: 'Assets',
-          comingSoon: true,
-          icon: (
-            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="2" y="7" width="20" height="14" rx="2" ry="2" /><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16" />
-            </svg>
-          ),
-        },
-      ],
-    },
   ];
 
   const greeting = () => {
@@ -256,47 +242,23 @@ export default function PortalLayout() {
                 <div className="portal-nav-section-label">{group.label}</div>
               )}
               {group.items.map((item) => (
-                item.comingSoon ? (
-                  <button
-                    key={item.to}
-                    className="portal-nav-item coming-soon"
-                    onClick={() => {
-                      // P2/C-14: replaced ad-hoc document.createElement toast with
-                      // the proper ToastContext used elsewhere in the app.
-                      pushToast('Assets module is coming soon.', 'info');
-                    }}
-                    // SOL-P0#1: stable accessible name + tooltip regardless of
-                    // sidebar collapse state — required by WCAG 2.4.4 + 4.1.2.
-                    title={item.label}
-                    aria-label={item.label}
-                  >
-                    <span className="portal-nav-icon" aria-hidden="true">{item.icon}</span>
-                    {sidebarOpen ? (
-                      <span className="portal-nav-label">{item.label}</span>
-                    ) : (
-                      <span className="sr-only">{item.label}</span>
-                    )}
-                    {sidebarOpen && <span className="portal-nav-soon-badge">Soon</span>}
-                  </button>
-                ) : (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    onClick={closeMobileSidebar}
-                    className={({ isActive }) => `portal-nav-item ${isActive ? 'active' : ''}`}
-                    // SOL-P0#1: stable accessible name + tooltip regardless of
-                    // sidebar collapse state — required by WCAG 2.4.4 + 4.1.2.
-                    title={item.label}
-                    aria-label={item.label}
-                  >
-                    <span className="portal-nav-icon" aria-hidden="true">{item.icon}</span>
-                    {sidebarOpen ? (
-                      <span className="portal-nav-label">{item.label}</span>
-                    ) : (
-                      <span className="sr-only">{item.label}</span>
-                    )}
-                  </NavLink>
-                )
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  onClick={closeMobileSidebar}
+                  className={({ isActive }) => `portal-nav-item ${isActive ? 'active' : ''}`}
+                  // SOL-P0#1: stable accessible name + tooltip regardless of
+                  // sidebar collapse state — required by WCAG 2.4.4 + 4.1.2.
+                  title={item.label}
+                  aria-label={item.label}
+                >
+                  <span className="portal-nav-icon" aria-hidden="true">{item.icon}</span>
+                  {sidebarOpen ? (
+                    <span className="portal-nav-label">{item.label}</span>
+                  ) : (
+                    <span className="sr-only">{item.label}</span>
+                  )}
+                </NavLink>
               ))}
             </React.Fragment>
           ))}
