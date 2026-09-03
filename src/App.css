@@ -4386,6 +4386,17 @@ footer {
 .training-btn-primary:hover:not(:disabled) {
   background: #1d4ed8;
 }
+/* Round-24: neutral filled button. Used for Edit / Reassign on the course
+   detail page — visually between primary (solid blue) and ghost (outlined).
+   Keeps Archive as ghost so it's the lowest-emphasis action. */
+.training-btn-secondary {
+  background: var(--off-white, #f1f5f9);
+  color: var(--navy, #0f172a);
+  border-color: var(--border, #e5ebf0);
+}
+.training-btn-secondary:hover:not(:disabled) {
+  background: #e2e8f0;
+}
 .training-btn-ghost {
   background: transparent;
   color: var(--navy, #0a2540);
@@ -4659,6 +4670,89 @@ footer {
 .training-btn-xs {
   padding: 0.15rem 0.5rem;
   font-size: 0.72rem;
+}
+
+/* Round-24: action toolbar on the course detail page (Edit / Reassign /
+   Archive). Wraps on narrow widths so all three stay reachable at 375px. */
+.training-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+}
+.training-card-actions .training-btn {
+  flex: 0 0 auto;
+}
+
+/* Round-24: reassign modal — mirrors the inline-modal pattern from
+   DprDashboard.jsx. Backdrop dims the page; the dialog is a centered
+   card with three sections (header / body / footer). */
+.training-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+.training-modal {
+  background: var(--surface, #ffffff);
+  border-radius: 10px;
+  width: 100%;
+  max-width: 560px;
+  max-height: calc(100vh - 2rem);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+.training-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border, #e2e8f0);
+}
+.training-modal-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 1.05rem;
+  margin: 0;
+  color: var(--navy, #0f172a);
+  overflow-wrap: anywhere;
+}
+.training-modal-close {
+  background: transparent;
+  border: 0;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: var(--steel, #5b6b7c);
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+}
+.training-modal-close:hover { background: var(--off-white, #f1f5f9); }
+.training-modal-body {
+  padding: 1.25rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.training-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.875rem 1.25rem;
+  border-top: 1px solid var(--border, #e2e8f0);
+  background: var(--off-white, #f8fafc);
+}
+@media (max-width: 480px) {
+  .training-modal { max-width: 100%; }
+  .training-modal-footer { flex-direction: column-reverse; }
+  .training-modal-footer .training-btn { width: 100%; }
 }
 /* SOL-P1#12: employee directory picker. Search box on top, scrollable
    list of checkbox rows below. Replaces the email-paste textarea. */

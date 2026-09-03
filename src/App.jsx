@@ -42,6 +42,11 @@ const Training = React.lazy(() => import('./pages/portal/Training.jsx'));
 const TrainingDetail = React.lazy(() => import('./pages/portal/TrainingDetail.jsx'));
 const TrainingDashboard = React.lazy(() => import('./pages/admin/TrainingDashboard.jsx'));
 const TrainingCourseNew = React.lazy(() => import('./pages/admin/TrainingCourseNew.jsx'));
+// Round-24: admin course detail + edit pages. Lazy-loaded with the rest so
+// they share the admin chunk group. The detail page hosts the reassign
+// modal (deep-linkable via ?reassign=1).
+const TrainingCourseDetail = React.lazy(() => import('./pages/admin/TrainingCourseDetail.jsx'));
+const TrainingCourseEdit = React.lazy(() => import('./pages/admin/TrainingCourseEdit.jsx'));
 // SOL-P2#18: portal-side 404 — keeps the portal chrome and gives the
 // user a familiar recovery path rather than dumping them on the public
 // site. Renders inside the protected /portal/* tree.
@@ -112,14 +117,20 @@ function App() {
           <Route path="inspection/:id" element={<InspectionDetail />} />
           <Route path="admin/inspection" element={<InspectionDashboard />} />
           {/* Round-14: Employee Training — employee hub, player page, and admin views.
-              /training            = employee "My Learning" hub
-              /training/:id        = single-course player page (employee owner only)
-              /admin/training      = admin dashboard (course library + enrollment queue)
-              /admin/training/new  = create course + bulk-assign */}
+              /training                 = employee "My Learning" hub
+              /training/:id             = single-course player page (employee owner only)
+              /admin/training           = admin dashboard (course library + enrollment queue)
+              /admin/training/new       = create course + bulk-assign
+              /admin/training/:id       = admin course detail (view + reassign + archive) — round 24
+              /admin/training/:id/edit  = admin course edit form — round 24
+              NOTE: literal /new MUST come before param :id so HashRouter matches
+              "/new" instead of treating it as :id="new" (round-20 lesson). */}
           <Route path="training" element={<Training />} />
           <Route path="training/:id" element={<TrainingDetail />} />
           <Route path="admin/training" element={<TrainingDashboard />} />
           <Route path="admin/training/new" element={<TrainingCourseNew />} />
+          <Route path="admin/training/:id" element={<TrainingCourseDetail />} />
+          <Route path="admin/training/:id/edit" element={<TrainingCourseEdit />} />
           {/* P0/A-02: landing branches on role. Employees → Dashboard; admins → Admin Overview.
               SOL-P2#17: removed /portal/assets stub (and ComingSoon component) —
               the item was advertised as "coming soon" but had no roadmap date.

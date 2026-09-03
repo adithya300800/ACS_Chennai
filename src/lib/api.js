@@ -397,7 +397,16 @@ export const api = {
   assignTraining: (courseId, employeeIdsOrEmails, opts = {}, token) =>
     api.post('/training/enrollments', {
       courseId,
-      employeeEmails: employeeIdsOrEmails,
+      // Round-24: the previous wrapper hardcoded `employeeEmails` on the wire
+      // regardless of input, so any caller passing cuids (the picker in
+      // TrainingCourseNew, the reassign modal) silently fell into the email
+      // branch and got 0 matches / all in `invalidInputs`. Now we forward to
+      // the correct key based on `opts.byEmail`. Default is `employeeIds`
+      // because every UI consumer passes cuids; callers that genuinely want
+      // to assign by email (none today) opt in with `{ byEmail: true }`.
+      ...(opts.byEmail
+        ? { employeeEmails: employeeIdsOrEmails }
+        : { employeeIds: employeeIdsOrEmails }),
       ...(opts.dueDate ? { dueDate: opts.dueDate } : {}),
       ...(opts.priority ? { priority: opts.priority } : {}),
     }, token),

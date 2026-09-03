@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -116,6 +116,10 @@ export default function TrainingDashboard() {
   const { employee, accessToken } = useAuth();
   const { push } = useToast();
   const navigate = useNavigate();
+  // Round-24: courseFilter can arrive via ?courseFilter=<id> from the
+  // detail page's "View all in enrollment queue" link. We honor it on
+  // mount so the dashboard opens pre-scoped to the right course.
+  const [searchParams] = useSearchParams();
   // DR-026: refresh "today" on midnight + tab focus so memoized counts/filters
   // re-evaluate when the business date rolls over (or the user comes back
   // after leaving the tab open overnight).
@@ -132,7 +136,13 @@ export default function TrainingDashboard() {
   const [loadingEnrollments, setLoadingEnrollments] = useState(true);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState('ALL');
-  const [courseFilter, setCourseFilter] = useState('ALL');
+  // Round-24: seed courseFilter from ?courseFilter=<id> so the detail
+  // page's "View all in enrollment queue" link opens pre-scoped. Done
+  // via lazy initializer so it only fires once.
+  const [courseFilter, setCourseFilter] = useState(() => {
+    const fromUrl = searchParams.get('courseFilter');
+    return fromUrl && fromUrl.length > 0 ? fromUrl : 'ALL';
+  });
   const [actionPending, setActionPending] = useState({}); // { [enrollmentId]: 'override' }
 
   const fetchCourses = useCallback(async () => {
@@ -265,7 +275,15 @@ export default function TrainingDashboard() {
           <ul className="training-list training-list-courses">
             {courses.map((c) => (
               <li key={c.id} className="training-card training-card-course">
-                <div className="training-card-main">
+                {/* Round-24: card body is now a Link to the new detail page.
+                    Side actions stay as buttons so they don't navigate when
+                    clicked (their handlers are different from "open detail"). */}
+                <Link
+                  to={`/portal/admin/training/${c.id}`}
+                  className="training-card-main"
+                  style={{ textDecoration: 'none', color: 'inherit', display: 'block' }}
+                  aria-label={`Open ${c.title}`}
+                >
                   <div className="training-card-title-row">
                     <h3 className="training-card-title">{c.title}</h3>
                     {c.isArchived && <span className="training-pill training-pill-archived">Archived</span>}
@@ -284,8 +302,8 @@ export default function TrainingDashboard() {
                     <span>Created {formatDate(c.createdAt)}</span>
                   </div>
                   {c.description && <div className="training-card-desc">{c.description}</div>}
-                </div>
-                <div className="training-card-side">
+                </Link>
+                <div className="training-card-side training-card-actions">
                   <button
                     type="button"
                     className="training-btn training-btn-ghost"
@@ -294,6 +312,24 @@ export default function TrainingDashboard() {
                   >
                     View enrollments
                   </button>
+                  {/* Round-24: reassign deep-links with ?reassign=1 so the
+                      detail page auto-opens its modal. Useful when the admin
+                      wants to add more people without scrolling to find the
+                      button. */}
+                  <Link
+                    to={`/portal/admin/training/${c.id}?reassign=1`}
+                    className="training-btn training-btn-ghost"
+                    aria-label={`Reassign ${c.title}`}
+                  >
+                    Reassign
+                  </Link>
+                  <Link
+                    to={`/portal/admin/training/${c.id}/edit`}
+                    className="training-btn training-btn-ghost"
+                    aria-label={`Edit ${c.title}`}
+                  >
+                    Edit
+                  </Link>
                 </div>
               </li>
             ))}
