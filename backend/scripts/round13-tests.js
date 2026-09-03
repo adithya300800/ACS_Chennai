@@ -200,19 +200,34 @@ header('timesheet.buildAttendanceMap / buildLeaveMap');
 
   const lMap = ts.buildLeaveMap(
     [
-      { id: 'l1', status: 'PENDING', startDate: dms, endDate: dms, leaveType: 'CASUAL' },
-      { id: 'l2', status: 'APPROVED', startDate: dms, endDate: dms, leaveType: 'SICK' },
-      { id: 'l3', status: 'REJECTED', startDate: dms, endDate: dms, leaveType: 'CASUAL' },
+      { id: 'l1', employeeId: 'emp1', status: 'PENDING', startDate: dms, endDate: dms, leaveType: 'CASUAL' },
+      { id: 'l2', employeeId: 'emp1', status: 'APPROVED', startDate: dms, endDate: dms, leaveType: 'SICK' },
+      { id: 'l3', employeeId: 'emp1', status: 'REJECTED', startDate: dms, endDate: dms, leaveType: 'CASUAL' },
     ],
     { includeStatuses: ['APPROVED'] }
   );
-  ok('buildLeaveMap filters by status', lMap[dms] && lMap[dms].leaveType === 'SICK');
+  ok('buildLeaveMap filters by status', lMap['emp1'] && lMap['emp1'][dms] && lMap['emp1'][dms].leaveType === 'SICK');
 
   const ml = ts.buildLeaveMap(
-    [{ id: 'l1', status: 'APPROVED', startDate: new Date(2026, 7, 10).getTime(), endDate: new Date(2026, 7, 12).getTime(), leaveType: 'EARNED' }],
+    [{ id: 'l1', employeeId: 'emp1', status: 'APPROVED', startDate: new Date(2026, 7, 10).getTime(), endDate: new Date(2026, 7, 12).getTime(), leaveType: 'EARNED' }],
     { includeStatuses: ['APPROVED'] }
   );
-  ok('multi-day range covers middle', ml[new Date(2026, 7, 11).getTime()].leaveType === 'EARNED');
+  ok('multi-day range covers middle', ml['emp1'][new Date(2026, 7, 11).getTime()].leaveType === 'EARNED');
+
+  // Round-21 regression: an APPROVED leave for one employee must NOT
+  // appear in another employee's bucket. Old code keyed by dayMs only,
+  // so the most-recently-written leave "won" globally per day.
+  const cross = ts.buildLeaveMap(
+    [
+      { id: 'la', employeeId: 'emp1', status: 'APPROVED', startDate: new Date(2026, 7, 14).getTime(), endDate: new Date(2026, 7, 14).getTime(), leaveType: 'SICK' },
+      { id: 'lb', employeeId: 'emp2', status: 'APPROVED', startDate: new Date(2026, 7, 14).getTime(), endDate: new Date(2026, 7, 14).getTime(), leaveType: 'CASUAL' },
+    ],
+    { includeStatuses: ['APPROVED'] }
+  );
+  const d14 = new Date(2026, 7, 14).getTime();
+  ok('leave is scoped to its own employee (emp1)', cross['emp1'][d14] && cross['emp1'][d14].leaveType === 'SICK');
+  ok('leave is scoped to its own employee (emp2)', cross['emp2'][d14] && cross['emp2'][d14].leaveType === 'CASUAL');
+  ok('cross-employee bucket is empty', !cross['emp3'] || !cross['emp3'][d14]);
 }
 
 // ============ timesheet.resolveStatus priority ============
@@ -275,7 +290,7 @@ header('timesheet.buildTimesheetRows');
   const r5 = ts.buildTimesheetRows({
     employees: [{ id: 'e1', name: 'Alice', department: 'Eng' }],
     attendanceRows: [{ id: 'a1', employeeId: 'e1', date: new Date(2026, 7, 14).getTime(), sessions: [{ checkIn: at(9, 0), checkOut: at(17, 0) }] }],
-    leaveRequests: [{ id: 'l1', status: 'APPROVED', startDate: new Date(2026, 7, 14).getTime(), endDate: new Date(2026, 7, 14).getTime(), leaveType: 'CASUAL' }],
+    leaveRequests: [{ id: 'l1', employeeId: 'e1', status: 'APPROVED', startDate: new Date(2026, 7, 14).getTime(), endDate: new Date(2026, 7, 14).getTime(), leaveType: 'CASUAL' }],
     month: '2026-08',
     today: new Date(2026, 7, 14),
   });
@@ -286,13 +301,36 @@ header('timesheet.buildTimesheetRows');
   const r6 = ts.buildTimesheetRows({
     employees: [{ id: 'e1', name: 'Alice', department: 'Eng' }],
     attendanceRows: [],
-    leaveRequests: [{ id: 'l1', status: 'PENDING', startDate: new Date(2026, 7, 14).getTime(), endDate: new Date(2026, 7, 14).getTime(), leaveType: 'CASUAL' }],
+    leaveRequests: [{ id: 'l1', employeeId: 'e1', status: 'PENDING', startDate: new Date(2026, 7, 14).getTime(), endDate: new Date(2026, 7, 14).getTime(), leaveType: 'CASUAL' }],
     month: '2026-08',
     today: new Date(2026, 7, 14),
   });
   const pendingRow = r6.rows.find(x => x.date === '2026-08-14');
   ok('pending leave does NOT mark Leave', pendingRow.status === 'Absent');
   eq('pending leave leaves leaveType blank', pendingRow.leaveType, '');
+
+  // Round-21 regression: Alice on leave + Bob no leave, same date → only Alice is Leave.
+  // Pre-fix this asserted "Leave" for Bob too because the leaveMap was keyed by dayMs only.
+  const r7 = ts.buildTimesheetRows({
+    employees: [
+      { id: 'alice', name: 'Alice', department: 'Eng' },
+      { id: 'bob', name: 'Bob', department: 'Ops' },
+    ],
+    attendanceRows: [],
+    leaveRequests: [{
+      id: 'l1', employeeId: 'alice', status: 'APPROVED',
+      startDate: new Date(2026, 7, 14).getTime(),
+      endDate: new Date(2026, 7, 14).getTime(),
+      leaveType: 'CASUAL',
+    }],
+    month: '2026-08',
+    today: new Date(2026, 7, 14),
+  });
+  const aliceRow = r7.rows.find(x => x.date === '2026-08-14' && x.employeeId === 'alice');
+  const bobRow = r7.rows.find(x => x.date === '2026-08-14' && x.employeeId === 'bob');
+  ok('Alice is Leave on her own leave day', aliceRow.status === 'Leave' && aliceRow.leaveType === 'CASUAL');
+  ok('Bob is NOT Leave on Alice\'s leave day (cross-employee leak)', bobRow.status !== 'Leave');
+  ok('Bob has empty leaveType', bobRow.leaveType === '');
 
   // Malformed month
   let threw1 = false, threw2 = false;

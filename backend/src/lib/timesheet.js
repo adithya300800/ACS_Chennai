@@ -122,10 +122,15 @@ function resolveStatus({ dateMs, attendanceRow, leaveMap, todayMs }) {
   return 'Absent';
 }
 
-// Build a leave-overlap map keyed by local-midnight day timestamp.
+// Build a leave-overlap map keyed by employeeId → local-midnight day → leave row.
 // Only APPROVED leaves overlay the timesheet (per design decision 4.17).
 // Pending leaves render as Absent in the timesheet — visible to admin but
 // not interfering with payroll until approved.
+//
+// Keying by (employeeId, dayMs) — NOT just dayMs — is the Round-21 fix for
+// the cross-employee leak where one employee's approved leave was painting
+// every other employee "Leave" on the same dates in the CSV/XLSX export.
+// See /api/attendance/export route handler for the caller-side fix.
 function buildLeaveMap(leaveRequests, opts) {
   const inclusive = opts && typeof opts.includeStatuses === 'object'
     ? new Set(opts.includeStatuses)
@@ -134,11 +139,14 @@ function buildLeaveMap(leaveRequests, opts) {
   if (!Array.isArray(leaveRequests)) return map;
   for (const lr of leaveRequests) {
     if (!inclusive.has(lr.status)) continue;
+    if (!lr.employeeId) continue;
     const startMs = dayKey(lr.startDate);
     const endMs = dayKey(lr.endDate);
     if (startMs == null || endMs == null || endMs < startMs) continue;
+    if (!map[lr.employeeId]) map[lr.employeeId] = Object.create(null);
+    const empMap = map[lr.employeeId];
     for (let t = startMs; t <= endMs; t += 24 * 60 * 60 * 1000) {
-      map[t] = lr; // Last write wins on overlap (shouldn't happen — overlap check at submit).
+      empMap[t] = lr; // Last write wins on overlap (shouldn't happen — overlap check at submit).
     }
   }
   return map;
@@ -198,9 +206,12 @@ function buildTimesheetRows({ employees, attendanceRows, leaveRequests, month, t
   for (const emp of safeEmployees) {
     if (!emp || !emp.id) continue;
     const empAtd = attendanceMap[emp.id] || {};
+    // Round-21 fix: read leaves keyed by employeeId, NOT dayMs only —
+    // otherwise a single approved leave painted every employee on those days.
+    const empLeave = leaveMap[emp.id] || {};
     for (const dateMs of monthDays) {
       const atd = empAtd[dateMs] || null;
-      const leave = leaveMap[dateMs] || null;
+      const leave = empLeave[dateMs] || null;
       const status = resolveStatus({ dateMs, attendanceRow: atd, leaveMap: leave ? { [dateMs]: leave } : null, todayMs });
 
       let firstCheckIn = '—';
