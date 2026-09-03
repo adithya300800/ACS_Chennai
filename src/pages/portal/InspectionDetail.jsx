@@ -110,16 +110,19 @@ export default function InspectionDetail() {
             },
           ]}
         />
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
-          <div>
+        {/* SOL-P1#6: on mobile the status badge wraps below the title
+            instead of being truncated beside it. The wrapper uses
+            flex-wrap so the layout collapses gracefully. */}
+        <div className="inspection-detail-header">
+          <div style={{ minWidth: 0 }}>
             <h1 className="dpr-page-title" style={{ marginBottom: '0.25rem' }}>
               {typeMeta?.label || record.inspectionType}
             </h1>
-            <div style={{ color: 'var(--steel)', fontSize: '0.9rem' }}>
+            <div style={{ color: 'var(--steel)', fontSize: '0.9rem', overflowWrap: 'anywhere' }}>
               {record.projectName} · {record.location}
             </div>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.5rem' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.5rem', flexShrink: 0 }}>
             <span className={`dpr-status-badge dpr-status-${(record.status || 'open').toLowerCase()}`}>
               {(record.status || 'OPEN').replace(/_/g, ' ')}
             </span>
@@ -159,11 +162,14 @@ export default function InspectionDetail() {
               Details
             </h3>
             <div style={{ background: '#f8fafc', borderRadius: 6, padding: '1rem', borderLeft: '3px solid var(--blue)' }}>
-              <dl style={{ margin: 0, display: 'grid', gridTemplateColumns: 'minmax(140px, max-content) 1fr', gap: '0.5rem 1rem' }}>
+              {/* SOL-P1#6: single-column dl on narrow screens so dates and
+                  values aren't split / clipped. CSS class `dl-stacked`
+                  collapses the grid at ≤640px. */}
+              <dl className="dl-stacked">
                 {Object.entries(record.data).map(([key, value]) => (
                   <React.Fragment key={key}>
-                    <dt style={{ fontWeight: 500, color: 'var(--steel)', fontSize: '0.85rem' }}>{labelize(key)}:</dt>
-                    <dd style={{ margin: 0, fontSize: '0.9rem', whiteSpace: 'pre-wrap' }}>{renderValue(value)}</dd>
+                    <dt>{labelize(key)}:</dt>
+                    <dd>{renderValue(value)}</dd>
                   </React.Fragment>
                 ))}
               </dl>
