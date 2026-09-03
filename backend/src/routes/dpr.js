@@ -574,7 +574,13 @@ router.post('/', async (req, res) => {
 // ─── GET /api/dpr ─────────────────────────────────────────────────────────────
 router.get('/', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
-  const { cursor, limit = '20', status: statusFilter, from, to, my } = req.query;
+  // R22.5: `projectName` (case-insensitive substring) and `submittedById` are
+  // optional query params used by the admin "All Daily Reports Records" page
+  // (DprAll.jsx). Both feed into the where clause so a filter narrows the
+  // result set server-side — a 500+ row org doesn't need to ship everything
+  // to the browser just so the client can filter. submittedById is the
+  // canonical cuid; projectName is a free-text contains search.
+  const { cursor, limit = '20', status: statusFilter, from, to, my, projectName, submittedById: submittedByIdFilter } = req.query;
 
   const take = Math.min(parseInt(limit) || 20, 100);
 
@@ -637,6 +643,8 @@ router.get('/', asyncHandler(async (req, res) => {
     const where = {
       ...(restrictToSelf ? { submittedById: req.employeeId } : {}),
       ...(statusFilter ? { status: statusFilter } : {}),
+      ...(submittedByIdFilter && !restrictToSelf ? { submittedById: submittedByIdFilter } : {}),
+      ...(projectName ? { projectName: { contains: projectName, mode: 'insensitive' } } : {}),
       ...(Object.keys(dateFilter).length ? { reportDate: dateFilter } : {}),
       ...(cursor ? cursorWhere : {}),
     };
@@ -651,8 +659,41 @@ router.get('/', asyncHandler(async (req, res) => {
       take: take + 1,
     });
 
-    const hasMore = dprs.length > take;
-    const items = hasMore ? dprs.slice(0, -1) : dprs;
+    // R22.5 (round-22 follow-up): DPR queue cards (DprDashboard.jsx) render
+    // photos directly from the list response. The single-record GET has
+    // always generated `readUrl` (signed R2 GET SAS) for each photo, but the
+    // list GET omitted the field — so every queue card showed a placeholder
+    // icon and the <a href> was dead. We now mirror the single-record path:
+    // for each photo, derive the same `${employeeId}/${ulid}.${ext}` blob
+    // name the upload wrote under (blobStorage.js:66) and generate a fresh
+    // 1-hour read SAS. Errors on a single URL don't fail the whole list —
+    // the photo just renders without a usable src and the placeholder path
+    // takes over (PhotoThumb in DprDashboard.jsx falls back gracefully).
+    //
+    // Latency budget: N+1 SAS generations per page, parallel via Promise.all.
+    // For a 20-row page with 2 photos each = 40 calls × ~30 ms = ~1.2 s
+    // worst-case added. Acceptable for an admin-only queue.
+    const enriched = await Promise.all(dprs.map(async (d) => {
+      if (!d.photos || d.photos.length === 0) return d;
+      const photosWithUrls = await Promise.all(d.photos.map(async (p) => {
+        try {
+          const ext = CONTENT_TYPE_EXT[p.contentType];
+          const blobName = ext
+            ? `${d.submittedById}/${p.ulid}.${ext}`
+            : `${d.submittedById}/${p.ulid}`;
+          const { sasUrl } = await generateReadSASUrl(p.container, blobName);
+          return { ...p, readUrl: sasUrl };
+        } catch (e) {
+          // Don't fail the whole list if one URL fails — the placeholder
+          // path in PhotoThumb handles missing readUrl.
+          return { ...p, readUrl: null };
+        }
+      }));
+      return { ...d, photos: photosWithUrls };
+    }));
+
+    const hasMore = enriched.length > take;
+    const items = hasMore ? enriched.slice(0, -1) : enriched;
     const lastItem = items[items.length - 1];
     // reportDate is @db.Date in Postgres — Prisma sometimes returns it as
     // a "YYYY-MM-DD" string rather than a JS Date (depends on column type
