@@ -324,8 +324,16 @@ export const api = {
   // columns. See docs/dashboard-metrics.md for the metric definitions.
   getInspectionStats: (token) => api.get('/inspection/stats', token),
   getInspection: (id, token) => api.get(`/inspection/${id}`, token),
-  updateInspection: (id, data, version, token) =>
-    api.put(`/inspection/${id}`, { ...data, version }, token),
+  // DR-004 (round-20): the previous signature took a `version` argument
+  // and forwarded it on the wire, but InspectionRecord has no `version`
+  // column. The backend's dead `where: { id, version }` clause made
+  // every PUT silently 409 with VERSION_CONFLICT. The new wire
+  // contract is: PUT /inspection/:id with just the editable fields
+  // (no version, no status — status transitions go through the admin
+  // endpoints). We keep the third positional arg as a deprecated
+  // no-op so any caller still passing it doesn't crash.
+  updateInspection: (id, data, _deprecatedVersion, token) =>
+    api.put(`/inspection/${id}`, data, token),
 
   // Round-17 B-06: bulk fan-out for the admin inspection queue. Mirrors the
   // DPR bulkReviewDprs shape — backend returns

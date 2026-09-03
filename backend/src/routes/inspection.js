@@ -230,14 +230,32 @@ router.post('/', async (req, res) => {
     });
   }
 
-  // status — defaults to OPEN
-  const finalStatus = status || 'OPEN';
-  if (!ALLOWED_STATUSES.has(finalStatus)) {
+  // DR-004 (round-20): owner-create is restricted to status OPEN. The
+  // other 5 statuses (ACKNOWLEDGED, IN_PROGRESS, PENDING_VERIFICATION,
+  // CLOSED, REJECTED) are admin-only workflow states reached through
+  // /acknowledge, /close, /reject, and the bulk-review endpoint. The
+  // previous implementation accepted ANY of the 6 — an employee could
+  // POST an inspection with `status: 'CLOSED'` and skip the entire
+  // admin review queue.
+  //
+  // Admins creating inspections on behalf of a workflow (rare, but
+  // legitimate for back-filling NCRs) use the same route with the
+  // admin status explicitly — gated below by req.isAdmin.
+  const requestedStatus = status === undefined ? 'OPEN' : status;
+  if (!ALLOWED_STATUSES.has(requestedStatus)) {
     return res.status(422).json({
       error: `status must be one of: ${[...ALLOWED_STATUSES].join(', ')}`,
       code: 'STATUS_INVALID',
     });
   }
+  if (requestedStatus !== 'OPEN' && !req.isAdmin) {
+    return res.status(403).json({
+      error: 'Only admins can create inspections in a non-OPEN status',
+      code: 'STATUS_ADMIN_ONLY',
+      currentStatus: requestedStatus,
+    });
+  }
+  const finalStatus = requestedStatus;
 
   // data — must be a non-null object; cap string values to prevent abuse.
   // Per-field validation (required-ness) is the frontend's job (mirrors how
@@ -595,18 +613,42 @@ router.get('/:id', async (req, res) => {
 // Owner-only update; only allowed while status = OPEN (locked once
 // acknowledged or progressed). Same mass-assignment allowlist pattern as
 // dpr.js P0-1 — explicit allowlist prevents IDOR on submittedById etc.
+//
+// DR-004 (round-20): two bugs the audit caught:
+//   1. The previous ALLOWED_UPDATE_FIELDS included `status`. The owner
+//      could send `status: 'CLOSED'` via PUT and silently mark a
+//      record as admin-decided without going through the admin queue.
+//      `status` is removed from the owner allowlist — the dedicated
+//      /acknowledge /close /reject endpoints (and bulk-review) are
+//      the only legal way out of OPEN.
+//   2. The handler required a `version` field in the body and used
+//      `where: { id, version: existing.version }` on the conditional
+//      update — but InspectionRecord has NO version column in the
+//      schema (see prisma/schema.prisma: model InspectionRecord). The
+//      WHERE clause never matched and every PUT 409'd with
+//      VERSION_CONFLICT. We now accept a plain PUT body without a
+//      version field and update by `id`. Race-safety on the
+//      status=OPEN lock is provided by the explicit status check
+//      above; admins transition status through dedicated endpoints
+//      that use a different race-safe pattern.
 router.put('/:id', async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
-  const { version, ...fields } = req.body || {};
+  const fields = req.body || {};
 
-  if (!Number.isInteger(version) || version < 1) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'version must be a positive integer' });
+  // `version` was a phantom — reject explicitly so any client still
+  // sending it gets a clear 400 instead of silently working (or, as
+  // before, silently 409'ing on the dead WHERE clause).
+  if ('version' in fields) {
+    return res.status(400).json({
+      error: 'version is not a valid field on inspection records',
+      code: 'VERSION_FIELD_INVALID',
+    });
   }
 
   const ALLOWED_UPDATE_FIELDS = [
     'projectName', 'location', 'reportDate', 'weather', 'contractor',
-    'inspectionType', 'data', 'severity', 'status', 'dprId',
+    'inspectionType', 'data', 'severity', 'dprId',
   ];
   const unknown = Object.keys(fields).filter(k => !ALLOWED_UPDATE_FIELDS.includes(k));
   if (unknown.length) {
@@ -638,9 +680,6 @@ router.put('/:id', async (req, res) => {
   }
   if (fields.severity !== undefined && fields.severity !== null && !ALLOWED_SEVERITIES.has(fields.severity)) {
     return res.status(422).json({ error: 'severity not allowed', code: 'SEVERITY_INVALID' });
-  }
-  if (fields.status !== undefined && !ALLOWED_STATUSES.has(fields.status)) {
-    return res.status(422).json({ error: 'status not allowed', code: 'STATUS_INVALID' });
   }
   if (fields.data !== undefined) {
     if (fields.data == null || typeof fields.data !== 'object' || Array.isArray(fields.data)) {
@@ -677,10 +716,9 @@ router.put('/:id', async (req, res) => {
 
   try {
     const updated = await prisma.inspectionRecord.update({
-      where: { id, version: existing.version },
+      where: { id },
       data: {
         ...fields,
-        version: { increment: 1 },
         updatedAt: new Date(),
       },
       include: {
@@ -697,9 +735,6 @@ router.put('/:id', async (req, res) => {
       prismaCode: err.code,
       message: err.message?.split('\n')[0],
     });
-    if (err.code === 'P2025') {
-      return res.status(409).json({ error: 'VERSION_CONFLICT', code: 'VERSION_CONFLICT' });
-    }
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to update inspection record' });
