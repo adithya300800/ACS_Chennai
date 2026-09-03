@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
 
@@ -6,17 +6,36 @@ import { useAuth } from '../contexts/AuthContext.jsx';
 // colored circle) opens a dropdown with: name + email + role badge,
 // Help & Support link, Settings placeholder, Sign out. Closes on
 // outside-click + Escape. Anchored top-right; never off-screen on
-// 320px+ viewports because we use position: fixed + max-width.
+// 320px+ viewports because we use position: fixed + JS-computed
+// top/right from the trigger rect.
 export default function UserMenu() {
   const { employee, logout } = useAuth();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, right: 0 }); // SOL-P2#19 live-deploy fix: dropdown is position:fixed, compute viewport coords from trigger rect
   const rootRef = useRef(null);
   const triggerRef = useRef(null);
   const menuRef = useRef(null);
 
-  // Close on outside-click + Escape. Also repositions to top-right
-  // so the menu never escapes the viewport.
+  // Compute dropdown position from the trigger rect. useLayoutEffect
+  // avoids the 1-frame flash where the dropdown would otherwise render
+  // at 0,0 before React commits the position.
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return;
+    const compute = () => {
+      const r = triggerRef.current.getBoundingClientRect();
+      setPos({ top: r.bottom + 8, right: window.innerWidth - r.right });
+    };
+    compute();
+    window.addEventListener('resize', compute);
+    window.addEventListener('scroll', compute, true);
+    return () => {
+      window.removeEventListener('resize', compute);
+      window.removeEventListener('scroll', compute, true);
+    };
+  }, [open]);
+
+  // Close on outside-click + Escape.
   useEffect(() => {
     if (!open) return undefined;
     const onDoc = (e) => {
@@ -82,6 +101,7 @@ export default function UserMenu() {
           className="user-menu-dropdown"
           role="menu"
           aria-label="Account"
+          style={{ top: `${pos.top}px`, right: `${pos.right}px` }}
         >
           <div className="user-menu-header">
             <div className="user-menu-name">{fullName}</div>
