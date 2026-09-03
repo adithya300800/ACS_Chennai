@@ -11,6 +11,21 @@ info:
     retries (mobile network drop, double-click) collapse to a single record.
     The same key + payload returns the same response; a different payload
     under the same key returns 409.
+
+    ---
+
+    **DR-018 status: PARTIAL — auto-generated stub**
+
+    This file is kept as a historical reference but is **stale**. Round-20
+    (DR-018) found it missing routes for attendance/status + export, leave
+    (7 endpoints), training (10 endpoints), inspection/bulk-review + photos
+    upload, and dpr/bulk-review + notifications/list + pdf. The companion
+    file `openapi.json` was deleted as part of the same DR.
+
+    Run `npm run openapi:gen` from the `backend/` directory to regenerate
+    this file from the live Express router mounts. The generator lives at
+    `scripts/generateOpenapi.js`. Until the generator is run, treat the
+    paths below as a partial map — full coverage is a follow-up.
   version: 1.0.0
   contact:
     name: ACS Chennai
