@@ -569,6 +569,33 @@ function validateCompletePayload(body) {
   };
 }
 
+// Validate the body for POST /api/training/enrollments/:id/cancel.
+// Round-24 follow-up to the edit/reassign work: the only field the admin
+// sends is an optional reason (stored in employeeNote). The route enforces
+// the actual transition against canTransition() + a status
+// `notIn: completed-states` clause, so the validator's job is just shape
+// + length checks; the business rules live in the route + state machine.
+function validateCancelPayload(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, code: 'INVALID_BODY', message: 'Body required' };
+  }
+  let note = null;
+  if (body.note != null) {
+    if (typeof body.note !== 'string') {
+      return { ok: false, code: 'INVALID_NOTE', message: 'note must be a string or null' };
+    }
+    note = body.note.trim() || null;
+    if (note && note.length > MAX_EMPLOYEE_NOTE_LEN) {
+      return {
+        ok: false,
+        code: 'NOTE_TOO_LONG',
+        message: `note must be at most ${MAX_EMPLOYEE_NOTE_LEN} characters`,
+      };
+    }
+  }
+  return { ok: true, value: { note } };
+}
+
 // DR-010 (round-20): given an existing enrollment and a chosen evidence
 // class, return the data patch that the route handler should pass to
 // Prisma.update. Pure function — no I/O. The route handler is responsible
@@ -621,20 +648,34 @@ function canTransition(fromStatus, toStatus) {
   if (isCompleted(fromStatus)) return false; // completed is terminal
 
   if (fromStatus === 'ASSIGNED') {
+    // Round-24: admin can unassign before the learner starts (CANCELLED
+    // branch added). The route also enforces the same terminal-state guard
+    // (`status: { notIn: completed-states }` in the where clause) so two
+    // admins racing on the same row get a clean 409, not a silent overwrite.
     return toStatus === 'IN_PROGRESS'
       || toStatus === 'SELF_ATTESTED_COMPLETED'
       || toStatus === 'PLAYER_OBSERVED_COMPLETED'
-      || toStatus === 'ADMIN_OVERRIDE_COMPLETED';
+      || toStatus === 'ADMIN_OVERRIDE_COMPLETED'
+      || toStatus === 'CANCELLED';
   }
   if (fromStatus === 'IN_PROGRESS') {
     return toStatus === 'SELF_ATTESTED_COMPLETED'
       || toStatus === 'PLAYER_OBSERVED_COMPLETED'
       || toStatus === 'PROVIDER_VERIFIED_COMPLETED'
-      || toStatus === 'ADMIN_OVERRIDE_COMPLETED';
+      || toStatus === 'ADMIN_OVERRIDE_COMPLETED'
+      // Round-24: admin can unassign an in-progress learner (employee
+      // already started, admin pulls the row).
+      || toStatus === 'CANCELLED';
   }
-  // OVERDUE / CANCELLED: terminal-ish; an admin could in theory re-open by
-  // hand. Re-opening is post-v1 — for now only `?status=OVERDUE` audit
-  // queries are read paths.
+  // OVERDUE: rolled into "admin can pull it back" (round-24). The route
+  // refuses the row-update if status is currently in a completed-state, so
+  // OVERDUE→CANCELLED here is safe and lets the admin clean up stale
+  // assignments without touching completed ones.
+  if (fromStatus === 'OVERDUE') {
+    return toStatus === 'CANCELLED';
+  }
+  // CANCELLED: terminal. Re-opening is post-v1 (would need an audit trail
+  // of who reopened and why; out of scope for the round-24 cancel button).
   return false;
 }
 
@@ -709,6 +750,7 @@ module.exports = {
   validateAssignEnrollments,
   validateProgressPayload,
   validateCompletePayload,
+  validateCancelPayload,
   canTransition,
   canAutoCompleteFromPlayer,
   isCompleted,

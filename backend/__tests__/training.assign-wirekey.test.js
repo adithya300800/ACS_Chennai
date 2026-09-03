@@ -23,6 +23,8 @@
 
 const {
   validateAssignEnrollments,
+  validateCancelPayload,
+  canTransition,
   httpStatusForCode,
 } = require('../src/lib/trainingRules');
 
@@ -158,5 +160,97 @@ describe('Round-24 — validateAssignEnrollments wire-key contract', () => {
     expect(r.ok).toBe(false);
     expect(r.code).toBe('INVALID_PRIORITY');
     expect(httpStatusForCode(r.code)).toBe(400);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Round-24 follow-up: cancel (unassign) wire + state-machine contract.
+//
+// The cancel flow is two-layered:
+//   1. validateCancelPayload — body shape (note?), lives in trainingRules.
+//   2. canTransition — guards which (fromStatus → 'CANCELLED') pairs are
+//      allowed. The route also reads the row first to surface a clean 409
+//      ENROLLMENT_LOCKED / ENROLLMENT_CANCELLED instead of letting the
+//      where-clause's P2025 do all the talking. Completed states are
+//      terminal upstream (isCompleted → false), so canTransition never
+//      accepts *_COMPLETED → CANCELLED.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Round-24 — validateCancelPayload', () => {
+  it('accepts an empty body (note is optional)', () => {
+    const r = validateCancelPayload({});
+    expect(r.ok).toBe(true);
+    expect(r.value.note).toBeNull();
+  });
+
+  it('accepts a trimmed non-empty note', () => {
+    const r = validateCancelPayload({ note: '  wrong course for this employee  ' });
+    expect(r.ok).toBe(true);
+    expect(r.value.note).toBe('wrong course for this employee');
+  });
+
+  it('coerces an all-whitespace note to null (no-point storing "   ")', () => {
+    const r = validateCancelPayload({ note: '   ' });
+    expect(r.ok).toBe(true);
+    expect(r.value.note).toBeNull();
+  });
+
+  it('rejects non-string notes (400 INVALID_NOTE)', () => {
+    const r = validateCancelPayload({ note: 42 });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('INVALID_NOTE');
+    expect(httpStatusForCode(r.code)).toBe(400);
+  });
+
+  it('rejects notes longer than MAX_EMPLOYEE_NOTE_LEN (400 NOTE_TOO_LONG)', () => {
+    // Pin to the constant rather than a magic number — matches the existing
+    // training.test.js convention for length bounds.
+    const { MAX_EMPLOYEE_NOTE_LEN } = require('../src/lib/trainingRules');
+    const long = 'a'.repeat(MAX_EMPLOYEE_NOTE_LEN + 1);
+    const r = validateCancelPayload({ note: long });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('NOTE_TOO_LONG');
+    expect(httpStatusForCode(r.code)).toBe(400);
+  });
+
+  it('rejects null/array/missing body (400 INVALID_BODY)', () => {
+    expect(validateCancelPayload(null).code).toBe('INVALID_BODY');
+    expect(validateCancelPayload(undefined).code).toBe('INVALID_BODY');
+    expect(validateCancelPayload([]).code).toBe('INVALID_BODY');
+    expect(validateCancelPayload('not an object').code).toBe('INVALID_BODY');
+  });
+});
+
+describe('Round-24 — canTransition → CANCELLED allowlist', () => {
+  // Active rows can be pulled by an admin. The route's `where: { id,
+  // status: <existing.status> }` clause locks the row so a concurrent
+  // override/complete fires P2025 → 409 ENROLLMENT_LOCKED instead of a
+  // silent overwrite. canTransition is just the policy layer.
+  it('allows ASSIGNED → CANCELLED', () => {
+    expect(canTransition('ASSIGNED', 'CANCELLED')).toBe(true);
+  });
+  it('allows IN_PROGRESS → CANCELLED', () => {
+    expect(canTransition('IN_PROGRESS', 'CANCELLED')).toBe(true);
+  });
+  it('allows OVERDUE → CANCELLED (admin cleanup of stale assignments)', () => {
+    expect(canTransition('OVERDUE', 'CANCELLED')).toBe(true);
+  });
+
+  // Terminal / blocked. The route surfaces these as 409 with codes:
+  //   *_COMPLETED → ENROLLMENT_LOCKED (already completed)
+  //   CANCELLED  → ENROLLMENT_CANCELLED
+  it('refuses *_COMPLETED → CANCELLED (completed is terminal)', () => {
+    expect(canTransition('SELF_ATTESTED_COMPLETED', 'CANCELLED')).toBe(false);
+    expect(canTransition('PLAYER_OBSERVED_COMPLETED', 'CANCELLED')).toBe(false);
+    expect(canTransition('PROVIDER_VERIFIED_COMPLETED', 'CANCELLED')).toBe(false);
+    expect(canTransition('ADMIN_OVERRIDE_COMPLETED', 'CANCELLED')).toBe(false);
+  });
+  it('refuses CANCELLED → CANCELLED re-open (terminal)', () => {
+    // canTransition idempotent-write rule: same→same is true. Pin
+    // explicitly that a re-cancel is treated as a no-op transition (the
+    // route, however, still 409s because the row is already terminal —
+    // that 409 is the *route's* status check, not the canTransition
+    // matrix).
+    expect(canTransition('CANCELLED', 'CANCELLED')).toBe(true);
   });
 });

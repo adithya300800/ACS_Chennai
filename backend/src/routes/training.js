@@ -36,6 +36,7 @@ const {
   validateAssignEnrollments,
   validateProgressPayload,
   validateCompletePayload,
+  validateCancelPayload,
   canTransition,
   canAutoCompleteFromPlayer,
   isCompleted,
@@ -900,6 +901,139 @@ router.post('/enrollments/:id/admin-override', trainingWriteLimiter, asyncHandle
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to admin-override enrollment' });
+  }
+}));
+
+// POST /api/training/enrollments/:id/cancel — admin-only unassign.
+//
+// Round-24 follow-up to edit/reassign/archive: the per-row "cancel" half of
+// the enrollment lifecycle. The admin can pull back an ASSIGNED,
+// IN_PROGRESS, or OVERDUE row — anything that's still in flight. Once a
+// row is in any *_COMPLETED state, this endpoint refuses with 409
+// (use the existing override-completed route if you really need to flip
+// a completed row). Already-CANCELLED rows are 409 too (idempotent re-cancel
+// is reasonable but the UI already hides the button after cancellation, so
+// a 409 surfaces obvious races and double-clicks).
+//
+// Body: { note?: string <= 500 chars } — optional, stored in employeeNote
+// as a plain-text audit trail. There is no dedicated `cancelledAt` /
+// `cancelledBy` column on TrainingEnrollment (round-22 deliberately avoided
+// a migration during the deploy hardening sequence); the row's `updatedAt`
+// is Prisma's automatic write and serves as the "when" timestamp.
+//
+// Response: 200 with the updated enrollment serialized via
+// serializeEnrollment(), same shape as admin-override returns.
+router.post('/enrollments/:id/cancel', trainingWriteLimiter, requireFreshAdmin, asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  const { id } = req.params;
+
+  if (!req.isAdmin) return res.status(403).json({ error: 'Admin access required' });
+  const fresh = await assertFreshAdmin(req, prisma);
+  if (!fresh) return res.status(403).json({ error: 'Admin access required' });
+
+  const result = validateCancelPayload(req.body);
+  if (!result.ok) {
+    return res.status(httpStatusForCode(result.code)).json({
+      error: result.message,
+      code: result.code,
+    });
+  }
+
+  // Read the existing row so we can:
+  //   - 404 if missing
+  //   - 409 if already CANCELLED or already in a completed state
+  //   - surface a useful error if the state machine would refuse the
+  //     transition we intended (defence-in-depth — the WHERE clause below
+  //     already locks this, so this is purely a clearer error message).
+  const existing = await prisma.trainingEnrollment.findUnique({
+    where: { id },
+    include: {
+      course: { select: { id: true, title: true, isArchived: true } },
+      employee: { select: { id: true, name: true, email: true } },
+    },
+  });
+  if (!existing) return res.status(404).json({ error: 'Enrollment not found', code: 'NOT_FOUND' });
+  if (existing.status === 'CANCELLED') {
+    return res.status(409).json({ error: 'Already cancelled', code: 'ENROLLMENT_CANCELLED' });
+  }
+  if (isCompleted(existing.status)) {
+    return res.status(409).json({ error: 'Cannot cancel a completed enrollment', code: 'ENROLLMENT_LOCKED' });
+  }
+  if (!canTransition(existing.status, 'CANCELLED')) {
+    return res.status(409).json({
+      error: `Cannot cancel an enrollment in state ${existing.status}`,
+      code: 'INVALID_TRANSITION',
+    });
+  }
+
+  // `where: { id, status: existing.status }` is the atomic guard. If two
+  // admins click Cancel at the same instant, only one updateMany/update
+  // will match — the other raises P2025 (no rows matched) and we 409.
+  // This mirrors the concurrency lock admin-override uses
+  // (`status: { notIn: completed-states }`) but is tighter: it locks
+  // against the exact status we read, not a notIn set.
+  try {
+    const data = { status: 'CANCELLED' };
+    if (result.value.note) data.employeeNote = result.value.note;
+
+    const updated = await prisma.trainingEnrollment.update({
+      where: { id, status: existing.status },
+      data,
+      include: {
+        employee: { select: { id: true, name: true, email: true, department: true } },
+        assignedBy: { select: { id: true, name: true, email: true } },
+        course: {
+          select: {
+            id: true, title: true, description: true,
+            externalUrl: true, provider: true, category: true, durationHint: true,
+          },
+        },
+      },
+    });
+
+    // Best-effort: drop a notification so the employee (and the assigner)
+    // see that the row was pulled back. Same pattern as admin-override —
+    // wrapped in try/catch so a notification failure doesn't downgrade the
+    // 200 to a 500.
+    try {
+      await prisma.notification.create({
+        data: {
+          employeeId: updated.employeeId,
+          type: 'TRAINING_CANCELLED',
+          trainingEnrollmentId: updated.id,
+          message: `Training unassigned: ${updated.course.title}${result.value.note ? ` — ${result.value.note}` : ''}`,
+        },
+      });
+    } catch (notifyErr) {
+      console.error('[training/cancel] notification failed', {
+        enrollmentId: updated.id,
+        prismaCode: notifyErr.code,
+      });
+    }
+
+    console.log('[training/cancel]', {
+      actor: hashIdentifier(req.employeeId),
+      enrollmentId: updated.id,
+      courseId: updated.courseId,
+      priorStatus: existing.status,
+      noteLen: result.value.note ? result.value.note.length : 0,
+    });
+
+    res.json(serializeEnrollment(updated));
+  } catch (err) {
+    if (err.code === 'P2025') {
+      // The atomic guard failed — someone else flipped the row between
+      // our read and our write. Surface as 409 ENROLLMENT_LOCKED so the
+      // UI can re-fetch and decide what to do.
+      return res.status(409).json({
+        error: 'Enrollment changed during cancel; refresh and retry',
+        code: 'ENROLLMENT_LOCKED',
+      });
+    }
+    console.error('[training/cancel]', { prismaCode: err.code, message: err.message?.split('\n')[0] });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to cancel enrollment' });
   }
 }));
 

@@ -121,6 +121,11 @@ export default function TrainingCourseDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [actionPending, setActionPending] = useState(false);
+  // Per-row cancel-in-flight map keyed by enrollmentId — needed because
+  // multiple rows can show a Cancel button at once and each row needs its
+  // own disabled state (vs actionPending which is a single boolean for
+  // the page-level Archive/Reassign toggles).
+  const [cancelPending, setCancelPending] = useState({});
   const [showReassignModal, setShowReassignModal] = useState(false);
 
   // Auto-open the reassign modal when arriving via `?reassign=1`. Lets the
@@ -205,6 +210,31 @@ export default function TrainingCourseDetail() {
     setShowReassignModal(false);
     await fetchEnrollments();
   }, [push, fetchEnrollments]);
+
+  // Soft-cancel (unassign) an active enrollment. Backend refuses if the
+  // row is already CANCELLED or in a *_COMPLETED state, so the button is
+  // also hidden in those cases below. The optional reason is collected
+  // via window.prompt — same UX as Round-13's DPR bulk cancel — and is
+  // stored in employeeNote (existing column).
+  const handleCancelEnrollment = useCallback(async (enrollment) => {
+    if (!enrollment) return;
+    const name = enrollment.employee?.name || 'this employee';
+    if (!window.confirm(`Unassign ${name} from "${course?.title || 'this course'}"? The row stays for audit (status=Cancelled).`)) return;
+    // window.prompt returns the typed string OR null if cancelled. Empty
+    // string also treated as "no reason" — toast + backend both cope.
+    const rawReason = window.prompt(`Why? (optional, stored as a note)`, '');
+    const reason = rawReason == null ? null : rawReason.trim() || null;
+    setCancelPending((p) => ({ ...p, [enrollment.id]: true }));
+    try {
+      await api.cancelTrainingEnrollment(enrollment.id, reason, accessToken);
+      push(`Unassigned ${name}.`, 'success');
+      await fetchEnrollments();
+    } catch (err) {
+      push(err?.message || 'Failed to unassign', 'error');
+    } finally {
+      setCancelPending((p) => { const next = { ...p }; delete next[enrollment.id]; return next; });
+    }
+  }, [course, accessToken, push, fetchEnrollments]);
 
   if (loading) {
     return (
@@ -393,6 +423,25 @@ export default function TrainingCourseDetail() {
                     )}
                   </div>
                 </div>
+                {/* Round-24 follow-up: per-row Cancel (unassign) action. Same
+                    pattern as TrainingDashboard's "Mark complete" button —
+                    hidden when the row is already terminal (CANCELLED or in
+                    a *_COMPLETED state). Backend also refuses those via
+                    canTransition, so this is a UX shortcut, not a security
+                    gate. */}
+                {!COMPLETED_STATUSES.has(e.status) && e.status !== 'CANCELLED' && (
+                  <div className="training-card-side">
+                    <button
+                      type="button"
+                      className="training-btn training-btn-ghost"
+                      onClick={() => handleCancelEnrollment(e)}
+                      disabled={!!cancelPending[e.id]}
+                      aria-label={`Unassign ${e.employee?.name || 'this employee'} from this course`}
+                    >
+                      {cancelPending[e.id] ? 'Cancelling…' : 'Cancel assignment'}
+                    </button>
+                  </div>
+                )}
               </li>
             ))}
           </ul>

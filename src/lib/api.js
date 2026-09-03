@@ -428,6 +428,13 @@ export const api = {
     api.put(`/training/enrollments/${id}/progress`, { progressPct, lastWatchedSec }, token),
   // Manual mark-complete (employee for non-trackable providers, or admin
   // override). 409 ENROLLMENT_LOCKED if the row is already COMPLETED.
+  // Round-24 follow-up: admin can pull a row back from the employee's
+  // queue. Soft-cancel — the row stays for audit (status=CANCELLED) so the
+  // history isn't lost. Body shape: { note?: string }. The backend writes
+  // it to employeeNote (existing column) and refuses if the row is already
+  // completed or cancelled. Returns the updated enrollment row.
+  cancelTrainingEnrollment: (id, note, token) =>
+    api.post(`/training/enrollments/${id}/cancel`, { note: note || null }, token),
   markTrainingComplete: (id, note, token) =>
     api.put(`/training/enrollments/${id}/complete`, note ? { note } : {}, token),
 };
