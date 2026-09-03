@@ -89,7 +89,7 @@ export default function NotificationPreferences() {
         setTypes(res.types || []);
       } catch (err) {
         if (cancelled) return;
-        push({ type: 'error', message: err.message || 'Failed to load preferences' });
+        push(err.message || 'Failed to load preferences', 'error');
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -126,9 +126,9 @@ export default function NotificationPreferences() {
         digestHourLocal: res.preferences.digestHourLocal,
         typeMutes: res.preferences.typeMutes || {},
       });
-      push({ type: 'success', message: 'Preferences saved' });
+      push('Preferences saved', 'success');
     } catch (err) {
-      push({ type: 'error', message: err.message || 'Failed to save preferences' });
+      push(err.message || 'Failed to save preferences', 'error');
     } finally {
       setSaving(false);
     }
@@ -139,13 +139,13 @@ export default function NotificationPreferences() {
     setSendingTest(true);
     try {
       const res = await api.sendTestEmail(token);
-      push({ type: 'success', message: `Test email sent to ${res.to}` });
+      push(`Test email sent to ${res.to}`, 'success');
     } catch (err) {
       // 503 with code EMAIL_SEND_FAILED carries the underlying SMTP error;
       // surface it so the operator knows whether it's a credential issue,
       // a network issue, or a recipient-rejection.
       const detail = err.body?.detail || err.message || 'Failed to send test email';
-      push({ type: 'error', message: `Test email failed: ${detail}` });
+      push(`Test email failed: ${detail}`, 'error');
     } finally {
       setSendingTest(false);
     }
