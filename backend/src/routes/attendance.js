@@ -397,16 +397,69 @@ router.post('/check-in', async (req, res) => {
       }
     }
 
-    // Create the new session with server time (P2 source-of-truth).
-    const session = await prisma.attendanceSession.create({
-      data: {
-        attendanceId: attendance.id,
-        checkIn: checkInTime,
-        checkInLat: latitude,
-        checkInLng: longitude,
-        checkInAddr: addressText || null,
-      },
-    });
+    // DR-025 (round-20): one open session per attendance row. The
+    // partial unique index at
+    //   prisma/migrations/20260902230000_dr025_one_open_attendance_session/
+    // enforces this at the DB layer (Postgres raises P2002 on a second
+    // open session); the application-level precheck below provides the
+    // clean 409 ALREADY_CHECKED_IN message instead of a raw constraint
+    // violation. Race-safety: the findFirst + create run inside one
+    // $transaction, and the Attendance row's row-level lock (taken by
+    // the SELECT FOR UPDATE on the attendance id we just fetched)
+    // serializes concurrent check-ins for the same (employee, day).
+    // Different employees don't block each other.
+    let session;
+    try {
+      session = await prisma.$transaction(async (tx) => {
+        // SELECT … FOR UPDATE on the Attendance row serializes any
+        // concurrent /check-in for the same (employee, day).
+        const locked = await tx.$queryRaw`
+          SELECT id FROM "attendance" WHERE id = ${attendance.id} FOR UPDATE
+        `;
+        if (!locked || locked.length === 0) {
+          // The row vanished between the create/findFirst and the lock
+          // — extremely unlikely. Surface as a 500 by throwing.
+          throw new Error('Attendance row not found at lock time');
+        }
+
+        const open = await tx.attendanceSession.findFirst({
+          where: { attendanceId: attendance.id, checkOut: null },
+        });
+        if (open) {
+          // The constraint + precheck both fire here. Throw a typed
+          // error so the outer catch can map it to 409 ALREADY_CHECKED_IN.
+          const e = new Error('Employee is already checked in for this day');
+          e.code = 'ALREADY_CHECKED_IN';
+          e.openSession = open;
+          throw e;
+        }
+
+        return await tx.attendanceSession.create({
+          data: {
+            attendanceId: attendance.id,
+            checkIn: checkInTime,
+            checkInLat: latitude,
+            checkInLng: longitude,
+            checkInAddr: addressText || null,
+          },
+        });
+      });
+    } catch (txErr) {
+      if (txErr && txErr.code === 'ALREADY_CHECKED_IN') {
+        return res.status(409).json({
+          error: 'Employee is already checked in for this day',
+          code: 'ALREADY_CHECKED_IN',
+          activeSession: txErr.openSession ? {
+            id: txErr.openSession.id,
+            checkIn: txErr.openSession.checkIn.toISOString(),
+            checkInLat: txErr.openSession.checkInLat,
+            checkInLng: txErr.openSession.checkInLng,
+            checkInAddr: txErr.openSession.checkInAddr,
+          } : null,
+        });
+      }
+      throw txErr;
+    }
 
     // Return full attendance with all sessions
     const fullAttendance = await prisma.attendance.findUnique({
