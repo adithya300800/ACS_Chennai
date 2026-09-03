@@ -2417,6 +2417,11 @@ footer {
   transition: background 0.15s;
 }
 .dpr-list-item:hover { background: #f8fafc; }
+.dpr-list-item:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+  background: #eff6ff;
+}
 .dpr-list-item:last-child { border-bottom: none; }
 
 .dpr-list-location {

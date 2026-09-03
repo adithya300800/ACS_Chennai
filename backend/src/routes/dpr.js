@@ -899,6 +899,55 @@ router.put('/:id', async (req, res) => {
   }
 });
 
+// ─── DELETE /api/dpr/:id ────────────────────────────────────────────────────
+// SOL-P0#4: owners can delete their own DRAFT DPRs (no admin involvement).
+// Terminal/submitted states are immutable: deleting an in-review or already-
+// approved record would rewrite the audit trail. Cascade through DPRPhoto +
+// DPRRevision (per schema) and null the dprId on linked InspectionRecord rows
+// (so they survive but lose the draft linkage).
+router.delete('/:id', async (req, res) => {
+  const prisma = getPrisma(req);
+  const { id } = req.params;
+
+  const existing = await prisma.dPR.findUnique({ where: { id } });
+  if (!existing) return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
+  if (existing.submittedById !== req.employeeId) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Only owner can delete' });
+  }
+  if (existing.status !== 'DRAFT') {
+    return res.status(409).json({
+      error: 'INVALID_TRANSITION',
+      code: 'INVALID_TRANSITION',
+      message: `Only DRAFT DPRs can be deleted (current status: ${existing.status}).`,
+      currentStatus: existing.status,
+    });
+  }
+
+  try {
+    await prisma.$transaction([
+      // Null the dprId on any inspections that referenced this draft so they
+      // survive as standalone records (their own photo cascade handles itself).
+      prisma.inspectionRecord.updateMany({
+        where: { dprId: id },
+        data: { dprId: null },
+      }),
+      prisma.dPR.delete({ where: { id } }),
+    ]);
+    res.json({ deleted: true, id });
+  } catch (err) {
+    console.error('DPR delete error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) {
+      return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    }
+    res.status(500).json({ error: 'Failed to delete DPR' });
+  }
+});
+
 // ─── POST /api/dpr/:id/review ───────────────────────────────────────────────
 // ─── Admin state-machine helpers (round-7 hardening) ──────────────────────────
 //

@@ -262,6 +262,8 @@ export const api = {
   bulkReviewDprs: ({ ids, action, reason, adminNotes }, token) =>
     api.post('/dpr/bulk-review', { ids, action, reason, adminNotes }, token),
   generateDprPdf: (id, token) => api.post(`/dpr/${id}/pdf`, {}, token),
+  // SOL-P0#4: delete own DRAFT DPR. Backend enforces DRAFT-only + owner-only.
+  deleteDpr: (id, token) => api.delete(`/dpr/${id}`, token),
   // P0 round-9: GET /api/dpr/notifications is mounted only as an SSE stream,
   // so JSON-parsing the response silently throws and the bell shows "0 unread".
   // The dedicated JSON-list endpoint returns { notifications: [...] } so

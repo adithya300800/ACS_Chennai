@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -93,10 +93,12 @@ function formatIndianDate(iso) {
 }
 
 export default function DprSubmit() {
-  useDocumentTitle('New Daily Progress Report');
+  useDocumentTitle(draftId ? 'Edit Draft · Daily Progress Report' : 'New Daily Progress Report');
   const { accessToken } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const draftId = searchParams.get('draftId') || null;
   const fileInputRef = useRef(null);
   const submittingRef = useRef(false);
 
@@ -129,6 +131,60 @@ export default function DprSubmit() {
   const [todayInspections, setTodayInspections] = useState([]);
   const [todayInspectionsLoaded, setTodayInspectionsLoaded] = useState(false);
   const photoObjectUrlsRef = useRef(new Set());
+
+  // SOL-P0#4: when arriving via ?draftId=…, load the server-side draft and
+  // pre-populate the form. The submit handler switches to PUT /:id instead
+  // of POST / when editingId is set. The local-autosave banner is suppressed
+  // so we don't show "Restored unsaved draft" alongside an explicit server
+  // draft load.
+  const [editingId, setEditingId] = useState(null);
+  const [editingVersion, setEditingVersion] = useState(null);
+  const [draftLoadedFromServer, setDraftLoadedFromServer] = useState(false);
+
+  useEffect(() => {
+    if (!draftId || !accessToken) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await api.getDpr(draftId, accessToken);
+        if (cancelled) return;
+        if (d.status !== 'DRAFT') {
+          toast.push(`This report is no longer a draft (status: ${d.status}).`, 'warning');
+          navigate('/portal/dpr/my', { replace: true });
+          return;
+        }
+        setEditingId(d.id);
+        setEditingVersion(d.version);
+        setForm({
+          projectName: d.projectName || '',
+          location: d.location || '',
+          reportDate: d.reportDate || getLocalDate(),
+          weather: d.weather || 'Sunny',
+          temperature: d.temperature || '',
+          contractor: d.contractor || '',
+          workType: d.workType || 'SITE_INSPECTION',
+        });
+        setDailyFields({
+          workExecutedToday: d.workExecutedToday || '',
+          workLocation: d.workLocation || '',
+          manpowerSummary: d.manpowerSummary || '',
+          risksHindrances: d.risksHindrances || '',
+          materialsReceivedSummary: d.materialsReceivedSummary || '',
+        });
+        setCustomSections(Array.isArray(d.customSections) ? d.customSections : []);
+        setNotes(d.notes || '');
+        // Photo ULIDs from the server are preserved as references — no preview
+        // blobs possible from the readUrls (they're SAS URLs we can't re-upload
+        // through). User can re-add photos in the editor if needed.
+        setPhotos([]);
+        setShowDraftBanner(false); // suppress local-autosave banner
+        setDraftLoadedFromServer(true);
+      } catch (err) {
+        if (!cancelled) toast.push(err.message || 'Failed to load draft', 'error');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [draftId, accessToken, toast, navigate]);
 
   // Persist draft on every meaningful change. 750ms debounce matches the
   // pre-Round-12 behaviour at the original DprSubmit.jsx:124.
@@ -315,34 +371,64 @@ export default function DprSubmit() {
         return;
       }
 
-      await api.createDpr(
-        {
-          projectName: form.projectName,
-          location: form.location,
-          reportDate: form.reportDate,
-          weather: form.weather,
-          temperature: form.temperature,
-          contractor: form.contractor,
-          workType: form.workType,
-          notes: notes || null,
-          status: submitStatus,
-          // Round-12: 5 daily-narrative fields.
-          workExecutedToday: dailyFields.workExecutedToday || null,
-          workLocation: dailyFields.workLocation || null,
-          manpowerSummary: dailyFields.manpowerSummary || null,
-          risksHindrances: dailyFields.risksHindrances || null,
-          materialsReceivedSummary: dailyFields.materialsReceivedSummary || null,
-          // User-added ad-hoc text + table sections.
-          customSections: Array.isArray(customSections) && customSections.length > 0 ? customSections : null,
-          photos: photosToSubmit,
-          // workEntries intentionally omitted — moved to Inspection & Compliance Records.
-        },
-        accessToken
-      );
-
-      clearDraft();
-      toast.push(submitStatus === 'DRAFT' ? 'Draft saved.' : 'DPR submitted successfully.', 'success');
-      navigate('/portal/dpr/my');
+      // SOL-P0#4: when editing an existing server-side draft, PUT the update
+      // (with the version we read on load — backend enforces optimistic lock).
+      // Otherwise POST a brand-new DPR.
+      if (editingId) {
+        await api.updateDpr(
+          editingId,
+          {
+            version: editingVersion,
+            projectName: form.projectName,
+            location: form.location,
+            reportDate: form.reportDate,
+            weather: form.weather,
+            temperature: form.temperature,
+            contractor: form.contractor,
+            workType: form.workType,
+            notes: notes || null,
+            // Round-12: 5 daily-narrative fields.
+            workExecutedToday: dailyFields.workExecutedToday || null,
+            workLocation: dailyFields.workLocation || null,
+            manpowerSummary: dailyFields.manpowerSummary || null,
+            risksHindrances: dailyFields.risksHindrances || null,
+            materialsReceivedSummary: dailyFields.materialsReceivedSummary || null,
+            // User-added ad-hoc text + table sections.
+            customSections: Array.isArray(customSections) && customSections.length > 0 ? customSections : null,
+          },
+          accessToken
+        );
+        toast.push(submitStatus === 'DRAFT' ? 'Draft updated.' : 'DPR submitted successfully.', 'success');
+        navigate('/portal/dpr/my');
+      } else {
+        await api.createDpr(
+          {
+            projectName: form.projectName,
+            location: form.location,
+            reportDate: form.reportDate,
+            weather: form.weather,
+            temperature: form.temperature,
+            contractor: form.contractor,
+            workType: form.workType,
+            notes: notes || null,
+            status: submitStatus,
+            // Round-12: 5 daily-narrative fields.
+            workExecutedToday: dailyFields.workExecutedToday || null,
+            workLocation: dailyFields.workLocation || null,
+            manpowerSummary: dailyFields.manpowerSummary || null,
+            risksHindrances: dailyFields.risksHindrances || null,
+            materialsReceivedSummary: dailyFields.materialsReceivedSummary || null,
+            // User-added ad-hoc text + table sections.
+            customSections: Array.isArray(customSections) && customSections.length > 0 ? customSections : null,
+            photos: photosToSubmit,
+            // workEntries intentionally omitted — moved to Inspection & Compliance Records.
+          },
+          accessToken
+        );
+        clearDraft();
+        toast.push(submitStatus === 'DRAFT' ? 'Draft saved.' : 'DPR submitted successfully.', 'success');
+        navigate('/portal/dpr/my');
+      }
     } catch (err) {
       const msg = err.message || 'Failed to submit DPR';
       setError(msg);
@@ -736,6 +822,22 @@ export default function DprSubmit() {
             )}
           </div>
           </section>
+
+          {editingId && (
+            <div className="draft-banner" style={{ marginTop: '1rem' }}>
+              <span style={{ flex: 1 }}>
+                ✏️ Editing saved draft. Changes will update the existing draft when you click Save or Submit.
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => navigate('/portal/dpr/my')}
+                style={{ flexShrink: 0 }}
+              >
+                Cancel edit
+              </button>
+            </div>
+          )}
 
           <div className="dpr-form-actions dpr-form-actions-sticky" style={{ marginTop: '1.5rem' }}>
             <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting'}>

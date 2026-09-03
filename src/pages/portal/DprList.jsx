@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatDateOnly } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
@@ -99,6 +100,7 @@ function timeAgo(dateStr) {
 export default function DprList() {
   useDocumentTitle('My Daily Reports');
   const { accessToken } = useAuth();
+  const toast = useToast();
   const navigate = useNavigate();
 
   const [dprs, setDprs] = useState([]);
@@ -188,6 +190,30 @@ export default function DprList() {
     setExpandedDpr(null);
     setExpandedError('');
     setExpandedLoading(false);
+  };
+
+  // SOL-P0#4: Resume / Edit / Delete draft actions.
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleResumeDraft = (dprId) => {
+    navigate(`/portal/dpr/submit?draftId=${dprId}`);
+  };
+
+  const handleDeleteDraft = async (dprId) => {
+    setDeleting(true);
+    try {
+      await api.deleteDpr(dprId, accessToken);
+      toast.push('Draft deleted.', 'success');
+      setConfirmDeleteId(null);
+      handleCloseModal();
+      // Refresh list
+      setDprs((prev) => prev.filter((d) => d.id !== dprId));
+    } catch (err) {
+      toast.push(err.message || 'Failed to delete draft', 'error');
+    } finally {
+      setDeleting(false);
+    }
   };
 
   // Close modal on Escape (matches NotificationBell behaviour for a11y)
@@ -312,11 +338,24 @@ export default function DprList() {
             {dprs.map(dpr => (
               <div
                 key={dpr.id}
+                role="button"
+                tabIndex={0}
                 className="dpr-list-item"
                 onClick={() => handleRowClick(dpr)}
+                // SOL-P0#3: row is keyboard-operable — Enter / Space open
+                // the detail modal. The element is announced as a button
+                // (its role) with the project name + status as accessible
+                // name via aria-label.
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    handleRowClick(dpr);
+                  }
+                }}
+                aria-label={`${dpr.projectName || 'Untitled'} — ${dpr.status}${dpr.submittedAt ? `, submitted ${timeAgo(dpr.submittedAt)}` : ', draft'}`}
                 style={{ cursor: 'pointer' }}
               >
-                <div style={{ flex: '0 0 36px', fontSize: '1.25rem' }}>📄</div>
+                <div style={{ flex: '0 0 36px', fontSize: '1.25rem' }} aria-hidden="true">📄</div>
                 <div style={{ flex: 2 }}>
                   <div style={{ fontWeight: 600, color: 'var(--navy)', marginBottom: '0.25rem' }}>{dpr.projectName}</div>
                   <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
@@ -337,7 +376,18 @@ export default function DprList() {
                       <div style={{ fontSize: '0.75rem' }}>{dpr.submittedBy?.name}</div>
                     </div>
                   ) : (
-                    <span className="text-placeholder">Draft</span>
+                    // SOL-P0#4: Resume button directly on draft rows so users
+                    // don't have to open the modal first. The row itself
+                    // remains keyboard-openable for viewing details.
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      onClick={(e) => { e.stopPropagation(); handleResumeDraft(dpr.id); }}
+                      style={{ padding: '0.3rem 0.7rem', fontSize: '0.78rem' }}
+                      aria-label={`Resume editing ${dpr.projectName || 'draft'}`}
+                    >
+                      Resume
+                    </button>
                   )}
                 </div>
               </div>
@@ -498,6 +548,52 @@ export default function DprList() {
                           </a>
                         ))}
                       </div>
+                    </div>
+                  )}
+
+                  {/* SOL-P0#4: Resume / Edit / Delete actions for DRAFT DPRs. */}
+                  {expandedDpr.status === 'DRAFT' && !expandedLoading && (
+                    <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid #e2e8f0', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        onClick={() => handleResumeDraft(expandedDpr.id)}
+                      >
+                        Resume draft
+                      </button>
+                      {confirmDeleteId === expandedDpr.id ? (
+                        <>
+                          <span style={{ fontSize: '0.85rem', color: 'var(--danger)', alignSelf: 'center' }}>
+                            Delete this draft permanently?
+                          </span>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => setConfirmDeleteId(null)}
+                            disabled={deleting}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            style={{ background: 'var(--danger)', color: 'white', border: 'none' }}
+                            onClick={() => handleDeleteDraft(expandedDpr.id)}
+                            disabled={deleting}
+                          >
+                            {deleting ? 'Deleting…' : 'Yes, delete'}
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          style={{ color: 'var(--danger)' }}
+                          onClick={() => setConfirmDeleteId(expandedDpr.id)}
+                        >
+                          Delete draft
+                        </button>
+                      )}
                     </div>
                   )}
                 </>
