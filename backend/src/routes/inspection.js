@@ -24,6 +24,12 @@ const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/curso
 // DR-027: parseStrictISODate only validates calendar shape, so a well-formed
 // future date used to persist. rejectIfFutureReportDate is the authority.
 const { rejectIfFutureReportDate, assertNotFutureReportDate } = require('../lib/reportDate');
+// Round-25: email fan-out for in-app notifications. Fire-and-forget —
+// the helper swallows its own errors and never throws to the caller.
+// Invoked inside the tx callback AFTER the notification row is created so
+// the email leaves after (or concurrently with) the row commit; a failed
+// tx rolls back the notification row AND the email send in-flight.
+const { fanOutEmail } = require('../lib/notify');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -920,6 +926,21 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
         type: notifType,
         message: messageParts.join('\n'),
       },
+    });
+
+    // Round-25: schedule email fan-out AFTER the notification row insert.
+    // The helper is fire-and-forget so the tx callback returns
+    // immediately, but the send runs once the row is durable (the send
+    // happens in the same tick of the event loop as the tx commit because
+    // the tx awaits here). For REJECT, pass the reason so the email can
+    // surface it in the body.
+    fanOutEmail({
+      id: null, // tx-row id not returned; EmailLog.notificationId is nullable
+      employeeId: record.submittedById,
+      type: notifType,
+      message: messageParts.join('\n'),
+    }, prisma, {
+      reason: action === 'REJECT' ? payload.reason?.trim() : null,
     });
 
     return tx.inspectionRecord.findUnique({

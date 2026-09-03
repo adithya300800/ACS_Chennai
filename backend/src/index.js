@@ -44,6 +44,11 @@ const storageAdminRoutes = require('./routes/storage');
 // picker. Lives at /api/admin/employees alongside the other admin
 // surfaces so the URL pattern matches the "admin = picker" mental model.
 const adminEmployeesRoutes = require('./routes/adminEmployees');
+// Round-25: notification preferences + admin test-send. The 13 notification
+// fan-out hooks in dpr/leave/inspection/training don't go through this
+// router — they call notify.fanOutEmail() inline after their tx/inline
+// notification.create. This router is the user-facing preferences surface.
+const notificationsRoutes = require('./routes/notifications');
 const {
   loginLimiter, refreshLimiter, contactLimiter, sasLimiter,
   exportLimiter, leaveCreateLimiter,
@@ -334,6 +339,13 @@ function createApp(deps = {}) {
   // SOL-P1#12: admin employee directory — powers the training bulk-assign
   // picker. Same requireAuth + requireFreshAdmin envelope.
   app.use('/api/admin', adminEmployeesRoutes);
+  // Round-25: per-employee notification preferences + admin-only test send.
+  app.use('/api/notifications', notificationsRoutes);
+  // Round-25 (M2): daily digest cron endpoint. Gated by INTERNAL_API_TOKEN
+  // (404 when unset, 403 when the header doesn't match) — same envelope as
+  // the /version probe. Render Cron Job hits this at 02:30 UTC = 08:00 IST.
+  const internalDigestRoutes = require('./routes/internal-digest');
+  app.use('/api/internal/digest', internalDigestRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ error: 'Not found' });

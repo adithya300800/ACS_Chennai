@@ -37,6 +37,12 @@ model Employee {
   trainingCoursesCreated TrainingCourse[]     @relation("CourseCreatedBy")
   trainingEnrollments    TrainingEnrollment[] @relation("EnrollEmployee")
   trainingAssignedByMe   TrainingEnrollment[] @relation("EnrollAssignedBy")
+  // Round-25: email notification preferences + audit log + digest runs.
+  // NotificationPreference is 1:1 (PK = employeeId); EmailLog / DigestRun
+  // are 1:N and outlive notification rows via onDelete: SetNull.
+  notificationPreference NotificationPreference?
+  emailLogs              EmailLog[]
+  digestRuns             DigestRun[]
 
   @@map("employees")
 }
@@ -317,6 +323,9 @@ model Notification {
   dpr                DPR?                @relation(fields: [dprId], references: [id])
   leaveRequest       LeaveRequest?       @relation(fields: [leaveRequestId], references: [id], onDelete: SetNull)
   trainingEnrollment TrainingEnrollment? @relation(fields: [trainingEnrollmentId], references: [id], onDelete: SetNull)
+  // Round-25: back-relation to the email audit log. SetNull so a notification
+  // row can be pruned without orphaning the audit history of who got the email.
+  emailLogs          EmailLog[]
 
   @@index([employeeId, createdAt])
   // Round-7: dpr relation is included in many read queries; index for joins.
@@ -509,4 +518,109 @@ model TrainingEnrollment {
   // keeps it tight (only completed rows have an evidenceClass value).
   @@index([evidenceClass])
   @@map("training_enrollment")
+}
+
+// ─────────────────────────────────────────────
+// Round-25: Email Notification System
+// ─────────────────────────────────────────────
+//
+// Four new tables power the transactional-email transport added alongside the
+// existing in-app SSE feed (Notification table is unchanged). The split keeps
+// each layer's data minimal and indexable for its own hot path:
+//
+//   - NotificationPreference (1:1 with Employee, PK = employeeId) — per-user
+//     switches. emailEnabled is the master kill switch; digestEnabled opts
+//     out of the daily digest (still receives immediate emails); typeMutes
+//     blocks specific notification types entirely. digestHourLocal captures
+//     the user's preferred send hour (0-23, IST) for the daily digest.
+//
+//   - EmailLog — append-only audit trail for every email dispatch attempt
+//     (sent, failed, opted-out, missing-address). notificationId is SetNull
+//     so a notification row can be pruned without orphaning the audit.
+//
+//   - DigestRun + DigestItem — book-keeping for the daily digest cron. The
+//     @@unique([employeeId, scheduledFor]) is the idempotency key: a second
+//     cron fire on the same day is a no-op. DigestItem records which
+//     notifications were bundled into a given run.
+
+model NotificationPreference {
+  employeeId       String   @id @map("employee_id")
+  emailEnabled     Boolean  @default(true) @map("email_enabled")
+  digestEnabled    Boolean  @default(true) @map("digest_enabled")
+  // Free-form JSON object: { "<NOTIFICATION_TYPE>": true }. Reads tolerate
+  // unknown type strings (forward-compat) and missing keys (default = false,
+  // i.e. NOT muted).
+  typeMutes        Json     @default("{}") @map("type_mutes")
+  // 0-23, default 8 AM IST. Out-of-range values are rejected at the API
+  // layer; the cron uses Date.now() in TZ=Asia/Kolkata for the actual send
+  // window matching.
+  digestHourLocal  Int      @default(8) @map("digest_hour_local")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@map("notification_preference")
+}
+
+model EmailLog {
+  id                String   @id @default(uuid())
+  employeeId        String   @map("employee_id")
+  notificationId    String?  @map("notification_id")
+  recipientEmail    String   @map("recipient_email")
+  subject           String
+  // "IMMEDIATE" — single notification email. "DIGEST" — daily digest bundle.
+  channel           String   @map("channel")
+  // "SENT" | "FAILED" | "SKIPPED_OPT_OUT" | "SKIPPED_NO_EMAIL" | "SKIPPED_TYPE_MUTED" | "SKIPPED_NO_ADDRESS".
+  // One row per dispatch ATTEMPT so a retry that succeeds leaves a clear
+  // SENT + FAILED trail in audit. Pruning policy: keep 90 days.
+  status            String
+  providerMessageId String?  @map("provider_message_id")
+  errorMessage      String?  @map("error_message")
+  sentAt            DateTime @default(now()) @map("sent_at")
+
+  employee     Employee      @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  notification Notification? @relation(fields: [notificationId], references: [id], onDelete: SetNull)
+
+  @@index([employeeId, sentAt])
+  @@index([notificationId])
+  @@index([status])
+  @@map("email_log")
+}
+
+model DigestItem {
+  id              String   @id @default(uuid())
+  digestRunId     String   @map("digest_run_id")
+  employeeId      String   @map("employee_id")
+  notificationId  String   @map("notification_id")
+  includedAt      DateTime @default(now()) @map("included_at")
+
+  digestRun DigestRun @relation(fields: [digestRunId], references: [id], onDelete: Cascade)
+
+  // A notification can only appear in a given digest run once. This is the
+  // idempotency guarantee against a re-enqueue race.
+  @@unique([digestRunId, notificationId])
+  @@index([employeeId, digestRunId])
+  @@map("digest_item")
+}
+
+model DigestRun {
+  id            String    @id @default(uuid())
+  employeeId    String    @map("employee_id")
+  scheduledFor  DateTime  @map("scheduled_for")            // business-date key (00:00 IST)
+  status        String    @default("PENDING")              // "PENDING" | "SENT" | "EMPTY" | "FAILED"
+  emailLogId    String?   @unique @map("email_log_id")
+  errorMessage  String?   @map("error_message")
+  completedAt   DateTime? @map("completed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  employee Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  items    DigestItem[]
+  emailLog EmailLog?    @relation(fields: [emailLogId], references: [id], onDelete: SetNull)
+
+  // Idempotency: a second cron fire for the same employee + business date
+  // is a no-op. The unique constraint races-safe against the digest run
+  // creator — Prisma P2002 → caller treats as already-completed.
+  @@unique([employeeId, scheduledFor])
+  @@index([status])
+  @@map("digest_run")
 }

@@ -45,6 +45,10 @@ const {
 } = require('../lib/trainingRules');
 const { mapPrismaError } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
+// Round-25: email fan-out hook for the existing in-app notification. The
+// 6 training notification.create sites add one fire-and-forget
+// `fanOutEmail(...)` call after their insert succeeds.
+const { fanOutEmail } = require('../lib/notify');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -362,13 +366,23 @@ router.post('/enrollments', trainingWriteLimiter, requireFreshAdmin, asyncHandle
   if (created.length > 0) {
     for (const enrollment of created) {
       try {
-        await prisma.notification.create({
+        const notifRow = await prisma.notification.create({
           data: {
             employeeId: enrollment.employeeId,
             type: 'TRAINING_ASSIGNED',
             trainingEnrollmentId: enrollment.id,
             message: `New training assigned: ${enrollment.course.title}`,
           },
+        });
+        // Round-25: email fan-out. courseTitle in context lets the
+        // template render "New training assigned: <course>" without a
+        // follow-up lookup. dueDate is included so the email body can
+        // surface the deadline.
+        fanOutEmail(notifRow, prisma, {
+          courseTitle: enrollment.course.title,
+          dueDate: enrollment.dueDate
+            ? new Date(enrollment.dueDate).toISOString().slice(0, 10)
+            : null,
         });
       } catch (notifyErr) {
         console.error('[training/assign] notification insert failed', {
@@ -589,7 +603,7 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
     // Best-effort notifications on first IN_PROGRESS transition + completed.
     if (existing.status === 'ASSIGNED' && updated.status === 'IN_PROGRESS') {
       try {
-        await prisma.notification.create({
+        const notifRow = await prisma.notification.create({
           data: {
             employeeId: updated.employeeId,
             type: 'TRAINING_IN_PROGRESS',
@@ -597,6 +611,7 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
             message: `You started: ${updated.course.title}`,
           },
         });
+        fanOutEmail(notifRow, prisma, { courseTitle: updated.course.title });
       } catch (notifyErr) {
         console.error('[training/progress] in-progress notification failed', {
           enrollmentId: updated.id,
@@ -605,7 +620,7 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
       }
     } else if (isCompleted(updated.status) && !isCompleted(existing.status)) {
       try {
-        await prisma.notification.create({
+        const notifRow = await prisma.notification.create({
           data: {
             employeeId: updated.employeeId,
             type: 'TRAINING_COMPLETED',
@@ -613,6 +628,7 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
             message: `Training completed: ${updated.course.title}`,
           },
         });
+        fanOutEmail(notifRow, prisma, { courseTitle: updated.course.title });
       } catch (notifyErr) {
         console.error('[training/progress] completed notification failed', {
           enrollmentId: updated.id,
@@ -750,7 +766,7 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
 
     // Best-effort notification on completed transition.
     try {
-      await prisma.notification.create({
+      const notifRow = await prisma.notification.create({
         data: {
           employeeId: updated.employeeId,
           type: 'TRAINING_COMPLETED',
@@ -758,6 +774,7 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
           message: `Training completed: ${updated.course.title}`,
         },
       });
+      fanOutEmail(notifRow, prisma, { courseTitle: updated.course.title });
     } catch (notifyErr) {
       console.error('[training/complete] notification failed', {
         enrollmentId: updated.id,
@@ -868,7 +885,7 @@ router.post('/enrollments/:id/admin-override', trainingWriteLimiter, asyncHandle
 
     // Best-effort notification on override.
     try {
-      await prisma.notification.create({
+      const notifRow = await prisma.notification.create({
         data: {
           employeeId: updated.employeeId,
           type: 'TRAINING_COMPLETED',
@@ -876,6 +893,7 @@ router.post('/enrollments/:id/admin-override', trainingWriteLimiter, asyncHandle
           message: `Training completed: ${updated.course.title}`,
         },
       });
+      fanOutEmail(notifRow, prisma, { courseTitle: updated.course.title });
     } catch (notifyErr) {
       console.error('[training/admin-override] notification failed', {
         enrollmentId: updated.id,
@@ -996,13 +1014,17 @@ router.post('/enrollments/:id/cancel', trainingWriteLimiter, requireFreshAdmin, 
     // wrapped in try/catch so a notification failure doesn't downgrade the
     // 200 to a 500.
     try {
-      await prisma.notification.create({
+      const notifRow = await prisma.notification.create({
         data: {
           employeeId: updated.employeeId,
           type: 'TRAINING_CANCELLED',
           trainingEnrollmentId: updated.id,
           message: `Training unassigned: ${updated.course.title}${result.value.note ? ` — ${result.value.note}` : ''}`,
         },
+      });
+      fanOutEmail(notifRow, prisma, {
+        courseTitle: updated.course.title,
+        note: result.value.note,
       });
     } catch (notifyErr) {
       console.error('[training/cancel] notification failed', {

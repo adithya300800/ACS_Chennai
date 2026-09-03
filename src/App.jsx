@@ -47,6 +47,10 @@ const TrainingCourseNew = React.lazy(() => import('./pages/admin/TrainingCourseN
 // modal (deep-linkable via ?reassign=1).
 const TrainingCourseDetail = React.lazy(() => import('./pages/admin/TrainingCourseDetail.jsx'));
 const TrainingCourseEdit = React.lazy(() => import('./pages/admin/TrainingCourseEdit.jsx'));
+// Round-25: notification email preferences page. Master switches + per-type
+// toggles + admin SMTP test button. Lazy-loaded so it doesn't bloat the
+// initial bundle (most users won't visit this page).
+const NotificationPreferences = React.lazy(() => import('./pages/portal/NotificationPreferences.jsx'));
 // SOL-P2#18: portal-side 404 — keeps the portal chrome and gives the
 // user a familiar recovery path rather than dumping them on the public
 // site. Renders inside the protected /portal/* tree.
@@ -131,6 +135,10 @@ function App() {
           <Route path="admin/training/new" element={<TrainingCourseNew />} />
           <Route path="admin/training/:id" element={<TrainingCourseDetail />} />
           <Route path="admin/training/:id/edit" element={<TrainingCourseEdit />} />
+          {/* Round-25: per-user email notification preferences. Master kill
+              switches + 11 per-type toggles + admin SMTP wire-check. Lives
+              outside the admin tree so non-admins can manage their own. */}
+          <Route path="notifications/preferences" element={<NotificationPreferences />} />
           {/* P0/A-02: landing branches on role. Employees → Dashboard; admins → Admin Overview.
               SOL-P2#17: removed /portal/assets stub (and ComingSoon component) —
               the item was advertised as "coming soon" but had no roadmap date.

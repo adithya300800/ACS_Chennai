@@ -1,0 +1,67 @@
+name: Daily notification digest
+
+# Round-25: daily digest cron — replaces the would-be Render Cron Job.
+# Fires at 02:30 UTC (= 08:00 IST) every day. The endpoint is idempotent
+# via DigestRun.@@unique([employeeId, scheduledFor]) so a delayed/retry
+# fire (GitHub Actions can lag by up to 30 min during peak times) is
+# safe — the second call short-circuits.
+#
+# Authentication: the endpoint expects header `X-Internal-Token` matching
+# the backend's `INTERNAL_API_TOKEN` env var. We pass it as a GitHub
+# repository secret so it never appears in workflow logs / git history.
+#
+# Manual fire for testing: Actions → "Daily notification digest" →
+# "Run workflow". Use the date override field to backfill a missed day.
+
+on:
+  schedule:
+    # 02:30 UTC = 08:00 IST (Asia/Kolkata is UTC+5:30, no DST).
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      date_override:
+        description: 'Backfill a missed day (YYYY-MM-DD, IST business date). Leave blank for "today IST".'
+        required: false
+        type: string
+
+concurrency:
+  # GitHub Actions can delay a scheduled run past the next scheduled
+  # trigger; without concurrency control we'd fire two in-flight curls.
+  # The endpoint is idempotent so even overlap is data-safe, but we cap
+  # to one in-flight job to keep logs readable.
+  group: 'digest'
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fire-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fire digest
+        run: |
+          # Optional ?date= override lets ops backfill a missed day
+          # without waiting for the next morning. Only honored when the
+          # workflow was manually dispatched; scheduled runs always
+          # target "today IST".
+          date_arg=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
+             [ -n "${{ inputs.date_override }}" ]; then
+            date_arg="?date=${{ inputs.date_override }}"
+          fi
+
+          echo "[digest] POST https://acs-chennai.onrender.com/api/internal/digest/run${date_arg}"
+          response=$(curl -X POST \
+            "https://acs-chennai.onrender.com/api/internal/digest/run${date_arg}" \
+            -H "X-Internal-Token: ${{ secrets.INTERNAL_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -fsS -m 300 -w "\nHTTP_STATUS:%{http_code}")
+
+          echo "$response"
+          status=$(echo "$response" | tail -n 1 | sed 's/HTTP_STATUS://')
+          if [ "$status" != "200" ]; then
+            echo "[digest] non-200 response (status=$status) — failing the job so GH Actions surfaces it"
+            exit 1
+          fi

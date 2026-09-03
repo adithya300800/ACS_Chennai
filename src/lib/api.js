@@ -276,6 +276,19 @@ export const api = {
   getNotificationTicket: (token) =>
     api.post('/dpr/notifications/ticket', {}, token),
 
+  // Round-25: notification email preferences. Two-way contract: server
+  // returns { preferences, types[] } on GET; PUT accepts any subset of
+  // { emailEnabled, digestEnabled, typeMutes, digestHourLocal } and
+  // returns the merged { preferences } shape.
+  getNotificationPreferences: (token) =>
+    api.get('/notifications/preferences', token),
+  updateNotificationPreferences: (partial, token) =>
+    api.put('/notifications/preferences', partial, token),
+  // Admin-only: send a probe email to the admin's own mailbox to verify
+  // the SMTP wire (Zoho credentials, deliverability) end-to-end.
+  sendTestEmail: (token) =>
+    api.post('/notifications/test', {}, token),
+
   // Auth helpers (BE4 added /api/auth/logout and /api/auth/me)
   // postLogout revokes the refresh token server-side so a stolen token stops
   // being valid after the user signs out (round-8 P2). Round-20 (DR-005):

@@ -157,6 +157,21 @@ export default function UserMenu() {
             </svg>
             <span>Dashboard</span>
           </Link>
+          {/* Round-25: deep link to per-user email preferences. Lives next
+              to Dashboard in the avatar dropdown so it's discoverable
+              without polluting the main sidebar. */}
+          <Link
+            to="/portal/notifications/preferences"
+            className="user-menu-item"
+            role="menuitem"
+            onClick={() => setOpen(false)}
+          >
+            <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9" />
+              <path d="M13.73 21a2 2 0 01-3.46 0" />
+            </svg>
+            <span>Notification preferences</span>
+          </Link>
           <button
             type="button"
             className="user-menu-item user-menu-signout"

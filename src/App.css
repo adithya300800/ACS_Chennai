@@ -5192,3 +5192,208 @@ footer {
     font-size: 0.6rem;
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Round-25: Notification preferences page
+   - Master switches + 11 per-type toggles + digest-hour picker
+   - Reuses design tokens (--blue, --navy, --light-gray, --success-strong)
+   - Mobile-first: rows stack cleanly at 375px
+   ───────────────────────────────────────────────────────────────────────── */
+.notification-pref-page {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 3rem;
+}
+
+.notification-pref-header h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.65rem;
+  color: var(--navy);
+}
+
+.notification-pref-intro {
+  margin: 0 0 1.5rem;
+  color: var(--text-muted, #475569);
+  line-height: 1.55;
+}
+
+.notification-pref-section {
+  margin-top: 2rem;
+  background: #fff;
+  border: 1px solid var(--light-gray);
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem 0.5rem;
+}
+
+.notification-pref-section h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1.05rem;
+  color: var(--navy);
+}
+
+.notification-pref-section-desc {
+  margin: 0 0 1rem;
+  font-size: 0.875rem;
+  color: var(--text-muted, #64748b);
+  line-height: 1.5;
+}
+
+/* Single toggle row: text block on the left, switch on the right. Flex with
+   align-items:center so the switch lines up regardless of description height. */
+.notification-pref-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 0;
+  border-top: 1px solid var(--light-gray);
+}
+
+.notification-pref-row:first-of-type {
+  border-top: none;
+}
+
+.notification-pref-row.is-disabled {
+  opacity: 0.55;
+}
+
+.notification-pref-row-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.notification-pref-row-label {
+  font-weight: 600;
+  color: var(--navy);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.notification-pref-row-desc {
+  font-size: 0.85rem;
+  color: var(--text-muted, #64748b);
+  margin-top: 0.15rem;
+  line-height: 1.45;
+}
+
+.notification-pref-channel {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.notification-pref-channel--immediate {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.notification-pref-channel--daily {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.notification-pref-hour {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--light-gray);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  background: #fff;
+  color: var(--navy);
+  min-width: 140px;
+}
+
+.notification-pref-hour:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Toggle switch (reusable across round-25 + any future preference UI). The
+   slider is a 40×22 pill that animates the dot; we rely on the native
+   input:focus-visible ring rather than a custom one. */
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  cursor: pointer;
+  background: #cbd5e1;
+  border-radius: 999px;
+  transition: background 0.18s ease;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  height: 18px;
+  width: 18px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.18s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background: var(--blue, #2563eb);
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(18px);
+}
+
+.toggle-switch input:focus-visible + .toggle-slider {
+  outline: 2px solid var(--blue, #2563eb);
+  outline-offset: 2px;
+}
+
+.toggle-switch input:disabled + .toggle-slider {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.notification-pref-actions {
+  margin-top: 1.5rem;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.notification-pref-test-btn {
+  margin-top: 0.5rem;
+}
+
+.notification-pref-loading {
+  padding: 2rem 1.5rem;
+  color: var(--text-muted, #64748b);
+}
+
+@media (max-width: 600px) {
+  .notification-pref-page {
+    padding: 1.25rem 1rem 2rem;
+  }
+  .notification-pref-row {
+    gap: 0.75rem;
+  }
+  .notification-pref-row-label {
+    font-size: 0.95rem;
+  }
+}

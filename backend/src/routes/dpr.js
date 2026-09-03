@@ -6,6 +6,11 @@ const { generateReadSASUrl, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
+// Round-25: post-write email fan-out for the in-app notification system.
+// The 13 notification.create call sites add a single `fanOutEmail(...)` line
+// after their existing tx/SSE emit. fire-and-forget — never blocks the
+// user-facing response, never throws (helper swallows its own errors).
+const { fanOutEmail } = require('../lib/notify');
 // DR-021 (round-20): shared upload routes (sas-url + confirm-upload) live
 // in src/lib/uploadRoutes.js. DPR uses the "client-pick from allowlist"
 // mode because the frontend can upload to dpr-photos, dpr-documents, or
@@ -1233,6 +1238,13 @@ router.post('/:id/review', async (req, res) => {
       message: `Your DPR for ${dpr.projectName} was reviewed`,
       createdAt: new Date().toISOString(),
     });
+    fanOutEmail({
+      id: null, // tx-row id not returned by the create; EmailLog.notificationId is SetNull-able
+      employeeId: dpr.submittedById,
+      type: 'DPR_REVIEWED',
+      dprId: id,
+      message: notifMessage,
+    }, prisma, { projectName: dpr.projectName, reportDate: formatReportDate(dpr.reportDate) });
 
     res.json(updated);
   } catch (err) {
@@ -1329,6 +1341,13 @@ router.post('/:id/approve', async (req, res) => {
       message: `Your DPR for ${dpr.projectName} was approved`,
       createdAt: new Date().toISOString(),
     });
+    fanOutEmail({
+      id: null,
+      employeeId: dpr.submittedById,
+      type: 'DPR_APPROVED',
+      dprId: id,
+      message: notifMessage,
+    }, prisma, { projectName: dpr.projectName, reportDate: formatReportDate(dpr.reportDate) });
 
     res.json(updated);
   } catch (err) {
@@ -1442,6 +1461,13 @@ router.post('/:id/reject', async (req, res) => {
       reason: _combinedNotes,
       createdAt: new Date().toISOString(),
     });
+    fanOutEmail({
+      id: null,
+      employeeId: dpr.submittedById,
+      type: 'DPR_REJECTED',
+      dprId: id,
+      message: notifMessage,
+    }, prisma, { projectName: dpr.projectName, reportDate: formatReportDate(dpr.reportDate), reason: _combinedNotes });
 
     res.json(dprForClient);
   } catch (err) {
@@ -1620,6 +1646,17 @@ router.post('/bulk-review', async (req, res) => {
         message: `Your DPR for ${result.projectName} was ${result.newStatus.toLowerCase().replace('_', ' ')}`,
         createdAt: new Date().toISOString(),
       });
+      // Email fan-out mirrors the SSE payload. The actual notification row
+      // id was created inside the tx and isn't returned, so we pass null —
+      // EmailLog.notificationId is nullable (SetNull on delete) so audit
+      // trails remain valid even when the underlying notification is pruned.
+      fanOutEmail({
+        id: null,
+        employeeId: result.submittedById,
+        type: `DPR_${result.newStatus === 'UNDER_REVIEW' ? 'REVIEWED' : result.newStatus}`,
+        dprId: result.id,
+        message: notifMessage,
+      }, prisma, { projectName: result.projectName });
 
       succeeded.push({ id: result.id, newStatus: result.newStatus });
     } catch (err) {

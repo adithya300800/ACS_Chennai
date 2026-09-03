@@ -1,6 +1,12 @@
 const express = require('express');
 const router = express.Router();
 
+// Round-25: read the FROM address from env (RESEND_FROM_EMAIL/RESEND_FROM_NAME
+// are documented in backend/.env.example). Hardcoding them was a tiny debt;
+// now the contact form honours whatever the deployment is configured with.
+const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'info@acschennai.com';
+const RESEND_FROM_NAME = process.env.RESEND_FROM_NAME || 'ACS Chennai';
+
 let Resend;
 let resendClient = null;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
@@ -107,8 +113,8 @@ router.post('/', async (req, res) => {
 
   try {
     await resendClient.emails.send({
-      from: 'info@acschennai.com',
-      to: 'info@acschennai.com',
+      from: `${RESEND_FROM_NAME} <${RESEND_FROM_EMAIL}>`,
+      to: `${RESEND_FROM_NAME} <${RESEND_FROM_EMAIL}>`,
       replyTo: email,
       subject: `Project Enquiry${rawProjectType ? ` — ${rawProjectType}` : ''} from ${escapeHtml(name)}`,
       html: `<h2>New Project Enquiry</h2>

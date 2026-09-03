@@ -35,6 +35,12 @@ const {
 } = require('../lib/leaveRules');
 const { mapPrismaError } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
+// Round-25: email fan-out hook for the existing in-app notification. The
+// 13 sites across dpr/leave/inspection/training add one fire-and-forget
+// `fanOutEmail(...)` call after their notification.create. The helper
+// swallows its own errors so a misconfigured SMTP transport can't 500 the
+// admin's approve/reject.
+const { fanOutEmail } = require('../lib/notify');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -348,8 +354,9 @@ router.post('/:id/approve', requireFreshAdmin, asyncHandler(async (req, res) => 
 
     // Best-effort notification. Insert is wrapped so a notification failure
     // (FK constraint, etc.) doesn't unwind the leave approval.
+    let notifRow;
     try {
-      await prisma.notification.create({
+      notifRow = await prisma.notification.create({
         data: {
           employeeId: updated.employeeId,
           type: 'LEAVE_DECIDED',
@@ -362,6 +369,12 @@ router.post('/:id/approve', requireFreshAdmin, asyncHandler(async (req, res) => 
         leaveId: updated.id,
         prismaCode: notifyErr.code,
       });
+    }
+    // Round-25: fire-and-forget email fan-out. We need a notification-row
+    // id for the EmailLog FK, so fan-out runs only if the insert succeeded
+    // (otherwise pass null — EmailLog.notificationId is nullable).
+    if (notifRow) {
+      fanOutEmail(notifRow, prisma);
     }
 
     console.log('[leave/approve]', {
@@ -429,7 +442,7 @@ router.post('/:id/reject', requireFreshAdmin, asyncHandler(async (req, res) => {
     });
 
     try {
-      await prisma.notification.create({
+      const notifRow = await prisma.notification.create({
         data: {
           employeeId: updated.employeeId,
           type: 'LEAVE_DECIDED',
@@ -437,6 +450,9 @@ router.post('/:id/reject', requireFreshAdmin, asyncHandler(async (req, res) => {
           message: `Your leave request for ${toDateStr(updated.startDate)} to ${toDateStr(updated.endDate)} was rejected.${noteText ? ` Reason: ${noteText}` : ''}`,
         },
       });
+      // Round-25: email fan-out (fire-and-forget). Pass the inserted row so
+      // EmailLog can FK back to the notification id.
+      fanOutEmail(notifRow, prisma);
     } catch (notifyErr) {
       console.error('[leave/reject] notification insert failed', {
         leaveId: updated.id,
