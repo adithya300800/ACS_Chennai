@@ -16,7 +16,7 @@ const router = express.Router();
 const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
 const {
   generateULID, generateUploadSASUrl, generateReadSASUrl,
-  verifyBlobExists, CONTENT_TYPE_EXT,
+  verifyBlobExists, deleteBlob, CONTENT_TYPE_EXT,
 } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
@@ -88,14 +88,51 @@ function findOversizedStrings(node, path, max, out = []) {
 }
 
 // ─── Pending-upload registry (mirror of dpr.js) ────────────────────────────
-// In-memory ulid → { employeeId, container, filename } so confirm-upload can
-// verify ownership. Same TTL as dpr.js (20 min) — long enough for a slow
-// mobile upload, short enough that the map can't grow unboundedly.
+// In-memory ulid → { employeeId, container, filename, blobName } so
+// confirm-upload can verify ownership AND so the TTL sweeper can clean up
+// orphaned R2 blobs when a SAS URL is issued but never confirmed (DR-003).
 const pendingUploads = new Map();
 
+// DR-003: shared ceiling — also enforced at /sas-url time, not only at
+// /confirm-upload time (the previous code only checked the client-declared
+// sizeBytes against the limit at confirm, which is forgeable; the SAS URL
+// itself had no size hint, so R2 would happily accept up to the bucket
+// max of 5GB).
+const MAX_PHOTO_SIZE = 10 * 1024 * 1024; // 10 MB
+
+// DR-003: when the 20-min TTL fires, the in-memory entry is removed. If
+// the user uploaded bytes to R2 but never called /confirm-upload, those
+// bytes become orphaned (unreferenced, no DB row, paying for storage
+// forever). The previous implementation silently leaked. Now we attempt
+// a best-effort delete; R2 will 404 silently if the blob never landed.
+async function sweepPendingUpload({ employeeId, ulid, container, blobName }) {
+  try {
+    await deleteBlob(container, blobName);
+  } catch (err) {
+    // 404 / NoSuchKey is fine — user never uploaded.
+    if (err?.$metadata?.httpStatusCode === 404) return;
+    console.warn('Inspection orphan-blob cleanup failed', {
+      employeeHash: hashIdentifier(employeeId),
+      ulid,
+      container,
+      errMessage: err.message?.split('\n')[0],
+    });
+  }
+}
+
+// All routes below require auth.
+router.use(requireAuth);
+
 // ─── POST /api/inspection/sas-url ───────────────────────────────────────────
+// DR-003: previously anonymous — any unauthenticated caller could mint a
+// presigned R2 PUT URL and upload arbitrary bytes (up to the bucket's 5GB
+// cap) into the inspection-photos namespace. Now auth-gated, and the
+// client must declare sizeBytes up-front so we can reject oversized
+// requests before issuing the SAS URL (the prior code only validated
+// size at /confirm-upload against the client-declared value, which a
+// malicious client can lie about).
 router.post('/sas-url', async (req, res) => {
-  const { filename, contentType } = req.body;
+  const { filename, contentType, sizeBytes } = req.body || {};
 
   if (!filename || !contentType) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'filename, contentType required' });
@@ -106,6 +143,15 @@ router.post('/sas-url', async (req, res) => {
     return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: 'Only image/jpeg, image/png, image/webp allowed' });
   }
 
+  if (sizeBytes !== undefined) {
+    if (typeof sizeBytes !== 'number' || !Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+      return res.status(400).json({ error: 'INVALID_SIZE', message: 'sizeBytes must be a positive number' });
+    }
+    if (sizeBytes > MAX_PHOTO_SIZE) {
+      return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `Photo must be 1 byte – ${MAX_PHOTO_SIZE} bytes` });
+    }
+  }
+
   const ulid = generateULID();
   const container = 'inspection-photos';
 
@@ -113,20 +159,35 @@ router.post('/sas-url', async (req, res) => {
     container, req.employeeId, ulid, contentType
   );
 
+  // DR-003: track the full blobName so the TTL sweeper can DELETE the
+  // R2 object if the user never calls /confirm-upload. Without this,
+  // every aborted mobile upload leaves an orphan in R2 forever.
   pendingUploads.set(`${req.employeeId}:${ulid}`, {
     employeeId: req.employeeId,
     container,
     filename,
     contentType,
+    blobName: blobPath,
   });
   setTimeout(() => {
-    pendingUploads.delete(`${req.employeeId}:${ulid}`);
+    const key = `${req.employeeId}:${ulid}`;
+    const entry = pendingUploads.get(key);
+    pendingUploads.delete(key);
+    if (entry) {
+      sweepPendingUpload({
+        employeeId: entry.employeeId,
+        ulid,
+        container: entry.container,
+        blobName: entry.blobName,
+      }).catch(() => {});
+    }
   }, 20 * 60 * 1000).unref();
 
   res.json({ sasUrl, ulid, blobPath, expiresAt });
 });
 
 // ─── POST /api/inspection/confirm-upload ────────────────────────────────────
+// DR-003: auth-gated + orphan-cleanup-aware. See /sas-url above.
 router.post('/confirm-upload', async (req, res) => {
   const { ulid, filename, contentType, sizeBytes } = req.body;
 
@@ -134,7 +195,6 @@ router.post('/confirm-upload', async (req, res) => {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'All fields required' });
   }
 
-  const MAX_PHOTO_SIZE = 10 * 1024 * 1024;
   if (sizeBytes <= 0 || sizeBytes > MAX_PHOTO_SIZE) {
     return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `Photo must be 1 byte – ${MAX_PHOTO_SIZE} bytes` });
   }
@@ -174,9 +234,6 @@ router.post('/confirm-upload', async (req, res) => {
   pendingUploads.delete(pendingKey);
   res.json({ verified: true });
 });
-
-// All routes below require auth.
-router.use(requireAuth);
 
 // ─── POST /api/inspection ────────────────────────────────────────────────────
 router.post('/', async (req, res) => {

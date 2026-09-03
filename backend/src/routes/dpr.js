@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
-const { generateULID, generateUploadSASUrl, generateReadSASUrl, verifyBlobExists, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
+const { generateULID, generateUploadSASUrl, generateReadSASUrl, verifyBlobExists, deleteBlob, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
@@ -307,9 +307,35 @@ function getPrisma(req) {
   return req.app.get('prisma');
 }
 
+// DR-003: shared ceiling — also enforced at /sas-url time, not only at
+// /confirm-upload time (the previous code only checked the client-declared
+// sizeBytes against the limit at confirm, which is forgeable; the SAS URL
+// itself had no size hint, so R2 would happily accept up to the bucket
+// max of 5GB).
+const MAX_PHOTO_SIZE = 10 * 1024 * 1024; // 10 MB
+
+// DR-003: when the 20-min TTL fires, the in-memory entry is removed. If
+// the user uploaded bytes to R2 but never called /confirm-upload, those
+// bytes become orphaned (unreferenced, no DB row, paying for storage
+// forever). The previous implementation silently leaked. Now we attempt
+// a best-effort delete; R2 will 404 silently if the blob never landed.
+async function sweepPendingUpload({ employeeId, ulid, container, blobName }) {
+  try {
+    await deleteBlob(container, blobName);
+  } catch (err) {
+    if (err?.$metadata?.httpStatusCode === 404) return;
+    console.warn('DPR orphan-blob cleanup failed', {
+      employeeHash: hashIdentifier(employeeId),
+      ulid,
+      container,
+      errMessage: err.message?.split('\n')[0],
+    });
+  }
+}
+
 // ─── POST /api/dpr/sas-url ────────────────────────────────────────────────────
 router.post('/sas-url', async (req, res) => {
-  const { filename, contentType, container } = req.body;
+  const { filename, contentType, container, sizeBytes } = req.body;
 
   if (!filename || !contentType || !container) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'filename, contentType, container required' });
@@ -327,6 +353,15 @@ router.post('/sas-url', async (req, res) => {
   }
   if (!allowedContainers.includes(container)) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid container' });
+  }
+
+  if (sizeBytes !== undefined) {
+    if (typeof sizeBytes !== 'number' || !Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+      return res.status(400).json({ error: 'INVALID_SIZE', message: 'sizeBytes must be a positive number' });
+    }
+    if (sizeBytes > MAX_PHOTO_SIZE) {
+      return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `Photo must be 1 byte – ${MAX_PHOTO_SIZE} bytes` });
+    }
   }
 
   const ulid = generateULID();
@@ -347,11 +382,23 @@ router.post('/sas-url', async (req, res) => {
     container,
     filename,
     contentType,
+    blobName: blobPath, // DR-003: needed by the TTL sweeper
   });
 
   // Auto-expire pending uploads after 20 min (SAS is 15 min) to bound memory
+  // AND clean up any orphaned R2 blob if the user never called /confirm-upload.
   setTimeout(() => {
-    pendingUploads.delete(`${req.employeeId}:${ulid}`);
+    const key = `${req.employeeId}:${ulid}`;
+    const entry = pendingUploads.get(key);
+    pendingUploads.delete(key);
+    if (entry) {
+      sweepPendingUpload({
+        employeeId: entry.employeeId,
+        ulid,
+        container: entry.container,
+        blobName: entry.blobName,
+      }).catch(() => {});
+    }
   }, 20 * 60 * 1000).unref();
 
   res.json({ sasUrl, ulid, blobPath, expiresAt });
@@ -365,7 +412,9 @@ router.post('/confirm-upload', async (req, res) => {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'All fields required' });
   }
 
-  const MAX_PHOTO_SIZE = 10 * 1024 * 1024; // 10 MB
+  // MAX_PHOTO_SIZE is declared at the top of /sas-url (DR-003) — reusing it
+  // here keeps both gates consistent. /sas-url rejects upfront; this
+  // confirms against the actually-uploaded bytes.
   if (sizeBytes <= 0 || sizeBytes > MAX_PHOTO_SIZE) {
     return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `Photo must be 1 byte – ${MAX_PHOTO_SIZE} bytes` });
   }
