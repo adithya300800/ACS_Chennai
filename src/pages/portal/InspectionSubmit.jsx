@@ -350,18 +350,6 @@ export default function InspectionSubmit() {
           quality, waterproofing, NCR, safety violation, etc. One record per submission.
         </p>
 
-        {/* A-11: sticky in-form section jump-nav so keyboard / screen-reader users
-            can skip past long blocks instead of Tabbing through every field. */}
-        <nav className="section-skip-nav" aria-label="Jump to section">
-          <ul>
-            {INSPECTION_SECTIONS.map((s) => (
-              <li key={s.id}>
-                <a href={`#${s.id}`}>{s.label}</a>
-              </li>
-            ))}
-          </ul>
-        </nav>
-
         {/* SOL-P1#11: progressive-disclosure progress strip — mirrors the
             DPR form so users see how many of the three sections they've
             filled before they can hit Submit. */}

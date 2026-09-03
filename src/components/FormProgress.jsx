@@ -2,8 +2,13 @@ import React from 'react';
 
 // SOL-P1#11: progressive-disclosure progress indicator for long forms.
 // Each section reports `complete: boolean`; the strip shows a check or
-// empty dot, plus a percentage. Anchored to the existing section
-// skip-nav so clicking a step jumps to the form section.
+// empty dot, plus a percentage. Round-22.5 follow-up: the previous
+// design wrapped each step in an <a href="#id"> so clicking jumped to
+// the section — but the portal uses HashRouter, which interprets any
+// hash fragment as a route. Clicking turned the URL into
+// `#/portal/dpr/submit#dpr-section-site`, which HashRouter routed to
+// PortalNotFound. Step pills are now plain status indicators (no link,
+// no click handler); users scroll the form manually.
 export default function FormProgress({ sections, label = 'Form progress' }) {
   const total = sections.length;
   const done = sections.filter((s) => s.complete).length;
@@ -30,7 +35,7 @@ export default function FormProgress({ sections, label = 'Form progress' }) {
       <ol className="form-progress-steps">
         {sections.map((s, i) => (
           <li key={s.id} className={`form-progress-step ${s.complete ? 'complete' : ''}`}>
-            <a href={`#${s.id}`} aria-current={s.complete ? 'false' : undefined}>
+            <span className="form-progress-step-pill">
               <span className="form-progress-step-num" aria-hidden="true">
                 {s.complete ? (
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
@@ -41,7 +46,7 @@ export default function FormProgress({ sections, label = 'Form progress' }) {
                 )}
               </span>
               <span className="form-progress-step-label">{s.label}</span>
-            </a>
+            </span>
           </li>
         ))}
       </ol>

@@ -4861,7 +4861,7 @@ footer {
   flex-wrap: wrap;
   gap: 0.5rem;
 }
-.form-progress-step a {
+.form-progress-step-pill {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
@@ -4870,16 +4870,9 @@ footer {
   background: var(--off-white);
   color: var(--navy);
   font-size: 0.78rem;
-  text-decoration: none;
   border: 1px solid var(--border);
 }
-.form-progress-step a:hover,
-.form-progress-step a:focus-visible {
-  background: var(--blue);
-  color: white;
-  border-color: var(--blue);
-}
-.form-progress-step.complete a {
+.form-progress-step.complete .form-progress-step-pill {
   background: var(--blue);
   color: white;
   border-color: var(--blue);

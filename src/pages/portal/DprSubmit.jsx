@@ -498,18 +498,6 @@ export default function DprSubmit() {
           {' '}<Link to="/portal/inspection/submit">Inspection &amp; Compliance</Link> page.
         </p>
 
-        {/* A-11: sticky in-form section jump-nav so keyboard / screen-reader users
-            can skip past long blocks instead of Tabbing through every field. */}
-        <nav className="section-skip-nav" aria-label="Jump to section">
-          <ul>
-            {DPR_SECTIONS.map((s) => (
-              <li key={s.id}>
-                <a href={`#${s.id}`}>{s.label}</a>
-              </li>
-            ))}
-          </ul>
-        </nav>
-
         {/* SOL-P1#11: progressive-disclosure progress strip. Each section
             reports its completion state; the user sees a fill bar + check
             chips so they know what's still missing before they hit Submit. */}
