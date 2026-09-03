@@ -3247,6 +3247,15 @@ footer {
   font-size: 0.72rem;
   color: var(--steel);
 }
+/* SOL-P1#7: per-field error rendered beneath the input on touched state.
+   Uses the same red palette as leave-form-error so visual hierarchy
+   reads consistently. */
+.leave-field-error {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--danger);
+  margin-top: 0.25rem;
+}
 .leave-form-error {
   padding: 0.6rem 0.75rem;
   background: var(--danger-bg);
@@ -3254,7 +3263,8 @@ footer {
   border-radius: 8px;
   font-size: 0.825rem;
 }
-.leave-form-actions { display: flex; justify-content: flex-end; }
+.leave-form-actions { display: flex; justify-content: flex-end; gap: 0.75rem; align-items: center; }
+.leave-submit-help { font-size: 0.78rem; color: var(--steel); }
 
 /* Buttons */
 .leave-btn {

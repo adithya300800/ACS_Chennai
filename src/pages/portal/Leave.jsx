@@ -80,6 +80,10 @@ export default function Leave() {
   const [leaveType, setLeaveType] = useState('CASUAL');
   const [reason, setReason] = useState('');
   const [formError, setFormError] = useState('');
+  // SOL-P1#7: track touched state so we don't yell at the user for an
+  // empty field before they've had a chance to fill it in.
+  const [touched, setTouched] = useState({ startDate: false, endDate: false, reason: false });
+  const markTouched = (field) => setTouched((t) => (t[field] ? t : { ...t, [field]: true }));
 
   const fetchRequests = useCallback(async () => {
     setLoading(true);
@@ -102,21 +106,42 @@ export default function Leave() {
 
   // Live form validation — surfaces errors inline so the user fixes them
   // before submit. Server still re-validates (never trust the client).
-  const liveError = useMemo(() => {
-    if (!startDate || !endDate) return '';
-    if (endDate < startDate) return 'End date must be on or after start date.';
-    const days = inclusiveDayCount(startDate, endDate);
-    if (days > 90) return `Leave duration (${days} days) exceeds the 90-day maximum.`;
-    if (reason.trim().length === 0) return 'Reason is required.';
-    if (reason.trim().length < 5) return 'Reason must be at least 5 characters.';
-    if (reason.trim().length > 1000) return 'Reason must be at most 1000 characters.';
-    return '';
+  // SOL-P1#7: per-field error derivation so each message is shown
+  // beneath its input (via aria-describedby) once the field has been
+  // touched or interacted with.
+  const fieldErrors = useMemo(() => {
+    const errors = { startDate: '', endDate: '', reason: '' };
+    if (!startDate) errors.startDate = 'Start date is required.';
+    if (!endDate) errors.endDate = 'End date is required.';
+    if (startDate && endDate && endDate < startDate) {
+      errors.endDate = 'End date must be on or after start date.';
+    }
+    if (startDate && endDate) {
+      const days = inclusiveDayCount(startDate, endDate);
+      if (days > 90) errors.endDate = `Leave duration (${days} days) exceeds the 90-day maximum.`;
+    }
+    const trimmed = reason.trim();
+    if (trimmed.length === 0) errors.reason = 'Reason is required.';
+    else if (trimmed.length < 5) errors.reason = `Reason needs at least 5 characters (${trimmed.length} so far).`;
+    else if (trimmed.length > 1000) errors.reason = 'Reason must be at most 1000 characters.';
+    return errors;
   }, [startDate, endDate, reason]);
+
+  const hasError = useMemo(
+    () => !!(fieldErrors.startDate || fieldErrors.endDate || fieldErrors.reason),
+    [fieldErrors]
+  );
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (liveError) {
-      setFormError(liveError);
+    // SOL-P1#7: mark every field touched on submit so all inline errors
+    // surface in one place. Server still re-validates.
+    setTouched({ startDate: true, endDate: true, reason: true });
+    if (hasError) {
+      // Surface the first failing field in a top-of-form alert so the
+      // user gets a single focused message after clicking Submit.
+      const firstErr = fieldErrors.startDate || fieldErrors.endDate || fieldErrors.reason;
+      setFormError(firstErr);
       return;
     }
     setSubmitting(true);
@@ -131,6 +156,7 @@ export default function Leave() {
       setEndDate(today);
       setLeaveType('CASUAL');
       setReason('');
+      setTouched({ startDate: false, endDate: false, reason: false });
       fetchRequests();
     } catch (err) {
       const msg = err.message || 'Failed to submit leave request';
@@ -172,10 +198,17 @@ export default function Leave() {
                 value={startDate}
                 min={today}
                 max={maxFuture}
-                onChange={(e) => setStartDate(e.target.value)}
+                onChange={(e) => { setStartDate(e.target.value); markTouched('startDate'); }}
+                onBlur={() => markTouched('startDate')}
                 required
-                aria-invalid={liveError && endDate < startDate ? 'true' : 'false'}
+                aria-invalid={touched.startDate && fieldErrors.startDate ? 'true' : 'false'}
+                aria-describedby={touched.startDate && fieldErrors.startDate ? 'leave-start-err' : undefined}
               />
+              {touched.startDate && fieldErrors.startDate && (
+                <span id="leave-start-err" className="leave-field-error" role="alert">
+                  {fieldErrors.startDate}
+                </span>
+              )}
             </div>
             <div className="leave-field">
               <label htmlFor="leave-end">End date</label>
@@ -185,9 +218,17 @@ export default function Leave() {
                 value={endDate}
                 min={startDate || today}
                 max={maxFuture}
-                onChange={(e) => setEndDate(e.target.value)}
+                onChange={(e) => { setEndDate(e.target.value); markTouched('endDate'); }}
+                onBlur={() => markTouched('endDate')}
                 required
+                aria-invalid={touched.endDate && fieldErrors.endDate ? 'true' : 'false'}
+                aria-describedby={touched.endDate && fieldErrors.endDate ? 'leave-end-err' : undefined}
               />
+              {touched.endDate && fieldErrors.endDate && (
+                <span id="leave-end-err" className="leave-field-error" role="alert">
+                  {fieldErrors.endDate}
+                </span>
+              )}
             </div>
             <div className="leave-field">
               <label htmlFor="leave-type">Leave type</label>
@@ -215,13 +256,21 @@ export default function Leave() {
               rows={3}
               value={reason}
               maxLength={1100}
-              onChange={(e) => setReason(e.target.value)}
+              onChange={(e) => { setReason(e.target.value); markTouched('reason'); }}
+              onBlur={() => markTouched('reason')}
               placeholder="Briefly describe the reason for leave (5-1000 chars)"
-              aria-describedby="leave-reason-help"
+              aria-invalid={touched.reason && fieldErrors.reason ? 'true' : 'false'}
+              aria-describedby={touched.reason && fieldErrors.reason ? 'leave-reason-err' : 'leave-reason-help'}
             />
-            <span id="leave-reason-help" className="leave-field-hint">
-              {dayCount > 0 ? `${dayCount} day${dayCount === 1 ? '' : 's'} selected.` : 'Select a date range.'}
-            </span>
+            {touched.reason && fieldErrors.reason ? (
+              <span id="leave-reason-err" className="leave-field-error" role="alert">
+                {fieldErrors.reason}
+              </span>
+            ) : (
+              <span id="leave-reason-help" className="leave-field-hint">
+                {dayCount > 0 ? `${dayCount} day${dayCount === 1 ? '' : 's'} selected.` : 'Select a date range.'}
+              </span>
+            )}
           </div>
 
           {formError && (
@@ -229,13 +278,22 @@ export default function Leave() {
           )}
 
           <div className="leave-form-actions">
+            {/* SOL-P1#7: submit stays enabled so users can click and see
+                all errors. Disabling silently with no inline explanation
+                was the reported defect. */}
             <button
               type="submit"
               className="leave-btn leave-btn-primary"
-              disabled={submitting || !!liveError || !reason.trim()}
+              disabled={submitting}
+              aria-describedby={hasError ? 'leave-submit-help' : undefined}
             >
               {submitting ? 'Submitting...' : 'Submit Request'}
             </button>
+            {hasError && (
+              <span id="leave-submit-help" className="leave-field-hint leave-submit-help">
+                Fix the highlighted fields above to submit.
+              </span>
+            )}
           </div>
         </form>
       </div>
