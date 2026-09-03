@@ -1,19 +1,22 @@
 /**
  * DR-024 (round-20): attendance check-in timezone trust boundary.
  *
- * The previous implementation trusted the client-supplied IANA timezone
- * string and ran it through Intl with a try/catch. A malicious or buggy
- * client could send an extreme timezone (e.g. "Pacific/Kiritimati",
- * UTC+14) and shift the day bucket, making a check-in land in the next
- * day's row — a trivial bypass of the per-day uniqueness constraint.
+ * The original DR-024 design hardened the trust boundary around the
+ * client-supplied `clientTimezone` field: validated it against the
+ * ICU/Intl database, rejected unknown strings as 400 INVALID_TIMEZONE,
+ * and used the IANA-aware path only for opted-in users. That was
+ * correct but heavy.
  *
- * The fix:
- *   1. clientTimezone is validated against the runtime ICU/Intl
- *      database BEFORE use. Unknown strings → 400 INVALID_TIMEZONE.
- *   2. The persisted check-in timestamp is ALWAYS `new Date()` (server
- *      wall clock). The client `localDateTime` is validated for drift
- *      and echoed back as `claimedLocalDateTime` for UI, but never
- *      overwrites the persisted instant.
+ * User simplification (round-20, post-deploy conversation): the company
+ * is based in India and every employee works in IST. Even when the user
+ * (PST) views the portal, they're happy to see IST-day records — there
+ * is no per-user day boundary to negotiate. Both paths collapsed into
+ * ONE: computeLocalDate always buckets by Asia/Kolkata; clientTimezone
+ * is accepted on the wire (frontend still sends it) but ignored.
+ *
+ * The DR-024 trust-boundary bug ("client picks the authoritative day")
+ * is now STRUCTURALLY IMPOSSIBLE — there is no client-controlled
+ * timezone to validate. This test file pins the new contract.
  */
 
 process.env.NODE_ENV = 'test';
@@ -90,34 +93,22 @@ beforeEach(() => {
   sessions = [];
 });
 
-describe('DR-024 — check-in IANA timezone validation', () => {
+describe('DR-024 simplified — clientTimezone is IGNORED, no validation gate', () => {
   const app = buildApp();
 
-  it('accepts the canonical IST workforce timezone', async () => {
+  it('omitting clientTimezone still works (legacy path)', async () => {
     const res = await request(app)
       .post('/api/attendance/check-in')
       .set('Authorization', authHeader())
-      .send({
-        latitude: 12.97, longitude: 77.59,
-        clientTimezone: 'Asia/Kolkata',
-      });
+      .send({ latitude: 12.97, longitude: 77.59 });
 
     expect(res.status).toBe(201);
   });
 
-  it('accepts a non-IST IANA timezone (closed-trust: still validated)', async () => {
-    const res = await request(app)
-      .post('/api/attendance/check-in')
-      .set('Authorization', authHeader())
-      .send({
-        latitude: 37.77, longitude: -122.42,
-        clientTimezone: 'America/Los_Angeles',
-      });
-
-    expect(res.status).toBe(201);
-  });
-
-  it('rejects garbage timezone string with 400 INVALID_TIMEZONE', async () => {
+  it('clientTimezone with garbage string is IGNORED, not rejected (no 400)', async () => {
+    // Round-20 originally returned 400 INVALID_TIMEZONE here. The
+    // user-requested simplification drops the validation gate: the
+    // field is accepted on the wire but never affects the bucket.
     const res = await request(app)
       .post('/api/attendance/check-in')
       .set('Authorization', authHeader())
@@ -126,22 +117,35 @@ describe('DR-024 — check-in IANA timezone validation', () => {
         clientTimezone: 'definitely-not-a-tz',
       });
 
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('INVALID_TIMEZONE');
+    expect(res.status).toBe(201);
   });
 
-  it('rejects the extreme-shift exploit ("Pacific/Kiritimati" UTC+14)', async () => {
-    // Pacific/Kiritimati IS a valid IANA name (UTC+14, Line Islands),
-    // so the previous trust-but-try-catch flow would have used it and
-    // shifted the bucket by 14 hours. The fix still accepts it as a
-    // valid IANA name — but the bucket is computed from SERVER TIME
-    // which is the actual trust anchor. This test pins that a valid
-    // but extreme timezone does NOT produce a server-bucket override.
-    //
-    // We can't easily test the bucket shift without simulating clock
-    // time; the assertion below is that the request still 201s and the
-    // recorded check-in instant is `new Date()` (server clock), not the
-    // client's claim.
+  it('clientTimezone with non-IST valid IANA name is IGNORED — bucket stays IST', async () => {
+    // A user claiming PST should NOT shift the bucket into a different
+    // calendar day. The bucket is always IST, regardless of what the
+    // client claims.
+    const res = await request(app)
+      .post('/api/attendance/check-in')
+      .set('Authorization', authHeader())
+      .send({
+        latitude: 12.97, longitude: 77.59,
+        clientTimezone: 'America/Los_Angeles',
+      });
+
+    expect(res.status).toBe(201);
+    // The attendance.date is a UTC-midnight Date of the IST calendar day.
+    // We can't easily pin a specific calendar day without freezing time,
+    // but we CAN assert it's always UTC midnight (canonical encoding).
+    expect(attendances[0].date.getUTCHours()).toBe(0);
+    expect(attendances[0].date.getUTCMinutes()).toBe(0);
+    expect(attendances[0].date.getUTCSeconds()).toBe(0);
+    expect(attendances[0].date.getUTCMilliseconds()).toBe(0);
+  });
+
+  it('clientTimezone with extreme-shift exploit is IGNORED (no day shift)', async () => {
+    // "Pacific/Kiritimati" is a valid IANA name (UTC+14, Line Islands).
+    // Previously this would have shifted the bucket by 14 hours.
+    // Now it's just ignored — the bucket is always IST.
     const res = await request(app)
       .post('/api/attendance/check-in')
       .set('Authorization', authHeader())
@@ -151,13 +155,11 @@ describe('DR-024 — check-in IANA timezone validation', () => {
       });
 
     expect(res.status).toBe(201);
-    // The session's checkIn is now() — the server wall clock at the
-    // moment of the request, NOT a client-supplied value.
-    expect(sessions[0].checkIn.getTime()).toBeGreaterThan(Date.now() - 1000);
-    expect(sessions[0].checkIn.getTime()).toBeLessThan(Date.now() + 1000);
+    // Canonical encoding is preserved.
+    expect(attendances[0].date.getUTCHours()).toBe(0);
   });
 
-  it('rejects non-string clientTimezone', async () => {
+  it('non-string clientTimezone is IGNORED, not rejected', async () => {
     const res = await request(app)
       .post('/api/attendance/check-in')
       .set('Authorization', authHeader())
@@ -166,21 +168,23 @@ describe('DR-024 — check-in IANA timezone validation', () => {
         clientTimezone: { evil: true },
       });
 
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('INVALID_TIMEZONE');
+    expect(res.status).toBe(201);
   });
 
-  it('omitting clientTimezone still works (IST fallback)', async () => {
+  it('null clientTimezone is IGNORED, not rejected', async () => {
     const res = await request(app)
       .post('/api/attendance/check-in')
       .set('Authorization', authHeader())
-      .send({ latitude: 12.97, longitude: 77.59 });
+      .send({
+        latitude: 12.97, longitude: 77.59,
+        clientTimezone: null,
+      });
 
     expect(res.status).toBe(201);
   });
 });
 
-describe('DR-024 — server time is the source of truth', () => {
+describe('DR-024 — server time is the source of truth (unchanged)', () => {
   const app = buildApp();
 
   it('persisted checkIn is `new Date()`, not the client localDateTime', async () => {
@@ -208,7 +212,7 @@ describe('DR-024 — server time is the source of truth', () => {
     expect(res.body.claimedLocalDateTime).toBe(clientTs);
   });
 
-  it('rejects localDateTime with too-large drift (still validates)', async () => {
+  it('rejects localDateTime with too-large drift', async () => {
     const tooOld = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min ago
     const res = await request(app)
       .post('/api/attendance/check-in')
