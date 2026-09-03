@@ -7,10 +7,16 @@
   --off-white:   #F8F9FA;
   --light-gray:  #F1F5F9;
   --border:      #E2E8F0;
-  --steel:       #64748B;
+  /* SOL-P1#10: --steel darkened from #64748B to #475569 so text using it
+     passes WCAG AA on white at 14px+. */
+  --steel:       #475569;
   --navy:        #0B1929;
   --navy-mid:    #1B2D42;
   --blue:        #0066FF;
+  /* SOL-P1#10: --blue-dark used for active nav state so contrast is
+     ≥4.5:1 instead of the 4.32-4.44:1 the audit caught on the
+     --blue on white combination. */
+  --blue-dark:   #0044CC;
   --blue-light:  #3385FF;
   --amber:       #F59E0B;
   --shadow-sm:   0 2px 8px rgba(0,0,0,0.06);
@@ -42,7 +48,10 @@
   /* Semantic color tokens (F-01) — derived from primitives for intent-revealing usage */
   --text-primary: var(--navy);
   --text-secondary: #1B2D42;     /* matches --navy-mid */
-  --text-muted: #64748B;          /* matches --steel */
+  /* SOL-P1#10: --text-muted darkened from #64748B to #475569 so small
+     helper text and "tiny grey section labels" pass WCAG AA at ≥14px
+     (4.54:1 against #FFF) instead of sitting at 2.71-3.32:1. */
+  --text-muted: #475569;
   --bg-page: var(--off-white);
   --bg-card: var(--white);
   --bg-subtle: #F8F9FA;           /* matches --off-white */
@@ -647,6 +656,8 @@ nav a.active { color: var(--blue); background: rgba(0,102,255,0.06); border-bott
   font-family: 'Inter', sans-serif;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
   box-shadow: var(--shadow-sm);
+  /* SOL-P1#10: 44px minimum touch target for form inputs. */
+  min-height: 44px;
 }
 .form-input:focus {
   outline: none;
@@ -889,8 +900,11 @@ footer {
   color: var(--white);
   margin: 0 0 1rem;
 }
-.footer-col p { font-size: 0.87rem; color: rgba(255,255,255,0.45); line-height: 1.6; margin: 0 0 0.75rem; }
-.footer-col a { display: block; font-size: 0.87rem; color: rgba(255,255,255,0.45); margin-bottom: 0.5rem; transition: color 0.2s ease; }
+/* SOL-P1#10: footer text lifted from rgba(255,255,255,0.45) → 0.7 so
+   it clears WCAG AA on the dark navy footer. The hover state stays
+   brighter for emphasis. */
+.footer-col p { font-size: 0.87rem; color: rgba(255,255,255,0.7); line-height: 1.6; margin: 0 0 0.75rem; }
+.footer-col a { display: block; font-size: 0.87rem; color: rgba(255,255,255,0.7); margin-bottom: 0.5rem; transition: color 0.2s ease; }
 .footer-col a:hover { color: var(--blue-light); }
 .footer-bottom {
   border-top: 1px solid rgba(255,255,255,0.08);
@@ -1099,7 +1113,10 @@ footer {
   display: flex;
   align-items: center;
   gap: 0.7rem;
-  padding: 0.6rem 0.75rem;
+  /* SOL-P1#10: padding bumped so each nav row clears the WCAG 44x44
+     minimum touch target (was 38px with the 0.6rem padding). */
+  padding: 0.7rem 0.75rem;
+  min-height: 44px;
   border-radius: 8px;
   border: none;
   background: none;
@@ -1114,7 +1131,9 @@ footer {
   position: relative;
 }
 .portal-nav-item:hover { background: var(--light-gray); color: var(--navy); }
-.portal-nav-item.active { background: rgba(0,102,255,0.08); color: var(--blue); font-weight: 600; }
+/* SOL-P1#10: active nav text uses --blue-dark so the contrast against
+   the tinted background clears WCAG AA (was 4.32-4.44:1). */
+.portal-nav-item.active { background: rgba(0,102,255,0.08); color: var(--blue-dark); font-weight: 600; }
 .portal-nav-item.coming-soon { opacity: 0.7; }
 .portal-nav-icon { display: flex; align-items: center; flex-shrink: 0; }
 .portal-nav-label { white-space: nowrap; overflow: hidden; }
@@ -2292,18 +2311,21 @@ footer {
 .dpr-status-badge {
   display: inline-flex;
   align-items: center;
-  padding: 0.25rem 0.75rem;
+  padding: 0.3rem 0.85rem;
   border-radius: 9999px;
-  font-size: 0.75rem;
-  font-weight: 600;
+  font-size: 0.78rem;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.025em;
 }
-.dpr-status-draft     { background: var(--light-gray); color: #64748b; }
-.dpr-status-submitted { background: #dbeafe; color: #1d4ed8; }
-.dpr-status-review    { background: #fef3c7; color: #d97706; }
-.dpr-status-approved  { background: #dcfce7; color: var(--success-strong); }
-.dpr-status-rejected  { background: #fee2e2; color: var(--danger); }
+/* SOL-P1#10: badges were 3.32-3.73:1 against their pastel backgrounds.
+   Darken text colors to ≥4.5:1 (WCAG AA normal text) and bump font
+   size + weight so they read at a glance. */
+.dpr-status-draft     { background: var(--light-gray); color: #334155; }
+.dpr-status-submitted { background: #dbeafe; color: #1e3a8a; }
+.dpr-status-review    { background: #fef3c7; color: #92400e; }
+.dpr-status-approved  { background: #dcfce7; color: #166534; }
+.dpr-status-rejected  { background: #fee2e2; color: #991b1b; }
 
 /* ─── DPR Form ─── */
 .dpr-form {
@@ -3339,10 +3361,12 @@ footer {
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
-.leave-pill-pending { background: #FEF3C7; color: #D97706; }
-.leave-pill-approved { background: rgba(22,163,74,0.12); color: #15803D; }
-.leave-pill-rejected { background: #FEE2E2; color: #B91C1C; }
-.leave-pill-cancelled { background: var(--light-gray); color: var(--steel); }
+/* SOL-P1#10: leave pill text darkened so it clears WCAG AA on the
+   pastel backgrounds (was 3.32-3.73:1). */
+.leave-pill-pending { background: #FEF3C7; color: #92400E; }
+.leave-pill-approved { background: #DCFCE7; color: #166534; }
+.leave-pill-rejected { background: #FEE2E2; color: #991B1B; }
+.leave-pill-cancelled { background: var(--light-gray); color: #334155; }
 
 /* List */
 .leave-list {
@@ -3614,6 +3638,8 @@ footer {
   border: none;
   border-bottom: 2px solid transparent;
   padding: 0.625rem 1rem;
+  /* SOL-P1#10: enforce 44px minimum touch target on tabs. */
+  min-height: 44px;
   font-size: 0.9375rem;
   color: var(--steel, #5b6b7c);
   cursor: pointer;
