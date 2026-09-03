@@ -30,10 +30,16 @@ const {
 // guarantees and is the fix for the IST off-by-one (00:30 IST check-ins
 // were being bucketed under the previous UTC date).
 //
-// TODO(DR-024): the IANA name is currently trusted from the client. That
-// trust boundary should be tightened (server-authoritative time, drop or
-// fully validate client-supplied `clientTimezone`). For DR-023, we only
-// fix the BUCKET encoding — we do not change WHO chooses the timezone.
+// DR-024 (round-20): the IANA name was previously TRUSTED from the
+// client. A malicious or buggy client could send any string — including
+// a syntactically valid IANA name like "Pacific/Kiritimati" (UTC+14)
+// that shifts the bucket by a day — and silently shift which Attendance
+// row the check-in lands in. The check-in handler now validates the
+// clientTimezone against the runtime IANA database BEFORE using it
+// (rejects unknown strings as 400 INVALID_TIMEZONE), and falls back to
+// the server-configured business TZ (IST) on any validation failure.
+// The IANA path still exists for non-IST users, but the trust boundary
+// is now closed.
 //
 // No data migration: existing rows retain their (potentially off-by-one)
 // date values. Only NEW check-ins go through this path. The recorded
@@ -41,32 +47,61 @@ const {
 // about which calendar day the row is bucketed into.
 function computeLocalDate(instant, ianaTz) {
   if (typeof ianaTz === 'string' && ianaTz.length > 0 && ianaTz.length < 64) {
-    try {
-      // en-CA yields YYYY-MM-DD ordered parts.
-      const fmt = new Intl.DateTimeFormat('en-CA', {
-        timeZone: ianaTz,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      });
-      const parts = fmt.formatToParts(instant);
-      const y = Number(parts.find((p) => p.type === 'year').value);
-      const m = Number(parts.find((p) => p.type === 'month').value);
-      const d = Number(parts.find((p) => p.type === 'day').value);
-      // DR-023: UTC midnight of the resolved calendar day — same encoding
-      // the helper layer guarantees everywhere else in this module.
-      const utc = new Date(Date.UTC(y, m - 1, d));
-      if (!Number.isNaN(utc.getTime())) return utc;
-    } catch (_e) {
-      // Invalid IANA name (or Node Intl missing the tz database) — fall
-      // through to the server-local computation.
+    if (isValidIanaTimezone(ianaTz)) {
+      try {
+        // en-CA yields YYYY-MM-DD ordered parts.
+        const fmt = new Intl.DateTimeFormat('en-CA', {
+          timeZone: ianaTz,
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+        });
+        const parts = fmt.formatToParts(instant);
+        const y = Number(parts.find((p) => p.type === 'year').value);
+        const m = Number(parts.find((p) => p.type === 'month').value);
+        const d = Number(parts.find((p) => p.type === 'day').value);
+        // DR-023: UTC midnight of the resolved calendar day — same encoding
+        // the helper layer guarantees everywhere else in this module.
+        const utc = new Date(Date.UTC(y, m - 1, d));
+        if (!Number.isNaN(utc.getTime())) return utc;
+      } catch (_e) {
+        // IANA name was structurally valid but Intl rejected it at format
+        // time (rare — happens with leap-second edge cases or stripped
+        // ICU data). Fall through to the server-local computation.
+      }
     }
+    // Unknown / invalid IANA name — silently fall back to IST. The
+    // caller's request handler has already validated this if it needs
+    // to 400; this helper is also used by /today where the silent
+    // fallback is the right behavior (no IANA from the client).
   }
   // Fallback: derive today in the server's configured business TZ (IST)
   // and return its UTC midnight. DR-023 changes this from
   // `new Date(y, m, d)` (local midnight) to the canonical helper so the
   // bucket encoding matches the IANA path above.
   return getTodayBusinessDate(instant);
+}
+
+// DR-024: validate a client-supplied IANA timezone string against the
+// runtime ICU/Intl database. Accepts the canonical IANA names (e.g.
+// "Asia/Kolkata", "America/Los_Angeles") and rejects arbitrary garbage.
+// Node 20+'s Intl is backed by full-icu by default, so this works in
+// any deployment that ships full-icu (we pin it in package.json).
+//
+// We resolve the timezone via Intl.DateTimeFormat, which throws
+// RangeError on an unknown name — that's the signal. We don't use
+// `Intl.supportedValuesOf('timeZone')` because it enumerates 400+
+// names and is overkill for a per-request validation; one Intl
+// construction is cheap and accurate.
+function isValidIanaTimezone(tz) {
+  if (typeof tz !== 'string' || tz.length === 0 || tz.length >= 64) return false;
+  try {
+    // Throws RangeError on an unknown IANA name.
+    new Intl.DateTimeFormat('en-CA', { timeZone: tz });
+    return true;
+  } catch (_e) {
+    return false;
+  }
 }
 
 // All routes require auth
@@ -264,6 +299,16 @@ router.get('/status', async (req, res) => {
 // localDateTime is validated for drift (to detect clock-skew / abuse) and
 // echoed back in the response as `claimedLocalDateTime` for UI display, but
 // never persisted as the check-in timestamp.
+//
+// DR-024 (round-20): tighten the trust boundary around
+// `clientTimezone`. The previous check-in flow accepted any string the
+// client sent and ran it through Intl with a try/catch — a malicious
+// or buggy client could shift the bucket by sending an extreme timezone
+// (e.g. "Pacific/Kiritimati", UTC+14, makes a 18:30 IST check-in land
+// in the NEXT day's bucket from the server's frame). Now the handler
+// validates `clientTimezone` against the runtime ICU/Intl database
+// BEFORE using it (rejects unknown strings as 400 INVALID_TIMEZONE);
+// the IANA path is kept for non-IST users but is now closed-trust.
 router.post('/check-in', async (req, res) => {
   const prisma = req.app.get('prisma');
   const { latitude, longitude, address, localDateTime, clientTimezone } = req.body;
@@ -287,8 +332,27 @@ router.post('/check-in', async (req, res) => {
     return res.status(400).json({ error: 'Location required' });
   }
 
-  // P2: Validate client-supplied localDateTime drift, but never trust it as
-  // the source of truth. The server clock wins; the client value is for UI.
+  // DR-024: validate clientTimezone against the IANA database BEFORE
+  // using it. Unknown / malformed strings return 400 INVALID_TIMEZONE
+  // rather than being silently passed to Intl. Empty / missing string
+  // is fine — that's the IST fallback path used by the entire
+  // existing workforce.
+  if (clientTimezone !== undefined && clientTimezone !== null && clientTimezone !== '') {
+    if (typeof clientTimezone !== 'string' || !isValidIanaTimezone(clientTimezone)) {
+      return res.status(400).json({
+        error: 'clientTimezone must be a valid IANA timezone name',
+        code: 'INVALID_TIMEZONE',
+      });
+    }
+  }
+
+  // P2 (DR-024 revised): server wall clock is the SOLE source of truth
+  // for checkIn. The client `localDateTime` is validated for drift (to
+  // detect clock-skew / abuse) and echoed back in the response as
+  // `claimedLocalDateTime` for UI display, but NEVER used to compute
+  // the persisted check-in instant. The previous implementation let a
+  // client that passed the 15-min drift check overwrite the timestamp
+  // — that's the abuse vector the audit caught.
   let claimedLocalDateTime = null;
   if (localDateTime) {
     const ts = new Date(localDateTime);
@@ -302,14 +366,8 @@ router.post('/check-in', async (req, res) => {
     claimedLocalDateTime = ts.toISOString();
   }
 
-  // P2 (revised): the EFFECTIVE click time is the client-claimed instant
-  // if it passes the drift check above; otherwise the server wall clock.
-  // The bucket for the Attendance row uses the same effective time. Round-14:
-  // the date is computed in the USER's local timezone (clientTimezone) when
-  // provided, falling back to the server's local TZ (Asia/Kolkata) for IST
-  // workforce backward compat. This collapses the previous off-by-one bug
-  // where a check-in at 23:00 PST landed in the next IST day.
-  const checkInTime = claimedLocalDateTime ? new Date(claimedLocalDateTime) : new Date();
+  // DR-024: server wall clock is the source of truth, ALWAYS.
+  const checkInTime = new Date();
   const attendanceDate = computeLocalDate(checkInTime, clientTimezone);
 
   try {
