@@ -2479,24 +2479,30 @@ footer {
 
 /* SOL-P1#6: on narrow screens the row layout clips "Submitted",
    "Photos", and the resume button. Stack into a card with status
-   on its own line and full-width fields. */
+   on its own line and full-width fields.
+
+   Round-20 follow-up: the JSX uses `style={{ flex: 2 }}` (inline
+   styles) which beats the attribute-selector CSS rule because
+   inline styles have higher specificity than any selector. The fix
+   is `!important` here so the mobile breakpoint actually wins at
+   narrow widths. */
 @media (max-width: 640px) {
   .dpr-list-item {
-    flex-wrap: wrap;
-    align-items: flex-start;
-    gap: 0.5rem 0.75rem;
+    flex-wrap: wrap !important;
+    align-items: flex-start !important;
+    gap: 0.5rem 0.75rem !important;
   }
   .dpr-list-item > div[style*="flex: 0 0 36px"] {
-    flex: 0 0 32px;
-    align-self: center;
+    flex: 0 0 32px !important;
+    align-self: center !important;
   }
   .dpr-list-item > div[style*="flex: 2"],
   .dpr-list-item > div[style*="flex: 1"] {
-    flex: 1 1 calc(50% - 40px);
-    min-width: 0;
+    flex: 1 1 calc(50% - 40px) !important;
+    min-width: 0 !important;
   }
   .dpr-list-item > div[style*="flex: 1"]:last-of-type {
-    flex: 1 1 100%;
+    flex: 1 1 100% !important;
   }
 }
 
