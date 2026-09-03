@@ -83,6 +83,9 @@ export default function DprDashboard() {
   // the admin. `selectableIds` is computed from the loaded list each render.
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
+  // SOL-P0#5: confirmation summary before destructive actions. Holds the
+  // pending action and the IDs it would touch; null = no dialog open.
+  const [confirmAction, setConfirmAction] = useState(null); // { kind, dprId?, ids?, action?, reason? }
   const [bulkRejectReason, setBulkRejectReason] = useState('');
 
   const selectableDprs = dprs.filter(
@@ -147,6 +150,14 @@ export default function DprDashboard() {
   useEffect(() => {
     setSelectedIds(new Set());
   }, [filter]);
+
+  // SOL-P0#5: close the confirmation modal on Escape.
+  useEffect(() => {
+    if (!confirmAction) return;
+    const handler = (e) => { if (e.key === 'Escape') setConfirmAction(null); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [confirmAction]);
 
   const toggleSelected = (id) => {
     setSelectedIds((prev) => {
@@ -265,6 +276,73 @@ export default function DprDashboard() {
     setReviewing(null);
     setAdminNotes('');
     setRejectReason('');
+  };
+
+  // SOL-P0#5: run the action that the user confirmed in the dialog.
+  // Single approve/reject call into the existing handlers; bulk hands off
+  // to handleBulkAction which already does the fan-out.
+  const runConfirmedAction = async () => {
+    if (!confirmAction) return;
+    const a = confirmAction;
+    setConfirmAction(null); // close dialog immediately for snappy UX
+    if (a.kind === 'single-approve') {
+      await handleApprove(a.dprId);
+    } else if (a.kind === 'single-reject') {
+      await handleReject(a.dprId);
+    } else if (a.kind === 'bulk') {
+      await handleBulkAction(a.action);
+    }
+  };
+
+  // Helper for the confirm dialog: derive the user-visible context from the
+  // pending action.
+  const confirmSummary = () => {
+    if (!confirmAction) return null;
+    if (confirmAction.kind === 'single-approve' || confirmAction.kind === 'single-reject') {
+      const d = dprs.find((x) => x.id === confirmAction.dprId);
+      if (!d) return null;
+      return {
+        verb: confirmAction.kind === 'single-approve' ? 'Approve' : 'Reject',
+        tone: confirmAction.kind === 'single-approve' ? 'success' : 'danger',
+        title: `${confirmAction.kind === 'single-approve' ? 'Approve' : 'Reject'} this DPR?`,
+        rows: [
+          ['Project', d.projectName || '(untitled)'],
+          ['Date', formatDateOnly(d.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })],
+          ['Submitted by', d.submittedBy?.name || '—'],
+          ['Contractor', d.contractor || '—'],
+          ['Status', d.status],
+          ...(confirmAction.reason ? [['Reason', confirmAction.reason]] : []),
+        ],
+        footer: confirmAction.kind === 'single-approve'
+          ? 'This will mark the report as approved. The decision is recorded in the audit trail.'
+          : 'This will mark the report as rejected. The reason will be visible to the submitter.',
+      };
+    }
+    if (confirmAction.kind === 'bulk') {
+      const targets = dprs.filter((d) => confirmAction.ids.includes(d.id));
+      const verb = confirmAction.action === 'APPROVE' ? 'Approve'
+        : confirmAction.action === 'REJECT' ? 'Reject'
+          : 'Mark for Review';
+      const tone = confirmAction.action === 'APPROVE' ? 'success'
+        : confirmAction.action === 'REJECT' ? 'danger'
+          : 'secondary';
+      return {
+        verb,
+        tone,
+        title: `${verb} ${targets.length} DPR${targets.length === 1 ? '' : 's'}?`,
+        rows: [
+          ['Records', targets.length],
+          ...(confirmAction.reason ? [['Reason', confirmAction.reason]] : []),
+        ],
+        list: targets.map((d) => `${d.projectName || '(untitled)'} · ${formatDateOnly(d.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })} · ${d.submittedBy?.name || '—'}`),
+        footer: confirmAction.action === 'APPROVE'
+          ? 'Each report will be approved independently. Per-record failures are reported.'
+          : confirmAction.action === 'REJECT'
+            ? 'Each report will be rejected with the reason above. Per-record failures are reported.'
+            : 'Each report will be moved to Under Review.',
+      };
+    }
+    return null;
   };
 
   if (!employee?.isAdmin) {
@@ -473,7 +551,9 @@ export default function DprDashboard() {
                       <div style={{ display: 'flex', gap: '0.5rem' }}>
                         <button
                           className="btn btn-success btn-sm"
-                          onClick={() => handleApprove(dpr.id)}
+                          // SOL-P0#5: require a confirmation summary before
+                          // approving. Avoids accidental one-click approval.
+                          onClick={() => setConfirmAction({ kind: 'single-approve', dprId: dpr.id })}
                           disabled={!!actionLoading}
                           style={{ flex: 1 }}
                         >
@@ -481,7 +561,7 @@ export default function DprDashboard() {
                         </button>
                         <button
                           className="btn btn-danger btn-sm"
-                          onClick={() => handleReject(dpr.id)}
+                          onClick={() => setConfirmAction({ kind: 'single-reject', dprId: dpr.id, reason: rejectReason.trim() })}
                           disabled={!!actionLoading || !rejectReason.trim()}
                           title={!rejectReason.trim() ? 'Enter a reject reason first' : ''}
                           style={{ flex: 1 }}
@@ -564,7 +644,7 @@ export default function DprDashboard() {
             <button
               type="button"
               className="btn btn-secondary btn-sm"
-              onClick={() => handleBulkAction('UNDER_REVIEW')}
+              onClick={() => setConfirmAction({ kind: 'bulk', action: 'UNDER_REVIEW', ids: [...selectedIds] })}
               disabled={bulkActionLoading}
             >
               {bulkActionLoading ? '...' : '↪ Mark for Review'}
@@ -572,7 +652,7 @@ export default function DprDashboard() {
             <button
               type="button"
               className="btn btn-success btn-sm"
-              onClick={() => handleBulkAction('APPROVE')}
+              onClick={() => setConfirmAction({ kind: 'bulk', action: 'APPROVE', ids: [...selectedIds] })}
               disabled={bulkActionLoading}
             >
               {bulkActionLoading ? '...' : '✓ Approve'}
@@ -580,7 +660,12 @@ export default function DprDashboard() {
             <button
               type="button"
               className="btn btn-danger btn-sm"
-              onClick={() => handleBulkAction('REJECT')}
+              onClick={() => setConfirmAction({
+                kind: 'bulk',
+                action: 'REJECT',
+                ids: [...selectedIds],
+                reason: bulkRejectReason.trim(),
+              })}
               disabled={bulkActionLoading || !bulkRejectReason.trim()}
               title={!bulkRejectReason.trim() ? 'Enter a reject reason first' : ''}
             >
@@ -589,6 +674,82 @@ export default function DprDashboard() {
           </div>
         </div>
       )}
+
+      {/* SOL-P0#5: approval / rejection confirmation summary. Renders an
+          accessible modal listing the affected records + context before
+          any state change is committed. Backdrop click and Escape cancel. */}
+      {confirmAction && confirmSummary() && (() => {
+        const s = confirmSummary();
+        const toneColor = s.tone === 'success' ? 'var(--success-strong, #16a34a)'
+          : s.tone === 'danger' ? 'var(--danger, #dc2626)'
+            : 'var(--blue, #0066ff)';
+        return (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="dpr-confirm-title"
+            onClick={() => setConfirmAction(null)}
+            style={{
+              position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              zIndex: 110, padding: '1rem',
+            }}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                background: 'white', borderRadius: 12, maxWidth: 560, width: '100%',
+                maxHeight: '85vh', overflow: 'auto',
+                boxShadow: '0 20px 60px rgba(0,0,0,0.25)',
+              }}
+            >
+              <div style={{ padding: '1.25rem 1.5rem', borderBottom: '1px solid var(--border, #e2e8f0)' }}>
+                <h2 id="dpr-confirm-title" style={{ margin: 0, fontSize: '1.1rem', color: 'var(--navy)' }}>
+                  {s.title}
+                </h2>
+              </div>
+              <div style={{ padding: '1.25rem 1.5rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                <dl style={{ margin: 0, display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '0.4rem 1rem', fontSize: '0.9rem' }}>
+                  {s.rows.map(([k, v]) => (
+                    <React.Fragment key={k}>
+                      <dt style={{ fontWeight: 600, color: 'var(--steel)' }}>{k}:</dt>
+                      <dd style={{ margin: 0, overflowWrap: 'anywhere' }}>{v}</dd>
+                    </React.Fragment>
+                  ))}
+                </dl>
+                {s.list && (
+                  <ul style={{ listStyle: 'none', padding: '0.5rem 0.75rem', margin: 0, background: '#f8fafc', borderRadius: 6, maxHeight: 180, overflow: 'auto', fontSize: '0.85rem' }}>
+                    {s.list.map((row, i) => (
+                      <li key={i} style={{ padding: '0.25rem 0' }}>• {row}</li>
+                    ))}
+                  </ul>
+                )}
+                {s.footer && (
+                  <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--steel)' }}>{s.footer}</p>
+                )}
+              </div>
+              <div style={{ padding: '1rem 1.5rem', borderTop: '1px solid var(--border, #e2e8f0)', display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setConfirmAction(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  style={{ background: toneColor, color: 'white', border: 'none', minWidth: 120 }}
+                  onClick={runConfirmedAction}
+                  autoFocus
+                >
+                  Yes, {s.verb}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
