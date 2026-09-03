@@ -5,6 +5,7 @@ import { api } from '../../lib/api.js';
 import { formatDateOnly } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import { CalendarIcon, MapPinIcon, CameraIcon } from '../../components/Icons.jsx';
 
 // C-06 (round-15+): local StatusBadge removed. We pass a per-page `map` so
 // SUBMITTED keeps its distinct blue (dpr-status-submitted, #dbeafe/#1d4ed8)
@@ -34,9 +35,9 @@ function PhotoThumb({ photo }) {
     return (
       <div
         className="text-placeholder"
-        style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.65rem' }}
+        style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--steel)' }}
       >
-        📷
+        <CameraIcon size={16} />
       </div>
     );
   }
@@ -446,8 +447,14 @@ export default function DprDashboard() {
                 <div>
                   <h3 className="dpr-card-title">{dpr.projectName}</h3>
                   <div className="dpr-card-meta" style={{ marginTop: '0.5rem' }}>
-                    <span>📍 {dpr.location}</span>
-                    <span>📅 {formatDateOnly(dpr.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                      <MapPinIcon size={13} style={{ color: 'var(--steel)' }} />
+                      {dpr.location}
+                    </span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                      <CalendarIcon size={13} style={{ color: 'var(--steel)' }} />
+                      {formatDateOnly(dpr.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })}
+                    </span>
                   </div>
                 </div>
                 <StatusBadge status={dpr.status} map={DPR_STATUS_MAP} />

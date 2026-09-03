@@ -7,6 +7,7 @@ import { formatDateOnly } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import { SUB_WORK_TYPE_OPTIONS } from '../portal/WorkTypes.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import { CalendarIcon, MapPinIcon, CameraIcon } from '../../components/Icons.jsx';
 
 // Round-12: admin view across all submitted inspection records across all
 // engineers. Mirrors the DprDashboard structure (stat cards + filter chips
@@ -426,8 +427,14 @@ export default function InspectionDashboard() {
                     <InspectionTypeLabel type={insp.inspectionType} />
                   </h3>
                   <div className="dpr-card-meta" style={{ marginTop: '0.5rem' }}>
-                    <span>📍 {insp.location}</span>
-                    <span>📅 {formatIndianDate(insp.reportDate)}</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                      <MapPinIcon size={13} style={{ color: 'var(--steel)' }} />
+                      {insp.location}
+                    </span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                      <CalendarIcon size={13} style={{ color: 'var(--steel)' }} />
+                      {formatIndianDate(insp.reportDate)}
+                    </span>
                   </div>
                 </div>
                 <StatusBadge status={insp.status} />
@@ -441,7 +448,10 @@ export default function InspectionDashboard() {
               </div>
 
               <div style={{ display: 'flex', gap: '1rem', fontSize: '0.8rem', color: 'var(--steel)' }}>
-                <span>📷 {insp.photos?.length || 0}</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                  <CameraIcon size={13} style={{ color: 'var(--steel)' }} />
+                  {insp.photos?.length || 0}
+                </span>
                 <span style={{ marginLeft: 'auto' }}>{insp.submittedBy?.name || '—'}</span>
               </div>
             </Link>

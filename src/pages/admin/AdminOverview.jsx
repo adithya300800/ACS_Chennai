@@ -56,11 +56,41 @@ export default function AdminOverview() {
     return () => { cancelled = true; document.removeEventListener('visibilitychange', onVis); };
   }, [accessToken]);
 
-  // Group tiles by what admins do with them.
+  // Group tiles by what admins do with them. SOL-P2#15: icons are inline
+  // SVGs (line-style, 1.5 stroke) so the overview doesn't mix emoji with
+  // the SVG line icon system used elsewhere.
+  const ICONS = {
+    attendance: (
+      <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="18" rx="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
+      </svg>
+    ),
+    dpr: (
+      <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><line x1="10" y1="9" x2="8" y2="9" />
+      </svg>
+    ),
+    inspection: (
+      <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /><path d="M11 8v6" /><path d="M8 11h6" />
+      </svg>
+    ),
+    leave: (
+      <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="18" rx="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /><path d="M9 15l2 2 4-4" />
+      </svg>
+    ),
+    training: (
+      <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M22 10v6" /><path d="M2 10l10-5 10 5-10 5z" /><path d="M6 12v5c3 3 9 3 12 0v-5" />
+      </svg>
+    ),
+  };
+
   const personalTiles = [
     {
       to: '/portal/admin/attendance',
-      icon: '📋',
+      icon: ICONS.attendance,
       title: 'All Attendance',
       sub: 'Org-wide attendance grid',
       desc: 'See every employee\'s check-ins, expand a day for the session map, and export the monthly timesheet.',
@@ -70,7 +100,7 @@ export default function AdminOverview() {
   const reviewTiles = [
     {
       to: '/portal/admin/dpr',
-      icon: '📝',
+      icon: ICONS.dpr,
       title: 'Daily Reports to Review',
       sub: 'Field reports queue',
       desc: 'Approve or reject Daily Progress Reports submitted across all projects.',
@@ -79,7 +109,7 @@ export default function AdminOverview() {
     },
     {
       to: '/portal/admin/inspection',
-      icon: '🔍',
+      icon: ICONS.inspection,
       title: 'Inspections to Review',
       sub: 'Compliance records queue',
       desc: 'Review inspection & compliance records — material receipts, cube tests, NCRs, safety violations.',
@@ -91,7 +121,7 @@ export default function AdminOverview() {
   const peopleTiles = [
     {
       to: '/portal/admin/leave',
-      icon: '🏖️',
+      icon: ICONS.leave,
       title: 'Leave Approvals',
       sub: 'HR workflow',
       desc: 'Approve or reject leave requests across the team.',
@@ -100,7 +130,7 @@ export default function AdminOverview() {
     },
     {
       to: '/portal/admin/training',
-      icon: '🎓',
+      icon: ICONS.training,
       title: 'Training Library',
       sub: 'Course & enrollment management',
       desc: 'Create training courses, assign to employees, override-complete enrollments.',
@@ -179,7 +209,7 @@ function TileSection({ title, tiles }) {
             )}
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.875rem' }}>
               <div style={{
-                fontSize: '1.75rem',
+                color: '#0066FF',
                 flexShrink: 0,
                 width: 44, height: 44,
                 background: 'rgba(0,102,255,0.08)',

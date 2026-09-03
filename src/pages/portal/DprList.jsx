@@ -7,6 +7,7 @@ import { formatDateOnly } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import { ClipboardIcon } from '../../components/Icons.jsx';
 
 const STATUS_FILTERS = [
   { value: '', label: 'All Statuses' },
@@ -313,7 +314,9 @@ export default function DprList() {
         </div>
       ) : dprs.length === 0 ? (
         <div className="dpr-list-empty">
-          <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>📋</div>
+          <div style={{ marginBottom: '1rem', color: 'var(--steel)' }}>
+            <ClipboardIcon size={48} />
+          </div>
           <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", color: 'var(--navy)', marginBottom: '0.5rem' }}>No DPRs found</h3>
           <p style={{ color: 'var(--steel)', marginBottom: '1.5rem' }}>
             {filter.status || filter.myOnly || filter.from || filter.to

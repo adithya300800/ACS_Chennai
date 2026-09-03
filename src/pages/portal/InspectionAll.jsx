@@ -5,6 +5,7 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import { MapPinIcon, BuildingIcon, ClipboardIcon } from '../../components/Icons.jsx';
 
 // P0/A-13: admin cross-org inspection list. The previous dead link at
 // /portal/inspection/all (rendered for admins in InspectionList.jsx)
@@ -61,7 +62,9 @@ export default function InspectionAll() {
         </div>
       ) : inspections.length === 0 ? (
         <div className="dpr-list-empty" style={{ textAlign: 'center', padding: '3rem' }}>
-          <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>📋</div>
+          <div style={{ marginBottom: '1rem', color: 'var(--steel)' }}>
+            <ClipboardIcon size={48} />
+          </div>
           <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", color: 'var(--navy)' }}>
             No inspection records yet
           </h3>
@@ -82,8 +85,14 @@ export default function InspectionAll() {
                   <div>
                     <h3 className="dpr-card-title">{typeLabel}</h3>
                     <div className="dpr-card-meta" style={{ marginTop: '0.5rem' }}>
-                      <span>📍 {insp.location}</span>
-                      <span>🏗 {insp.projectName}</span>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                        <MapPinIcon size={13} style={{ color: 'var(--steel)' }} />
+                        {insp.location}
+                      </span>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                        <BuildingIcon size={13} style={{ color: 'var(--steel)' }} />
+                        {insp.projectName}
+                      </span>
                     </div>
                   </div>
                 </div>

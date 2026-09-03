@@ -7,6 +7,7 @@ import { formatDateOnly } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import { CalendarIcon, MapPinIcon, CameraIcon, ClipboardIcon, PaperclipIcon } from '../../components/Icons.jsx';
 
 // C-06: local StatusBadge removed (round-15+). The shared component covers
 // all inspection statuses (OPEN/ACKNOWLEDGED/IN_PROGRESS/PENDING_VERIFICATION/
@@ -141,7 +142,9 @@ export default function InspectionList() {
         </div>
       ) : inspections.length === 0 ? (
         <div className="dpr-list-empty" style={{ textAlign: 'center', padding: '3rem' }}>
-          <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>📋</div>
+          <div style={{ marginBottom: '1rem', color: 'var(--steel)' }}>
+            <ClipboardIcon size={48} />
+          </div>
           <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", color: 'var(--navy)', marginBottom: '0.5rem' }}>
             No inspection records yet
           </h3>
@@ -167,8 +170,14 @@ export default function InspectionList() {
                     <InspectionTypeLabel type={insp.inspectionType} />
                   </h3>
                   <div className="dpr-card-meta" style={{ marginTop: '0.5rem' }}>
-                    <span>📍 {insp.location}</span>
-                    <span>📅 {formatIndianDate(insp.reportDate)}</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                      <MapPinIcon size={13} style={{ color: 'var(--steel)' }} />
+                      {insp.location}
+                    </span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                      <CalendarIcon size={13} style={{ color: 'var(--steel)' }} />
+                      {formatIndianDate(insp.reportDate)}
+                    </span>
                   </div>
                 </div>
                 <StatusBadge status={insp.status} />
@@ -182,9 +191,15 @@ export default function InspectionList() {
               </div>
 
               <div style={{ display: 'flex', gap: '1rem', fontSize: '0.8rem', color: 'var(--steel)' }}>
-                <span>📷 {insp.photos?.length || 0}</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                  <CameraIcon size={13} style={{ color: 'var(--steel)' }} />
+                  {insp.photos?.length || 0}
+                </span>
                 {insp.dpr && (
-                  <span>📎 Linked to DPR</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                    <PaperclipIcon size={13} style={{ color: 'var(--steel)' }} />
+                    Linked to DPR
+                  </span>
                 )}
                 <span style={{ marginLeft: 'auto' }}>
                   {insp.submittedBy?.name || ''}

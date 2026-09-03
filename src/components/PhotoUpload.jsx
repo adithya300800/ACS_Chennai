@@ -3,6 +3,7 @@ import { useAuth } from '../contexts/AuthContext.jsx';
 import { api } from '../lib/api.js';
 import { uploadBlob } from '../lib/blobUpload.js';
 import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../lib/constants.js';
+import { CameraIcon } from './Icons.jsx';
 
 const ACCEPTED_TYPES = ACCEPTED_PHOTO_TYPES;
 const MAX_SIZE = MAX_PHOTO_BYTES;
@@ -28,7 +29,7 @@ function UploadItem({ item, onRemove }) {
         />
       ) : (
         <div className="upload-item-placeholder" aria-hidden="true">
-          📷
+          <CameraIcon size={20} style={{ color: 'var(--steel)' }} />
         </div>
       )}
 
