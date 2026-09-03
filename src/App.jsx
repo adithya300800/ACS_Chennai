@@ -27,6 +27,10 @@ const AdminAttendance = React.lazy(() => import('./pages/portal/Admin.jsx')); //
 const Leave = React.lazy(() => import('./pages/portal/Leave.jsx'));
 const DprSubmit = React.lazy(() => import('./pages/portal/DprSubmit.jsx'));
 const DprList = React.lazy(() => import('./pages/portal/DprList.jsx'));
+// Round-22: admin cross-org DPR list — mirrors InspectionAll. Sidebar entry
+// for "All Daily Reports Records" lives in PortalLayout.jsx under the Admin
+// group and points here.
+const DprAll = React.lazy(() => import('./pages/portal/DprAll.jsx'));
 const DprDashboard = React.lazy(() => import('./pages/admin/DprDashboard.jsx'));
 const LeaveDashboard = React.lazy(() => import('./pages/admin/LeaveDashboard.jsx'));
 const InspectionSubmit = React.lazy(() => import('./pages/portal/InspectionSubmit.jsx'));
@@ -96,6 +100,8 @@ function App() {
           <Route path="leave" element={<Leave />} />
           <Route path="dpr/submit" element={<DprSubmit />} />
           <Route path="dpr/my" element={<DprList />} />
+          {/* Round-22: admin cross-org DPR list — mirrors InspectionAll. */}
+          <Route path="dpr/all" element={<DprAll />} />
           <Route path="admin/dpr" element={<DprDashboard />} />
           <Route path="admin/leave" element={<LeaveDashboard />} />
           <Route path="inspection/submit" element={<InspectionSubmit />} />
