@@ -505,4 +505,33 @@ if (require.main === module) {
   startServer({ app, prisma });
 }
 
-module.exports = { createApp, startServer };
+// DR-014 (round-20): backward-compat default export.
+//
+// The previous (pre-DR-014) index.js did `module.exports = app`, so tests
+// like __tests__/diag.removed.test.js + __tests__/storage.test.js do
+// `const app = require('../src/index');` and pass `app` straight into
+// supertest. The factory refactor changed the export to
+// `{ createApp, startServer }`, which broke those tests with
+// "TypeError: app.address is not a function".
+//
+// To preserve BOTH contracts:
+//   - `require('../src/index')` → the default app (Express), as before
+//   - `require('../src/index').createApp` → the factory for production use
+//     and the new mounted-app integration suite
+//   - `require('../src/index').startServer` → the production entry point
+//
+// We materialize the default app once at module load (with mocked
+// PrismaClient from jest.mock or real PrismaClient otherwise — the
+// tests that depend on the default export all mock @prisma/client at
+// the top of their file, so the real client is never instantiated).
+//
+// `module.exports = createApp();` returns the Express app; we then
+// attach the factory + startServer as properties. Note: this is a
+// function-shaped value (an Express app is a callable), but Express
+// apps are also objects with properties — so adding `.createApp` and
+// `.startServer` keeps `app.use(...)` and `request(app).get(...)`
+// working while exposing the factory to the new tests.
+const { app: defaultApp } = createApp();
+defaultApp.createApp = createApp;
+defaultApp.startServer = startServer;
+module.exports = defaultApp;
