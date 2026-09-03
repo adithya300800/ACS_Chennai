@@ -74,6 +74,19 @@ function isConfigured() {
   return Boolean(ZOHO_SMTP_USER && ZOHO_SMTP_PASSWORD);
 }
 
+// Round-25b debug: log env state once at module load so we can prove the
+// running service picked up ZOHO_SMTP_USER / ZOHO_SMTP_PASSWORD without
+// leaking the password itself. Strip on next round.
+const _bootState = {
+  user_set: !!ZOHO_SMTP_USER,
+  user_len: ZOHO_SMTP_USER.length,
+  pass_len: ZOHO_SMTP_PASSWORD.length,
+  from_email: FROM_EMAIL,
+  host: ZOHO_SMTP_HOST,
+  port: ZOHO_SMTP_PORT,
+};
+console.log('[email] module loaded', _bootState);
+
 /**
  * Escape an arbitrary string for safe interpolation into HTML email bodies.
  * Email clients vary wildly in built-in sanitization — escape explicitly.
