@@ -271,10 +271,18 @@ export default function InspectionDashboard() {
       </div>
 
       <div className="dpr-card" style={{ marginBottom: '1rem' }}>
+        {/* SOL-P0#2: every filter control now has a unique id and a wired
+            <label htmlFor>. The From/To date pair is grouped in a
+            <fieldset> with a <legend> for screen-reader context. */}
         <div className="form-row">
           <div className="form-group">
-            <label>Status</label>
-            <select className="form-input" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
+            <label htmlFor="insp-filter-status">Status</label>
+            <select
+              id="insp-filter-status"
+              className="form-input"
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value)}
+            >
               <option value="">All</option>
               <option value="OPEN">Open</option>
               <option value="ACKNOWLEDGED">Acknowledged</option>
@@ -285,22 +293,44 @@ export default function InspectionDashboard() {
             </select>
           </div>
           <div className="form-group">
-            <label>Type</label>
-            <select className="form-input" value={filterType} onChange={(e) => setFilterType(e.target.value)}>
+            <label htmlFor="insp-filter-type">Type</label>
+            <select
+              id="insp-filter-type"
+              className="form-input"
+              value={filterType}
+              onChange={(e) => setFilterType(e.target.value)}
+            >
               <option value="">All types</option>
               {SUB_WORK_TYPE_OPTIONS.map((s) => (
                 <option key={s.value} value={s.value}>{s.label}</option>
               ))}
             </select>
           </div>
-          <div className="form-group">
-            <label>From</label>
-            <input type="date" className="form-input" value={filterFrom} onChange={(e) => setFilterFrom(e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>To</label>
-            <input type="date" className="form-input" value={filterTo} onChange={(e) => setFilterTo(e.target.value)} />
-          </div>
+          <fieldset className="form-group" style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+            <legend style={{ fontSize: '0.85rem', fontWeight: 500, color: 'var(--steel)', padding: 0 }}>Date range</legend>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <div>
+                <label htmlFor="insp-filter-from" style={{ fontSize: '0.8rem' }}>From</label>
+                <input
+                  id="insp-filter-from"
+                  type="date"
+                  className="form-input"
+                  value={filterFrom}
+                  onChange={(e) => setFilterFrom(e.target.value)}
+                />
+              </div>
+              <div>
+                <label htmlFor="insp-filter-to" style={{ fontSize: '0.8rem' }}>To</label>
+                <input
+                  id="insp-filter-to"
+                  type="date"
+                  className="form-input"
+                  value={filterTo}
+                  onChange={(e) => setFilterTo(e.target.value)}
+                />
+              </div>
+            </div>
+          </fieldset>
         </div>
         {(filterStatus !== 'OPEN' || filterType || filterFrom || filterTo) && (
           <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem' }}>
