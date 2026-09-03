@@ -331,104 +331,122 @@ app.use((err, req, res, next) => {
   res.status(status).json(body);
 });
 
-// ─── Process error handlers (Node 22 default: terminate on unhandled rejection) ──
-process.on('unhandledRejection', (reason) => {
-  // Structured so we can filter for Prisma codes specifically.
-  console.error('[unhandledRejection]', {
-    code: reason?.code,
-    name: reason?.name,
-    message: reason?.message?.split('\n')[0],
-  });
-});
-process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException]', {
-    code: err?.code,
-    name: err?.name,
-    message: err?.message?.split('\n')[0],
-  });
-  // Best-effort shutdown
-  prisma.$disconnect().catch(() => {}).finally(() => process.exit(1));
-});
-
 // ─── Boot ────────────────────────────────────────────────────────────────────
-// Single-tenant assumption (see TENANCY.md). If this counts more than
-// the documented ACS workforce, treat as a tenancy boundary violation
-// and refactor before adding the second org.
-prisma.employee.count()
-  .then((count) => {
-    console.log(`[tenancy] employees in DB: ${count} (single-tenant ACS; see TENANCY.md)`);
-    // Soft guardrail: if the workforce size balloons past what one
-    // construction-services org realistically employs, log a warning
-    // so the operator notices before adding a second org without a
-    // tenancy refactor. Threshold is deliberately loose so an
-    // admin-onboarded contractor doesn't trip it; tighten when
-    // multi-tenant onboarding is real.
-    if (count > 1000) {
-      console.warn(`[tenancy] WARNING: ${count} employees exceeds the single-tenant workforce expectation. ` +
-        `Before adding a second organization, complete the pre-onboarding checklist in TENANCY.md.`);
-    }
-  })
-  .catch((err) => {
-    // Non-fatal: a missing table or unreadable DB shouldn't block boot
-    // (the /ready endpoint will report DB=fail and Render will mark the
-    // service unhealthy). Log and move on.
-    console.error('[tenancy] employee count probe failed (non-fatal):', err?.message?.split('\n')[0] || err);
+// Everything below runs ONLY when this file is the process entrypoint
+// (`node src/index.js`, which is what `npm start` and the Render start command
+// do). Guarding it lets a test `require('../src/index')` and assert against the
+// real, fully-mounted app — the actual route table, not a hand-copied mirror of
+// it — without opening a port, probing the DB, or hijacking the process's
+// signal and exception handlers. DR-012's regression test needs exactly that:
+// a mirror app would keep passing if someone re-added the /api/diag mount.
+function startServer() {
+  // ─── Process error handlers (Node 22 default: terminate on unhandled rejection) ──
+  process.on('unhandledRejection', (reason) => {
+    // Structured so we can filter for Prisma codes specifically.
+    console.error('[unhandledRejection]', {
+      code: reason?.code,
+      name: reason?.name,
+      message: reason?.message?.split('\n')[0],
+    });
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('[uncaughtException]', {
+      code: err?.code,
+      name: err?.name,
+      message: err?.message?.split('\n')[0],
+    });
+    // Best-effort shutdown
+    prisma.$disconnect().catch(() => {}).finally(() => process.exit(1));
   });
 
-const server = app.listen(PORT, () => {
-  console.log(`ACS Portal API listening on port ${PORT}`);
-  console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ') || '(none)'}`);
-});
+  // Single-tenant assumption (see TENANCY.md). If this counts more than
+  // the documented ACS workforce, treat as a tenancy boundary violation
+  // and refactor before adding the second org.
+  prisma.employee.count()
+    .then((count) => {
+      console.log(`[tenancy] employees in DB: ${count} (single-tenant ACS; see TENANCY.md)`);
+      // Soft guardrail: if the workforce size balloons past what one
+      // construction-services org realistically employs, log a warning
+      // so the operator notices before adding a second org without a
+      // tenancy refactor. Threshold is deliberately loose so an
+      // admin-onboarded contractor doesn't trip it; tighten when
+      // multi-tenant onboarding is real.
+      if (count > 1000) {
+        console.warn(`[tenancy] WARNING: ${count} employees exceeds the single-tenant workforce expectation. ` +
+          `Before adding a second organization, complete the pre-onboarding checklist in TENANCY.md.`);
+      }
+    })
+    .catch((err) => {
+      // Non-fatal: a missing table or unreadable DB shouldn't block boot
+      // (the /ready endpoint will report DB=fail and Render will mark the
+      // service unhealthy). Log and move on.
+      console.error('[tenancy] employee count probe failed (non-fatal):', err?.message?.split('\n')[0] || err);
+    });
 
-// R2 bucket CORS provisioning (round-13 → round-20 DR-017).
-//
-// Round-13: a one-shot CORS applier ran on every boot. Without it, the
-// browser preflight to the presigned PUT URL returned 403 with no
-// Access-Control-Allow-* headers and the browser aborted the upload
-// with "Network error during upload" before any bytes left.
-//
-// Round-20 (DR-017): canonical provisioning moved to
-// `scripts/provisionR2.js` (run once at deploy time as a preDeploy hook).
-// This boot-time call is now a NO-OP in production unless the env flag
-// `R2_CORS_SELF_HEAL=true` is set (dev convenience). The runtime IAM
-// key no longer needs `s3:PutBucketCors` / `s3:CreateBucket` — only the
-// much narrower `s3:PutObject` / `s3:GetObject` / `s3:DeleteObject` on
-// the bucket paths. See `scripts/README.md` for the deploy flow.
-const { applyR2Cors } = require('./lib/blobStorage');
-const r2SelfHeal = process.env.R2_CORS_SELF_HEAL === 'true';
-if (r2SelfHeal) {
-  applyR2Cors(ALLOWED_ORIGINS).then((results) => {
-    const failed = results.filter((r) => !r.ok && !r.skipped);
-    if (failed.length === 0) {
-      console.log(`[r2-cors] self-heal applied CORS policy to ${results.length} bucket(s): ${results.map((r) => r.Bucket).join(', ')}`);
-    } else {
-      console.error('[r2-cors] self-heal: some buckets failed:', JSON.stringify(failed));
-    }
-  }).catch((err) => {
-    console.error('[r2-cors] self-heal apply failed (non-fatal):', err?.$metadata?.httpStatusCode || err?.message || err);
+  const server = app.listen(PORT, () => {
+    console.log(`ACS Portal API listening on port ${PORT}`);
+    console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ') || '(none)'}`);
   });
-} else {
-  // Confirm at boot so an operator who inspects Render logs can see
-  // that the API deliberately skipped CORS provisioning. Canonical
-  // provisioning is now a preDeploy script (see scripts/README.md).
-  console.log('[r2-cors] boot-time provisioning disabled (default). Canonical provisioning via scripts/provisionR2.js. Set R2_CORS_SELF_HEAL=true to re-enable for dev.');
-}
 
-// Graceful shutdown — close server first, then disconnect Prisma
-let shuttingDown = false;
-async function shutdown(signal) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log(`[shutdown] received ${signal}, draining...`);
-  server.close((err) => {
-    if (err) console.error('[shutdown] server.close error', err);
-  });
-  try {
-    await prisma.$disconnect();
-  } catch (e) {
-    console.error('[shutdown] prisma disconnect error', e);
+  // R2 bucket CORS provisioning (round-13 → round-20 DR-017).
+  //
+  // Round-13: a one-shot CORS applier ran on every boot. Without it, the
+  // browser preflight to the presigned PUT URL returned 403 with no
+  // Access-Control-Allow-* headers and the browser aborted the upload
+  // with "Network error during upload" before any bytes left.
+  //
+  // Round-20 (DR-017): canonical provisioning moved to
+  // `scripts/provisionR2.js` (run once at deploy time as a preDeploy hook).
+  // This boot-time call is now a NO-OP in production unless the env flag
+  // `R2_CORS_SELF_HEAL=true` is set (dev convenience). The runtime IAM
+  // key no longer needs `s3:PutBucketCors` / `s3:CreateBucket` — only the
+  // much narrower `s3:PutObject` / `s3:GetObject` / `s3:DeleteObject` on
+  // the bucket paths. See `scripts/README.md` for the deploy flow.
+  const { applyR2Cors } = require('./lib/blobStorage');
+  const r2SelfHeal = process.env.R2_CORS_SELF_HEAL === 'true';
+  if (r2SelfHeal) {
+    applyR2Cors(ALLOWED_ORIGINS).then((results) => {
+      const failed = results.filter((r) => !r.ok && !r.skipped);
+      if (failed.length === 0) {
+        console.log(`[r2-cors] self-heal applied CORS policy to ${results.length} bucket(s): ${results.map((r) => r.Bucket).join(', ')}`);
+      } else {
+        console.error('[r2-cors] self-heal: some buckets failed:', JSON.stringify(failed));
+      }
+    }).catch((err) => {
+      console.error('[r2-cors] self-heal apply failed (non-fatal):', err?.$metadata?.httpStatusCode || err?.message || err);
+    });
+  } else {
+    // Confirm at boot so an operator who inspects Render logs can see
+    // that the API deliberately skipped CORS provisioning. Canonical
+    // provisioning is now a preDeploy script (see scripts/README.md).
+    console.log('[r2-cors] boot-time provisioning disabled (default). Canonical provisioning via scripts/provisionR2.js. Set R2_CORS_SELF_HEAL=true to re-enable for dev.');
   }
-  setTimeout(() => process.exit(0), 5000).unref();
+
+  // Graceful shutdown — close server first, then disconnect Prisma
+  let shuttingDown = false;
+  async function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[shutdown] received ${signal}, draining...`);
+    server.close((err) => {
+      if (err) console.error('[shutdown] server.close error', err);
+    });
+    try {
+      await prisma.$disconnect();
+    } catch (e) {
+      console.error('[shutdown] prisma disconnect error', e);
+    }
+    setTimeout(() => process.exit(0), 5000).unref();
+  }
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
+  return server;
 }
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = app;
+module.exports.startServer = startServer;
