@@ -39,12 +39,41 @@ function getClient() {
   return s3Client;
 }
 
+// Crockford base32 alphabet. Same shape as the canonical ULID spec —
+// excludes I, L, O, U to avoid hand-transcription confusion. The
+// downstream validator (`backend/src/routes/dpr.js` line 464 + the
+// mirror at `inspection.js` line 245) accepts exactly this alphabet;
+// round-22 live bug: the previous generator used `Date.now().toString(36)`
+// for the timestamp, which can emit I/L/O/U (base36 includes the full
+// 0-9A-Z), so roughly 11% of generated ULIDs were rejected on POST
+// with `photos[0].ulid invalid`. Encoding uniformly into Crockford
+// keeps generator + validator in lockstep.
+const CROCKFORD_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+/**
+ * Encode a non-negative integer as Crockford base32 (no padding).
+ */
+function crockfordEncode(n, minChars = 0) {
+  if (n === 0n) return CROCKFORD_ALPHABET[0].repeat(Math.max(1, minChars));
+  let out = '';
+  let v = n;
+  while (v > 0n) {
+    out = CROCKFORD_ALPHABET[Number(v & 31n)] + out;
+    v >>= 5n;
+  }
+  return out.padStart(minChars, '0');
+}
+
 /**
  * Generate a ULID-like 128-bit identifier (26-char Crockford base32).
+ * Layout: 10-char timestamp (ms since epoch) + 16-char randomness.
  */
 function generateULID() {
-  const ts = Date.now().toString(36).toUpperCase().padStart(10, '0');
-  const rand = randomBytes(10).toString('hex').toUpperCase();
+  const ts = crockfordEncode(BigInt(Date.now()), 10);
+  // 16 random chars = 80 bits. Hex (0-9A-F) is a subset of Crockford
+  // base32, so we can keep the hex trick — every hex char is a valid
+  // Crockford char. 10 random bytes -> 20 hex chars; take the first 16.
+  const rand = randomBytes(10).toString('hex').toUpperCase().slice(0, 16);
   return (ts + rand).slice(0, 26);
 }
 
