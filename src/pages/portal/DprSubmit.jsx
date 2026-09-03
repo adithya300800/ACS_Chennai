@@ -94,12 +94,16 @@ function formatIndianDate(iso) {
 }
 
 export default function DprSubmit() {
-  useDocumentTitle(draftId ? 'Edit Draft · Daily Progress Report' : 'New Daily Progress Report');
   const { accessToken } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const draftId = searchParams.get('draftId') || null;
+  // SOL-P1 mobile: order matters — draftId must be declared before
+  // useDocumentTitle's first call so the minifier doesn't trip the TDZ
+  // ("Cannot access 'g' before initialization") when the document-title
+  // effect tries to read it on mount.
+  useDocumentTitle(draftId ? 'Edit Draft · Daily Progress Report' : 'New Daily Progress Report');
   const fileInputRef = useRef(null);
   const submittingRef = useRef(false);
 
