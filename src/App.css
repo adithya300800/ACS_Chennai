@@ -2604,6 +2604,235 @@ footer {
   margin-top: 0.75rem;
 }
 
+/* SOL-P2#16: Employee home dashboard. Two-column grid on desktop so the
+   unused canvas from the audit is filled with actionable widgets. */
+
+.dashboard-page {
+  max-width: 1280px;
+}
+
+.dashboard-error {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.dashboard-attendance {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 1.25rem;
+  background: linear-gradient(135deg, #eff6ff 0%, #f8fafc 100%);
+  border: 1px solid #dbeafe;
+  border-radius: 16px;
+  padding: 1.5rem 1.75rem;
+  margin-bottom: 1.5rem;
+}
+.dashboard-attendance-eyebrow {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--steel);
+  margin-bottom: 0.5rem;
+}
+.dashboard-attendance-state {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.dashboard-state-pill {
+  display: inline-block;
+  font-size: 0.85rem;
+  font-weight: 700;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  background: rgba(0, 102, 255, 0.12);
+  color: #0044CC;
+}
+.dashboard-state-pill.on { background: #d1fae5; color: #065f46; }
+.dashboard-state-pill.off { background: #e0e7ff; color: #3730a3; }
+.dashboard-state-pill.muted { background: #f1f5f9; color: var(--steel); }
+.dashboard-attendance-time {
+  font-size: 0.95rem;
+  color: var(--navy);
+  font-weight: 500;
+}
+.dashboard-attendance-addr {
+  color: var(--steel);
+  font-weight: 400;
+  font-size: 0.85rem;
+}
+.dashboard-attendance-hint {
+  font-size: 0.95rem;
+  color: var(--steel);
+  margin: 1rem 0 0;
+}
+.dashboard-attendance-hint a {
+  color: var(--blue-dark);
+  font-weight: 600;
+  text-decoration: none;
+  margin-left: 0.4rem;
+}
+.dashboard-attendance-hint a:hover { text-decoration: underline; }
+.dashboard-attendance-error {
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  color: #991b1b;
+}
+.dashboard-attendance-aside {
+  display: flex;
+  align-items: center;
+  border-left: 1px solid rgba(0, 102, 255, 0.18);
+  padding-left: 1.25rem;
+}
+.dashboard-aside-link {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  text-decoration: none;
+  color: var(--navy);
+  font-size: 0.9rem;
+  padding: 0.5rem;
+  border-radius: 10px;
+  transition: background 0.15s;
+}
+.dashboard-aside-link:hover { background: rgba(0, 102, 255, 0.06); }
+.dashboard-aside-link svg { color: var(--steel); }
+.dashboard-aside-link strong { display: block; font-weight: 600; }
+.dashboard-aside-link small { color: var(--steel); font-size: 0.78rem; }
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem;
+}
+.dashboard-card {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 1.25rem 1.4rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.dashboard-card-wide { grid-column: span 2; }
+.dashboard-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.85rem;
+}
+.dashboard-card-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--navy);
+  margin: 0;
+  display: flex;
+  align-items: center;
+}
+.dashboard-card-link {
+  font-size: 0.8rem;
+  color: var(--blue-dark);
+  text-decoration: none;
+  font-weight: 600;
+}
+.dashboard-card-link:hover { text-decoration: underline; }
+.dashboard-card-empty {
+  color: var(--steel);
+  font-size: 0.9rem;
+  margin: 0;
+}
+.dashboard-card-primary {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--navy);
+}
+.dashboard-card-meta {
+  font-size: 0.8rem;
+  color: var(--steel);
+  margin-top: 0.25rem;
+}
+.dashboard-card-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.dashboard-card-list-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--navy);
+}
+.dashboard-card-list-row.overdue .dashboard-card-list-text { color: #991b1b; font-weight: 600; }
+.dashboard-card-list-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dashboard-card-list-meta {
+  color: var(--steel);
+  font-size: 0.78rem;
+  flex-shrink: 0;
+}
+.dashboard-pill {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.dashboard-pill-pending { background: #fef3c7; color: #92400e; }
+.dashboard-pill-approved { background: #d1fae5; color: #065f46; }
+.dashboard-pill-rejected { background: #fee2e2; color: #991b1b; }
+.dashboard-pill-cancelled { background: #f1f5f9; color: var(--steel); }
+
+.dashboard-activity {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.dashboard-activity-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  font-size: 0.88rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+.dashboard-activity-row:last-child { border-bottom: 0; }
+.dashboard-activity-icon { color: var(--steel); flex-shrink: 0; margin-top: 3px; }
+.dashboard-activity-body { flex: 1; min-width: 0; }
+.dashboard-activity-text { display: block; font-weight: 500; color: var(--navy); }
+.dashboard-activity-sub { display: block; color: var(--steel); font-size: 0.78rem; margin-top: 1px; }
+.dashboard-activity-time { color: var(--steel); font-size: 0.75rem; flex-shrink: 0; }
+
+@media (max-width: 960px) {
+  .dashboard-attendance { grid-template-columns: 1fr; }
+  .dashboard-attendance-aside { border-left: 0; padding-left: 0; border-top: 1px solid rgba(0, 102, 255, 0.18); padding-top: 1rem; }
+}
+@media (max-width: 640px) {
+  .dashboard-grid { grid-template-columns: 1fr; }
+  .dashboard-card-wide { grid-column: span 1; }
+}
+
 /* Round-17 B-06: bulk-select UI on the admin DPR queue.
    - .dpr-card-selected gives a soft blue ring so the admin can see which
      cards are in the current batch.

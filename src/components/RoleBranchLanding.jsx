@@ -6,6 +6,10 @@
 //      dragging in 23 lazy page chunks + PortalLayout + AuthContext's
 //      api.js + env.js chain (see src/__tests__/App.test.jsx).
 //
+// SOL-P2#16: non-admin employees now land on the home dashboard instead
+// of directly on Attendance. The dashboard offers check-in/out, draft
+// DPR, training due, leave, and recent updates in a single screen.
+//
 // The admin target is passed in as a render prop (`renderAdmin`) rather
 // than imported via `React.lazy()` here — the actual lazy import lives
 // in App.jsx where it already lazy-chunks the AdminOverview bundle. This
@@ -31,5 +35,7 @@ export default function RoleBranchLanding({ renderAdmin }) {
   if (employee?.isAdmin) {
     return renderAdmin ? renderAdmin() : null;
   }
-  return <Navigate to="attendance" replace />;
+  // SOL-P2#16: home dashboard is the new landing for employees. Attendance
+  // stays available at /portal/attendance for the full month history view.
+  return <Navigate to="dashboard" replace />;
 }

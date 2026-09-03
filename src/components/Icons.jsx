@@ -78,3 +78,49 @@ export function BuildingIcon({ size = 14, style }) {
     </svg>
   );
 }
+
+export function ClockIcon({ size = 14, style }) {
+  return (
+    <svg width={size} height={size} {...ICON_BASE} style={style}>
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </svg>
+  );
+}
+
+export function DocIcon({ size = 14, style }) {
+  return (
+    <svg width={size} height={size} {...ICON_BASE} style={style}>
+      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="9" y1="13" x2="15" y2="13" />
+      <line x1="9" y1="17" x2="13" y2="17" />
+    </svg>
+  );
+}
+
+export function BookIcon({ size = 14, style }) {
+  return (
+    <svg width={size} height={size} {...ICON_BASE} style={style}>
+      <path d="M4 19.5A2.5 2.5 0 016.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />
+    </svg>
+  );
+}
+
+export function PlaneIcon({ size = 14, style }) {
+  return (
+    <svg width={size} height={size} {...ICON_BASE} style={style}>
+      <path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z" />
+    </svg>
+  );
+}
+
+export function BellIcon({ size = 14, style }) {
+  return (
+    <svg width={size} height={size} {...ICON_BASE} style={style}>
+      <path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 01-3.46 0" />
+    </svg>
+  );
+}

@@ -106,8 +106,11 @@ export default function PortalLogin() {
         .then((data) => {
           setAuthData(data.accessToken, data.employee, data.refreshToken);
           maybeShowWelcomeToast(toast, data.employee);
-          // P0/A-02: land admins on the new Overview, employees on Attendance.
-          const landing = data.employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
+          // P0/A-02: land admins on the new Overview.
+          // SOL-P2#16: employees now land on the home dashboard (which itself
+          // surfaces today's attendance state). Attendance stays at
+          // /portal/attendance for the full month history view.
+          const landing = data.employee?.isAdmin ? '/portal/admin' : '/portal/dashboard';
           // SPA navigation — preserves any draft state and avoids a full reload
           navigate(landing, { replace: true });
         })
@@ -164,7 +167,8 @@ export default function PortalLogin() {
       } catch {}
       maybeShowWelcomeToast(toast, employee);
       // P0/A-02: branch landing on role post-auth.
-      const landing = employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
+      // SOL-P2#16: employees now land on the home dashboard.
+      const landing = employee?.isAdmin ? '/portal/admin' : '/portal/dashboard';
       navigate(landing);
     } catch (err) {
       const msg = err.message || 'Login failed. Please check your credentials.';

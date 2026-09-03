@@ -37,7 +37,10 @@ function branchLanding({ employee }) {
   if (employee && employee.isAdmin) {
     return { type: 'admin', target: '/portal/admin' };
   }
-  return { type: 'employee', target: '/portal/attendance' };
+  // SOL-P2#16: employees now land on the home dashboard (which itself
+  // surfaces today's attendance state). Attendance stays accessible at
+  // /portal/attendance for full history.
+  return { type: 'employee', target: '/portal/dashboard' };
 }
 
 const rblPath = resolvePath(__dirname, '../components/RoleBranchLanding.jsx');
@@ -63,14 +66,14 @@ describe('RoleBranchLanding — DR-020', () => {
       .toEqual({ type: 'admin', target: '/portal/admin' });
   });
 
-  test('employee employee → attendance redirect', () => {
+  test('employee employee → dashboard redirect', () => {
     expect(branchLanding({ employee: { id: 'e', isAdmin: false, role: 'EMPLOYEE' } }))
-      .toEqual({ type: 'employee', target: '/portal/attendance' });
+      .toEqual({ type: 'employee', target: '/portal/dashboard' });
   });
 
-  test('null employee → safe default (attendance)', () => {
+  test('null employee → safe default (dashboard)', () => {
     expect(branchLanding({ employee: null }))
-      .toEqual({ type: 'employee', target: '/portal/attendance' });
+      .toEqual({ type: 'employee', target: '/portal/dashboard' });
   });
 
   test('stale localStorage("acs_employee") is not consulted by the new code', () => {
@@ -78,6 +81,6 @@ describe('RoleBranchLanding — DR-020', () => {
     // never reads from localStorage at all.
     localStorage.setItem('acs_employee', JSON.stringify({ isAdmin: true }));
     expect(branchLanding({ employee: { id: 'e', isAdmin: false, role: 'EMPLOYEE' } }))
-      .toEqual({ type: 'employee', target: '/portal/attendance' });
+      .toEqual({ type: 'employee', target: '/portal/dashboard' });
   });
 });

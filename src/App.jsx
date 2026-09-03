@@ -19,6 +19,9 @@ const Careers = React.lazy(() => import('./pages/Careers.jsx'));
 const NotFound = React.lazy(() => import('./pages/NotFound.jsx'));
 const PortalLogin = React.lazy(() => import('./pages/PortalLogin.jsx'));
 const Attendance = React.lazy(() => import('./pages/portal/Attendance.jsx'));
+// SOL-P2#16: employee home dashboard — the new landing for non-admin
+// employees, replacing the previous direct redirect into Attendance.
+const EmployeeDashboard = React.lazy(() => import('./pages/portal/EmployeeDashboard.jsx'));
 const AdminOverview = React.lazy(() => import('./pages/admin/AdminOverview.jsx'));
 const AdminAttendance = React.lazy(() => import('./pages/portal/Admin.jsx')); // renamed semantically; kept file path stable
 const Leave = React.lazy(() => import('./pages/portal/Leave.jsx'));
@@ -81,6 +84,8 @@ function App() {
           }
         >
           <Route path="attendance" element={<Attendance />} />
+          {/* SOL-P2#16: employee home dashboard. */}
+          <Route path="dashboard" element={<EmployeeDashboard />} />
           {/* /portal/admin = new overview hub (A-01). /portal/admin/attendance
               keeps the org-wide attendance grid so the existing
               "All Attendance" tile and admin nav item still have a target. */}
