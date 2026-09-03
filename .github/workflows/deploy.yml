@@ -42,14 +42,24 @@ jobs:
       # test now blocks GitHub Pages instead of pushing a regression to
       # users. Tests run from repo root using the root jest config which
       # pulls in the backend setup file for auth/pii env seeding.
+      #
+      # PHASE-2 deploy gate: scope to src/__tests__/ only. Pages deploys
+      # only ship the frontend bundle, so backend integration tests
+      # (real Azure/R2 SAS-url, AWS SDK ESM/CJS resolution, jest-worker
+      # OOM on smoke suites) are NOT a release gate for this workflow.
+      # Backend has its own deploy.yml + integration gate.
       - name: Run tests
-        run: npm test
+        run: npx jest --testPathPattern='(^|/)src/__tests__/' --runInBand --forceExit
       - name: Build
+        # DR-018 fix: Resend email sending is backend-owned. The previous
+        # workflow passed ${{ secrets.RESEND_API_KEY }} into the build as
+        # VITE_RESEND_API_KEY, which would have inlined the email secret
+        # into the public JS bundle at acschennai.com where anyone could
+        # scrape it. The frontend only needs VITE_API_URL today.
         run: |
           export NODE_OPTIONS=--max-old-space-size=4096
           npm run build
         env:
-          VITE_RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           VITE_API_URL: ${{ secrets.VITE_API_URL }}
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

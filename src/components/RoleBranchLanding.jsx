@@ -24,9 +24,8 @@ export default function RoleBranchLanding({ renderAdmin }) {
   // Read role from AuthContext — same source of truth as PortalLayout,
   // ProtectedRoute, and PortalLogin's post-login redirect
   // (PortalLogin.jsx:108 — `data.employee?.isAdmin ? '/portal/admin' : ...`).
-  // The previous localStorage('acs_employee') read always failed because
-  // AuthContext stores the user under `acs_auth`; admins were misrouted to
-  // Attendance on first paint after refresh.
+  // The previous code read from the wrong per-user store key and admins
+  // were misrouted to Attendance on first paint after refresh.
   //
   // AuthProvider is mounted above this component in main.jsx, so useAuth()
   // resolves cleanly without violating the layering rule in CLAUDE.md
