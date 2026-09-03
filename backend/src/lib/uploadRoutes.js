@@ -133,7 +133,14 @@ function mountUploadRoutes(router, config = {}) {
       res.status(400).json({ error: 'VALIDATION_ERROR', message: 'container required' });
       return false;
     }
-    if (!allowedContainers.includes(container)) {
+    // Hardcoded mode: server picks the container, no allowlist check
+    // needed (and `allowedContainers` is undefined). Client-pick mode:
+    // verify against the allowlist. Calling `.includes` on undefined
+    // here used to crash the route with a TypeError → 500 (DR-014
+    // mounted-app integration suite surfaced it; the existing isolated
+    // uploadRoutes.test.js "hardcoded" cases had been timing out for the
+    // same reason).
+    if (allowedContainers && !allowedContainers.includes(container)) {
       res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid container' });
       return false;
     }

@@ -45,301 +45,356 @@ const {
   exportLimiter, leaveCreateLimiter,
 } = require('./middleware/rateLimit');
 
-const app = express();
-const prisma = new PrismaClient();
+// DR-014 (round-20): extract the Express app factory so mounted-route
+// integration tests can call `createApp({ prisma: mock, blobStorage: mock })`
+// and exercise the REAL middleware stack (helmet, request-id, CORS,
+// body-parser, rate-limiters, every route, the global error handler, and
+// the /health /version /ready probes) against a fully wired Express app.
+//
+// Before this refactor, every test hand-rolled its own minimal app with one
+// or two routers and a hand-copied error mapper. That meant the CI suite
+// was green while the production app itself could regress (parser order,
+// middleware order, error-shape mapping, /version auth). With createApp
+// we test the app as it is shipped — the same code path that runs on Render.
+//
+// Production behavior is unchanged: startServer() still listens on PORT,
+// the process still gets the real Prisma client + real blobStorage. The
+// only difference is the route through createApp().
+function createApp(deps = {}) {
+  const prisma = deps.prisma || new PrismaClient();
+  // The /ready endpoint probes R2 bucket existence via HeadBucketCommand.
+  // Tests inject a mock blobStorage (with `getClient()` and `REQUIRED_BUCKETS`)
+  // so they don't reach out to Cloudflare.
+  const blobStorage = deps.blobStorage || require('./lib/blobStorage');
 
-// Trust Render's reverse-proxy load balancer (1 hop) so req.ip reflects the
-// real client behind Render's edge, not the proxy's IP (rate-limit + audit).
-app.set('trust proxy', 1);
+  const app = express();
 
-const PORT = (process.env.PORT && process.env.PORT !== '') ? process.env.PORT : 8080;
+  // Trust Render's reverse-proxy load balancer (1 hop) so req.ip reflects the
+  // real client behind Render's edge, not the proxy's IP (rate-limit + audit).
+  app.set('trust proxy', 1);
 
-// Allowed origins — exact match only, no wildcard subdomain trust
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
-  : (process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])
-);
+  // Allowed origins — exact match only, no wildcard subdomain trust
+  const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
+    : (process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])
+  );
 
-if (process.env.NODE_ENV === 'production' && ALLOWED_ORIGINS.length === 0) {
-  throw new Error('ALLOWED_ORIGINS or FRONTEND_URL must be set in production');
+  if (process.env.NODE_ENV === 'production' && ALLOWED_ORIGINS.length === 0) {
+    throw new Error('ALLOWED_ORIGINS or FRONTEND_URL must be set in production');
+  }
+
+  app.disable('x-powered-by');
+  // Round-7: enable full helmet defaults (CSP, HSTS, X-Frame-Options,
+  // X-Content-Type-Options, Referrer-Policy, etc). The previous config
+  // disabled CSP entirely because we assumed an API doesn't render HTML —
+  // but helmet's defaults are still valuable (HSTS prevents SSL-stripping
+  // MITM, X-Content-Type-Options prevents MIME sniffing on the JSON
+  // responses, X-Frame-Options prevents clickjacking on error pages if any
+  // HTML slips through). The default CSP `default-src 'self'` is fine for
+  // a JSON-only API — there are no inline scripts or external assets.
+  //
+  // Round-11: override helmet's default `Cross-Origin-Opener-Policy:
+  // same-origin` to `same-origin-allow-popups`. The default severs
+  // window.opener as soon as the Zoho OAuth popup navigates cross-origin
+  // from the popup opener (acschennai.com) to the backend's callback
+  // (acs-chennai.onrender.com) — which means the callback HTML's
+  // `window.opener.postMessage(...)` runs against `window.opener === null`
+  // and the OAuth tokens are silently never delivered to the parent.
+  // `same-origin-allow-popups` preserves COOP isolation for non-popup
+  // browsing contexts while keeping the opener reference intact for
+  // popup-launched documents, which is exactly what the OAuth callback
+  // needs.
+  app.use(helmet({
+    crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+  }));
+
+  // ─── Request ID (DR-012) ───────────────────────────────────────────────────
+  // Every response carries an `X-Request-Id` so a user reporting "it failed"
+  // can hand over one token that ties their request to the server log line in
+  // the error handler below. Before DR-012 the id was minted *inside* the error
+  // handler, which meant it only existed on 5xx responses and was never sent to
+  // the client on success — useless for correlating a report after the fact.
+  //
+  // Mounted before CORS (and therefore before every route) so the header is
+  // present on preflight 204s, health probes, 404s, and error responses alike.
+  //
+  // An inbound `X-Request-Id` is honoured so a trace started at Render's edge
+  // or by the SPA survives the hop — but it is validated first, not echoed
+  // blind. Two reasons: (1) `res.setHeader` throws `ERR_INVALID_CHAR` on a
+  // value containing CR/LF, so an unvalidated echo turns a malformed header
+  // into a 500; (2) an unbounded caller-controlled value would land verbatim
+  // in the log line, letting a caller forge log entries. Anything that isn't a
+  // short, plain token is discarded in favour of a server-generated UUID.
+  const REQUEST_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+  app.use((req, res, next) => {
+    const supplied = req.headers['x-request-id'];
+    req.id = (typeof supplied === 'string' && REQUEST_ID_RE.test(supplied))
+      ? supplied
+      : randomUUID();
+    res.setHeader('X-Request-Id', req.id);
+    next();
+  });
+
+  // CORS — manual headers, exact origin allowlist.
+  // Round-7: trimmed methods to what this API actually uses. Audited the
+  // routes: only GET, POST, PUT are mounted (no DELETE or PATCH handlers).
+  // Listing unused methods gives browsers no extra capability but makes
+  // intent fuzzing easier (e.g. an attacker probing for DELETE endpoints
+  // knows the server's CORS policy explicitly allows it).
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && ALLOWED_ORIGINS.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-Request-ID, X-Internal-Token');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      // Round-13: expose Content-Disposition + X-Export-* so the browser JS
+      // can read the suggested filename and the chosen export format on the
+      // /api/attendance/export binary response. Without this the browser
+      // gets a Blob but no way to know what to call the file or whether the
+      // server fell back from xlsx to csv.
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Export-Format, X-Export-Row-Count, X-Request-Id');
+      res.setHeader('Access-Control-Max-Age', '300');
+    }
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+    next();
+  });
+
+  // Body parser — single global 1 MB limit (DR-007 fix).
+  // Round-7 had a 16 KB global default + per-route 1 MB opt-ins for DPR and
+  // inspection. The intent was "tight limit globally, looser limit per route".
+  // In practice that didn't work: Express 4's json middleware skips re-parsing
+  // once the body is populated, so a 17 KB payload hitting the global parser
+  // 413'd before the route-specific parser could ever run.
+  //
+  // The route-level overrides are now collapsed into this single 1 MB global.
+  // Rationale: DPR and inspection `data` blobs (workEntries + photo metadata,
+  // NCR / cube test / material receipt structured JSON) legitimately exceed
+  // the 16 KB default, but nothing in the API accepts more than ~1 MB of JSON
+  // — uploads are presigned PUT to R2, not JSON bodies. Per-route tighter
+  // limits (e.g. auth at 32 KB, contact at 16 KB) are NOT re-introduced here:
+  // they were never enforced in Round-7 either (parser-order bug), and adding
+  // them now would re-introduce the same ordering trap. If a route genuinely
+  // needs a tighter limit in the future, mount its parser BEFORE this one and
+  // document why.
+  //
+  // Mount order matters: parser must be before the route handler.
+  const defaultBodyLimit = '1mb';
+  app.use(express.json({ limit: defaultBodyLimit }));
+
+  app.set('prisma', prisma);
+
+  // ─── Health & readiness ───────────────────────────────────────────────────
+  // /health is the liveness probe (lightweight — never depends on downstreams).
+  // Deliberately returns only {status, timestamp}. Deploy metadata (SHA, time)
+  // is exposed only on /version, which requires an internal token — public
+  // attackers don't need to know which commit is running.
+  app.get('/health', (req, res) => {
+    res.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // /version is for ops/SRE dashboards. Requires the X-Internal-Token header to
+  // match INTERNAL_API_TOKEN env var (set via Azure App Setting). 404 when unset.
+  //
+  // DR-014 (round-20): extended with expected-SHA verification. The deploy
+  // workflow writes DEPLOY_SHA (the commit it pushed) and EXPECTED_SHA
+  // (the commit the workflow was triggered for, i.e. github.event.head_sha).
+  // When both are present and DIFFERENT, `matches: false` is returned —
+  // indicating the running release is not what the workflow intended to ship.
+  // This is the "release identity" half of the production-contract suite:
+  // ops dashboards alert on `matches === false` rather than guessing.
+  app.get('/version', (req, res) => {
+    const expected = process.env.INTERNAL_API_TOKEN;
+    if (!expected) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    if (req.headers['x-internal-token'] !== expected) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const deploySha = process.env.DEPLOY_SHA || 'unknown';
+    const expectedSha = process.env.EXPECTED_SHA || null;
+    // Both set and equal → ok. Both set and different → mismatch. Either
+    // missing → null (workflow didn't wire the env, can't determine).
+    let matches = null;
+    if (expectedSha && deploySha !== 'unknown') {
+      matches = deploySha === expectedSha;
+    }
+    res.json({
+      status: 'ok',
+      deploySha,
+      expectedSha,
+      matches,
+      deployTime: process.env.DEPLOY_TIME || 'unknown',
+      nodeEnv: process.env.NODE_ENV,
+    });
+  });
+
+  app.get('/ready', async (req, res) => {
+    // DR-017: every required R2 bucket must be reachable, not just dpr-photos.
+    // The previous probe only checked dpr-photos, so /ready reported healthy
+    // even when inspection-photos / training-materials were missing — masking
+    // the very class of "bucket never provisioned" bugs round-13 fixed for
+    // the DPR side. Each probe is a HeadBucket call (no enumeration), so the
+    // readiness check stays cheap even with three buckets.
+    const checks = { db: 'fail', blob: {} };
+    let ok = true;
+
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      checks.db = 'ok';
+    } catch (err) {
+      ok = false;
+      // Include err.code + err.name so an empty-message Prisma error (e.g.
+      // a network-layer failure) still surfaces the cause for diagnosis.
+      checks.db = `fail: ${err.code || err.name || 'unknown'}: ${err.message?.split('\n')[0] || ''}`;
+    }
+
+    try {
+      const { getClient, REQUIRED_BUCKETS } = blobStorage;
+      const { HeadBucketCommand } = require('@aws-sdk/client-s3');
+      const client = getClient();
+      // Run probes in parallel — three HeadBucket calls finish in well under
+      // a second even on a cold R2 path, and serial would just add latency
+      // to every Render liveness ping.
+      const probeResults = await Promise.all(REQUIRED_BUCKETS.map(async (Bucket) => {
+        try {
+          await client.send(new HeadBucketCommand({ Bucket }));
+          return { Bucket, ok: true };
+        } catch (err) {
+          // Distinguish missing-bucket (NotFound), auth/perm (Forbidden), and
+          // network failures (NetworkingError) so operators can see the cause
+          // without the error leaking credentials or bucket names.
+          const errName = err?.name || err?.Code || 'unknown';
+          return { Bucket, ok: false, error: errName };
+        }
+      }));
+      for (const r of probeResults) {
+        checks.blob[r.Bucket] = r.ok ? 'ok' : `fail: ${r.error}`;
+        if (!r.ok) ok = false;
+      }
+    } catch (err) {
+      // R2 client itself failed to initialize (missing env, bad endpoint).
+      // This is a deploy-level misconfiguration; mark ALL buckets unknown
+      // rather than guessing.
+      ok = false;
+      const errName = err?.name || err?.message || 'unknown';
+      for (const Bucket of (blobStorage.REQUIRED_BUCKETS || [])) {
+        checks.blob[Bucket] = `fail: client: ${errName}`;
+      }
+    }
+
+    res.status(ok ? 200 : 503).json({ status: ok ? 'ready' : 'degraded', checks });
+  });
+
+  // ─── Routes ───────────────────────────────────────────────────────────────
+  // Auth: rate-limit per-IP BEFORE routing so abusive callers hit the limiter
+  // even if their payload would otherwise be parsed/rejected.
+  app.use('/api/auth/login', loginLimiter);
+  app.use('/api/auth/refresh', refreshLimiter);
+  app.use('/api/auth', authRoutes);
+  // Round-13: rate-limit the binary export BEFORE requireAuth so the limiter
+  // fires even for unauthenticated floods (saves a DB lookup). The handler
+  // itself still requires admin, so a banned admin still gets 403.
+  app.use('/api/attendance/export', exportLimiter);
+  app.use('/api/attendance', attendanceRoutes);
+  // Round-13: leave routes. The create-rate-limiter is mounted inside the
+  // route file (POST /) so it only throttles submissions — list/get/cancel
+  // remain unthrottled. leaveCreateLimiter is imported above and exported.
+  app.use('/api/leave', leaveRoutes);
+  // Round-14: employee training. Same pattern as leave — write-limiter is
+  // mounted inside the route file on POST/PUT only, so the dashboard reads
+  // stay cheap. No body-limit override: payloads are tiny (one URL + small
+  // metadata), well under the global 1mb default.
+  app.use('/api/training', trainingRoutes);
+  app.use('/api/dpr/sas-url', sasLimiter);
+  // DPR mount uses the global 1mb body limit (DR-007). Photo metadata +
+  // workEntries payloads can legitimately approach 1 MB; actual binary
+  // uploads go via R2 presigned PUT, not JSON bodies.
+  app.use('/api/dpr', dprRoutes);
+  // Round-12: Inspection & Compliance Records. Uses the global 1mb body
+  // limit — inspection `data` is a structured JSON blob (NCR / cube test /
+  // material receipt) and can legitimately approach 1 MB.
+  app.use('/api/inspection/sas-url', sasLimiter);
+  app.use('/api/inspection', inspectionRoutes);
+  app.use('/api/contact', contactLimiter, contactRoutes);
+  // DR-017: admin storage health — orphan counts + on-demand sweep trigger.
+  // Routes inside use requireAuth + requireFreshAdmin; the mount itself has
+  // no extra middleware.
+  app.use('/api/admin/storage', storageAdminRoutes);
+
+  app.use((req, res) => {
+    res.status(404).json({ error: 'Not found' });
+  });
+
+  app.use((err, req, res, next) => {
+    // DR-012: reuse the server-owned id minted by the request-id middleware so
+    // the value logged here is the same one the client already received in the
+    // `X-Request-Id` response header. The `??` fallback only fires if this
+    // handler is somehow reached before that middleware ran.
+    const requestId = req.id ?? randomUUID();
+    // Map known Prisma error codes to the right HTTP response so the
+    // client gets actionable 4xx instead of a generic 500.
+    let status = 500;
+    let body = { error: 'Internal server error', requestId };
+    // Round-8 (F1): body-parser SyntaxError → 400 instead of 500. The previous
+    // catch-all surfaced `not-json{` as 500, which masked the actual cause
+    // (malformed JSON from the client) and made it look like a server bug.
+    if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError) && err.status === 400) {
+      status = 400;
+      body = { error: 'Malformed JSON body', code: 'INVALID_JSON', requestId };
+    } else if (err && err.type === 'entity.too.large' && err.status === 413) {
+      // DR-014 (round-20): body-parser payload too large → 413 instead of 500.
+      // The previous catch-all surfaced a 2 MB POST as 500, which looked like
+      // a server bug rather than a "client overshot the 1 MB limit" message.
+      // This was previously untested because the bodyParser.test.js test
+      // mocks the error handler on a throwaway app; the mounted-app integration
+      // suite (DR-014) is what surfaced it. The contract is: oversized
+      // bodies are a CLIENT error, not a server error.
+      status = 413;
+      body = { error: 'Payload too large', code: 'PAYLOAD_TOO_LARGE', requestId };
+    } else if (err && typeof err.code === 'string') {
+      if (err.code === 'P2003') { status = 400; body = { error: 'Referenced record does not exist', code: 'FK_VIOLATION', requestId }; }
+      else if (err.code === 'P2009') { status = 400; body = { error: 'Database rejected the input', code: 'VALIDATION_FAILED', requestId }; }
+      else if (err.code === 'P2025') { status = 404; body = { error: 'Record not found', code: 'NOT_FOUND', requestId }; }
+      else if (['P1001','P1002','P1017','P2024'].includes(err.code)) { status = 503; body = { error: 'Database temporarily unavailable', code: 'DB_UNAVAILABLE', requestId }; }
+    }
+    console.error(`[err ${requestId}]`, {
+      path: req.path,
+      method: req.method,
+      status,
+      code: err?.code,
+      name: err?.name,
+      message: err?.message?.split('\n')[0],
+    });
+    if (process.env.NODE_ENV !== 'production') {
+      console.error(err.stack);
+    }
+    res.status(status).json(body);
+  });
+
+  return { app, prisma, blobStorage };
 }
 
-app.disable('x-powered-by');
-// Round-7: enable full helmet defaults (CSP, HSTS, X-Frame-Options,
-// X-Content-Type-Options, Referrer-Policy, etc). The previous config
-// disabled CSP entirely because we assumed an API doesn't render HTML —
-// but helmet's defaults are still valuable (HSTS prevents SSL-stripping
-// MITM, X-Content-Type-Options prevents MIME sniffing on the JSON
-// responses, X-Frame-Options prevents clickjacking on error pages if any
-// HTML slips through). The default CSP `default-src 'self'` is fine for
-// a JSON-only API — there are no inline scripts or external assets.
-//
-// Round-11: override helmet's default `Cross-Origin-Opener-Policy:
-// same-origin` to `same-origin-allow-popups`. The default severs
-// window.opener as soon as the Zoho OAuth popup navigates cross-origin
-// from the popup opener (acschennai.com) to the backend's callback
-// (acs-chennai.onrender.com) — which means the callback HTML's
-// `window.opener.postMessage(...)` runs against `window.opener === null`
-// and the OAuth tokens are silently never delivered to the parent.
-// `same-origin-allow-popups` preserves COOP isolation for non-popup
-// browsing contexts while keeping the opener reference intact for
-// popup-launched documents, which is exactly what the OAuth callback
-// needs.
-app.use(helmet({
-  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
-}));
-
-// ─── Request ID (DR-012) ─────────────────────────────────────────────────────
-// Every response carries an `X-Request-Id` so a user reporting "it failed"
-// can hand over one token that ties their request to the server log line in
-// the error handler below. Before DR-012 the id was minted *inside* the error
-// handler, which meant it only existed on 5xx responses and was never sent to
-// the client on success — useless for correlating a report after the fact.
-//
-// Mounted before CORS (and therefore before every route) so the header is
-// present on preflight 204s, health probes, 404s, and error responses alike.
-//
-// An inbound `X-Request-Id` is honoured so a trace started at Render's edge
-// or by the SPA survives the hop — but it is validated first, not echoed
-// blind. Two reasons: (1) `res.setHeader` throws `ERR_INVALID_CHAR` on a
-// value containing CR/LF, so an unvalidated echo turns a malformed header
-// into a 500; (2) an unbounded caller-controlled value would land verbatim
-// in the log line, letting a caller forge log entries. Anything that isn't a
-// short, plain token is discarded in favour of a server-generated UUID.
-const REQUEST_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
-app.use((req, res, next) => {
-  const supplied = req.headers['x-request-id'];
-  req.id = (typeof supplied === 'string' && REQUEST_ID_RE.test(supplied))
-    ? supplied
-    : randomUUID();
-  res.setHeader('X-Request-Id', req.id);
-  next();
-});
-
-// CORS — manual headers, exact origin allowlist.
-// Round-7: trimmed methods to what this API actually uses. Audited the
-// routes: only GET, POST, PUT are mounted (no DELETE or PATCH handlers).
-// Listing unused methods gives browsers no extra capability but makes
-// intent fuzzing easier (e.g. an attacker probing for DELETE endpoints
-// knows the server's CORS policy explicitly allows it).
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin && ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-Request-ID, X-Internal-Token');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    // Round-13: expose Content-Disposition + X-Export-* so the browser JS
-    // can read the suggested filename and the chosen export format on the
-    // /api/attendance/export binary response. Without this the browser
-    // gets a Blob but no way to know what to call the file or whether the
-    // server fell back from xlsx to csv.
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Export-Format, X-Export-Row-Count, X-Request-Id');
-    res.setHeader('Access-Control-Max-Age', '300');
-  }
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
-  next();
-});
-
-// Body parser — single global 1 MB limit (DR-007 fix).
-// Round-7 had a 16 KB global default + per-route 1 MB opt-ins for DPR and
-// inspection. The intent was "tight limit globally, looser limit per route".
-// In practice that didn't work: Express 4's json middleware skips re-parsing
-// once the body is populated, so a 17 KB payload hitting the global parser
-// 413'd before the route-specific parser could ever run.
-//
-// The route-level overrides are now collapsed into this single 1 MB global.
-// Rationale: DPR and inspection `data` blobs (workEntries + photo metadata,
-// NCR / cube test / material receipt structured JSON) legitimately exceed
-// the 16 KB default, but nothing in the API accepts more than ~1 MB of JSON
-// — uploads are presigned PUT to R2, not JSON bodies. Per-route tighter
-// limits (e.g. auth at 32 KB, contact at 16 KB) are NOT re-introduced here:
-// they were never enforced in Round-7 either (parser-order bug), and adding
-// them now would re-introduce the same ordering trap. If a route genuinely
-// needs a tighter limit in the future, mount its parser BEFORE this one and
-// document why.
-//
-// Mount order matters: parser must be before the route handler.
-const defaultBodyLimit = '1mb';
-app.use(express.json({ limit: defaultBodyLimit }));
-
-app.set('prisma', prisma);
-
-// ─── Health & readiness ──────────────────────────────────────────────────────
-// /health is the liveness probe (lightweight — never depends on downstreams).
-// Deliberately returns only {status, timestamp}. Deploy metadata (SHA, time)
-// is exposed only on /version, which requires an internal token — public
-// attackers don't need to know which commit is running.
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-  });
-});
-
-// /version is for ops/SRE dashboards. Requires the X-Internal-Token header to
-// match INTERNAL_API_TOKEN env var (set via Azure App Setting). 404 when unset.
-app.get('/version', (req, res) => {
-  const expected = process.env.INTERNAL_API_TOKEN;
-  if (!expected) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  if (req.headers['x-internal-token'] !== expected) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-  res.json({
-    status: 'ok',
-    deploySha: process.env.DEPLOY_SHA || 'unknown',
-    deployTime: process.env.DEPLOY_TIME || 'unknown',
-    nodeEnv: process.env.NODE_ENV,
-  });
-});
-
-app.get('/ready', async (req, res) => {
-  // DR-017: every required R2 bucket must be reachable, not just dpr-photos.
-  // The previous probe only checked dpr-photos, so /ready reported healthy
-  // even when inspection-photos / training-materials were missing — masking
-  // the very class of "bucket never provisioned" bugs round-13 fixed for
-  // the DPR side. Each probe is a HeadBucket call (no enumeration), so the
-  // readiness check stays cheap even with three buckets.
-  const checks = { db: 'fail', blob: {} };
-  let ok = true;
-
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-    checks.db = 'ok';
-  } catch (err) {
-    ok = false;
-    // Include err.code + err.name so an empty-message Prisma error (e.g.
-    // a network-layer failure) still surfaces the cause for diagnosis.
-    checks.db = `fail: ${err.code || err.name || 'unknown'}: ${err.message?.split('\n')[0] || ''}`;
-  }
-
-  try {
-    const { getClient, REQUIRED_BUCKETS } = require('./lib/blobStorage');
-    const { HeadBucketCommand } = require('@aws-sdk/client-s3');
-    const client = getClient();
-    // Run probes in parallel — three HeadBucket calls finish in well under
-    // a second even on a cold R2 path, and serial would just add latency
-    // to every Render liveness ping.
-    const probeResults = await Promise.all(REQUIRED_BUCKETS.map(async (Bucket) => {
-      try {
-        await client.send(new HeadBucketCommand({ Bucket }));
-        return { Bucket, ok: true };
-      } catch (err) {
-        // Distinguish missing-bucket (NotFound), auth/perm (Forbidden), and
-        // network failures (NetworkingError) so operators can see the cause
-        // without the error leaking credentials or bucket names.
-        const errName = err?.name || err?.Code || 'unknown';
-        return { Bucket, ok: false, error: errName };
-      }
-    }));
-    for (const r of probeResults) {
-      checks.blob[r.Bucket] = r.ok ? 'ok' : `fail: ${r.error}`;
-      if (!r.ok) ok = false;
-    }
-  } catch (err) {
-    // R2 client itself failed to initialize (missing env, bad endpoint).
-    // This is a deploy-level misconfiguration; mark ALL buckets unknown
-    // rather than guessing.
-    ok = false;
-    const errName = err?.name || err?.message || 'unknown';
-    for (const Bucket of (require('./lib/blobStorage').REQUIRED_BUCKETS || [])) {
-      checks.blob[Bucket] = `fail: client: ${errName}`;
-    }
-  }
-
-  res.status(ok ? 200 : 503).json({ status: ok ? 'ready' : 'degraded', checks });
-});
-
-// ─── Routes ──────────────────────────────────────────────────────────────────
-// Auth: rate-limit per-IP BEFORE routing so abusive callers hit the limiter
-// even if their payload would otherwise be parsed/rejected.
-app.use('/api/auth/login', loginLimiter);
-app.use('/api/auth/refresh', refreshLimiter);
-app.use('/api/auth', authRoutes);
-// Round-13: rate-limit the binary export BEFORE requireAuth so the limiter
-// fires even for unauthenticated floods (saves a DB lookup). The handler
-// itself still requires admin, so a banned admin still gets 403.
-app.use('/api/attendance/export', exportLimiter);
-app.use('/api/attendance', attendanceRoutes);
-// Round-13: leave routes. The create-rate-limiter is mounted inside the
-// route file (POST /) so it only throttles submissions — list/get/cancel
-// remain unthrottled. leaveCreateLimiter is imported above and exported.
-app.use('/api/leave', leaveRoutes);
-// Round-14: employee training. Same pattern as leave — write-limiter is
-// mounted inside the route file on POST/PUT only, so the dashboard reads
-// stay cheap. No body-limit override: payloads are tiny (one URL + small
-// metadata), well under the global 1mb default.
-app.use('/api/training', trainingRoutes);
-app.use('/api/dpr/sas-url', sasLimiter);
-// DPR mount uses the global 1mb body limit (DR-007). Photo metadata +
-// workEntries payloads can legitimately approach 1 MB; actual binary
-// uploads go via R2 presigned PUT, not JSON bodies.
-app.use('/api/dpr', dprRoutes);
-// Round-12: Inspection & Compliance Records. Uses the global 1mb body
-// limit — inspection `data` is a structured JSON blob (NCR / cube test /
-// material receipt) and can legitimately approach 1 MB.
-app.use('/api/inspection/sas-url', sasLimiter);
-app.use('/api/inspection', inspectionRoutes);
-app.use('/api/contact', contactLimiter, contactRoutes);
-// DR-017: admin storage health — orphan counts + on-demand sweep trigger.
-// Routes inside use requireAuth + requireFreshAdmin; the mount itself has
-// no extra middleware.
-app.use('/api/admin/storage', storageAdminRoutes);
-
-app.use((req, res) => {
-  res.status(404).json({ error: 'Not found' });
-});
-
-app.use((err, req, res, next) => {
-  // DR-012: reuse the server-owned id minted by the request-id middleware so
-  // the value logged here is the same one the client already received in the
-  // `X-Request-Id` response header. The `??` fallback only fires if this
-  // handler is somehow reached before that middleware ran.
-  const requestId = req.id ?? randomUUID();
-  // Map known Prisma error codes to the right HTTP response so the
-  // client gets actionable 4xx instead of a generic 500.
-  let status = 500;
-  let body = { error: 'Internal server error', requestId };
-  // Round-8 (F1): body-parser SyntaxError → 400 instead of 500. The previous
-  // catch-all surfaced `not-json{` as 500, which masked the actual cause
-  // (malformed JSON from the client) and made it look like a server bug.
-  if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError) && err.status === 400) {
-    status = 400;
-    body = { error: 'Malformed JSON body', code: 'INVALID_JSON', requestId };
-  } else if (err && typeof err.code === 'string') {
-    if (err.code === 'P2003') { status = 400; body = { error: 'Referenced record does not exist', code: 'FK_VIOLATION', requestId }; }
-    else if (err.code === 'P2009') { status = 400; body = { error: 'Database rejected the input', code: 'VALIDATION_FAILED', requestId }; }
-    else if (err.code === 'P2025') { status = 404; body = { error: 'Record not found', code: 'NOT_FOUND', requestId }; }
-    else if (['P1001','P1002','P1017','P2024'].includes(err.code)) { status = 503; body = { error: 'Database temporarily unavailable', code: 'DB_UNAVAILABLE', requestId }; }
-  }
-  console.error(`[err ${requestId}]`, {
-    path: req.path,
-    method: req.method,
-    status,
-    code: err?.code,
-    name: err?.name,
-    message: err?.message?.split('\n')[0],
-  });
-  if (process.env.NODE_ENV !== 'production') {
-    console.error(err.stack);
-  }
-  res.status(status).json(body);
-});
-
-// ─── Boot ────────────────────────────────────────────────────────────────────
+// ─── Boot ──────────────────────────────────────────────────────────────────
 // Everything below runs ONLY when this file is the process entrypoint
 // (`node src/index.js`, which is what `npm start` and the Render start command
-// do). Guarding it lets a test `require('../src/index')` and assert against the
-// real, fully-mounted app — the actual route table, not a hand-copied mirror of
-// it — without opening a port, probing the DB, or hijacking the process's
-// signal and exception handlers. DR-012's regression test needs exactly that:
-// a mirror app would keep passing if someone re-added the /api/diag mount.
-function startServer() {
+// do). Guarding it lets a test `require('../src/index')` and call `createApp`
+// to assert against the real, fully-mounted app — the actual route table,
+// not a hand-copied mirror of it — without opening a port, probing the DB,
+// or hijacking the process's signal and exception handlers.
+function startServer({ app, prisma }) {
+  const PORT = (process.env.PORT && process.env.PORT !== '') ? process.env.PORT : 8080;
+  const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
+    : (process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])
+  );
+
   // ─── Process error handlers (Node 22 default: terminate on unhandled rejection) ──
   process.on('unhandledRejection', (reason) => {
     // Structured so we can filter for Prisma codes specifically.
@@ -445,8 +500,9 @@ function startServer() {
 }
 
 if (require.main === module) {
-  startServer();
+  // Production boot: real Prisma + real blobStorage, listen on PORT.
+  const { app, prisma } = createApp();
+  startServer({ app, prisma });
 }
 
-module.exports = app;
-module.exports.startServer = startServer;
+module.exports = { createApp, startServer };
