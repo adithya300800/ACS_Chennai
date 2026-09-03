@@ -238,32 +238,33 @@ export default function PortalLayout() {
         </div>
 
         <nav className="portal-nav">
-          {navGroups.map((group, gi) => (
-            <React.Fragment key={group.label || `__group_${gi}`}>
-              {group.label && sidebarOpen && (
-                <div className="portal-nav-section-label">{group.label}</div>
-              )}
-              {group.items.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  onClick={closeMobileSidebar}
-                  className={({ isActive }) => `portal-nav-item ${isActive ? 'active' : ''}`}
-                  // SOL-P0#1: stable accessible name + tooltip regardless of
-                  // sidebar collapse state — required by WCAG 2.4.4 + 4.1.2.
-                  title={item.label}
-                  aria-label={item.label}
-                >
-                  <span className="portal-nav-icon" aria-hidden="true">{item.icon}</span>
-                  {sidebarOpen ? (
-                    <span className="portal-nav-label">{item.label}</span>
-                  ) : (
-                    <span className="sr-only">{item.label}</span>
-                  )}
-                </NavLink>
-              ))}
-            </React.Fragment>
-          ))}
+          {navGroups.flatMap((group, gi) => {
+            // Round-22: drop the "FIELD REPORTS" / "ADMIN" group-divider
+            // labels from the sidebar — the user wants a flat list. The
+            // navGroups data structure is kept (still nice for organization
+            // and any future re-grouping), we just stop rendering the
+            // label div. The .portal-nav-section-label CSS is now orphan
+            // but harmless; cleanup pass can remove it later.
+            return group.items.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                onClick={closeMobileSidebar}
+                className={({ isActive }) => `portal-nav-item ${isActive ? 'active' : ''}`}
+                // SOL-P0#1: stable accessible name + tooltip regardless of
+                // sidebar collapse state — required by WCAG 2.4.4 + 4.1.2.
+                title={item.label}
+                aria-label={item.label}
+              >
+                <span className="portal-nav-icon" aria-hidden="true">{item.icon}</span>
+                {sidebarOpen ? (
+                  <span className="portal-nav-label">{item.label}</span>
+                ) : (
+                  <span className="sr-only">{item.label}</span>
+                )}
+              </NavLink>
+            ));
+          })}
         </nav>
 
         <div className="portal-sidebar-footer">
