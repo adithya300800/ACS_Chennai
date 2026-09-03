@@ -58,7 +58,12 @@ function ToggleRow({ type, label, channel, description, muted, disabled, onToggl
 
 export default function NotificationPreferences() {
   useDocumentTitle('Notification preferences');
-  const { token, employee } = useAuth();
+  // AuthContext exposes `accessToken`, not `token` — destructuring the wrong
+  // name silently sends no Authorization header, and `api.js` treats that as a
+  // dead session (it 401s and dispatches auth:logout, bouncing the user to
+  // /portal/login with "session expired"). Round-25 fix.
+  const { accessToken, employee } = useAuth();
+  const token = accessToken;
   const { push } = useToast();
 
   const [loading, setLoading] = useState(true);
