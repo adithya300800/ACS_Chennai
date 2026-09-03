@@ -30,6 +30,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Round-25: regenerate the Prisma client before the test step.
+      # The mounted-app integration test imports src/index.js at module load,
+      # which calls `new PrismaClient()`. When the schema adds new models
+      # (e.g. round-25's NotificationPreference / EmailLog / DigestRun /
+      # DigestItem), `node_modules/.prisma/client/default.js` is stale
+      # and @prisma/client throws "did not initialize yet". The same
+      # `npx prisma generate` is also part of the Render build command
+      # (npm install && npx prisma generate) so this keeps CI aligned
+      # with production. Idempotent; cheap.
+      - name: Generate Prisma client
+        run: npx prisma generate
+
       - name: Run tests
         run: npm test
 
