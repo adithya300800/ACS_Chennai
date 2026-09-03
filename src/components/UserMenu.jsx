@@ -50,6 +50,14 @@ export default function UserMenu() {
   }, [open]);
 
   // Close on outside-click + Escape.
+  // Round-22 fix: use 'click' (not 'mousedown') for outside-click detection.
+  // Round-21 made the dropdown a React portal to document.body. Mousedown
+  // fires BEFORE the link's onClick, so setOpen(false) on mousedown causes
+  // React to unmount the dropdown (and remove the link element) before the
+  // browser fires the click event — meaning React Router never sees the
+  // navigation, and Help & Support / Dashboard / Sign out all silently
+  // stop working. Switching to 'click' lets the link's click handler run
+  // first (so React Router navigates) before we close the menu.
   useEffect(() => {
     if (!open) return undefined;
     const onDoc = (e) => {
@@ -61,10 +69,10 @@ export default function UserMenu() {
         triggerRef.current?.focus();
       }
     };
-    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('click', onDoc);
     document.addEventListener('keydown', onKey);
     return () => {
-      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('click', onDoc);
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
@@ -160,7 +168,7 @@ export default function UserMenu() {
               <polyline points="16 17 21 12 16 7" />
               <line x1="21" y1="12" x2="9" y2="12" />
             </svg>
-            <span>Sign out</span>
+            <span>Logout</span>
           </button>
         </div>,
         document.body

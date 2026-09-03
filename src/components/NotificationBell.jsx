@@ -259,6 +259,12 @@ useLayoutEffect(() => {
   // Close dropdown on outside click. Round-21: dropdown is portalled to
   // <body>, so the bell-button wrapper alone isn't enough — also check
   // the portalled dropdown's own ref.
+  // Round-22 fix: use 'click' (not 'mousedown'). Mousedown fires BEFORE
+  // the notification item's onClick — calling setOpen(false) on mousedown
+  // unmounts the dropdown and removes the item before the click event
+  // reaches React Router / the notification handler, breaking the
+  // click-to-navigate flow. Switching to 'click' lets the item's click
+  // handler run first (navigate + mark-read + close) before we close.
   useEffect(() => {
     if (!open) return;
     const handler = (e) => {
@@ -267,8 +273,8 @@ useLayoutEffect(() => {
       if (portalDropdownRef.current?.contains(target)) return;
       setOpen(false);
     };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
   }, [open]);
 
   // Close dropdown on Escape (accessibility)
