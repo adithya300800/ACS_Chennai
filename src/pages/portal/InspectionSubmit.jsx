@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
@@ -8,6 +8,7 @@ import {
   MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES,
 } from '../../lib/constants.js';
 import WorkEntryAdder from './WorkEntryAdder.jsx';
+import FormProgress from '../../components/FormProgress.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
@@ -360,6 +361,30 @@ export default function InspectionSubmit() {
             ))}
           </ul>
         </nav>
+
+        {/* SOL-P1#11: progressive-disclosure progress strip — mirrors the
+            DPR form so users see how many of the three sections they've
+            filled before they can hit Submit. */}
+        <FormProgress
+          label="Inspection completion"
+          sections={[
+            {
+              id: 'inspection-section-site',
+              label: INSPECTION_SECTIONS[0].label,
+              complete: Boolean(form.projectName && form.location && form.reportDate),
+            },
+            {
+              id: 'inspection-section-record',
+              label: INSPECTION_SECTIONS[1].label,
+              complete: Boolean(workEntry && workEntry.workType),
+            },
+            {
+              id: 'inspection-section-photos',
+              label: INSPECTION_SECTIONS[2].label,
+              complete: photos.length > 0,
+            },
+          ]}
+        />
 
         {showDraftBanner && (
           <div

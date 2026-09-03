@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
@@ -6,6 +6,7 @@ import { api } from '../../lib/api.js';
 import { uploadBlob } from '../../lib/blobUpload.js';
 import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../../lib/constants.js';
 import DprCustomSection from './DprCustomSection.jsx';
+import FormProgress from '../../components/FormProgress.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
@@ -354,6 +355,26 @@ export default function DprSubmit() {
       return;
     }
 
+    // SOL-P1#11: require at least one piece of meaningful content before
+    // final submission. The audit caught that project+location+date was
+    // enough to submit, leaving admins reviewing an empty DPR.
+    if (submitStatus === 'SUBMITTED') {
+      const hasNarrative = (
+        (dailyFields.workExecutedToday && dailyFields.workExecutedToday.trim().length > 0) ||
+        (dailyFields.manpowerSummary && dailyFields.manpowerSummary.trim().length > 0) ||
+        (dailyFields.materialsReceivedSummary && dailyFields.materialsReceivedSummary.trim().length > 0) ||
+        (notes && notes.trim().length > 0) ||
+        photos.length > 0
+      );
+      if (!hasNarrative) {
+        const msg = 'Add at least one work item, manpower note, materials note, or photo before submitting.';
+        setError(msg);
+        toast.push(msg, 'warning');
+        submittingRef.current = false;
+        return;
+      }
+    }
+
     setStatus('submitting');
 
     try {
@@ -484,6 +505,45 @@ export default function DprSubmit() {
             ))}
           </ul>
         </nav>
+
+        {/* SOL-P1#11: progressive-disclosure progress strip. Each section
+            reports its completion state; the user sees a fill bar + check
+            chips so they know what's still missing before they hit Submit. */}
+        <FormProgress
+          label="DPR completion"
+          sections={[
+            {
+              id: 'dpr-section-site',
+              label: DPR_SECTIONS[0].label,
+              complete: Boolean(form.projectName && form.location && form.reportDate && form.workType),
+            },
+            {
+              id: 'dpr-section-narrative',
+              label: DPR_SECTIONS[1].label,
+              complete: Boolean(
+                (dailyFields.workExecutedToday && dailyFields.workExecutedToday.trim().length > 0) ||
+                (dailyFields.manpowerSummary && dailyFields.manpowerSummary.trim().length > 0) ||
+                (dailyFields.materialsReceivedSummary && dailyFields.materialsReceivedSummary.trim().length > 0) ||
+                (notes && notes.trim().length > 0)
+              ),
+            },
+            {
+              id: 'dpr-section-photos',
+              label: DPR_SECTIONS[2].label,
+              complete: photos.length > 0,
+            },
+            {
+              id: 'dpr-section-custom',
+              label: DPR_SECTIONS[3].label,
+              complete: customSections.length > 0,
+            },
+            {
+              id: 'dpr-section-inspections',
+              label: DPR_SECTIONS[4].label,
+              complete: todayInspections.length > 0,
+            },
+          ]}
+        />
 
         {showDraftBanner && (
           <div
