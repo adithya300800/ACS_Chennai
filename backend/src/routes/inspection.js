@@ -348,13 +348,32 @@ router.post('/', async (req, res) => {
 });
 
 // ─── GET /api/inspection ────────────────────────────────────────────────────
-// Supports filters: dprId, reportDate (YYYY-MM-DD or full ISO), inspectionType,
-// status, severity, cursor (base64(reportDate|id)), limit (max 100).
+// Supports filters: dprId, reportDate (YYYY-MM-DD or full ISO), from/to
+// (YYYY-MM-DD range — DR-028), inspectionType, status, severity, cursor
+// (base64(reportDate|id)), limit (max 100).
+//
 // Non-admins are restricted to their own records; admins see all unless
 // `my=true` is passed.
+//
+// DR-028: the admin dashboard has always sent `from`/`to` range
+// parameters, but the route previously ignored them — `filterFrom`/`filterTo`
+// in InspectionDashboard.jsx were dead UI. We now parse them through the
+// same `parseStrictISODate` helper as the single-day `reportDate` filter
+// and merge them as an inclusive `gte`/`lte` range (calendar-day
+// semantics on @db.Date — same as the leave admin queue).
+//
+// Filter precedence:
+//   1. `reportDate` (exact day) → exclusive range over the day
+//   2. `from` + `to` (inclusive range)
+//   3. `from` only / `to` only (one-sided open range)
+//
+// Sending both `reportDate` and `from`/`to` returns the intersection
+// (record-date matches BOTH), which is the most useful semantics — a
+// caller looking at "exactly Sept 4 within the Sept 1..Sept 7 window"
+// gets that record and nothing else.
 router.get('/', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
-  const { cursor, limit = '20', dprId, reportDate, inspectionType, status, severity, my } = req.query;
+  const { cursor, limit = '20', dprId, reportDate, from, to, inspectionType, status, severity, my } = req.query;
 
   const take = Math.min(parseInt(limit) || 20, 100);
 
@@ -397,10 +416,74 @@ router.get('/', asyncHandler(async (req, res) => {
     }
   }
 
+  // DR-028: from/to range filter. Both bounds are inclusive calendar-day
+  // matches against the @db.Date `reportDate` column (UTC midnight).
+  // Each bound is parsed independently so a missing bound means "no
+  // constraint on that side". A reversed range (from > to) is a client
+  // bug — return 400 rather than silently returning an empty set.
+  let rangeFilter = undefined;
+  if (from || to) {
+    let fromDate = null;
+    let toDate = null;
+    if (from !== undefined) {
+      const parsed = parseStrictISODate(String(from));
+      if (!parsed.ok) {
+        return res.status(400).json({
+          error: 'from must be a valid YYYY-MM-DD',
+          code: 'INVALID_FROM_DATE',
+        });
+      }
+      fromDate = parsed.date;
+    }
+    if (to !== undefined) {
+      const parsed = parseStrictISODate(String(to));
+      if (!parsed.ok) {
+        return res.status(400).json({
+          error: 'to must be a valid YYYY-MM-DD',
+          code: 'INVALID_TO_DATE',
+        });
+      }
+      toDate = parsed.date;
+    }
+    if (fromDate && toDate && fromDate > toDate) {
+      return res.status(400).json({
+        error: 'from must be on or before to',
+        code: 'INVALID_DATE_RANGE',
+      });
+    }
+    rangeFilter = {};
+    if (fromDate) rangeFilter.gte = fromDate;
+    if (toDate) rangeFilter.lte = toDate;
+  }
+
   try {
     const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
     const isAdmin = employee && employee.isAdmin;
     const restrictToSelf = !isAdmin || my === 'true';
+
+    // DR-028: merge `reportDate` (single day, half-open [gte,lt)) and
+    // `from`/`to` (inclusive range, [gte,lte]) into one `reportDate`
+    // clause by combining per-bound keys. Prisma's per-field filter
+    // AND-combines its members, so we just take the tighter bound on
+    // each side:
+    //   gte = max(reportDateFilter.gte, rangeFilter.gte)  (whichever is
+    //         larger — both must be satisfied)
+    //   lt  = reportDateFilter.lt  (single-day only)
+    //   lte = rangeFilter.lte       (range only)
+    // When neither is supplied, `reportDate` is omitted entirely.
+    const mergedDate = {};
+    if (reportDateFilter) {
+      if (reportDateFilter.gte) mergedDate.gte = reportDateFilter.gte;
+      if (reportDateFilter.lt) mergedDate.lt = reportDateFilter.lt;
+      if (reportDateFilter.equals) mergedDate.equals = reportDateFilter.equals;
+    }
+    if (rangeFilter) {
+      if (rangeFilter.gte && (!mergedDate.gte || rangeFilter.gte > mergedDate.gte)) {
+        mergedDate.gte = rangeFilter.gte;
+      }
+      if (rangeFilter.lte) mergedDate.lte = rangeFilter.lte;
+    }
+    const reportDateWhere = Object.keys(mergedDate).length > 0 ? mergedDate : undefined;
 
     const where = {
       ...(restrictToSelf ? { submittedById: req.employeeId } : {}),
@@ -408,7 +491,7 @@ router.get('/', asyncHandler(async (req, res) => {
       ...(inspectionType ? { inspectionType } : {}),
       ...(status ? { status } : {}),
       ...(severity ? { severity } : {}),
-      ...(reportDateFilter ? { reportDate: reportDateFilter } : {}),
+      ...(reportDateWhere ? { reportDate: reportDateWhere } : {}),
       ...(cursor ? cursorWhere : {}),
     };
 
