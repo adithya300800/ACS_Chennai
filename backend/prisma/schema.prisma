@@ -580,6 +580,11 @@ model EmailLog {
 
   employee     Employee      @relation(fields: [employeeId], references: [id], onDelete: Cascade)
   notification Notification? @relation(fields: [notificationId], references: [id], onDelete: SetNull)
+  // Back-relation required by Prisma's validation when DigestRun declares
+  // `emailLog EmailLog? @relation(...)` on the other side. Optional because
+  // emailLogId is nullable + @unique — at most one DigestRun points at this
+  // email log row (e.g. when the digest send succeeds and gets audited).
+  digestRun    DigestRun?
 
   @@index([employeeId, sentAt])
   @@index([notificationId])
