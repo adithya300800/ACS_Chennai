@@ -114,7 +114,16 @@ const pendingUploads = new Map();
 // unboundedly. Keyed by (employeeId, Idempotency-Key) so a leaked key from
 // employee A can't replay employee B's response. The CORS Allow-Headers list
 // (index.js) already exposes this header to the browser.
-const idempotencyCache = new Map(); // key: `${employeeId}:${idempotencyKey}` → { status, body, savedAt }
+//
+// DR-006 (round-20): the cache now stores a SHA-256 hash of the POST
+// body alongside the response. A replay request with the SAME key but
+// a DIFFERENT body returns 409 IDEMPOTENCY_MISMATCH instead of
+// silently returning the first response — that's a security bug
+// (an attacker who learned/leaked a key could probe arbitrary
+// payloads against the cached slot). Same key + same body is the only
+// valid replay. Canonical JSON via stable JSON.stringify (sorted
+// keys, no whitespace) so {a:1,b:2} and {b:2,a:1} hash identically.
+const idempotencyCache = new Map(); // key: `${employeeId}:${idempotencyKey}` → { status, body, bodyHash, savedAt }
 const IDEMPOTENCY_TTL_MS = 5 * 60 * 1000;
 
 function pruneIdempotency() {
@@ -123,6 +132,22 @@ function pruneIdempotency() {
     if (v.savedAt <= cutoff) idempotencyCache.delete(k);
   }
 }
+
+// Stable JSON stringify: sort object keys recursively so {a:1,b:2} and
+// {b:2,a:1} produce identical output. Arrays preserve order.
+function canonicalJsonStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return '[' + value.map((v) => canonicalJsonStringify(v)).join(',') + ']';
+  }
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalJsonStringify(value[k])).join(',') + '}';
+}
+
+function sha256Hex(s) {
+  return crypto.createHash('sha256').update(s).digest('hex');
+}
+
 function getCachedIdempotent(employeeId, key) {
   const cacheKey = `${employeeId}:${key}`;
   const cached = idempotencyCache.get(cacheKey);
@@ -133,9 +158,14 @@ function getCachedIdempotent(employeeId, key) {
   }
   return cached;
 }
-function storeIdempotent(employeeId, key, status, body) {
+function storeIdempotent(employeeId, key, status, body, bodyHash) {
   pruneIdempotency();
-  idempotencyCache.set(`${employeeId}:${key}`, { status, body, savedAt: Date.now() });
+  idempotencyCache.set(`${employeeId}:${key}`, {
+    status,
+    body,
+    bodyHash,
+    savedAt: Date.now(),
+  });
 }
 
 // SSE connections per employee
@@ -390,10 +420,29 @@ router.post('/', async (req, res) => {
   // 201 response instead of creating a duplicate DPR row. The header is
   // exposed via CORS Allow-Headers (index.js:62) so the browser preflight
   // succeeds.
+  //
+  // DR-006: the cache is keyed on `(employeeId, key)` AND the SHA-256
+  // hash of the request body. A replay with the same key but a
+  // different body is a CLIENT BUG (the key should be regenerated for a
+  // new submission) and now returns 409 IDEMPOTENCY_MISMATCH instead of
+  // silently returning the first cached response — that silent-return
+  // was the security hole (a leaked key let an attacker probe arbitrary
+  // payloads against the cached slot).
   const idempotencyKey = req.headers['idempotency-key'];
+  let bodyHash = null;
   if (idempotencyKey && typeof idempotencyKey === 'string' && idempotencyKey.length > 0 && idempotencyKey.length <= 200) {
+    bodyHash = sha256Hex(canonicalJsonStringify(req.body || {}));
     const cached = getCachedIdempotent(req.employeeId, idempotencyKey);
     if (cached) {
+      if (cached.bodyHash !== bodyHash) {
+        // Same key, different body — refuse. The client should mint a
+        // new key for a new submission; reusing a key across distinct
+        // intents is a client bug.
+        return res.status(409).json({
+          error: 'Idempotency-Key was used for a different request body',
+          code: 'IDEMPOTENCY_MISMATCH',
+        });
+      }
       // Replay — return the original response with a header so the client
       // can tell this is a replay (helps debug "did my second click create
       // a duplicate?" investigations).
@@ -565,8 +614,8 @@ router.post('/', async (req, res) => {
       },
     });
 
-    if (idempotencyKey && typeof idempotencyKey === 'string') {
-      storeIdempotent(req.employeeId, idempotencyKey, 201, dpr);
+    if (idempotencyKey && typeof idempotencyKey === 'string' && bodyHash) {
+      storeIdempotent(req.employeeId, idempotencyKey, 201, dpr, bodyHash);
     }
 
     res.status(201).json(dpr);
@@ -871,11 +920,35 @@ router.put('/:id', async (req, res) => {
     return res.status(403).json({ error: 'FORBIDDEN', message: 'Only owner can update' });
   }
 
+  // DR-006 (round-20): terminal states are immutable. APPROVED and
+  // REJECTED represent decisions an admin made on the submitted DPR —
+  // the owner editing them afterwards would silently rewrite the audit
+  // trail (the photos / notes / reportDate that were on file when the
+  // admin decided). Status transitions are the only legal way out of a
+  // terminal state, and they go through /approve, /reject, /review —
+  // not PUT.
+  if (existing.status === 'APPROVED' || existing.status === 'REJECTED') {
+    return res.status(409).json({
+      error: `Cannot edit a DPR in status ${existing.status}`,
+      code: 'INVALID_TRANSITION',
+      currentStatus: existing.status,
+    });
+  }
+
   try {
+    // DR-006 (round-20): tighten the conditional update WHERE to also
+    // pin the status we read. The previous WHERE only pinned version —
+    // a concurrent admin /review could move status DRAFT → UNDER_REVIEW
+    // between our read and our update, and we'd silently overwrite an
+    // in-review DPR with stale field edits. Adding status to the WHERE
+    // makes Prisma reject the update with P2025 → we translate to 409
+    // VERSION_CONFLICT (same wire code as a version-only race; both
+    // signal "the row moved, refetch and retry").
     const updated = await prisma.dPR.update({
       where: {
         id,
         version: existing.version,
+        status: existing.status,
       },
       data: {
         ...fields,
