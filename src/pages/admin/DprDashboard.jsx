@@ -4,6 +4,7 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatDateOnly } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
+import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { CalendarIcon, MapPinIcon, CameraIcon } from '../../components/Icons.jsx';
 
@@ -520,10 +521,14 @@ export default function DprDashboard() {
                       href={photo.readUrl || photo.blobUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      style={{ width: 56, height: 56, borderRadius: 6, background: '#f1f5f9', overflow: 'hidden', flexShrink: 0, display: 'block' }}
+                      style={{ position: 'relative', width: 56, height: 56, borderRadius: 6, background: '#f1f5f9', overflow: 'hidden', flexShrink: 0, display: 'block' }}
                       title={photo.caption || 'Open photo'}
                     >
                       <PhotoThumb photo={photo} />
+                      {/* R22.5: per-image download affordance on the queue
+                          card thumbnail. Opens the signed R2 URL in a new
+                          tab so the admin can save the photo. */}
+                      <PhotoDownloadButton photo={photo} />
                     </a>
                   ))}
                   {dpr.photos.length > 4 && (

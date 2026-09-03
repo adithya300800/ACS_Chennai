@@ -6,6 +6,7 @@ import { api } from '../../lib/api.js';
 import { formatDateOnly } from '../../lib/format.js';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
+import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 function formatIndianDate(iso) {
@@ -190,7 +191,7 @@ export default function InspectionDetail() {
                   href={p.readUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  style={{ display: 'block', aspectRatio: '1', borderRadius: 6, overflow: 'hidden', background: '#f1f5f9' }}
+                  style={{ position: 'relative', display: 'block', aspectRatio: '1', borderRadius: 6, overflow: 'hidden', background: '#f1f5f9' }}
                   title={p.caption || 'Open photo'}
                 >
                   <img
@@ -199,6 +200,8 @@ export default function InspectionDetail() {
                     loading="lazy"
                     style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   />
+                  {/* R22.5: per-image download affordance. */}
+                  <PhotoDownloadButton photo={p} label="Open inspection photo" />
                 </a>
               ))}
             </div>

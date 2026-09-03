@@ -6,6 +6,7 @@ import { api } from '../../lib/api.js';
 import { formatDateOnly } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
+import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { ClipboardIcon } from '../../components/Icons.jsx';
 
@@ -110,7 +111,13 @@ export default function DprList() {
   const [error, setError] = useState('');
   const [hasMore, setHasMore] = useState(false);
   const [nextCursor, setNextCursor] = useState(null);
-  const [filter, setFilter] = useState({ status: '', myOnly: false, from: '', to: '' });
+  // R22.5: default `myOnly` to true so the page matches its title. Admins
+  // used to land here and see every org DPR (the backend returns all rows
+  // when `my=true` is unset — see backend/src/routes/dpr.js:641); that
+  // made "My Daily Reports" misleading for admins. They can still uncheck
+  // the box to opt in to the cross-org view, and admins get a sidebar
+  // link to the dedicated `/portal/dpr/all` browse page (round-22).
+  const [filter, setFilter] = useState({ status: '', myOnly: true, from: '', to: '' });
   const [showFilters, setShowFilters] = useState(false);
   // P0 fix (round-10): clicking a row previously navigated to the same
   // route with location.state.selectedDpr — nothing read that state, so
@@ -297,7 +304,7 @@ export default function DprList() {
           </div>
           {(filter.status || filter.from || filter.to) && (
             <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem' }}>
-              <button className="btn btn-ghost btn-sm" onClick={() => setFilter({ status: '', myOnly: false, from: '', to: '' })}>
+              <button className="btn btn-ghost btn-sm" onClick={() => setFilter({ status: '', myOnly: true, from: '', to: '' })}>
                 Clear filters
               </button>
             </div>
@@ -542,12 +549,16 @@ export default function DprList() {
                       <strong style={{ fontSize: '0.9rem' }}>Photos ({expandedDpr.photos.length})</strong>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '0.5rem', marginTop: '0.5rem' }}>
                         {expandedDpr.photos.map((p) => (
-                          <a key={p.id} href={p.readUrl} target="_blank" rel="noopener noreferrer" title={p.filename}>
+                          <a key={p.id} href={p.readUrl} target="_blank" rel="noopener noreferrer" title={p.filename} style={{ position: 'relative', display: 'block' }}>
                             <img
                               src={p.readUrl}
                               alt={p.caption || p.filename}
                               style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 6 }}
                             />
+                            {/* R22.5: per-image download affordance — opens
+                                the signed R2 URL in a new tab so the user
+                                can right-click → Save As. */}
+                            <PhotoDownloadButton photo={p} />
                           </a>
                         ))}
                       </div>

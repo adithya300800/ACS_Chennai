@@ -3,6 +3,7 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
+import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { CalendarIcon, MapPinIcon, CameraIcon, ClipboardIcon } from '../../components/Icons.jsx';
 
@@ -15,6 +16,9 @@ import { CalendarIcon, MapPinIcon, CameraIcon, ClipboardIcon } from '../../compo
 // row-list of DprList) to match the All Inspection Records visual contract.
 // Click a card to open an inline detail modal; no separate /portal/dpr/:id
 // route exists, so we mirror DprList's modal pattern.
+//
+// R22.5: filters (status, date range, project name, submitter) +
+// per-photo download overlay on the modal.
 
 const WORK_TYPE_LABEL = {
   MATERIAL_RECEIPT: 'Material Receipt',
@@ -32,6 +36,18 @@ const DPR_STATUS_MAP = {
   APPROVED: 'dpr-status-approved',
   REJECTED: 'dpr-status-rejected',
 };
+
+// R22.5: shared status filter options for the All Daily Reports page. Same
+// shape as DprList.jsx STATUS_FILTERS so the dropdown is consistent across
+// the two DPR browse views.
+const STATUS_FILTERS = [
+  { value: '', label: 'All Statuses' },
+  { value: 'DRAFT', label: 'Draft' },
+  { value: 'SUBMITTED', label: 'Submitted' },
+  { value: 'UNDER_REVIEW', label: 'Under Review' },
+  { value: 'APPROVED', label: 'Approved' },
+  { value: 'REJECTED', label: 'Rejected' },
+];
 
 function PhotoThumb({ photo }) {
   const src = photo.thumbUrl || photo.readUrl || photo.blobUrl;
@@ -165,8 +181,10 @@ function DprDetailModal({ dprSummary, onClose }) {
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '0.5rem' }}>
                   {dpr.photos.map((p) => (
-                    <div key={p.id || p.ulid}>
+                    <div key={p.id || p.ulid} style={{ position: 'relative' }}>
                       <PhotoThumb photo={p} />
+                      {/* R22.5: per-image download affordance on the modal. */}
+                      <PhotoDownloadButton photo={p} />
                       {p.caption && <div style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>{p.caption}</div>}
                     </div>
                   ))}
@@ -189,15 +207,29 @@ export default function DprAll() {
   const [error, setError] = useState('');
   const [selectedDpr, setSelectedDpr] = useState(null);
 
+  // R22.5: filter state for the admin browse view. The backend supports
+  // `status`, `from`, `to` (date range on reportDate), `projectName`
+  // (case-insensitive contains), and `submittedById` (cuid). The first
+  // three were already wired in r21; we added projectName + submittedById
+  // in r22.5. Result count is computed from the loaded list.
+  const [filter, setFilter] = useState({ status: '', from: '', to: '', projectName: '', submittedById: '' });
+  const [showFilters, setShowFilters] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
       // GET /api/dpr returns every org row for admins by default (no
-      // `my=true` filter). See backend/src/routes/dpr.js:633 — the
+      // `my=true` filter). See backend/src/routes/dpr.js:641 — the
       // restrictToSelf check is `!isAdmin || my === 'true'`. Limit 100
       // matches InspectionAll's browse-view contract.
-      const data = await api.getDprs({ limit: '100' }, accessToken);
+      const params = { limit: '100' };
+      if (filter.status) params.status = filter.status;
+      if (filter.from) params.from = filter.from;
+      if (filter.to) params.to = filter.to;
+      if (filter.projectName) params.projectName = filter.projectName;
+      if (filter.submittedById) params.submittedById = filter.submittedById;
+      const data = await api.getDprs(params, accessToken);
       setDprs(data.dprs || []);
     } catch (err) {
       if (err.status !== 401) {
@@ -207,9 +239,33 @@ export default function DprAll() {
     } finally {
       setLoading(false);
     }
-  }, [accessToken, toast]);
+  }, [accessToken, toast, filter]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, [accessToken, filter]);
+
+  const handleFilterChange = (key, value) => {
+    setFilter((f) => ({ ...f, [key]: value }));
+  };
+
+  const clearFilters = () => {
+    setFilter({ status: '', from: '', to: '', projectName: '', submittedById: '' });
+  };
+
+  const hasActiveFilters = filter.status || filter.from || filter.to || filter.projectName || filter.submittedById;
+
+  // The submitter dropdown is populated from the unique names found in the
+  // currently loaded list. This avoids a separate /api/employees fetch and
+  // keeps the dropdown scoped to "people who actually submitted a DPR". If
+  // a filter narrows the list to 0 rows, the dropdown loses options — the
+  // admin can clear the filter to re-populate.
+  const submitterOptions = (() => {
+    const map = new Map();
+    for (const d of dprs) {
+      const id = d.submittedBy?.id;
+      if (id && !map.has(id)) map.set(id, d.submittedBy?.name || id);
+    }
+    return Array.from(map.entries()).map(([id, name]) => ({ value: id, label: name }));
+  })();
 
   return (
     <div className="dpr-page">
@@ -220,10 +276,89 @@ export default function DprAll() {
             Every daily progress report across the organization.
           </p>
         </div>
-        <a href="#/portal/admin/dpr" className="btn btn-secondary btn-sm">
-          ← Back to admin review queue
-        </a>
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+          <button className="btn btn-secondary btn-sm" onClick={() => setShowFilters((s) => !s)}>
+            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 3H2l8 9.46V19l4 2V12.46z"/></svg>
+            Filters {showFilters ? '▲' : '▼'}
+          </button>
+          <a href="#/portal/admin/dpr" className="btn btn-secondary btn-sm">
+            ← Back to admin review queue
+          </a>
+        </div>
       </div>
+
+      {showFilters && (
+        <div className="dpr-card" style={{ marginBottom: '1rem' }}>
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="dprall-filter-status">Status</label>
+              <select
+                id="dprall-filter-status"
+                className="form-input"
+                value={filter.status}
+                onChange={(e) => handleFilterChange('status', e.target.value)}
+              >
+                {STATUS_FILTERS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+              </select>
+            </div>
+            <fieldset className="form-group" style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+              <legend style={{ fontSize: '0.85rem', fontWeight: 500, color: 'var(--steel)', padding: 0 }}>Date range</legend>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <div>
+                  <label htmlFor="dprall-filter-from" style={{ fontSize: '0.8rem' }}>From</label>
+                  <input
+                    id="dprall-filter-from"
+                    type="date"
+                    className="form-input"
+                    value={filter.from}
+                    onChange={(e) => handleFilterChange('from', e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="dprall-filter-to" style={{ fontSize: '0.8rem' }}>To</label>
+                  <input
+                    id="dprall-filter-to"
+                    type="date"
+                    className="form-input"
+                    value={filter.to}
+                    onChange={(e) => handleFilterChange('to', e.target.value)}
+                  />
+                </div>
+              </div>
+            </fieldset>
+            <div className="form-group">
+              <label htmlFor="dprall-filter-project">Project name</label>
+              <input
+                id="dprall-filter-project"
+                type="text"
+                className="form-input"
+                value={filter.projectName}
+                onChange={(e) => handleFilterChange('projectName', e.target.value)}
+                placeholder="Contains…"
+              />
+            </div>
+            <div className="form-group">
+              <label htmlFor="dprall-filter-submitter">Submitted by</label>
+              <select
+                id="dprall-filter-submitter"
+                className="form-input"
+                value={filter.submittedById}
+                onChange={(e) => handleFilterChange('submittedById', e.target.value)}
+              >
+                <option value="">All submitters</option>
+                {submitterOptions.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+              </select>
+            </div>
+          </div>
+          {hasActiveFilters && (
+            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem' }}>
+              <button className="btn btn-ghost btn-sm" onClick={clearFilters}>
+                Clear filters
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
 
@@ -238,11 +373,21 @@ export default function DprAll() {
             <ClipboardIcon size={48} />
           </div>
           <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", color: 'var(--navy)' }}>
-            No daily reports yet
+            No daily reports found
           </h3>
-          <p style={{ color: 'var(--steel)' }}>Nothing has been submitted across the org.</p>
+          <p style={{ color: 'var(--steel)' }}>
+            {hasActiveFilters
+              ? 'No DPRs match your current filters.'
+              : 'Nothing has been submitted across the org.'}
+          </p>
+          {hasActiveFilters && (
+            <button className="btn btn-secondary btn-sm" onClick={clearFilters} style={{ marginTop: '0.5rem' }}>
+              Clear filters
+            </button>
+          )}
         </div>
       ) : (
+        <>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem' }}>
           {dprs.map((dpr) => {
             const workTypeLabel = WORK_TYPE_LABEL[dpr.workType] || dpr.workType || '—';
@@ -292,6 +437,11 @@ export default function DprAll() {
             );
           })}
         </div>
+        <div className="dpr-list-count" style={{ textAlign: 'center', color: 'var(--steel)', fontSize: '0.8rem', padding: '0.75rem 0.5rem' }}>
+          Showing {dprs.length} DPR{dprs.length !== 1 ? 's' : ''}
+          {hasActiveFilters ? ' · filtered' : ''}
+        </div>
+        </>
       )}
 
       {selectedDpr && (
