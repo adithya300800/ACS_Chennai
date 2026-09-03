@@ -8,6 +8,7 @@
 
 const {
   InvalidDateOnlyError,
+  InvalidMonthRangeError,
   dateOnlyToUtc,
   parseDateOnlyToUtc,
   getTodayBusinessDate,
@@ -125,6 +126,53 @@ describe('dateOnly — canonical helpers (DR-023)', () => {
       const { startDate, endDate } = getMonthRangeUtc('2026-02');
       expect(startDate.toISOString()).toBe('2026-02-01T00:00:00.000Z');
       expect(endDate.toISOString()).toBe('2026-03-01T00:00:00.000Z');
+    });
+  });
+
+  describe('getMonthRangeUtc — DR-030 strict validation', () => {
+    // Before DR-030 the helper silently rolled overflowing inputs forward:
+    //   "2026-13" → 2027-02-01 (via Date.UTC(y, 12, 1) == Feb 1 next year)
+    //   "2026-00" → 2025-12-01 (via Date.UTC(y, -1, 1) == Dec prev year)
+    // The /attendance list endpoint used to return data for the wrong month
+    // instead of failing loudly. These tests pin the new contract: throw
+    // InvalidMonthRangeError, never silently roll.
+
+    it('throws InvalidMonthRangeError on month > 12 (was: silently rolled to Feb next year)', () => {
+      expect(() => getMonthRangeUtc('2026-13')).toThrow(InvalidMonthRangeError);
+      // Pin the code so the route handler's `instanceof` check survives a
+      // rename.
+      try { getMonthRangeUtc('2026-13'); } catch (e) {
+        expect(e.code).toBe('INVALID_MONTH');
+      }
+    });
+
+    it('throws InvalidMonthRangeError on month < 1 (was: silently rolled to Dec prev year)', () => {
+      expect(() => getMonthRangeUtc('2026-00')).toThrow(InvalidMonthRangeError);
+    });
+
+    it('throws InvalidMonthRangeError on non-canonical shape', () => {
+      expect(() => getMonthRangeUtc('2026-1')).toThrow(InvalidMonthRangeError);
+      expect(() => getMonthRangeUtc('26-01')).toThrow(InvalidMonthRangeError);
+      expect(() => getMonthRangeUtc('2026/01')).toThrow(InvalidMonthRangeError);
+      expect(() => getMonthRangeUtc('2026-01-15')).toThrow(InvalidMonthRangeError);
+      expect(() => getMonthRangeUtc('')).toThrow(InvalidMonthRangeError);
+    });
+
+    it('throws InvalidMonthRangeError on a non-string input', () => {
+      expect(() => getMonthRangeUtc(null)).toThrow(InvalidMonthRangeError);
+      expect(() => getMonthRangeUtc(undefined)).toThrow(InvalidMonthRangeError);
+      expect(() => getMonthRangeUtc(202609)).toThrow(InvalidMonthRangeError);
+      expect(() => getMonthRangeUtc({})).toThrow(InvalidMonthRangeError);
+    });
+
+    it('accepts the boundary months 01 and 12', () => {
+      const jan = getMonthRangeUtc('2026-01');
+      expect(jan.startDate.toISOString()).toBe('2026-01-01T00:00:00.000Z');
+      expect(jan.endDate.toISOString()).toBe('2026-02-01T00:00:00.000Z');
+
+      const dec = getMonthRangeUtc('2026-12');
+      expect(dec.startDate.toISOString()).toBe('2026-12-01T00:00:00.000Z');
+      expect(dec.endDate.toISOString()).toBe('2027-01-01T00:00:00.000Z');
     });
   });
 

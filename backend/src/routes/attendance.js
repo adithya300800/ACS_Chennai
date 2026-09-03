@@ -9,6 +9,7 @@ const {
   getTodayBusinessDate,
   getMonthRangeUtc,
   formatDateOnly,
+  InvalidMonthRangeError,
 } = require('../lib/dateOnly');
 
 // Helper: compute the attendance "day bucket" for a given instant, in the
@@ -71,6 +72,28 @@ function computeLocalDate(instant, ianaTz) {
 // All routes require auth
 router.use(requireAuth);
 
+// DR-030: routes that take a `month` query param route the canonical
+// helper's shape error into the same 400 INVALID_MONTH contract the
+// /export endpoint already publishes. The regex pre-check above each
+// call site already rejects bad shapes early — this is a belt-and-braces
+// net for any future caller that forgets to pre-validate. The helper
+// returns null and writes the 400 itself when it sees
+// InvalidMonthRangeError; non-shape errors (DB, etc.) re-throw.
+function monthRangeOrBadRequest(req, res, month) {
+  try {
+    return getMonthRangeUtc(month);
+  } catch (err) {
+    if (err instanceof InvalidMonthRangeError) {
+      res.status(400).json({
+        error: 'INVALID_MONTH',
+        message: 'month must be YYYY-MM with 01 ≤ MM ≤ 12',
+      });
+      return null;
+    }
+    throw err;
+  }
+}
+
 // GET /api/attendance?month=YYYY-MM
 router.get('/', async (req, res) => {
   const prisma = req.app.get('prisma');
@@ -80,8 +103,15 @@ router.get('/', async (req, res) => {
     return res.status(400).json({ error: 'month query param required (YYYY-MM)' });
   }
 
+  // DR-030: getMonthRangeUtc now validates month/year strictly and
+  // throws InvalidMonthRangeError on out-of-range input. The helper
+  // translates that to a 400 INVALID_MONTH so the caller never sees
+  // a silent month-roll (e.g. "2026-13" → 2027-02-01).
+  const range = monthRangeOrBadRequest(req, res, month);
+  if (!range) return; // 400 already written
+
   try {
-    const { startDate, endDate } = getMonthRangeUtc(month);
+    const { startDate, endDate } = range;
 
     const records = await prisma.attendance.findMany({
       where: {
@@ -458,8 +488,13 @@ router.get('/all', async (req, res) => {
     return res.status(400).json({ error: 'month query param required (YYYY-MM)' });
   }
 
+  // DR-030: see /attendance — same belt-and-braces for /all so a typo
+  // never returns data for a silently-rolled month.
+  const range = monthRangeOrBadRequest(req, res, month);
+  if (!range) return;
+
   try {
-    const { startDate, endDate } = getMonthRangeUtc(month);
+    const { startDate, endDate } = range;
 
     const records = await prisma.attendance.findMany({
       where: {
@@ -531,6 +566,10 @@ router.get('/export', async (req, res) => {
   }
 
   try {
+    // DR-030: getMonthRangeUtc now validates strictly. The earlier
+    // pre-checks above already reject non-canonical inputs with 400;
+    // a failure here would mean the pre-check missed something, and
+    // a 500 is the right escape.
     const { startDate, endDate } = getMonthRangeUtc(month);
 
     // Filter to one employee if requested. Otherwise include everyone —

@@ -33,6 +33,21 @@ class InvalidDateOnlyError extends Error {
   }
 }
 
+// Thrown by `getMonthRangeUtc` when the caller passes something that is
+// not a strict `YYYY-MM` month string with a valid 1..12 month. The
+// previous implementation silently rolled overflowing inputs forward
+// (e.g. "2026-13" → Feb 2027, "2026-00" → Dec 2025) and let callers
+// either 500 on the bad SQL or return a wrong month of data. Routes
+// catch this and translate to 400 INVALID_MONTH so the client sees the
+// same error contract the /export endpoint already publishes.
+class InvalidMonthRangeError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'InvalidMonthRangeError';
+    this.code = 'INVALID_MONTH';
+  }
+}
+
 // Build a UTC midnight Date for the given calendar year/month/day.
 // Caller is responsible for validity; we don't re-check here because the
 // JS `Date` constructor accepts overflow values silently (e.g.
@@ -106,13 +121,33 @@ function getTodayBusinessDate(now, timezone) {
 // at every predicate so the upper bound is exclusive — avoids the
 // off-by-one risk of inclusive `lte` against a UTC-midnight end.
 //
-// Caller must pass a `YYYY-MM` string; we don't validate shape here
-// because all callers already do. If you want shape validation, run it
-// upstream.
+// DR-030: this helper now validates shape strictly (`YYYY-MM` with
+// year ≥ 1 and month in 1..12). The previous implementation rolled
+// overflowing inputs forward ("2026-13" → 2027-02-01, "2026-00" →
+// 2025-12-01) and let callers return a wrong month of data. Routes
+// catch the thrown `InvalidMonthRangeError` and translate it to a
+// 400 INVALID_MONTH so the caller sees the same error contract the
+// /attendance/export endpoint already publishes.
 function getMonthRangeUtc(yearMonth) {
-  const [yearStr, monthStr] = yearMonth.split('-');
-  const y = Number(yearStr);
-  const mo = Number(monthStr);
+  if (typeof yearMonth !== 'string') {
+    throw new InvalidMonthRangeError(
+      `month must be a string in YYYY-MM form (got: ${typeof yearMonth})`
+    );
+  }
+  const m = /^(\d{4})-(\d{2})$/.exec(yearMonth);
+  if (!m) {
+    throw new InvalidMonthRangeError(
+      `month must match YYYY-MM (got: ${JSON.stringify(yearMonth)})`
+    );
+  }
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  if (!Number.isInteger(y) || y < 1) {
+    throw new InvalidMonthRangeError(`month year out of range: ${m[1]}`);
+  }
+  if (!Number.isInteger(mo) || mo < 1 || mo > 12) {
+    throw new InvalidMonthRangeError(`month out of range: ${m[2]}`);
+  }
   // startDate = first day of month @ UTC midnight
   const startDate = dateOnlyToUtc(y, mo, 1);
   // endDate = first day of NEXT month @ UTC midnight. `mo === 12` rolls
@@ -153,6 +188,7 @@ function formatDateOnly(date) {
 
 module.exports = {
   InvalidDateOnlyError,
+  InvalidMonthRangeError,
   dateOnlyToUtc,
   parseDateOnlyToUtc,
   getTodayBusinessDate,
