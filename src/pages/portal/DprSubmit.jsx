@@ -676,7 +676,7 @@ export default function DprSubmit() {
 
             <div className="form-group">
               <label htmlFor="manpowerSummary">
-                Man power
+                Manpower
                 <span style={{ fontWeight: 400, color: 'var(--steel)' }}> (optional)</span>
               </label>
               <textarea

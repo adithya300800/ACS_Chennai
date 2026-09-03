@@ -67,7 +67,7 @@ export const WORK_TYPE_FIELDS = {
     fields: [
       { name: 'materialType', label: 'Material Type', type: 'select', required: true, options: ['Cement', 'Steel', 'Sand', 'Aggregates', 'Brick', 'Blocks', 'Tiles', 'Paint', 'Admixture', 'Other'] },
       { name: 'supplierName', label: 'Supplier Name', type: 'text', required: true },
-      { name: 'invoiceNumber', label: 'Invoice/Chalan No.', type: 'text', required: true },
+      { name: 'invoiceNumber', label: 'Invoice / Chalan No.', type: 'text', required: true },
       { name: 'quantityReceived', label: 'Quantity Received', type: 'number', required: true },
       { name: 'unit', label: 'Unit', type: 'select', required: true, options: ['MT', 'Bags', 'Cu.m', 'Nos', 'Kg'] },
       { name: 'visualInspectionStatus', label: 'Visual Inspection', type: 'select', required: true, options: ['Pass', 'Fail', 'Partial'] },
@@ -80,7 +80,7 @@ export const WORK_TYPE_FIELDS = {
     label: 'Cement Receipt',
     fields: [
       { name: 'supplierName', label: 'Supplier Name', type: 'text', required: true },
-      { name: 'invoiceNumber', label: 'Invoice/Chalan No.', type: 'text', required: true },
+      { name: 'invoiceNumber', label: 'Invoice / Chalan No.', type: 'text', required: true },
       { name: 'quantityReceived', label: 'Quantity (Bags)', type: 'number', required: true },
       { name: 'cementGrade', label: 'Grade/Type', type: 'select', required: true, options: ['OPC 53S', 'OPC 43S', 'PPC', 'PSC', 'OPC 33S'] },
       { name: 'brand', label: 'Brand', type: 'select', required: true, options: ['ACC', 'UltraTech', 'Ambuja', 'Lafarge', 'Birla', 'Ramco', 'Chettinad', 'Other'] },
@@ -96,7 +96,7 @@ export const WORK_TYPE_FIELDS = {
     isCritical: true,
     fields: [
       { name: 'supplierName', label: 'Supplier Name', type: 'text', required: true },
-      { name: 'invoiceNumber', label: 'Invoice/Chalan No.', type: 'text', required: true },
+      { name: 'invoiceNumber', label: 'Invoice / Chalan No.', type: 'text', required: true },
       { name: 'quantityReceived', label: 'Quantity (MT)', type: 'number', required: true },
       { name: 'steelGrade', label: 'Grade', type: 'select', required: true, options: ['Fe415', 'Fe500', 'Fe500D', 'Fe550', 'Fe550D', 'TMT500', 'TMT550'] },
       { name: 'brand', label: 'Brand', type: 'select', required: true, options: ['TATA Tiscon', 'SAIL', 'JSW', 'Jindal', 'Kamdhenu', 'Primary Steel', 'Other'] },
@@ -121,7 +121,7 @@ export const WORK_TYPE_FIELDS = {
       { name: 'materialType', label: 'Material Type', type: 'select', required: true, options: ['River Sand', 'M-Sand', 'Crushed Aggregates', 'Fly Ash', 'GGBS', 'Cement Bulk', 'Other'] },
       { name: 'supplierName', label: 'Supplier/Quarry Name', type: 'text', required: true },
       { name: 'sourceLocation', label: 'Source/Quarry Location', type: 'text', required: true },
-      { name: 'invoiceNumber', label: 'Invoice/Chalan No.', type: 'text', required: true },
+      { name: 'invoiceNumber', label: 'Invoice / Chalan No.', type: 'text', required: true },
       { name: 'quantityReceived', label: 'Quantity', type: 'number', required: true },
       { name: 'unit', label: 'Unit', type: 'select', required: true, options: ['Cu.m', 'MT', 'Bags'] },
       { name: 'itpReference', label: 'ITP Reference No.', type: 'text', required: true },
@@ -157,7 +157,7 @@ export const WORK_TYPE_FIELDS = {
     fields: [
       { name: 'materialType', label: 'Material Type', type: 'text', required: true },
       { name: 'supplierName', label: 'Supplier Name', type: 'text', required: true },
-      { name: 'invoiceNumber', label: 'Invoice/Chalan No.', type: 'text', required: true },
+      { name: 'invoiceNumber', label: 'Invoice / Chalan No.', type: 'text', required: true },
       { name: 'quantityReceived', label: 'Quantity', type: 'number', required: true },
       { name: 'unit', label: 'Unit', type: 'text', required: true },
       { name: 'inspectionCriteria', label: 'Specific Inspection Criteria', type: 'textarea', required: true },

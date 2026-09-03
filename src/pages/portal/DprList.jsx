@@ -491,7 +491,7 @@ export default function DprList() {
                       <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.workExecutedToday || <em className="text-placeholder">—</em>}</dd>
                       <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Work location:</dt>
                       <dd style={{ margin: 0 }}>{expandedDpr.workLocation || <em className="text-placeholder">—</em>}</dd>
-                      <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Man power:</dt>
+                      <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Manpower:</dt>
                       <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.manpowerSummary || <em className="text-placeholder">—</em>}</dd>
                       <dt style={{ fontWeight: 500, color: 'var(--steel)' }}>Risks:</dt>
                       <dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{expandedDpr.risksHindrances || <em className="text-placeholder">—</em>}</dd>
