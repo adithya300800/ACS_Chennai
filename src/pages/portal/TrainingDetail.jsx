@@ -56,6 +56,22 @@ export default function TrainingDetail() {
   const latestRef = useRef({ pct: 0, currentSec: 0 });
   const dirtyRef = useRef(false);
 
+  // Round-24 follow-up: the IFrame session token the backend requires
+  // (DR-010) before accepting `progressPct >= 100` from a player-observable
+  // provider. Generated ONCE per page mount — the route ties the chain of
+  // progress pings to this single token. crypto.randomUUID is widely
+  // supported (modern Chrome/Firefox/Safari); the fallback covers older
+  // runtimes (still collision-resistant enough for an integrity check —
+  // this is not a security boundary, just proof-of-payload).
+  const sessionIdRef = useRef(null);
+  if (sessionIdRef.current === null) {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      sessionIdRef.current = crypto.randomUUID();
+    } else {
+      sessionIdRef.current = `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+    }
+  }
+
   const fetchEnrollment = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -88,7 +104,13 @@ export default function TrainingDetail() {
       const { pct, currentSec } = latestRef.current;
       dirtyRef.current = false;
       try {
-        const updated = await api.updateTrainingProgress(enrollment.id, Math.round(pct), Math.floor(currentSec), accessToken);
+        const updated = await api.updateTrainingProgress(
+          enrollment.id,
+          Math.round(pct),
+          Math.floor(currentSec),
+          { sessionId: sessionIdRef.current },
+          accessToken
+        );
         setPendingPct(updated.progressPct || 0);
         setLastPingAt(Date.now());
         // Mirror status into local state so the pill / progress bar update
@@ -126,12 +148,23 @@ export default function TrainingDetail() {
   }, []);
 
   // Fired by VideoPlayer on the actual `ended` event. We post IMMEDIATELY
-  // (not waiting for the interval) so completion is real-time.
+  // (not waiting for the interval) so completion is real-time. This is the
+  // critical call site for DR-010 — the very first progressPct=100 POST
+  // from a player-observable provider, where the route demands
+  // evidenceMetadata.sessionId. Sending the same sessionIdRef used by the
+  // interval pings lets the route validate the chain as a single iframe
+  // session.
   const handleEnded = useCallback(async () => {
     if (!enrollment) return;
     if (enrollment.status === TRAINING_STATUSES.COMPLETED) return;
     try {
-      const updated = await api.updateTrainingProgress(enrollment.id, 100, latestRef.current.currentSec || 0, accessToken);
+      const updated = await api.updateTrainingProgress(
+        enrollment.id,
+        100,
+        latestRef.current.currentSec || 0,
+        { sessionId: sessionIdRef.current },
+        accessToken
+      );
       setEnrollment((prev) => ({ ...prev, status: updated.status, progressPct: updated.progressPct }));
       setPendingPct(100);
       push('Course completed! 🎉', 'success');

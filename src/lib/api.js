@@ -424,8 +424,20 @@ export const api = {
   // Progress ping — called every ~10s by the player (YouTube / Vimeo IFrame
   // API). Backend conditional UPDATE on status != COMPLETED so a stale
   // ping can't move the row backwards, and the row is locked once complete.
-  updateTrainingProgress: (id, progressPct, lastWatchedSec, token) =>
-    api.put(`/training/enrollments/${id}/progress`, { progressPct, lastWatchedSec }, token),
+  //
+  // Round-24 follow-up: `evidenceMetadata` is the IFrame session token the
+  // backend requires (DR-010) before accepting `progressPct >= 100` from a
+  // player-observable provider (YOUTUBE / VIMEO). Without it the route
+  // 400s with PLAYER_DATA_REQUIRED. Caller passes `{ sessionId }` —
+  // generated once per page mount by TrainingDetail (see sessionIdRef) —
+  // and we send it on every progress POST so the route can validate the
+  // chain of pings came from the same iframe load.
+  updateTrainingProgress: (id, progressPct, lastWatchedSec, evidenceMetadata, token) =>
+    api.put(`/training/enrollments/${id}/progress`, {
+      progressPct,
+      lastWatchedSec,
+      ...(evidenceMetadata ? { evidenceMetadata } : {}),
+    }, token),
   // Manual mark-complete (employee for non-trackable providers, or admin
   // override). 409 ENROLLMENT_LOCKED if the row is already COMPLETED.
   // Round-24 follow-up: admin can pull a row back from the employee's

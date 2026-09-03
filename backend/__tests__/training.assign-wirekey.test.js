@@ -24,6 +24,7 @@
 const {
   validateAssignEnrollments,
   validateCancelPayload,
+  validateProgressPayload,
   canTransition,
   httpStatusForCode,
 } = require('../src/lib/trainingRules');
@@ -252,5 +253,111 @@ describe('Round-24 — canTransition → CANCELLED allowlist', () => {
     // that 409 is the *route's* status check, not the canTransition
     // matrix).
     expect(canTransition('CANCELLED', 'CANCELLED')).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Round-24 follow-up: progress pings must carry evidenceMetadata.sessionId
+// once progressPct >= 100 from a player-observable provider (DR-010).
+//
+// Background — before round-24:
+//   TrainingDetail.jsx posted `{ progressPct, lastWatchedSec }` with no
+//   evidenceMetadata. The route's PLAYER_OBSERVED guard (training.js:546)
+//   then 400'd at 100% with `PLAYER_DATA_REQUIRED`. Manual "Mark as
+//   Complete" still worked (different route, SELF_ATTESTED evidence class),
+//   so admins could complete a course, but the auto-complete path that
+//   fires when a learner finishes a YouTube/Vimeo video was dead.
+//
+// Round-24 fix:
+//   - TrainingDetail generates `sessionIdRef` once on mount (crypto.randomUUID).
+//   - api.updateTrainingProgress now accepts an `evidenceMetadata` arg and
+//     sends `{ sessionId }` on every progress POST (interval + handleEnded).
+//   - validateProgressPayload accepts an optional `evidenceMetadata` object
+//     and returns it verbatim — the route then guards against missing
+//     `sessionId` only at the 100% threshold for player-observable providers.
+//
+// These tests pin the validator contract (shape, monotonic guard, missing/
+// non-object error) so the wire shape the route relies on is locked.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Round-24 — validateProgressPayload evidenceMetadata contract', () => {
+  it('returns progressPct/lastWatchedSec with evidenceMetadata=null when omitted', () => {
+    const v = ok(validateProgressPayload({ progressPct: 42, lastWatchedSec: 123 }));
+    expect(v.progressPct).toBe(42);
+    expect(v.lastWatchedSec).toBe(123);
+    expect(v.evidenceMetadata).toBeNull();
+  });
+
+  it('echoes evidenceMetadata.sessionId verbatim when present', () => {
+    const sessionId = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+    const v = ok(validateProgressPayload({
+      progressPct: 99,
+      lastWatchedSec: 200,
+      evidenceMetadata: { sessionId },
+    }));
+    expect(v.evidenceMetadata).toEqual({ sessionId });
+  });
+
+  it('accepts progressPct=100 with a valid sessionId (route-level guard runs separately)', () => {
+    const v = ok(validateProgressPayload({
+      progressPct: 100,
+      lastWatchedSec: 600,
+      evidenceMetadata: { sessionId: 'sess-abc-123' },
+    }));
+    expect(v.progressPct).toBe(100);
+    expect(v.evidenceMetadata.sessionId).toBe('sess-abc-123');
+  });
+
+  it('accepts progressPct=100 WITHOUT a sessionId (validator layer only — route enforces)', () => {
+    // The validator accepts the body; the ROUTE then 400s when
+    // canAutoCompleteFromPlayer(provider) is true and sessionId is
+    // missing. The split lets the same validator serve the admin
+    // override / non-trackable paths where sessionId isn't required.
+    const v = ok(validateProgressPayload({ progressPct: 100, lastWatchedSec: 0 }));
+    expect(v.progressPct).toBe(100);
+    expect(v.evidenceMetadata).toBeNull();
+  });
+
+  it('rejects non-object evidenceMetadata (400 INVALID_METADATA)', () => {
+    expect(validateProgressPayload({
+      progressPct: 50, lastWatchedSec: 0, evidenceMetadata: 'not-an-object',
+    }).code).toBe('INVALID_METADATA');
+    expect(validateProgressPayload({
+      progressPct: 50, lastWatchedSec: 0, evidenceMetadata: 42,
+    }).code).toBe('INVALID_METADATA');
+    expect(httpStatusForCode('INVALID_METADATA')).toBe(400);
+  });
+
+  it('accepts evidenceMetadata with extra fields (forward-compat for future keys)', () => {
+    // The route reads only sessionId today, but the schema should be open
+    // so adding e.g. `playerVersion`, `networkType`, etc. doesn't require
+    // a validator change. Pins the open-object shape so a future
+    // refactor that switches to a strict allowlist is a deliberate choice.
+    const v = ok(validateProgressPayload({
+      progressPct: 80,
+      lastWatchedSec: 480,
+      evidenceMetadata: {
+        sessionId: 'sess-xyz',
+        playerVersion: '2.0',
+        networkType: 'wifi',
+      },
+    }));
+    expect(v.evidenceMetadata).toEqual({
+      sessionId: 'sess-xyz',
+      playerVersion: '2.0',
+      networkType: 'wifi',
+    });
+  });
+
+  it('rejects body regressions with PROGRESS_REGRESSED (monotonic guard still in force)', () => {
+    // progressPct+5 < previousPct triggers the guard. Make sure the new
+    // evidenceMetadata handling doesn't accidentally disable the
+    // monotonic check.
+    const r = validateProgressPayload(
+      { progressPct: 10, lastWatchedSec: 0, evidenceMetadata: { sessionId: 'sess' } },
+      50 /* previousPct */
+    );
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('PROGRESS_REGRESSED');
   });
 });

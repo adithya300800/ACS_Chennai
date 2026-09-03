@@ -4457,17 +4457,30 @@ footer {
   width: 100%;
   padding-top: 56.25%; /* 16:9 */
 }
-.training-player-frame > div {
+/* Round-24 follow-up: the YouTube IFrame Player API REPLACES the inner div
+   with an iframe (preserving className), so `.training-player-frame > div`
+   no longer matches. The previous CSS only positioned the pre-replacement
+   div absolutely — once the iframe landed, it fell back to default height
+   (150px) inside a parent that had no explicit height (only padding-top),
+   and the video collapsed to a tiny black sliver. Apply absolute
+   positioning to BOTH the class target (works pre-replacement) and the
+   iframe fallback so the player fills the 16:9 box regardless of stage. */
+.training-player-frame > div,
+.training-player-frame > iframe {
   position: absolute;
   inset: 0;
 }
 .training-player-yt,
 .training-player-vimeo {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
 }
 .training-player-yt iframe,
 .training-player-vimeo iframe {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   border: 0;
