@@ -25,6 +25,7 @@
 // (written by the caller); this module only logs to stdout.
 
 const nodemailer = require('nodemailer');
+const crypto = require('crypto');
 const { hashIdentifier } = require('./pii');
 
 // All env vars are required for a working send. They stay backend-only —
@@ -81,6 +82,10 @@ const _bootState = {
   user_set: !!ZOHO_SMTP_USER,
   user_len: ZOHO_SMTP_USER.length,
   pass_len: ZOHO_SMTP_PASSWORD.length,
+  pass_sha8: ZOHO_SMTP_PASSWORD ? crypto.createHash('sha256').update(ZOHO_SMTP_PASSWORD).digest('hex').slice(0, 8) : 'EMPTY',
+  pass_first2: ZOHO_SMTP_PASSWORD.slice(0, 2),
+  pass_last2: ZOHO_SMTP_PASSWORD.slice(-2),
+  pass_has_space: ZOHO_SMTP_PASSWORD.includes(' '),
   from_email: FROM_EMAIL,
   host: ZOHO_SMTP_HOST,
   port: ZOHO_SMTP_PORT,
