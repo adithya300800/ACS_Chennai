@@ -13,7 +13,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
 const {
   generateULID, generateUploadSASUrl, generateReadSASUrl,
   verifyBlobExists, CONTENT_TYPE_EXT,
@@ -21,6 +21,9 @@ const {
 const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
+// DR-027: parseStrictISODate only validates calendar shape, so a well-formed
+// future date used to persist. rejectIfFutureReportDate is the authority.
+const { rejectIfFutureReportDate, assertNotFutureReportDate } = require('../lib/reportDate');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -213,6 +216,11 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'INVALID_REPORT_DATE', message: 'reportDate must be a valid YYYY-MM-DD date' });
   }
   const dateUTC = dateParsed.date;
+
+  // DR-027: mirror of the dpr.js create guard. A future-dated inspection sits
+  // in the admin queue (OPEN) for a site visit that hasn't happened, and
+  // back-fills the linked DPR's day bucket. Admins may override (audited).
+  if (rejectIfFutureReportDate(req, res, dateUTC, 'inspection.create')) return;
 
   // severity — nullable, allowlist
   if (severity !== undefined && severity !== null && !ALLOWED_SEVERITIES.has(severity)) {
@@ -538,6 +546,8 @@ router.put('/:id', async (req, res) => {
     const dp = parseStrictISODate(fields.reportDate);
     if (!dp.ok) return res.status(400).json({ error: 'INVALID_REPORT_DATE', message: 'reportDate must be YYYY-MM-DD' });
     fields.reportDate = dp.date;
+    // DR-027: without this, PUT is a trivial bypass of the create-time check.
+    if (rejectIfFutureReportDate(req, res, fields.reportDate, 'inspection.update')) return;
   }
 
   if (fields.inspectionType !== undefined && !ALLOWED_INSPECTION_TYPES.has(fields.inspectionType)) {
@@ -646,7 +656,24 @@ const INSPECTION_INCLUDE = {
 // Shared per-record transition helper used by both the single-record endpoints
 // and the bulk-review loop. Throws tagged errors on failure so callers can
 // branch on _code / _status without re-implementing the state-machine logic.
-async function transitionInspectionRecord(prisma, id, action, payload, actorEmployeeId) {
+async function transitionInspectionRecord(prisma, id, action, payload, actorEmployeeId, options = {}) {
+  const { allowAdminOverride = false } = options;
+
+  // DR-027: none of the three transition endpoints accepts a reportDate today
+  // — they only move `status` and append `_adminNotes`. This guard exists so
+  // that if a future transition ever carries a date correction through
+  // `payload`, it cannot slip past the no-future rule the way create/update
+  // did. All callers here are `req.isAdmin`-gated, so they pass
+  // allowAdminOverride:true and a deliberate future date is audit-logged
+  // rather than rejected.
+  if (payload && payload.reportDate !== undefined) {
+    assertNotFutureReportDate(payload.reportDate, {
+      allowAdminOverride,
+      actor: actorEmployeeId,
+      resource: `inspection.${String(action).toLowerCase()}`,
+    });
+  }
+
   const allowedFrom =
     action === 'ACKNOWLEDGE' ? ACK_FROM
     : action === 'CLOSE' ? CLOSE_FROM
@@ -763,7 +790,8 @@ router.post('/:id/acknowledge', async (req, res) => {
       id,
       'ACKNOWLEDGE',
       { adminNotes },
-      req.employeeId
+      req.employeeId,
+      { allowAdminOverride: true } // DR-027: route is req.isAdmin-gated above
     );
     res.json(updated);
   } catch (err) {
@@ -791,7 +819,8 @@ router.post('/:id/close', async (req, res) => {
       id,
       'CLOSE',
       { adminNotes },
-      req.employeeId
+      req.employeeId,
+      { allowAdminOverride: true } // DR-027: route is req.isAdmin-gated above
     );
     res.json(updated);
   } catch (err) {
@@ -826,7 +855,8 @@ router.post('/:id/reject', async (req, res) => {
       id,
       'REJECT',
       { reason, adminNotes },
-      req.employeeId
+      req.employeeId,
+      { allowAdminOverride: true } // DR-027: route is req.isAdmin-gated above
     );
     res.json(updated);
   } catch (err) {
@@ -924,7 +954,8 @@ router.post('/bulk-review', async (req, res) => {
         id,
         action,
         { reason, adminNotes },
-        req.employeeId
+        req.employeeId,
+        { allowAdminOverride: true } // DR-027: route is req.isAdmin-gated above
       );
       succeeded.push({ id: record.id, newStatus: record.status });
     } catch (err) {
@@ -947,5 +978,99 @@ router.post('/bulk-review', async (req, res) => {
     failed,
   });
 });
+
+// ─── GET /api/inspection/stats ──────────────────────────────────────────────
+// DR-029 (round-20): explicit aggregate counts for the admin inspection
+// dashboard. Mirrors the /api/dpr/stats shape so the frontend treats both
+// endpoints uniformly.
+//
+// Before this endpoint existed, InspectionDashboard sent three requests
+// with limit=1 and used response length as the count. That meant "Open",
+// "Filed Today", and "Closed" could never display more than 1, and "Total
+// Visible" never more than 2. Same anti-pattern as DPR but worse because
+// limit=1 made it obviously broken at scale (admin at the live portal
+// testing round-19 reported "the dashboard says 1 open inspection when
+// there are clearly more in the queue").
+//
+// Six targeted COUNT queries against indexed columns (reportDate, status),
+// all in parallel. Admin-only via requireFreshAdmin (falls back to
+// requireAdmin in older builds). See docs/dashboard-metrics.md.
+const inspectionStatsAdminGuard = requireFreshAdmin || requireAdmin;
+
+router.get('/stats', inspectionStatsAdminGuard, asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  // Same UTC [start, end) window convention as /api/dpr/stats. reportDate
+  // is @db.Date so { gte: today, lt: tomorrow } covers the full day.
+  const startOfToday = new Date();
+  startOfToday.setUTCHours(0, 0, 0, 0);
+  const endOfToday = new Date(startOfToday);
+  endOfToday.setUTCDate(endOfToday.getUTCDate() + 1);
+
+  const [
+    openNow,
+    filedToday,
+    closedToday,
+    acknowledged,
+    pendingReview,
+    totalActive,
+  ] = await Promise.all([
+    // openNow: every OPEN record across the org (no date window — this is
+    // the "how big is the current queue" tile).
+    prisma.inspectionRecord.count({ where: { status: 'OPEN' } }),
+    // filedToday: any record whose reportDate is today, regardless of
+    // status. "Filed Today" means "engineer submitted today" — once it's
+    // filed, even if it transitions to CLOSED later, it counts here.
+    prisma.inspectionRecord.count({
+      where: { reportDate: { gte: startOfToday, lt: endOfToday } },
+    }),
+    // closedToday: rows that TRANSITIONED to CLOSED today. Inspection
+    // records don't have a dedicated closedAt column; we use updatedAt as
+    // the best proxy because the close transition sets status='CLOSED' +
+    // updatedAt=now inside a $transaction. (A re-edit on a CLOSED row
+    // would bump updatedAt again — acceptable; the label is "Closed Today"
+    // not "Closed and not edited today".)
+    prisma.inspectionRecord.count({
+      where: {
+        status: 'CLOSED',
+        updatedAt: { gte: startOfToday, lt: endOfToday },
+      },
+    }),
+    // acknowledged: org-wide count of records an admin has explicitly
+    // ACK'd. Status 'ACKNOWLEDGED' is the entry-point state for review
+    // (vs OPEN which is the engineer's submission state).
+    prisma.inspectionRecord.count({ where: { status: 'ACKNOWLEDGED' } }),
+    // pendingReview: rows an admin can still pick up. Inspection reviewable
+    // states (matching B-06's REVIEWABLE_STATUSES) are
+    // OPEN / IN_PROGRESS / PENDING_VERIFICATION. ACKNOWLEDGED is the
+    // "I've seen it" state — it's no longer pending action from the admin
+    // until it moves to IN_PROGRESS.
+    prisma.inspectionRecord.count({
+      where: { status: { in: ['OPEN', 'IN_PROGRESS', 'PENDING_VERIFICATION'] } },
+    }),
+    // totalActive: every non-terminal record. Terminal states are CLOSED
+    // and REJECTED — same model as DPR's totalActive.
+    prisma.inspectionRecord.count({
+      where: { status: { in: ['OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION'] } },
+    }),
+  ]);
+
+  res.json({
+    openNow,
+    filedToday,
+    closedToday,
+    acknowledged,
+    pendingReview,
+    totalActive,
+    window: {
+      start: startOfToday.toISOString(),
+      end: endOfToday.toISOString(),
+      timezone: 'UTC',
+    },
+  });
+}));
 
 module.exports = router;

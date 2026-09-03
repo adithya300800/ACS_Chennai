@@ -83,7 +83,18 @@ export default function InspectionDashboard() {
   const [filterType, setFilterType] = useState('');
   const [filterFrom, setFilterFrom] = useState('');
   const [filterTo, setFilterTo] = useState('');
-  const [stats, setStats] = useState({ open: 0, closedWeek: 0, today: 0, total: 0 });
+  // DR-029 (round-20): stats now come from /api/inspection/stats — a
+  // single request that returns six explicit aggregate counts. Replaces the
+  // previous "fetch limit=1 paginated lists, use response.length" pattern
+  // that hard-capped every tile at 1. See docs/dashboard-metrics.md.
+  const [stats, setStats] = useState({
+    openNow: 0,
+    filedToday: 0,
+    closedToday: 0,
+    acknowledged: 0,
+    pendingReview: 0,
+    totalActive: 0,
+  });
 
   // Round-17 B-06: bulk-select state for the inspection admin queue. The
   // inspection status enum is OPEN / ACKNOWLEDGED / IN_PROGRESS /
@@ -117,20 +128,18 @@ export default function InspectionDashboard() {
     setLoading(true);
     setError('');
     try {
-      const today = getLocalDate();
-
-      // Fire all stat queries in parallel.
-      const [openRes, closedRes, todayRes] = await Promise.all([
-        api.getInspections({ status: 'OPEN', limit: '1' }, accessToken),
-        api.getInspections({ status: 'CLOSED', from: today, to: today, limit: '1' }, accessToken),
-        api.getInspections({ reportDate: today, limit: '1' }, accessToken),
-      ]);
-
+      // DR-029 (round-20): replace three limit=1 sample queries with one
+      // aggregate endpoint. The backend runs six COUNT() queries in
+      // parallel against indexed columns; labels match exactly what the
+      // count returns. See docs/dashboard-metrics.md.
+      const statsRes = await api.getInspectionStats(accessToken);
       setStats({
-        open: openRes.inspections?.length || 0,
-        closedWeek: closedRes.inspections?.length || 0,
-        today: todayRes.inspections?.length || 0,
-        total: (openRes.inspections?.length || 0) + (closedRes.inspections?.length || 0),
+        openNow: Number(statsRes.openNow) || 0,
+        filedToday: Number(statsRes.filedToday) || 0,
+        closedToday: Number(statsRes.closedToday) || 0,
+        acknowledged: Number(statsRes.acknowledged) || 0,
+        pendingReview: Number(statsRes.pendingReview) || 0,
+        totalActive: Number(statsRes.totalActive) || 0,
       });
 
       const data = await fetchPage(null);
@@ -251,10 +260,14 @@ export default function InspectionDashboard() {
       </div>
 
       <div className="dpr-dashboard-stats">
-        <StatCard number={stats.open} label="Open" color="#dc2626" />
-        <StatCard number={stats.today} label="Filed Today" color="#2563eb" />
-        <StatCard number={stats.closedWeek} label="Closed" color="#16a34a" />
-        <StatCard number={stats.total} label="Total Visible" color="#64748b" />
+        {/* DR-029 (round-20): labels now match the backend aggregate.
+            Each number is a real COUNT() against an indexed column with an
+            explicit window — see docs/dashboard-metrics.md. */}
+        <StatCard number={stats.openNow} label="Open" color="#dc2626" />
+        <StatCard number={stats.filedToday} label="Filed Today" color="#2563eb" />
+        <StatCard number={stats.closedToday} label="Closed Today" color="#16a34a" />
+        <StatCard number={stats.acknowledged} label="Acknowledged" color="#f59e0b" />
+        <StatCard number={stats.totalActive} label="Total Active" color="#64748b" />
       </div>
 
       <div className="dpr-card" style={{ marginBottom: '1rem' }}>

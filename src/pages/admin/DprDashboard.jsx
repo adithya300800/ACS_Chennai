@@ -62,7 +62,20 @@ export default function DprDashboard() {
   const [rejectReason, setRejectReason] = useState('');
   const [actionLoading, setActionLoading] = useState('');
   const [filter, setFilter] = useState('SUBMITTED');
-  const [stats, setStats] = useState({ today: 0, pending: 0, approvedWeek: 0, total: 0, openInspections: 0 });
+  // DR-029 (round-20): stats now come from /api/dpr/stats — a single
+  // request that returns six explicit aggregate counts against the indexed
+  // reportDate / status / approvedAt / reviewedAt columns. Replaces the
+  // previous "fetch limit=20 paginated lists, use response.length" pattern
+  // that silently capped every tile at 20. See docs/dashboard-metrics.md
+  // for the field → label contract.
+  const [stats, setStats] = useState({
+    submittedToday: 0,
+    pendingReview: 0,
+    approvedToday: 0,
+    rejectedToday: 0,
+    draftCount: 0,
+    totalActive: 0,
+  });
 
   // Round-17 B-06: bulk-select state. We only allow selecting DPRs in a
   // reviewable state (SUBMITTED / UNDER_REVIEW) — APPROVED / REJECTED are
@@ -89,21 +102,18 @@ export default function DprDashboard() {
     setLoading(true);
     setError('');
     try {
-      const [pendingData, todayData, weekData, openInspectionsData] = await Promise.all([
-        api.getDprs({ status: 'SUBMITTED' }, accessToken),
-        api.getDprs({ status: 'UNDER_REVIEW' }, accessToken),
-        api.getDprs({ status: 'APPROVED' }, accessToken),
-        // Round-12: 5th stat card — open inspection records across the org.
-        // Non-fatal if it fails (e.g. permissions); fall back to 0.
-        api.getInspections({ status: 'OPEN', limit: '1' }, accessToken).catch(() => ({ inspections: [] })),
-      ]);
-
+      // DR-029 (round-20): replace four paginated sample queries with a
+      // single stats endpoint. The backend runs six COUNT() queries in
+      // parallel against indexed columns; the response includes a `window`
+      // echo so we can show "as of <ts>" if we ever want to.
+      const statsRes = await api.getDprStats(accessToken);
       setStats({
-        today: (pendingData.dprs || []).length,
-        pending: (todayData.dprs || []).length,
-        approvedWeek: (weekData.dprs || []).length,
-        total: (pendingData.dprs || []).length + (todayData.dprs || []).length,
-        openInspections: openInspectionsData.inspections?.length || 0,
+        submittedToday: Number(statsRes.submittedToday) || 0,
+        pendingReview: Number(statsRes.pendingReview) || 0,
+        approvedToday: Number(statsRes.approvedToday) || 0,
+        rejectedToday: Number(statsRes.rejectedToday) || 0,
+        draftCount: Number(statsRes.draftCount) || 0,
+        totalActive: Number(statsRes.totalActive) || 0,
       });
 
       const items = await loadDprs();
@@ -300,11 +310,14 @@ export default function DprDashboard() {
       </div>
 
       <div className="dpr-dashboard-stats">
-        <StatCard number={stats.today} label="Submitted Today" />
-        <StatCard number={stats.pending} label="Pending Review" color="#f59e0b" />
-        <StatCard number={stats.approvedWeek} label="Approved" color="#22c55e" />
-        <StatCard number={stats.openInspections} label="Open Inspections" color="#dc2626" />
-        <StatCard number={stats.total} label="Total Active DPRs" />
+        {/* DR-029 (round-20): labels now match the backend aggregate.
+            Each number is a real COUNT() against an indexed column with an
+            explicit date window — see docs/dashboard-metrics.md. */}
+        <StatCard number={stats.submittedToday} label="Submitted Today" />
+        <StatCard number={stats.pendingReview} label="Pending Review" color="#f59e0b" />
+        <StatCard number={stats.approvedToday} label="Approved Today" color="#22c55e" />
+        <StatCard number={stats.rejectedToday} label="Rejected Today" color="#dc2626" />
+        <StatCard number={stats.totalActive} label="Total Active DPRs" />
       </div>
 
       {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}

@@ -241,6 +241,12 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return api.get(`/dpr${qs ? '?' + qs : ''}`, token);
   },
+  // DR-029 (round-20): explicit aggregate counts for the admin dashboard.
+  // Replaces the old "read paginated list, use length as count" pattern
+  // that silently capped numbers at the page size. The backend runs six
+  // indexed COUNT() queries in parallel; the window is echoed back in the
+  // response so the UI can render "as of <ts>" if desired.
+  getDprStats: (token) => api.get('/dpr/stats', token),
   getDpr: (id, token) => api.get(`/dpr/${id}`, token),
   updateDpr: (id, data, version, token) =>
     api.put(`/dpr/${id}`, { ...data, version }, token),
@@ -313,6 +319,10 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return api.get(`/inspection${qs ? '?' + qs : ''}`, token);
   },
+  // DR-029 (round-20): inspection admin dashboard aggregate counts. Same
+  // shape as getDprStats — six parallel COUNT() queries against indexed
+  // columns. See docs/dashboard-metrics.md for the metric definitions.
+  getInspectionStats: (token) => api.get('/inspection/stats', token),
   getInspection: (id, token) => api.get(`/inspection/${id}`, token),
   updateInspection: (id, data, version, token) =>
     api.put(`/inspection/${id}`, { ...data, version }, token),

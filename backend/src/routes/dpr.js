@@ -1,11 +1,14 @@
 const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
 const { generateULID, generateUploadSASUrl, generateReadSASUrl, verifyBlobExists, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
+// DR-027: parseStrictISODate only validates calendar shape, so a well-formed
+// future date used to persist. rejectIfFutureReportDate is the authority.
+const { rejectIfFutureReportDate } = require('../lib/reportDate');
 
 // Tiny asyncHandler so unhandled rejections in async route handlers reach
 // the global error handler instead of hanging the request or crashing the
@@ -473,6 +476,13 @@ router.post('/', async (req, res) => {
   }
   const dateUTC = dateParsed.date;
 
+  // DR-027: shape-valid but future dates were persisting. A tomorrow-dated
+  // DPR reserves the legitimate (employee, day) key — the real report 409s as
+  // a duplicate the next morning — and contaminates the admin review queue
+  // with work that hasn't happened. The date picker already clamps this, but
+  // the UI is a UX guard, not an authority. Admins may override (audited).
+  if (rejectIfFutureReportDate(req, res, dateUTC, 'dpr.create')) return;
+
   // Photos validation (P1-5). Server-side enforcement of every constraint
   // that /sas-url already enforces — the POST handler used to trust the
   // client, which is an IDOR vector (P0-2).
@@ -844,6 +854,12 @@ router.put('/:id', async (req, res) => {
     const dp = parseStrictISODate(fields.reportDate);
     if (!dp.ok) return res.status(400).json({ error: 'INVALID_REPORT_DATE', message: 'reportDate must be YYYY-MM-DD' });
     fields.reportDate = dp.date;
+    // DR-027: same no-future rule as POST — otherwise an edit is a trivial
+    // bypass of the create-time check (submit today's DPR, then PUT it to
+    // tomorrow). This route is owner-gated rather than admin-gated, so the
+    // override only ever applies when the owner is themselves an admin;
+    // `req.isAdmin` comes from the JWT claim set by requireAuth.
+    if (rejectIfFutureReportDate(req, res, fields.reportDate, 'dpr.update')) return;
   }
 
   // Only owner can update
@@ -1524,5 +1540,128 @@ router.post('/:id/pdf', (req, res) => {
              'See backend/src/lib/pdfGenerator.js for the planned integration.',
   });
 });
+
+// ─── GET /api/dpr/stats ────────────────────────────────────────────────────
+// DR-029 (round-20): explicit aggregate counts for the admin dashboard.
+//
+// Before this endpoint existed, the DprDashboard read four paginated lists
+// (limit=20) and used the response length as the count. With more than 20
+// records the numbers were silently capped at 20; the labels claimed "Today"
+// / "Approved" / "Total Active" but the request had no date or status scope,
+// so the counts were whatever 20 records happened to come back.
+//
+// This endpoint runs six targeted COUNT queries against indexed columns
+// (reportDate, status) using an explicit [today UTC, tomorrow UTC) window so
+// the count matches the user-visible label. Counts run in parallel.
+//
+// Admin-only — a non-admin can derive similar numbers via /api/dpr with
+// submittedById=me, but the admin dashboard tiles are scope-less and the
+// wider org totals are not something a regular engineer should be able to
+// scrape. requireFreshAdmin is used (falls back to requireAdmin if the
+// import was unavailable in older builds) so a demoted admin can't read
+// org totals from a stale JWT.
+//
+// Response shape is the documented contract — see docs/dashboard-metrics.md.
+// Any change here MUST be mirrored there so the labels stay honest.
+// requireFreshAdmin is exported from middleware/auth.js; if a future build
+// drops it (or tests mount this module without it) we fall back to
+// requireAdmin — both reject non-admin tokens, only requireFreshAdmin
+// re-reads isAdmin from the DB on each call.
+const dprStatsAdminGuard = requireFreshAdmin || requireAdmin;
+
+// We use a single [start, end) UTC window for "today". reportDate is
+// @db.Date in Postgres, so the comparison is on the date portion only.
+// start = today UTC midnight; end = tomorrow UTC midnight. Anything dated
+// earlier than today but transitioned today (APPROVED, REJECTED) is counted
+// in the *Today variants via the transition timestamps on the same row.
+// Mounted AFTER `router.use(requireAuth)` at line 256, so the token is
+// already verified by the time this handler runs — dprStatsAdminGuard
+// only needs to confirm the admin claim.
+router.get('/stats', dprStatsAdminGuard, asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  // Build the [start, end) window for "today" once and reuse for all six
+  // counts. Date.now() inside the request handler — we don't need exact
+  // midnight math because reportDate is a date column (no time portion).
+  const startOfToday = new Date();
+  startOfToday.setUTCHours(0, 0, 0, 0);
+  const endOfToday = new Date(startOfToday);
+  endOfToday.setUTCDate(endOfToday.getUTCDate() + 1);
+
+  // Count queries run in parallel — each is a single COUNT() against an
+  // indexed column. Worst case: six tiny aggregates, ~tens of ms total.
+  // `transition` timestamps use `gte`/`lt` against today, not the date
+  // column — those are DateTime columns, so the equality semantics differ.
+  const [
+    submittedToday,
+    approvedToday,
+    rejectedToday,
+    pendingReview,
+    draftCount,
+    totalActive,
+  ] = await Promise.all([
+    // submittedToday: reportDate = today AND status = SUBMITTED.
+    // reportDate is a Date column, so { gte: today, lt: tomorrow } matches
+    // the whole day.
+    prisma.dPR.count({
+      where: {
+        status: 'SUBMITTED',
+        reportDate: { gte: startOfToday, lt: endOfToday },
+      },
+    }),
+    // approvedToday: rows that TRANSITIONED to APPROVED today. The
+    // transition timestamp is approvedAt, not reportDate — a DPR filed last
+    // week can be approved today, and a DPR filed today can be approved
+    // tomorrow. Matching the label "Approved Today" requires the
+    // transition timestamp.
+    prisma.dPR.count({
+      where: {
+        status: 'APPROVED',
+        approvedAt: { gte: startOfToday, lt: endOfToday },
+      },
+    }),
+    // rejectedToday: rows transitioned to REJECTED today (reviewedAt is
+    // the terminal transition timestamp for both APPROVED and REJECTED —
+    // the reject path sets reviewedAt alongside status=REJECTED).
+    prisma.dPR.count({
+      where: {
+        status: 'REJECTED',
+        reviewedAt: { gte: startOfToday, lt: endOfToday },
+      },
+    }),
+    // pendingReview: anything not in a terminal state. Counts every DPR in
+    // the org that an admin could still pick up — SUBMITTED + UNDER_REVIEW.
+    prisma.dPR.count({
+      where: { status: { in: ['SUBMITTED', 'UNDER_REVIEW'] } },
+    }),
+    // draftCount: drafts in the org (engineers still typing).
+    prisma.dPR.count({ where: { status: 'DRAFT' } }),
+    // totalActive: every non-terminal DPR (DRAFT + SUBMITTED + UNDER_REVIEW).
+    // The dashboard label is "Total Active DPRs" — terminal rows (APPROVED /
+    // REJECTED) are excluded because they're done.
+    prisma.dPR.count({
+      where: { status: { in: ['DRAFT', 'SUBMITTED', 'UNDER_REVIEW'] } },
+    }),
+  ]);
+
+  res.json({
+    submittedToday,
+    approvedToday,
+    rejectedToday,
+    pendingReview,
+    draftCount,
+    totalActive,
+    window: {
+      // Echo back the window so the client can render "as of <ts>" if it
+      // wants to — useful for diagnosing clock-skew between server and DB.
+      start: startOfToday.toISOString(),
+      end: endOfToday.toISOString(),
+      timezone: 'UTC',
+    },
+  });
+}));
 
 module.exports = router;
