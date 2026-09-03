@@ -29,11 +29,16 @@ export default function UserMenu() {
   // Compute dropdown position from the trigger rect. useLayoutEffect
   // avoids the 1-frame flash where the dropdown would otherwise render
   // at 0,0 before React commits the position.
+  //
+  // Round-21 update: `right` is now CSS-driven (`right: 1rem` clamps the
+  // dropdown to the viewport edge on mobile). JS-computed right doesn't
+  // generalize for mobile topbars where the avatar is not at the far
+  // right of the screen — same lesson as NotificationBell.
   useLayoutEffect(() => {
     if (!open || !triggerRef.current) return;
     const compute = () => {
       const r = triggerRef.current.getBoundingClientRect();
-      setPos({ top: r.bottom + 8, right: window.innerWidth - r.right });
+      setPos({ top: r.bottom + 8 });
     };
     compute();
     window.addEventListener('resize', compute);
@@ -110,7 +115,7 @@ export default function UserMenu() {
           className="user-menu-dropdown user-menu-dropdown--portalled"
           role="menu"
           aria-label="Account"
-          style={{ top: `${pos.top}px`, right: `${pos.right}px` }}
+          style={{ top: `${pos.top}px` }}
         >
           <div className="user-menu-header">
             <div className="user-menu-name">{fullName}</div>

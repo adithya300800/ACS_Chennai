@@ -2942,8 +2942,13 @@ footer {
      band. Portalling out moves the DOM sibling out of <header>
      entirely; `position: fixed` then resolves against the viewport
      as intended. z-index: 1000 keeps it above all in-page stacking
-     contexts. */
+     contexts.
+     `right: 1rem` pins the dropdown to the viewport's right edge — JS
+     no longer computes `right` because the result depends on which
+     topbar element is rightmost (the avatar on desktop vs. any of
+     several on mobile), and a fixed CSS offset is robust to both. */
   position: fixed;
+  right: 1rem;
   min-width: 240px;
   max-width: calc(100vw - 16px);
   background: white;
@@ -3149,8 +3154,15 @@ footer {
      sibling of <body> rather than a descendant of <header>, so
      `position: fixed` resolves against the viewport as expected.
      z-index bumped from 100 → 1000 to sit above the sidebar's
-     z-index: 100 stacking context (same lesson as UserMenu). */
+     z-index: 100 stacking context (same lesson as UserMenu).
+     `right: 1rem` pins the dropdown to the viewport's right edge on
+     desktop; the @media (max-width: 480px) override clamps width and
+     re-confirms the same right offset for mobile. JS no longer
+     computes `right` (was `innerWidth - bell.right`) because on mobile
+     the bell sits in the middle of the topbar — that offset would
+     push the dropdown off the left of the viewport. */
   position: fixed;
+  right: 1rem;
   width: 360px;
   max-height: 480px;
   overflow-y: auto;

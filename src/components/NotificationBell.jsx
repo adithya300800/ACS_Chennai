@@ -66,13 +66,22 @@ export default function NotificationBell() {
   // resolve against the viewport because the dropdown is portalled to
   // <body> — escaping the <header>'s containing block (created by the
   // global `header { backdrop-filter: blur(16px)… }` rule in App.css).
-  useLayoutEffect(() => {
+//
+// `top` is JS-driven (the bell's `rect.bottom + 8` doesn't generalize
+// to CSS). `right` is CSS-driven: App.css pins `.notification-dropdown`
+// to `right: 1rem` and the mobile override clamps width to
+// `calc(100vw - 2rem)`. JS-computing `right = innerWidth - bell.right`
+// correctly aligns to the bell on desktop, but breaks on mobile where
+// the bell sits in the middle of the topbar (375px viewport, bell at
+// x≈222 → right: 152 → dropdown extends to x=-120). Drop the inline
+// right; CSS handles it.
+useLayoutEffect(() => {
     if (!open) return undefined;
     const compute = () => {
       const btn = triggerRef.current;
       if (!btn) return;
       const r = btn.getBoundingClientRect();
-      setDropdownPos({ top: r.bottom + 8, right: window.innerWidth - r.right });
+      setDropdownPos({ top: r.bottom + 8 });
     };
     compute();
     window.addEventListener('resize', compute);
@@ -341,7 +350,7 @@ export default function NotificationBell() {
           className="notification-dropdown"
           role="dialog"
           aria-label="Notifications"
-          style={{ top: `${dropdownPos.top}px`, right: `${dropdownPos.right}px` }}
+          style={{ top: `${dropdownPos.top}px` }}
         >
           <div style={{ padding: '0.875rem 1rem', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ fontWeight: 600, color: 'var(--navy)', fontSize: '0.9rem' }}>
