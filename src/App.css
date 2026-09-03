@@ -1150,6 +1150,20 @@ footer {
 .portal-logout-btn { color: var(--danger) !important; }
 .portal-logout-btn:hover { background: var(--danger-bg) !important; color: var(--danger) !important; }
 
+/* SOL-P0#1: screen-reader-only utility for labels that are visually hidden
+   when the sidebar is collapsed but must remain in the accessibility tree. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* Main Content Area */
 .portal-main {
   flex: 1;

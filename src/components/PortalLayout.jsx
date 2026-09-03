@@ -265,9 +265,17 @@ export default function PortalLayout() {
                       // the proper ToastContext used elsewhere in the app.
                       pushToast('Assets module is coming soon.', 'info');
                     }}
+                    // SOL-P0#1: stable accessible name + tooltip regardless of
+                    // sidebar collapse state — required by WCAG 2.4.4 + 4.1.2.
+                    title={item.label}
+                    aria-label={item.label}
                   >
-                    <span className="portal-nav-icon">{item.icon}</span>
-                    {sidebarOpen && <span className="portal-nav-label">{item.label}</span>}
+                    <span className="portal-nav-icon" aria-hidden="true">{item.icon}</span>
+                    {sidebarOpen ? (
+                      <span className="portal-nav-label">{item.label}</span>
+                    ) : (
+                      <span className="sr-only">{item.label}</span>
+                    )}
                     {sidebarOpen && <span className="portal-nav-soon-badge">Soon</span>}
                   </button>
                 ) : (
@@ -276,9 +284,17 @@ export default function PortalLayout() {
                     to={item.to}
                     onClick={closeMobileSidebar}
                     className={({ isActive }) => `portal-nav-item ${isActive ? 'active' : ''}`}
+                    // SOL-P0#1: stable accessible name + tooltip regardless of
+                    // sidebar collapse state — required by WCAG 2.4.4 + 4.1.2.
+                    title={item.label}
+                    aria-label={item.label}
                   >
-                    <span className="portal-nav-icon">{item.icon}</span>
-                    {sidebarOpen && <span className="portal-nav-label">{item.label}</span>}
+                    <span className="portal-nav-icon" aria-hidden="true">{item.icon}</span>
+                    {sidebarOpen ? (
+                      <span className="portal-nav-label">{item.label}</span>
+                    ) : (
+                      <span className="sr-only">{item.label}</span>
+                    )}
                   </NavLink>
                 )
               ))}
@@ -287,13 +303,23 @@ export default function PortalLayout() {
         </nav>
 
         <div className="portal-sidebar-footer">
-          <button className="portal-nav-item portal-logout-btn" onClick={handleLogout}>
-            <span className="portal-nav-icon">
+          <button
+            className="portal-nav-item portal-logout-btn"
+            onClick={handleLogout}
+            // SOL-P0#1: stable accessible name regardless of sidebar state.
+            title="Logout"
+            aria-label="Logout"
+          >
+            <span className="portal-nav-icon" aria-hidden="true">
               <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" />
               </svg>
             </span>
-            {sidebarOpen && <span className="portal-nav-label">Logout</span>}
+            {sidebarOpen ? (
+              <span className="portal-nav-label">Logout</span>
+            ) : (
+              <span className="sr-only">Logout</span>
+            )}
           </button>
         </div>
       </aside>
