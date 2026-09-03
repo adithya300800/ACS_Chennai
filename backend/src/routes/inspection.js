@@ -52,6 +52,30 @@ const ALLOWED_INSPECTION_TYPES = new Set([
   'major_deviation', 'ncr', 'safety_violation',
 ]);
 
+// SOL-P2#13: human-readable labels for the enums that show up in
+// notifications. Keep in sync with src/pages/portal/WorkTypes.jsx —
+// frontend mirrors the same display name so users see one copy.
+const INSPECTION_TYPE_LABELS = {
+  material_inspection: 'Material Inspection',
+  cement_receipt: 'Cement Receipt',
+  steel_receipt: 'Steel Receipt (with MTC)',
+  bulk_materials: 'Bulk Materials (ITP)',
+  concrete_receipt: 'Concrete Receipt',
+  other_bulk_materials: 'Other Bulk Materials',
+  water_quality: 'Water Quality (ITP)',
+  cube_casting: 'Cube Casting',
+  cube_testing: 'Cube Testing',
+  villa_inspection: 'Villa/Unit Inspection',
+  day_activity_inspection: 'Day Activity Inspection',
+  waterproofing_inspection: 'Waterproofing Inspection',
+  major_deviation: 'Major Deviation',
+  ncr: 'Non-Conformity Report',
+  safety_violation: 'Safety Violation',
+};
+function labelizeInspectionType(t) {
+  return INSPECTION_TYPE_LABELS[t] || String(t || '').replace(/_/g, ' ');
+}
+
 const ALLOWED_STATUSES = new Set([
   'OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION', 'CLOSED', 'REJECTED',
 ]);
@@ -782,13 +806,15 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
       throw Object.assign(new Error('version conflict'), { _code: 'VERSION_CONFLICT', _status: 409 });
     }
 
-    // Notification — no FK link available; embed the id in the message body.
+    // SOL-P2#13: human-readable label for the inspection type so the
+    // bell/toast reads "Cube Testing" instead of "cube_testing", and the
+    // raw cuid is no longer dumped into the message body (employees were
+    // seeing a 24-char id appended to every notification).
     const messageParts = [
-      `Your inspection (${record.inspectionType}) for ${record.projectName} on ${formatInspectionReportDate(record.reportDate)} was ${action.toLowerCase()}d.`,
+      `Your ${labelizeInspectionType(record.inspectionType)} for ${record.projectName} on ${formatInspectionReportDate(record.reportDate)} was ${action.toLowerCase()}d.`,
     ];
     if (action === 'REJECT' && payload.reason) messageParts.push(`Reason: ${payload.reason.trim()}`);
     if (payload.adminNotes) messageParts.push(`Notes: ${payload.adminNotes}`);
-    messageParts.push(`Inspection ID: ${id}`);
     await tx.notification.create({
       data: {
         employeeId: record.submittedById,
