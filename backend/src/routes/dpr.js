@@ -2,10 +2,16 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
-const { generateULID, generateUploadSASUrl, generateReadSASUrl, verifyBlobExists, deleteBlob, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
+const { generateReadSASUrl, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
+// DR-021 (round-20): shared upload routes (sas-url + confirm-upload) live
+// in src/lib/uploadRoutes.js. DPR uses the "client-pick from allowlist"
+// mode because the frontend can upload to dpr-photos, dpr-documents, or
+// inspection-photos depending on whether the photo is the daily narrative,
+// a generated PDF, or an inspection-record photo.
+const { mountUploadRoutes } = require('../lib/uploadRoutes');
 // DR-027: parseStrictISODate only validates calendar shape, so a well-formed
 // future date used to persist. rejectIfFutureReportDate is the authority.
 const { rejectIfFutureReportDate } = require('../lib/reportDate');
@@ -103,8 +109,10 @@ function validateCustomSections(v) {
   return { ok: true };
 }
 
-// In-memory pending uploads (ulid -> { employeeId, container, filename })
-const pendingUploads = new Map();
+// In-memory pending uploads now live in src/lib/uploadRoutes.js
+// (DR-021 round-20). Both DPR and Inspection share one Map — entries
+// are keyed by employeeId + server-generated ulid, so the two
+// consumers cannot collide.
 
 // ─── Idempotency-Key store ─────────────────────────────────────────────────
 // Round-10: when a client retries a POST (mobile flaky network, browser
@@ -307,157 +315,17 @@ function getPrisma(req) {
   return req.app.get('prisma');
 }
 
-// DR-003: shared ceiling — also enforced at /sas-url time, not only at
-// /confirm-upload time (the previous code only checked the client-declared
-// sizeBytes against the limit at confirm, which is forgeable; the SAS URL
-// itself had no size hint, so R2 would happily accept up to the bucket
-// max of 5GB).
-const MAX_PHOTO_SIZE = 10 * 1024 * 1024; // 10 MB
-
-// DR-003: when the 20-min TTL fires, the in-memory entry is removed. If
-// the user uploaded bytes to R2 but never called /confirm-upload, those
-// bytes become orphaned (unreferenced, no DB row, paying for storage
-// forever). The previous implementation silently leaked. Now we attempt
-// a best-effort delete; R2 will 404 silently if the blob never landed.
-async function sweepPendingUpload({ employeeId, ulid, container, blobName }) {
-  try {
-    await deleteBlob(container, blobName);
-  } catch (err) {
-    if (err?.$metadata?.httpStatusCode === 404) return;
-    console.warn('DPR orphan-blob cleanup failed', {
-      employeeHash: hashIdentifier(employeeId),
-      ulid,
-      container,
-      errMessage: err.message?.split('\n')[0],
-    });
-  }
-}
-
-// ─── POST /api/dpr/sas-url ────────────────────────────────────────────────────
-router.post('/sas-url', async (req, res) => {
-  const { filename, contentType, container, sizeBytes } = req.body;
-
-  if (!filename || !contentType || !container) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'filename, contentType, container required' });
-  }
-
-  const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
-  // Round-12: 'inspection-photos' added for the Inspection & Compliance page.
-  // The existing dpr-photos container is still used for DPR-level photos
-  // (the daily narrative); inspection photos get their own bucket so a
-  // single leaky SAS can't cross between the two record types.
-  const allowedContainers = ['dpr-photos', 'dpr-documents', 'inspection-photos'];
-
-  if (!allowedTypes.includes(contentType)) {
-    return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: 'Only image/jpeg, image/png, image/webp allowed' });
-  }
-  if (!allowedContainers.includes(container)) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid container' });
-  }
-
-  if (sizeBytes !== undefined) {
-    if (typeof sizeBytes !== 'number' || !Number.isFinite(sizeBytes) || sizeBytes <= 0) {
-      return res.status(400).json({ error: 'INVALID_SIZE', message: 'sizeBytes must be a positive number' });
-    }
-    if (sizeBytes > MAX_PHOTO_SIZE) {
-      return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `Photo must be 1 byte – ${MAX_PHOTO_SIZE} bytes` });
-    }
-  }
-
-  const ulid = generateULID();
-
-  // Generate real SAS URL. Blob is scoped under `${employeeId}/${ulid}.${ext}`
-  // so a leaked SAS cannot cross tenants. Extension is derived from validated
-  // contentType — NEVER from the user-supplied filename.
-  const { sasUrl, blobPath, expiresAt } = await generateUploadSASUrl(
-    container,
-    req.employeeId,
-    ulid,
-    contentType
-  );
-
-  // Track pending upload for owner-scoped lookup on confirm
-  pendingUploads.set(`${req.employeeId}:${ulid}`, {
-    employeeId: req.employeeId,
-    container,
-    filename,
-    contentType,
-    blobName: blobPath, // DR-003: needed by the TTL sweeper
-  });
-
-  // Auto-expire pending uploads after 20 min (SAS is 15 min) to bound memory
-  // AND clean up any orphaned R2 blob if the user never called /confirm-upload.
-  setTimeout(() => {
-    const key = `${req.employeeId}:${ulid}`;
-    const entry = pendingUploads.get(key);
-    pendingUploads.delete(key);
-    if (entry) {
-      sweepPendingUpload({
-        employeeId: entry.employeeId,
-        ulid,
-        container: entry.container,
-        blobName: entry.blobName,
-      }).catch(() => {});
-    }
-  }, 20 * 60 * 1000).unref();
-
-  res.json({ sasUrl, ulid, blobPath, expiresAt });
-});
-
-// ─── POST /api/dpr/confirm-upload ──────────────────────────────────────────
-router.post('/confirm-upload', async (req, res) => {
-  const { ulid, container, filename, contentType, sizeBytes } = req.body;
-
-  if (!ulid || !container || !filename || !contentType || sizeBytes === undefined) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'All fields required' });
-  }
-
-  // MAX_PHOTO_SIZE is declared at the top of /sas-url (DR-003) — reusing it
-  // here keeps both gates consistent. /sas-url rejects upfront; this
-  // confirms against the actually-uploaded bytes.
-  if (sizeBytes <= 0 || sizeBytes > MAX_PHOTO_SIZE) {
-    return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `Photo must be 1 byte – ${MAX_PHOTO_SIZE} bytes` });
-  }
-
-  const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
-  if (!allowedTypes.includes(contentType)) {
-    return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: 'Only image/jpeg, image/png, image/webp allowed' });
-  }
-
-  const pendingKey = `${req.employeeId}:${ulid}`;
-  const pending = pendingUploads.get(pendingKey);
-  if (!pending || pending.employeeId !== req.employeeId) {
-    return res.status(404).json({ error: 'BLOB_NOT_FOUND', message: 'Upload not found or unauthorized' });
-  }
-
-  // Server-side blob verification — derive the same scoped blob name and
-  // confirm the bytes actually landed with the claimed size + content-type.
-  try {
-    const ext = require('../lib/blobStorage').CONTENT_TYPE_EXT[contentType];
-    const blobName = `${req.employeeId}/${ulid}.${ext}`;
-    const props = await verifyBlobExists(container, blobName);
-    if (!props.exists) {
-      return res.status(404).json({ error: 'BLOB_NOT_UPLOADED', message: 'Photo bytes not found in storage' });
-    }
-    if (props.contentType && props.contentType !== contentType) {
-      return res.status(400).json({ error: 'CONTENT_TYPE_MISMATCH', message: 'Uploaded content-type does not match request' });
-    }
-    if (Math.abs((props.contentLength || 0) - sizeBytes) > 1024) {
-      // 1 KB tolerance for chunked-upload finalization
-      return res.status(400).json({ error: 'SIZE_MISMATCH', message: 'Uploaded size does not match declared size' });
-    }
-  } catch (err) {
-    console.error('Blob verification failed', {
-      employeeHash: hashIdentifier(req.employeeId),
-      container, ulid,
-      errMessage: err.message?.split('\n')[0],
-    });
-    return res.status(502).json({ error: 'BLOB_VERIFICATION_FAILED', message: 'Could not verify upload' });
-  }
-
-  pendingUploads.delete(pendingKey);
-
-  res.json({ verified: true });
+// DR-021 (round-20): shared upload routes live in src/lib/uploadRoutes.js.
+// DPR uses the "client-pick from allowlist" mode — the frontend can
+// upload to dpr-photos (daily narrative), dpr-documents (generated
+// PDFs), or inspection-photos (inspection-record photo referenced from
+// a DPR). Mounted AFTER `router.use(requireAuth)` at line 256 below.
+mountUploadRoutes(router, {
+  // Round-12: 'inspection-photos' added for the Inspection & Compliance
+  // page. The existing dpr-photos container is still used for DPR-level
+  // photos; inspection photos get their own bucket so a single leaky
+  // SAS can't cross between the two record types.
+  allowedContainers: ['dpr-photos', 'dpr-documents', 'inspection-photos'],
 });
 
 // ─── POST /api/dpr ────────────────────────────────────────────────────────────
