@@ -52,11 +52,13 @@ export default function PortalLogin() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const [form, setForm] = useState({ email: '', password: '' });
-  // Round-17 B-15: login errors now flow through the shared toast stack
-  // (PortalLayout already mounts ToastProvider) — no more on-page red box,
-  // no `errorMsg` state, no `status === 'error'` branch. The user sees the
-  // error in the same place they'd see errors on every other portal page.
+  // SOL-P1#8: inline error displayed beneath the form fields so the user
+  // doesn't have to look up at a transient toast. We keep the toast as
+  // well for redundancy / accessibility (toast is announced via
+  // aria-live). The two surfaces are intentionally the same message.
+  const [formError, setFormError] = useState('');
   const [status, setStatus] = useState('idle'); // idle | loading
+  const [showPassword, setShowPassword] = useState(false);
 
   // Surface "session expired" navigation state from AuthContext's logout
   // listener as a friendly toast instead of letting the user wonder why
@@ -118,14 +120,41 @@ export default function PortalLogin() {
 
   const handleChange = (e) => {
     setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
+    // SOL-P1#8: clear the inline error as soon as the user starts editing
+    // so the message doesn't linger once they've begun addressing it.
+    if (formError) setFormError('');
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setFormError('');
+
+    // SOL-P1#8: surface missing-required inline BEFORE we attempt the
+    // request so the user doesn't have to look up at a toast for the
+    // server's complaint. Server still re-validates.
+    const email = form.email.trim();
+    const password = form.password;
+    if (!email && !password) {
+      setFormError('Enter your email and password to sign in.');
+      return;
+    }
+    if (!email) {
+      setFormError('Enter your email address.');
+      return;
+    }
+    if (!password) {
+      setFormError('Enter your password.');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setFormError('Enter a valid email address.');
+      return;
+    }
+
     setStatus('loading');
 
     try {
-      const employee = await login(form.email, form.password);
+      const employee = await login(email, password);
       // Clear dedupe keys for the new session — so a future session-expiry
       // toast can fire again.
       try {
@@ -138,7 +167,9 @@ export default function PortalLogin() {
       const landing = employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
       navigate(landing);
     } catch (err) {
-      toast.push(err.message || 'Login failed. Please check your credentials.', 'error');
+      const msg = err.message || 'Login failed. Please check your credentials.';
+      setFormError(msg);
+      toast.push(msg, 'error');
       setStatus('idle');
     }
   };
@@ -303,7 +334,7 @@ export default function PortalLogin() {
           <div style={{ flex: 1, height: '1px', background: '#ddd' }} />
         </div>
 
-        <form onSubmit={handleSubmit} className="portal-auth-form">
+        <form onSubmit={handleSubmit} className="portal-auth-form" noValidate>
           <div className="form-group">
             <label htmlFor="email">Email Address</label>
             <input
@@ -315,22 +346,63 @@ export default function PortalLogin() {
               value={form.email}
               onChange={handleChange}
               autoComplete="email"
+              required
+              aria-invalid={formError && !form.email.trim() ? 'true' : 'false'}
+              aria-describedby={formError ? 'portal-auth-error' : undefined}
             />
           </div>
 
           <div className="form-group">
             <label htmlFor="password">Password</label>
-            <input
-              id="password"
-              name="password"
-              type="password"
-              className="form-input"
-              placeholder="Enter your password"
-              value={form.password}
-              onChange={handleChange}
-              autoComplete="current-password"
-            />
+            {/* SOL-P1#8: password show/hide toggle — the audit called out
+                the missing affordance. Wrapped in a positioning context
+                so the eye icon can sit absolutely inside the input box. */}
+            <div className="portal-auth-input-wrap">
+              <input
+                id="password"
+                name="password"
+                type={showPassword ? 'text' : 'password'}
+                className="form-input"
+                placeholder="Enter your password"
+                value={form.password}
+                onChange={handleChange}
+                autoComplete="current-password"
+                required
+                aria-invalid={formError && !form.password ? 'true' : 'false'}
+                aria-describedby={formError ? 'portal-auth-error' : undefined}
+                style={{ paddingRight: '2.5rem' }}
+              />
+              <button
+                type="button"
+                className="portal-auth-input-toggle"
+                onClick={() => setShowPassword((s) => !s)}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                aria-pressed={showPassword}
+                tabIndex={0}
+              >
+                {showPassword ? (
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                    <line x1="1" y1="1" x2="23" y2="23" />
+                  </svg>
+                ) : (
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                )}
+              </button>
+            </div>
           </div>
+
+          {/* SOL-P1#8: inline form-level error rendered inside the form so
+              the user sees it right where they're typing instead of in a
+              transient toast. role="alert" announces it to screen readers. */}
+          {formError && (
+            <div id="portal-auth-error" className="portal-auth-form-error" role="alert">
+              {formError}
+            </div>
+          )}
 
           <button
             type="submit"
