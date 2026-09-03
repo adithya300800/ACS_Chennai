@@ -38,6 +38,10 @@ const Training = React.lazy(() => import('./pages/portal/Training.jsx'));
 const TrainingDetail = React.lazy(() => import('./pages/portal/TrainingDetail.jsx'));
 const TrainingDashboard = React.lazy(() => import('./pages/admin/TrainingDashboard.jsx'));
 const TrainingCourseNew = React.lazy(() => import('./pages/admin/TrainingCourseNew.jsx'));
+// SOL-P2#18: portal-side 404 — keeps the portal chrome and gives the
+// user a familiar recovery path rather than dumping them on the public
+// site. Renders inside the protected /portal/* tree.
+const PortalNotFound = React.lazy(() => import('./pages/portal/PortalNotFound.jsx'));
 
 function App() {
   const location = useLocation();
@@ -116,6 +120,10 @@ function App() {
               DR-020: RoleBranchLanding now reads role from AuthContext (not the stale
               acs_employee localStorage key). */}
           <Route path="" element={<RoleBranchLanding renderAdmin={() => <AdminOverview />} />} />
+          {/* SOL-P2#18: portal catch-all 404. Stays inside PortalLayout chrome so
+              the sidebar/topbar are visible — gives the user "Back to dashboard"
+              + browser-back recovery instead of the public-site placeholder. */}
+          <Route path="*" element={<PortalNotFound />} />
         </Route>
 
         {/* Public routes with header/footer */}

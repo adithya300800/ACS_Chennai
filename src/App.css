@@ -2833,6 +2833,43 @@ footer {
   .dashboard-card-wide { grid-column: span 1; }
 }
 
+/* SOL-P2#18: portal-side 404 — distinct from the public NotFound so the
+   sidebar/topbar stay visible and the user gets a familiar recovery path. */
+
+.portal-notfound-page {
+  max-width: 720px;
+}
+
+.portal-notfound-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 2.5rem 2rem;
+}
+
+.portal-notfound-title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--navy);
+  margin: 1rem 0 0.5rem;
+}
+
+.portal-notfound-hint {
+  color: var(--steel);
+  max-width: 420px;
+  margin: 0 0 1.5rem;
+  line-height: 1.5;
+}
+
+.portal-notfound-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
 /* Round-17 B-06: bulk-select UI on the admin DPR queue.
    - .dpr-card-selected gives a soft blue ring so the admin can see which
      cards are in the current batch.
