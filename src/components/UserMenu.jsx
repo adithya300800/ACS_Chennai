@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
 
@@ -6,8 +7,16 @@ import { useAuth } from '../contexts/AuthContext.jsx';
 // colored circle) opens a dropdown with: name + email + role badge,
 // Help & Support link, Settings placeholder, Sign out. Closes on
 // outside-click + Escape. Anchored top-right; never off-screen on
-// 320px+ viewports because we use position: fixed + JS-computed
-// top/right from the trigger rect.
+// 320px+ viewports.
+//
+// Round-21 fix: render the dropdown via React portal to document.body.
+// The portal escapes the <header>'s containing-block (the global rule
+// `header { backdrop-filter: blur(16px)… }` in App.css creates a fixed-
+// positioning ancestor), so the prior in-header `position: fixed`
+// dropdown was being clipped by the header's `overflow: hidden auto`
+// once it dropped below the header's 64px band. Portalling out makes
+// the dropdown a normal viewport-fixed element regardless of the
+// header's stacking context.
 export default function UserMenu() {
   const { employee, logout } = useAuth();
   const navigate = useNavigate();
@@ -95,10 +104,10 @@ export default function UserMenu() {
       >
         <span className="user-menu-avatar" style={{ background: accent }} aria-hidden="true">{initials}</span>
       </button>
-      {open && (
+      {open && createPortal(
         <div
           ref={menuRef}
-          className="user-menu-dropdown"
+          className="user-menu-dropdown user-menu-dropdown--portalled"
           role="menu"
           aria-label="Account"
           style={{ top: `${pos.top}px`, right: `${pos.right}px` }}
@@ -148,7 +157,8 @@ export default function UserMenu() {
             </svg>
             <span>Sign out</span>
           </button>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

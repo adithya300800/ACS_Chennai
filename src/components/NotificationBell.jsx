@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import { useToast } from '../contexts/ToastContext.jsx';
@@ -45,7 +46,9 @@ export default function NotificationBell() {
   const { accessToken, employee } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
-  const dropdownRef = useRef(null);
+  const dropdownRef = useRef(null); // bell-button wrapper (for outside-click)
+  const triggerRef = useRef(null); // bell button itself (for portal position)
+  const portalDropdownRef = useRef(null); // portalled dropdown (for outside-click)
   const eventSourceRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const reconnectAttemptRef = useRef(0);
@@ -57,6 +60,28 @@ export default function NotificationBell() {
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(false);
   const [connectionLost, setConnectionLost] = useState(false); // circuit-broken, user must refresh
+  const [dropdownPos, setDropdownPos] = useState({ top: 0, right: 0 }); // viewport coords; Round-21 portal fix
+
+  // Round-21: dropdown rect recompute on every open/resize/scroll. Coords
+  // resolve against the viewport because the dropdown is portalled to
+  // <body> — escaping the <header>'s containing block (created by the
+  // global `header { backdrop-filter: blur(16px)… }` rule in App.css).
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    const compute = () => {
+      const btn = triggerRef.current;
+      if (!btn) return;
+      const r = btn.getBoundingClientRect();
+      setDropdownPos({ top: r.bottom + 8, right: window.innerWidth - r.right });
+    };
+    compute();
+    window.addEventListener('resize', compute);
+    window.addEventListener('scroll', compute, true);
+    return () => {
+      window.removeEventListener('resize', compute);
+      window.removeEventListener('scroll', compute, true);
+    };
+  }, [open]);
 
   // Load initial notifications
   const loadNotifications = useCallback(async () => {
@@ -222,13 +247,16 @@ export default function NotificationBell() {
     // Re-mount on token change so the ticket request picks up the new JWT
   }, [loadNotifications, connectSSE]);
 
-  // Close dropdown on outside click
+  // Close dropdown on outside click. Round-21: dropdown is portalled to
+  // <body>, so the bell-button wrapper alone isn't enough — also check
+  // the portalled dropdown's own ref.
   useEffect(() => {
     if (!open) return;
     const handler = (e) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
-        setOpen(false);
-      }
+      const target = e.target;
+      if (dropdownRef.current?.contains(target)) return;
+      if (portalDropdownRef.current?.contains(target)) return;
+      setOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -283,6 +311,7 @@ export default function NotificationBell() {
   return (
     <div style={{ position: 'relative' }} ref={dropdownRef}>
       <button
+        ref={triggerRef}
         className={`notification-bell-btn ${open ? 'active' : ''}`}
         onClick={() => setOpen((o) => !o)}
         title={statusTitle}
@@ -306,11 +335,13 @@ export default function NotificationBell() {
         ) : null}
       </button>
 
-      {open && (
+      {open && createPortal(
         <div
+          ref={portalDropdownRef}
           className="notification-dropdown"
           role="dialog"
           aria-label="Notifications"
+          style={{ top: `${dropdownPos.top}px`, right: `${dropdownPos.right}px` }}
         >
           <div style={{ padding: '0.875rem 1rem', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ fontWeight: 600, color: 'var(--navy)', fontSize: '0.9rem' }}>
@@ -380,7 +411,8 @@ export default function NotificationBell() {
               ))
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

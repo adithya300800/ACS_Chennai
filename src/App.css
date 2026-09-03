@@ -2932,11 +2932,17 @@ footer {
 .user-menu-dropdown {
   /* SOL-P2#19 live-deploy fix: switched from `position: absolute` to
      `fixed` so the dropdown escapes ALL ancestor overflow contexts.
-     Global `* { overflow-x: hidden }` (App.css:66) implicitly sets
-     overflow-y: auto on every ancestor (sticky portal-topbar, etc.)
-     which was clipping the dropdown that renders 48px below the 40px
-     avatar. fixed + JS-computed top/right keeps it glued to the
-     trigger's corner without depending on ancestor overflow. */
+     Round-21 update: now also rendered via React portal (createPortal)
+     to <body>. The global `header { backdrop-filter: blur(16px)… }`
+     rule in App.css makes <header> a containing block for `position:
+     fixed` descendants (per CSS Filter Effects 1 spec), so a dropdown
+     rendered INSIDE the header — even with `position: fixed` + JS-
+     computed viewport coords — was being clipped by the header's
+     `overflow: hidden auto` once it dropped past the header's 64px
+     band. Portalling out moves the DOM sibling out of <header>
+     entirely; `position: fixed` then resolves against the viewport
+     as intended. z-index: 1000 keeps it above all in-page stacking
+     contexts. */
   position: fixed;
   min-width: 240px;
   max-width: calc(100vw - 16px);
@@ -3134,16 +3140,24 @@ footer {
 }
 
 .notification-dropdown {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
+  /* Round-21 fix: rendered via React portal (createPortal) to <body>.
+     Previously `position: absolute` resolved against `<header>` (the
+     containing block established by App.css's global `header {
+     backdrop-filter: blur(16px)… }`), causing the dropdown to be
+     clipped by the header's `overflow: hidden auto` once it dropped
+     past the header's 64px height. The portalled `<div>` is now a
+     sibling of <body> rather than a descendant of <header>, so
+     `position: fixed` resolves against the viewport as expected.
+     z-index bumped from 100 → 1000 to sit above the sidebar's
+     z-index: 100 stacking context (same lesson as UserMenu). */
+  position: fixed;
   width: 360px;
   max-height: 480px;
   overflow-y: auto;
   background: white;
   border-radius: 12px;
   box-shadow: 0 10px 40px rgba(0,0,0,0.15);
-  z-index: 100;
+  z-index: 1000;
   border: 1px solid var(--border);
 }
 

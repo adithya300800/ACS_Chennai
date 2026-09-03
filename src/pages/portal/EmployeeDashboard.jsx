@@ -135,13 +135,23 @@ export default function EmployeeDashboard() {
     return () => document.removeEventListener('visibilitychange', onVis);
   }, [refresh]);
 
-  // Derived attendance state
+  // Derived attendance state. Round-21: attendance moved to check-in-only
+  // (DR-024) — a single check-in per day is the whole flow, no check-out.
+  // `activeSession` is kept only as a "did the user check in today" signal;
+  // we never consume `lastSession.checkOut` again.
   const sessions = todayRecord?.sessions || [];
-  const activeSession = sessions.find((s) => !s.checkOut) || null;
-  const checkedIn = !!activeSession;
-  const checkedOut = sessions.length > 0 && !activeSession;
   const hasAnySession = sessions.length > 0;
-  const lastSession = sessions[sessions.length - 1];
+  const activeSession = sessions.find((s) => !s.checkOut) || null;
+  // `firstCheckIn` = earliest session of today. With check-in-only this is
+  // the only check-in the user can have on a given day, so we just take
+  // the session that exists (legacy multi-session days still render the
+  // earliest).
+  const firstCheckIn = (() => {
+    if (!sessions.length) return null;
+    const sorted = [...sessions].sort((a, b) =>
+      new Date(a.checkIn).getTime() - new Date(b.checkIn).getTime());
+    return sorted[0];
+  })();
 
   const handleCheckIn = async () => {
     setCheckInError('');
@@ -157,22 +167,6 @@ export default function EmployeeDashboard() {
     } catch (err) {
       setCheckInError(err.message || 'Check-in failed');
       push(err.message || 'Check-in failed', 'error');
-    } finally {
-      setActionLoading('');
-    }
-  };
-
-  const handleCheckOut = async () => {
-    if (!activeSession) return;
-    setCheckInError('');
-    setActionLoading('checkout');
-    try {
-      await api.put(`/attendance/check-out/${activeSession.id}`, {}, accessToken);
-      push('Checked out', 'success');
-      refresh(false);
-    } catch (err) {
-      setCheckInError(err.message || 'Check-out failed');
-      push(err.message || 'Check-out failed', 'error');
     } finally {
       setActionLoading('');
     }
@@ -202,8 +196,13 @@ export default function EmployeeDashboard() {
         <div className="dashboard-error" role="alert">{error}</div>
       )}
 
-      {/* Top row: attendance check-in/out hero. Mirrors the live state pattern
-          used on the Attendance page so muscle memory transfers. */}
+      {/* Top row: attendance check-in hero. Round-21: attendance moved to
+          check-in-only (DR-024) — there is no check-out button on this
+          dashboard. Once an employee checks in, the only follow-up action
+          is to view their full attendance history. The previously-rendered
+          Check out button hit `PUT /api/attendance/check-out/:id` with an
+          empty body and returned 400 ("latitude and longitude required")
+          on every click, so removing it is a strict improvement. */}
       <section className="dashboard-attendance" aria-label="Today's attendance">
         <div className="dashboard-attendance-main">
           <span className="dashboard-attendance-eyebrow">Today's attendance</span>
@@ -212,38 +211,26 @@ export default function EmployeeDashboard() {
               <Skeleton w="60%" h={28} />
               <div style={{ marginTop: 12 }}><Skeleton w="40%" h={14} /></div>
             </>
-          ) : hasAnySession && lastSession ? (
+          ) : hasAnySession && firstCheckIn ? (
             <>
               <div className="dashboard-attendance-state">
-                <span className={`dashboard-state-pill ${activeSession ? 'on' : 'off'}`}>
-                  {activeSession ? 'Checked in' : 'Checked out'}
+                <span className="dashboard-state-pill on">
+                  Checked in
                 </span>
                 <span className="dashboard-attendance-time">
-                  since {formatTime(lastSession.checkIn)}
-                  {lastSession.checkInAddr && (
+                  since {formatTime(firstCheckIn.checkIn)}
+                  {firstCheckIn.checkInAddr && (
                     <span className="dashboard-attendance-addr">
                       {' · '}
                       <MapPinIcon size={12} style={{ display: 'inline-block', verticalAlign: '-1px', marginRight: 4 }} />
-                      {lastSession.checkInAddr}
+                      {firstCheckIn.checkInAddr}
                     </span>
                   )}
                 </span>
               </div>
-              {activeSession ? (
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={handleCheckOut}
-                  disabled={actionLoading === 'checkout'}
-                  style={{ marginTop: 16, minHeight: 44 }}
-                >
-                  {actionLoading === 'checkout' ? 'Checking out…' : 'Check out'}
-                </button>
-              ) : (
-                <p className="dashboard-attendance-hint">
-                  See you tomorrow. <Link to="/portal/attendance">View full history →</Link>
-                </p>
-              )}
+              <p className="dashboard-attendance-hint">
+                <Link to="/portal/attendance">View full attendance history →</Link>
+              </p>
             </>
           ) : (
             <>
