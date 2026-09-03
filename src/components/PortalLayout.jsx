@@ -5,6 +5,8 @@ import { useAuth } from '../contexts/AuthContext.jsx';
 // the now-removed Assets coming-soon branch. Re-introduce when a
 // sidebar item genuinely needs a toast.
 import NotificationBell from './NotificationBell.jsx';
+// SOL-P2#19: header account/support control (avatar + dropdown).
+import UserMenu from './UserMenu.jsx';
 // Round-17: shared skip-nav + focus-trap + keyboard-shortcut primitives.
 import SkipNav from './SkipNav.jsx';
 import useFocusTrap from '../hooks/useFocusTrap.js';
@@ -312,6 +314,9 @@ export default function PortalLayout() {
             <div className="portal-topbar-date">
               {new Date().toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
             </div>
+            {/* SOL-P2#19: avatar + account menu replaces the bare sign-out
+                button. Sign-out is now inside the dropdown. */}
+            <UserMenu />
           </div>
         </header>
 
