@@ -324,8 +324,11 @@ export default function PortalLayout() {
         </div>
       </aside>
 
-      {/* Main Content */}
-      <div className="portal-main" id="main-content">
+      {/* Main Content — SOL-P1#9: <main> landmark so screen readers and
+          the SOL audit's landmark check recognize this as the page's
+          primary content region. tabIndex=-1 makes the skip-nav target
+          focusable programmatically without entering the tab order. */}
+      <main className="portal-main" id="main-content" tabIndex={-1}>
         {/* Topbar */}
         <header className="portal-topbar">
           <div className="portal-topbar-left">
@@ -393,7 +396,7 @@ export default function PortalLayout() {
             </NavLink>
           </nav>
         )}
-      </div>
+      </main>
     </div>
   );
 }
