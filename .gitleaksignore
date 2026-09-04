@@ -14,9 +14,10 @@
 # -----------------------------------------------------------------------------
 # Five root-level scratch scripts (test-contact.js, test-direct.js,
 # test-key-check.js, test-keys.js, test-resend.js) hardcoded a live Resend
-# API key (`re_iJhBsVbG_BgzTkm6Tycb1bPACMkiSqrei`) in git history from their
-# introduction (commit 16c962b) through commit f181cec (parent of b11f9f5),
-# which scrubbed them to a `REDACTED_USE_RESEND_API_KEY_ENV` placeholder.
+# API key (prefix `re_`, see LPR-002 / Resend dashboard for the exact value)
+# in git history from their introduction (commit 16c962b) through commit
+# f181cec (parent of b11f9f5), which scrubbed them to a
+# `REDACTED_USE_RESEND_API_KEY_ENV` placeholder.
 # The placeholder commit did NOT rewrite history, so the original key is
 # still in the object store and every clone/fork/cached checkout.
 #
