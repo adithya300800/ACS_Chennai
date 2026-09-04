@@ -156,8 +156,13 @@ router.get('/courses', asyncHandler(async (req, res) => {
 }));
 
 // POST /api/training/courses — admin creates a course
-router.post('/courses', trainingWriteLimiter, asyncHandler(async (req, res) => {
-  if (!req.isAdmin) return res.status(403).json({ error: 'Admin access required' });
+//
+// LPR-007: create is a mutation, so we use requireFreshAdmin (re-reads
+// Employee.isAdmin from the DB) instead of trusting the JWT's req.isAdmin
+// claim, which can be up-to 15 minutes stale after a demotion. READ-only
+// course/admin routes stay on the cheaper requireAdmin path — see
+// GET /courses above.
+router.post('/courses', trainingWriteLimiter, requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const result = validateCreateCourse(req.body);
   if (!result.ok) {
@@ -219,8 +224,14 @@ router.get('/courses/:id', asyncHandler(async (req, res) => {
 }));
 
 // PUT /api/training/courses/:id — admin updates
-router.put('/courses/:id', trainingWriteLimiter, asyncHandler(async (req, res) => {
-  if (!req.isAdmin) return res.status(403).json({ error: 'Admin access required' });
+//
+// LPR-007: update is a mutation, so we use requireFreshAdmin (re-reads
+// Employee.isAdmin from the DB) instead of the JWT claim. Previously this
+// route did an inline `await assertFreshAdmin(...)` after the JWT check;
+// that's the same ground truth but with the failure mode (503 on DB blip)
+// and identity semantics of the middleware. Centralizing on requireFreshAdmin
+// keeps every mutating training route using one path.
+router.put('/courses/:id', trainingWriteLimiter, requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
   const result = validateUpdateCourse(req.body);
@@ -231,9 +242,6 @@ router.put('/courses/:id', trainingWriteLimiter, asyncHandler(async (req, res) =
       ...(result.code === 'UNKNOWN_FIELDS' ? { fields: Object.keys(req.body).filter((k) => !ALLOWED_PROVIDERS.has(k)) } : {}),
     });
   }
-
-  const fresh = await assertFreshAdmin(req, prisma);
-  if (!fresh) return res.status(403).json({ error: 'Admin access required' });
 
   try {
     const updated = await prisma.trainingCourse.update({
@@ -267,10 +275,12 @@ router.put('/courses/:id', trainingWriteLimiter, asyncHandler(async (req, res) =
 
 // POST /api/training/enrollments — admin bulk-assigns a course to N employees
 //
-// Round-20 (DR-005): requireFreshAdmin instead of the `req.isAdmin` JWT claim.
-// Assigning training is a mutation, so it re-reads Employee.isAdmin from the
-// database — a demoted admin loses the ability to assign immediately rather
-// than when their access token happens to expire.
+// Round-20 (DR-005) + LPR-007: requireFreshAdmin instead of the `req.isAdmin`
+// JWT claim. Assigning training is a mutation, so it re-reads
+// Employee.isAdmin from the database — a demoted admin loses the ability
+// to assign immediately rather than when their access token happens to
+// expire. The middleware runs before any work, so we no longer need a
+// duplicated inline re-check below.
 router.post('/enrollments', trainingWriteLimiter, requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const result = validateAssignEnrollments(req.body);
@@ -281,9 +291,6 @@ router.post('/enrollments', trainingWriteLimiter, requireFreshAdmin, asyncHandle
     });
   }
   const { courseId, employeeIds, employeeEmails, dueDate, priority } = result.value;
-
-  const fresh = await assertFreshAdmin(req, prisma);
-  if (!fresh) return res.status(403).json({ error: 'Admin access required' });
 
   // Verify course exists and is not archived.
   const course = await prisma.trainingCourse.findUnique({
@@ -808,13 +815,13 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
 // Always sets evidenceClass = ADMIN_OVERRIDE, completedBy = the acting
 // admin. Use this when the auto-capture missed (browser killed mid-play)
 // or for non-trackable providers where the employee forgot to click.
-router.post('/enrollments/:id/admin-override', trainingWriteLimiter, asyncHandler(async (req, res) => {
+//
+// LPR-007: admin-override is a mutation; requireFreshAdmin enforces a
+// fresh Employee.isAdmin re-read so a demoted admin can no longer mark
+// other people's enrollments complete on a stale token.
+router.post('/enrollments/:id/admin-override', trainingWriteLimiter, requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
-
-  if (!req.isAdmin) return res.status(403).json({ error: 'Admin access required' });
-  const fresh = await assertFreshAdmin(req, prisma);
-  if (!fresh) return res.status(403).json({ error: 'Admin access required' });
 
   const existing = await prisma.trainingEnrollment.findUnique({
     where: { id },
@@ -941,13 +948,14 @@ router.post('/enrollments/:id/admin-override', trainingWriteLimiter, asyncHandle
 //
 // Response: 200 with the updated enrollment serialized via
 // serializeEnrollment(), same shape as admin-override returns.
+//
+// LPR-007: cancel is a mutation already gated by requireFreshAdmin
+// middleware; the previous inline `if (!req.isAdmin)` +
+// `assertFreshAdmin(...)` pair was redundant dead work (the middleware
+// rewrites req.isAdmin from the DB and 403s on a non-admin).
 router.post('/enrollments/:id/cancel', trainingWriteLimiter, requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
-
-  if (!req.isAdmin) return res.status(403).json({ error: 'Admin access required' });
-  const fresh = await assertFreshAdmin(req, prisma);
-  if (!fresh) return res.status(403).json({ error: 'Admin access required' });
 
   const result = validateCancelPayload(req.body);
   if (!result.ok) {

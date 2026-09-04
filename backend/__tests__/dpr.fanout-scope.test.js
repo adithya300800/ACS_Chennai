@@ -125,6 +125,14 @@ function buildApp() {
 
   const prisma = {
     ...txPrisma,
+    // LPR-007: requireFreshAdmin middleware re-reads Employee.isAdmin
+    // from the database on every mutating admin route. The JWT claim's
+    // isAdmin is no longer trusted for mutations, so the mock needs to
+    // answer "yes, ADMIN_ID is admin" when the middleware asks.
+    employee: {
+      findUnique: async ({ where: { id } }) =>
+        id === ADMIN_ID ? { id: ADMIN_ID, isAdmin: true } : null,
+    },
     $transaction: async (cb) => cb(txPrisma),
   };
 

@@ -1196,14 +1196,15 @@ const formatReportDate = (d) => {
   return String(d);
 };
 
-router.post('/:id/review', async (req, res) => {
+// LPR-007: review is a mutation, so requireFreshAdmin re-reads
+// Employee.isAdmin from the database instead of trusting the JWT's
+// req.isAdmin claim (which can be up to 15 minutes stale). Inline
+// `if (!req.isAdmin)` checks below are no longer needed — the
+// middleware rewrites req.isAdmin and 403s first.
+router.post('/:id/review', requireFreshAdmin, async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
   const { adminNotes } = req.body || {};
-
-  if (!req.isAdmin) {
-    return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
-  }
 
   try {
     const dpr = await prisma.dPR.findUnique({
@@ -1310,14 +1311,14 @@ router.post('/:id/review', async (req, res) => {
 
 // ─── POST /api/dpr/:id/approve ───────────────────────────────────────────────
 // Terminal state: DRAFT|SUBMITTED|UNDER_REVIEW -> APPROVED. Admin only.
-router.post('/:id/approve', async (req, res) => {
+//
+// LPR-007: approval is a mutation; requireFreshAdmin re-reads isAdmin
+// from the DB so a freshly demoted admin can't push approvals until
+// their JWT expires.
+router.post('/:id/approve', requireFreshAdmin, async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
   const { adminNotes } = req.body || {};
-
-  if (!req.isAdmin) {
-    return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
-  }
 
   try {
     const dpr = await prisma.dPR.findUnique({
@@ -1419,7 +1420,10 @@ router.post('/:id/approve', async (req, res) => {
 // ─── POST /api/dpr/:id/reject ────────────────────────────────────────────────
 // Terminal state: DRAFT|SUBMITTED|UNDER_REVIEW -> REJECTED. Admin only.
 // Requires a reason so the owner knows what to fix.
-router.post('/:id/reject', async (req, res) => {
+//
+// LPR-007: reject is a mutation; requireFreshAdmin re-reads isAdmin
+// from the DB so a demoted admin cannot reject on a stale JWT.
+router.post('/:id/reject', requireFreshAdmin, async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
   const { reason, adminNotes } = req.body || {};
@@ -1432,10 +1436,6 @@ router.post('/:id/reject', async (req, res) => {
   }
   if (adminNotes && typeof adminNotes === 'string' && adminNotes.length > 2000) {
     return res.status(400).json({ error: 'NOTES_TOO_LONG', message: 'adminNotes must be <= 2000 chars' });
-  }
-
-  if (!req.isAdmin) {
-    return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
   }
 
   try {
@@ -1557,13 +1557,12 @@ router.post('/:id/reject', async (req, res) => {
 const BULK_ALLOWED_ACTIONS = new Set(['APPROVE', 'REJECT', 'UNDER_REVIEW']);
 const BULK_MAX_IDS = 100;
 
-router.post('/bulk-review', async (req, res) => {
+// LPR-007: bulk-review is a mutation; requireFreshAdmin re-reads
+// Employee.isAdmin from the DB once per request so a freshly demoted
+// admin cannot flood in stale-JWT decisions across a batch.
+router.post('/bulk-review', requireFreshAdmin, async (req, res) => {
   const prisma = getPrisma(req);
   const { ids, action, reason, adminNotes } = req.body || {};
-
-  if (!req.isAdmin) {
-    return res.status(403).json({ error: 'FORBIDDEN', message: 'Admin access required' });
-  }
 
   if (!Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'ids must be a non-empty array' });
