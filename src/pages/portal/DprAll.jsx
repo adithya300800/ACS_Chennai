@@ -5,6 +5,7 @@ import { api } from '../../lib/api.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
 import MonthFilter from '../../components/MonthFilter.jsx';
+import MonthStepper from '../../components/MonthStepper.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { CalendarIcon, MapPinIcon, CameraIcon, ClipboardIcon } from '../../components/Icons.jsx';
 import { formatDateOnly, getCurrentIstMonth } from '../../lib/format.js';
@@ -325,7 +326,13 @@ export default function DprAll() {
             Every daily progress report across the organization.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          {/* R27.5: always-visible month stepper — the primary way to
+              scroll back one month at a time without opening Filters. */}
+          <MonthStepper
+            value={filter.month}
+            onChange={(v) => handleFilterChange('month', v)}
+          />
           <button className="btn btn-secondary btn-sm" onClick={() => setShowFilters((s) => !s)}>
             <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 3H2l8 9.46V19l4 2V12.46z"/></svg>
             Filters {showFilters ? '▲' : '▼'}
