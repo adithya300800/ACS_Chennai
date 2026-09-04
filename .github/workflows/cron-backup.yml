@@ -1,0 +1,270 @@
+name: Database backup (off-site to R2)
+
+# Round-26 finding (B-3): ACS Chennai has no scheduled, off-site database
+# backup. Supabase free tier does not include PITR or scheduled snapshots,
+# and the entire DPR / Inspection / Training / Timesheet history lives on
+# it. Render Cron Job requires a paid plan, so we use GitHub Actions —
+# same pattern as cron-warmup.yml, cron-admin-emails.yml, and digest.yml.
+#
+# What this workflow does
+# -----------------------
+#   1. pg_dump $DIRECT_DATABASE_URL (-Fc custom format, --no-owner --no-acl)
+#      into a compressed, selective-restore-friendly dump file.
+#   2. Compute SHA256 alongside the dump so an operator can verify the file
+#      after a restore without round-tripping bytes against the live DB.
+#   3. Upload both files to s3://${R2_BUCKET_DB_BACKUPS}/daily/ via the
+#      R2 S3-compatible endpoint.
+#   4. If today is Sunday, also copy today's dump to weekly/ — a separate
+#      prefix with longer retention.
+#   5. Sweep daily/ for objects older than `retention_days` (default 14).
+#      Sweep weekly/ for objects older than 28 days.
+#
+# Why GitHub Actions instead of Render Cron Job
+# ---------------------------------------------
+#   - Render Cron Job requires a paid plan (starter+) with a card on file.
+#     Public repos get unlimited free GitHub Actions minutes, so a once-per-
+#     day cron costs effectively nothing.
+#   - Same operational characteristics as cron-warmup.yml / digest.yml —
+#     we already accept the GH Actions lag tolerance for those.
+#   - The DB lives on Supabase; the backup dump runs from GH Actions, not
+#     from the Render container, so a single broken Render deploy cannot
+#     take the backup path down with it.
+#
+# GH Actions lag tolerance
+# ------------------------
+# GitHub Actions scheduled workflows can lag by up to ~30 minutes during
+# peak times. For a once-per-day backup this is acceptable — worst case
+# is a backup timestamped ~30 minutes after the nominal 02:30 UTC slot,
+# which still gives us a usable restore point for the day. If the run is
+# delayed by more than a few hours it will overlap with cron-admin-emails
+# (13:30 UTC) but pg_dump is independent of those endpoints.
+#
+# Retention policy
+# ----------------
+#   daily/  → 14 days (configurable via workflow_dispatch `retention_days`)
+#   weekly/ → 28 days (4 Sundays)
+# The sweep is idempotent: today's date is naturally excluded because the
+# comparison is "key_date < cutoff_date" (cutoff = today − retention_days).
+# No backup is ever deleted on the same day it was created.
+#
+# Required GitHub repository secrets
+# ----------------------------------
+# Before the first fire, add these under Settings → Secrets and variables
+# → Actions → New repository secret:
+#
+#   DIRECT_DATABASE_URL       — Supabase session-mode URL (port 5432). Same
+#                               value as Render's DIRECT_DATABASE_URL.
+#                               Required for pg_dump.
+#   R2_ACCOUNT_ID             — Cloudflare account ID. Same value as
+#                               Render's R2_ACCOUNT_ID.
+#   R2_ACCESS_KEY_ID          — R2 access key. Same value as Render's
+#                               R2_ACCESS_KEY_ID.
+#   R2_SECRET_ACCESS_KEY      — R2 secret. Same value as Render's
+#                               R2_SECRET_ACCESS_KEY.
+#   R2_BUCKET_DB_BACKUPS      — bucket name (default: `db-backups`). Must
+#                               exist before the first fire; create it once
+#                               in the Cloudflare R2 dashboard, or rely on
+#                               the existing `scripts/provisionR2.js` if
+#                               you extend that script. NOT auto-created
+#                               here — this workflow does not have bucket-
+#                               creation IAM.
+#
+# Manual fire: Actions → "Database backup (off-site to R2)" → "Run workflow".
+# Use this when an operator wants to force an out-of-band backup (e.g. right
+# before a risky migration). The optional `retention_days` input overrides
+# the 14-day daily-sweep window for that single run.
+
+on:
+  schedule:
+    # 02:30 UTC = 08:00 IST daily. Sits between the training-overdue sweep
+    # (00:30 UTC) and the admin attendance digest (13:30 UTC) so the backup
+    # IO does not fight either of them on the shared Supabase project.
+    # GH Actions lag tolerance of ~30 min is acceptable for a daily backup.
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: 'Daily retention window in days (default 14). Backsweeps only — does not change weekly retention.'
+        required: false
+        type: choice
+        options: ['7', '14', '21', '28', '30', '60', '90']
+        default: '14'
+
+concurrency:
+  # If a scheduled fire gets delayed and a manual fire happens at the same
+  # time, dedupe them so we don't dump + upload the same day's data twice.
+  group: 'db-backup'
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Default to 14 if the workflow was triggered by schedule (no input).
+      # workflow_dispatch lets operators override per-fire.
+      RETENTION_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.retention_days || '14' }}
+      WEEKLY_RETENTION_DAYS: '28'
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      BUCKET: ${{ secrets.R2_BUCKET_DB_BACKUPS }}
+    steps:
+      - name: Install postgres client + jq
+        # postgresql-client is NOT pre-installed on ubuntu-latest (it lives
+        # on macOS runners). jq IS pre-installed on Ubuntu; listing it
+        # here is for explicitness + portability to other GH runner images.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client jq
+
+      - name: Verify required secrets
+        # Fail loudly with a useful message if any secret is missing, rather
+        # than waiting for a misleading "connection refused" later.
+        run: |
+          missing=0
+          for var in DIRECT_DATABASE_URL R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET_DB_BACKUPS; do
+            if [ -z "${!var:-}" ]; then
+              echo "[backup] missing secret: $var"
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "[backup] one or more required secrets are unset — add them under Settings → Secrets → Actions before re-running"
+            exit 1
+          fi
+
+      - name: Configure aws-cli for R2
+        # R2 is S3-compatible; --endpoint-url points the AWS SDK at the
+        # Cloudflare endpoint. `aws configure set` keeps the creds in
+        # ~/.aws/credentials which the SDK reads automatically.
+        run: |
+          mkdir -p ~/.aws
+          aws configure set aws_access_key_id "$R2_ACCESS_KEY_ID"
+          aws configure set aws_secret_access_key "$R2_SECRET_ACCESS_KEY"
+          aws configure set default.region auto
+          aws configure set default.output json
+
+      - name: Run pg_dump + checksum + upload + sweep
+        env:
+          DIRECT_DATABASE_URL: ${{ secrets.DIRECT_DATABASE_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_DB_BACKUPS: ${{ secrets.R2_BUCKET_DB_BACKUPS }}
+        run: |
+          set -euo pipefail
+
+          DATE_UTC=$(date -u +%Y-%m-%d)
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H%M%SZ)
+          DUMP_NAME="acs-portal-${TIMESTAMP}.dump"
+          SHA_NAME="${DUMP_NAME}.sha256"
+          DAY_OF_WEEK=$(date -u +%u)  # 1=Mon ... 7=Sun (ISO 8601)
+
+          echo "[backup] start — date=$DATE_UTC ts=$TIMESTAMP dow=$DAY_OF_WEEK retention=${RETENTION_DAYS}d"
+
+          # ---- 1. pg_dump ------------------------------------------------
+          # -Fc  : custom format (compressed; supports selective restore via
+          #        pg_restore --table / --schema).
+          # --no-owner / --no-acl : portable across environments — roles and
+          #        GRANTs are owned by the live DB, not the dump.
+          # The dump stream is sent to a file so we can hash + upload it
+          # without buffering the entire DB in memory.
+          echo "[backup] pg_dump → $DUMP_NAME"
+          pg_dump "$DIRECT_DATABASE_URL" -Fc --no-owner --no-acl -f "$DUMP_NAME"
+
+          BYTES=$(wc -c < "$DUMP_NAME" | tr -d ' ')
+          echo "[backup] dump size: $BYTES bytes"
+
+          # ---- 2. SHA256 alongside ---------------------------------------
+          sha256sum "$DUMP_NAME" | awk '{print $1}' > "$SHA_NAME"
+          SHA=$(cat "$SHA_NAME")
+          echo "[backup] sha256: $SHA"
+
+          # ---- 3. Upload to daily/ ---------------------------------------
+          DAILY_KEY="daily/${DUMP_NAME}"
+          DAILY_SHA_KEY="daily/${SHA_NAME}"
+          echo "[backup] upload s3://${R2_BUCKET_DB_BACKUPS}/${DAILY_KEY}"
+          aws --endpoint-url "$R2_ENDPOINT" s3 cp "$DUMP_NAME" "s3://${R2_BUCKET_DB_BACKUPS}/${DAILY_KEY}" --no-progress
+          aws --endpoint-url "$R2_ENDPOINT" s3 cp "$SHA_NAME" "s3://${R2_BUCKET_DB_BACKUPS}/${DAILY_SHA_KEY}" --no-progress
+
+          # ---- 4. Sunday → promote to weekly/ ---------------------------
+          if [ "$DAY_OF_WEEK" = "7" ]; then
+            WEEKLY_KEY="weekly/${DUMP_NAME}"
+            WEEKLY_SHA_KEY="weekly/${SHA_NAME}"
+            echo "[backup] Sunday — promoting to s3://${R2_BUCKET_DB_BACKUPS}/${WEEKLY_KEY}"
+            aws --endpoint-url "$R2_ENDPOINT" s3 cp "s3://${R2_BUCKET_DB_BACKUPS}/${DAILY_KEY}" "s3://${R2_BUCKET_DB_BACKUPS}/${WEEKLY_KEY}" --no-progress
+            aws --endpoint-url "$R2_ENDPOINT" s3 cp "s3://${R2_BUCKET_DB_BACKUPS}/${DAILY_SHA_KEY}" "s3://${R2_BUCKET_DB_BACKUPS}/${WEEKLY_SHA_KEY}" --no-progress
+          fi
+
+          # ---- 5. Sweep daily/ older than retention ----------------------
+          # cutoff = today − RETENTION_DAYS. "older than" ⇒ strict less-than.
+          # Today's key (date == DATE_UTC) is naturally excluded.
+          DAILY_CUTOFF=$(date -u -d "${RETENTION_DAYS} days ago" +%Y-%m-%d)
+          echo "[backup] sweep daily/ cutoff=$DAILY_CUTOFF"
+
+          PRUNED_DAILY=""
+          while IFS= read -r line; do
+            # line format: "LastModified Key Size"
+            last_mod=$(echo "$line" | awk '{print $1}')
+            key=$(echo "$line" | awk '{print $2}')
+            size=$(echo "$line" | awk '{print $3}')
+            # Extract YYYY-MM-DD from the key (filename prefix).
+            key_date=$(echo "$key" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
+            if [ -z "$key_date" ]; then
+              continue
+            fi
+            if [ "$key_date" \< "$DAILY_CUTOFF" ]; then
+              echo "[backup] prune daily: $key (date=$key_date size=$size)"
+              aws --endpoint-url "$R2_ENDPOINT" s3 rm "s3://${R2_BUCKET_DB_BACKUPS}/${key}" --no-progress
+              # Drop the sibling .sha256 if present.
+              sha_key="${key%.dump}.sha256"
+              aws --endpoint-url "$R2_ENDPOINT" s3 rm "s3://${R2_BUCKET_DB_BACKUPS}/${sha_key}" --no-progress 2>/dev/null || true
+              PRUNED_DAILY="${PRUNED_DAILY}${key}\n"
+            fi
+          done < <(aws --endpoint-url "$R2_ENDPOINT" s3api list-objects-v2 \
+                    --bucket "$R2_BUCKET_DB_BACKUPS" \
+                    --prefix "daily/" \
+                    --output json \
+                    | jq -r '.Contents[]? | select(.Key | endswith(".dump")) | "\(.LastModified) \(.Key) \(.Size)"')
+
+          # ---- 6. Sweep weekly/ older than weekly retention --------------
+          WEEKLY_CUTOFF=$(date -u -d "${WEEKLY_RETENTION_DAYS} days ago" +%Y-%m-%d)
+          echo "[backup] sweep weekly/ cutoff=$WEEKLY_CUTOFF"
+
+          PRUNED_WEEKLY=""
+          while IFS= read -r line; do
+            last_mod=$(echo "$line" | awk '{print $1}')
+            key=$(echo "$line" | awk '{print $2}')
+            key_date=$(echo "$key" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
+            if [ -z "$key_date" ]; then
+              continue
+            fi
+            if [ "$key_date" \< "$WEEKLY_CUTOFF" ]; then
+              echo "[backup] prune weekly: $key (date=$key_date)"
+              aws --endpoint-url "$R2_ENDPOINT" s3 rm "s3://${R2_BUCKET_DB_BACKUPS}/${key}" --no-progress
+              PRUNED_WEEKLY="${PRUNED_WEEKLY}${key}\n"
+            fi
+          done < <(aws --endpoint-url "$R2_ENDPOINT" s3api list-objects-v2 \
+                    --bucket "$R2_BUCKET_DB_BACKUPS" \
+                    --prefix "weekly/" \
+                    --output json \
+                    | jq -r '.Contents[]? | select(.Key | endswith(".dump")) | "\(.LastModified) \(.Key)"')
+
+          # ---- 7. Summary -----------------------------------------------
+          echo "============================================================"
+          echo "[backup] SUMMARY"
+          echo "  bytes:     $BYTES"
+          echo "  sha256:    $SHA"
+          echo "  r2 path:   s3://${R2_BUCKET_DB_BACKUPS}/${DAILY_KEY}"
+          if [ "$DAY_OF_WEEK" = "7" ]; then
+            echo "  weekly:    s3://${R2_BUCKET_DB_BACKUPS}/weekly/${DUMP_NAME}"
+          fi
+          echo "  daily cutoff: $DAILY_CUTOFF (retention=${RETENTION_DAYS}d)"
+          echo "  weekly cutoff: $WEEKLY_CUTOFF (retention=${WEEKLY_RETENTION_DAYS}d)"
+          echo "  pruned daily:"
+          printf "%b" "${PRUNED_DAILY:-  (none)\n}"
+          echo "  pruned weekly:"
+          printf "%b" "${PRUNED_WEEKLY:-  (none)\n}"
+          echo "============================================================"

@@ -285,6 +285,14 @@ const ALLOWED_R2_BUCKETS = [
   // the round-13 "Network error during upload" class of bug the day a
   // course-attachment feature ships.
   process.env.R2_BUCKET_TRAINING_MATERIALS || 'training-materials',
+  // db-backups: written by .github/workflows/cron-backup.yml (round-26
+  // B-3). Not in REQUIRED_BUCKETS because the bucket does not exist
+  // before the first cron fire — adding it there would make /ready
+  // fail until an operator creates the bucket in the R2 dashboard.
+  // CORS is irrelevant for the GH Actions aws-cli path (no browser),
+  // but listing it here keeps the bucket list in one place when the
+  // canonical provisionR2.js script is extended to create it.
+  process.env.R2_BUCKET_DB_BACKUPS || 'db-backups',
 ].filter(Boolean);
 
 // DR-017: the buckets the `/ready` probe MUST see. Subset of

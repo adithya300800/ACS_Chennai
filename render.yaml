@@ -107,6 +107,16 @@ services:
       - key: R2_SECRET_ACCESS_KEY
         sync: false
 
+      # [B-3] Off-site DB backup destination. The cron-backup.yml workflow
+      # reads R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY from
+      # GitHub Actions secrets (mirrors the values above) and writes here.
+      # backend/src/lib/blobStorage.js lists this bucket in
+      # ALLOWED_R2_BUCKETS so the canonical provisionR2.js can CORS / create
+      # it on demand; NOT in REQUIRED_BUCKETS so /ready does not fail before
+      # the first backup creates the bucket.
+      - key: R2_BUCKET_DB_BACKUPS
+        sync: false
+
       # Zoho OAuth (contact form / mail integration).
       - key: ZOHO_CLIENT_ID
         sync: false
