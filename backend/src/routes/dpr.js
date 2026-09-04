@@ -24,6 +24,16 @@ const { mountUploadRoutes } = require('../lib/uploadRoutes');
 // DR-027: parseStrictISODate only validates calendar shape, so a well-formed
 // future date used to persist. rejectIfFutureReportDate is the authority.
 const { rejectIfFutureReportDate } = require('../lib/reportDate');
+// LPR-013: route the "today" window through the IST business-date helper
+// instead of UTC midnight. The previous UTC-midnight window meant a DPR
+// filed at 02:00 IST (20:30 UTC of the prior day) silently failed to
+// count as "Submitted Today" between 00:00 and 02:00 IST, and an admin
+// viewing the dashboard after 18:30 IST saw "tomorrow" entries already
+// bucketed under "today". The canonical helper `getTodayBusinessDate`
+// produces UTC midnight of the IST calendar day — same encoding as the
+// `reportDate` `@db.Date` column, so the half-open [gte, lt) query
+// semantics are preserved.
+const { getTodayBusinessDate } = require('../lib/dateOnly');
 
 // Tiny asyncHandler so unhandled rejections in async route handlers reach
 // the global error handler instead of hanging the request or crashing the
@@ -812,12 +822,22 @@ router.get('/stats', dprStatsAdminGuard, asyncHandler(async (req, res) => {
   }
 
   // Build the [start, end) window for "today" once and reuse for all six
-  // counts. Date.now() inside the request handler — we don't need exact
-  // midnight math because reportDate is a date column (no time portion).
-  const startOfToday = new Date();
-  startOfToday.setUTCHours(0, 0, 0, 0);
-  const endOfToday = new Date(startOfToday);
-  endOfToday.setUTCDate(endOfToday.getUTCDate() + 1);
+  // counts.
+  //
+  // LPR-013: window is now derived from the IST business date, not from
+  // UTC midnight. `getTodayBusinessDate()` returns the UTC midnight of
+  // the IST calendar day (`2026-09-03T00:00:00.000Z` for an instant
+  // inside IST day 2026-09-03) — same shape the `reportDate` `@db.Date`
+  // column is stored under, so the half-open [gte, lt) query semantics
+  // land on the correct calendar day for an India-based workforce.
+  // The previous `setUTCHours(0,0,0,0)` was wrong: between 00:00 and
+  // 05:29 IST (= 18:30–00:00 UTC of the prior day) a DPR filed in IST
+  // was being counted under yesterday's UTC bucket; between 18:30 UTC
+  // and midnight UTC (= 00:00–05:30 IST the next day) a tomorrow-filed
+  // IST DPR was already counted under today. The IST helper closes both
+  // windows.
+  const startOfToday = getTodayBusinessDate();
+  const endOfToday = getTodayBusinessDate(new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000));
 
   // Count queries run in parallel — each is a single COUNT() against an
   // indexed column. Worst case: six tiny aggregates, ~tens of ms total.
