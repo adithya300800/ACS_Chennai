@@ -12,6 +12,12 @@
 //   8. typeMutes: every item muted → EMPTY (not SENT).
 //   9. ?date= override pins scheduledFor to that IST date.
 //  10. SMTP not configured → 503 (no empty digest rows leaked into the DB).
+//  11. S3-1: employees with no notification_preference row still get a digest.
+//  12. S3-2: emailEnabled=false → EMPTY with email-disabled reason, no email sent.
+//  13. S3-4: already-read notifications are excluded (where.isRead=false asserted,
+//            and a mock that respects the filter excludes isRead=true rows).
+//  14. S3-3: digestHourLocal honoured — non-matching hours silently skip,
+//            matching hour sends the digest as usual. Default (8) still works.
 //
 // We mock the email transport (so we don't need Zoho creds) and build a
 // minimal prisma mock that captures every create. The handler is invoked
@@ -61,7 +67,22 @@ function makePrisma({ employees = [], notifications = [] } = {}) {
       findUnique: jest.fn(),
     },
     notification: {
-      findMany: jest.fn(async () => notifications),
+      // S3-4: respect the `isRead` filter the handler now adds. A test
+      // fixture that omits `isRead` is treated as the schema default
+      // (false) — exactly what Prisma returns for a row that was never
+      // explicitly set. This lets the new S3-4 tests pass a mix of
+      // read + unread fixtures and assert the handler filters them.
+      findMany: jest.fn(async ({ where } = {}) => {
+        let result = notifications;
+        if (where && Object.prototype.hasOwnProperty.call(where, 'isRead')) {
+          const wantRead = where.isRead === true;
+          result = result.filter((n) => {
+            const isRead = n.isRead === undefined ? false : n.isRead;
+            return isRead === wantRead;
+          });
+        }
+        return result;
+      }),
     },
     digestRun: {
       create: jest.fn(async ({ data }) => {
@@ -166,6 +187,13 @@ function buildApp(prisma) {
   return app;
 }
 
+// S3-3: import the test-only hour hooks. The default hour is 8 (the
+// documented default for digestHourLocal and what every legacy fixture
+// assumes). New tests can pin a different hour before firing the handler.
+const internalDigest = require('../src/routes/internal-digest');
+const _setCurrentIstHourForTest = internalDigest._setCurrentIstHourForTest;
+const _resetCurrentIstHourForTest = internalDigest._resetCurrentIstHourForTest;
+
 const SAMPLE_EMP = (overrides = {}) => ({
   id: 'emp-1',
   name: 'Rajesh',
@@ -192,10 +220,16 @@ beforeEach(() => {
   process.env.INTERNAL_API_TOKEN = 'test-token-123';
   sendEmail.mockReset();
   sendEmail.mockResolvedValue({ ok: true, messageId: 'msg-1' });
+  // S3-3: pin the IST hour to 8 (the legacy default) so existing fixtures
+  // — which carry no digestHourLocal — keep matching the wall-clock hour
+  // regardless of when the test suite runs. Tests that exercise S3-3's
+  // hour-mismatch path explicitly call _setCurrentIstHourForTest().
+  _setCurrentIstHourForTest(8);
 });
 
 afterEach(() => {
   delete process.env.INTERNAL_API_TOKEN;
+  _resetCurrentIstHourForTest();
 });
 
 // ─── 1. Token gate ────────────────────────────────────────────────────────
@@ -452,5 +486,209 @@ describe('Already-digested exclusion (defence against re-fire races)', () => {
     // Notification was excluded → empty digest for that employee.
     expect(res.body.empty).toBe(1);
     expect(sendEmail).not.toHaveBeenCalled();
+  });
+});
+
+// ─── 11. S3-1: employees with no preference row still get a digest ───────
+describe('S3-1: permissive default for missing NotificationPreference row', () => {
+  it('processes (and sends to) an employee whose notificationPreference is null', async () => {
+    // The documented contract at notifications.js is "null row = permissive
+    // defaults (all on)". Before the fix, the query
+    //   where: { notificationPreference: { digestEnabled: true } }
+    // excluded these employees entirely. After the fix, the OR with
+    //   { notificationPreference: { is: null } }
+    // restores the contract. The mock honours whatever array we hand to
+    // it, so we exercise the per-employee loop with a null-pref employee
+    // and assert the digest fires end-to-end.
+    const notif = SAMPLE_NOTIF();
+    const prisma = makePrisma({
+      employees: [SAMPLE_EMP({ notificationPreference: null })],
+      notifications: [notif],
+    });
+    const res = await request(buildApp(prisma))
+      .post('/api/internal/digest/run')
+      .set(TOKEN_HEADER)
+      .send();
+    expect(res.status).toBe(200);
+    expect(res.body.sent).toBe(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(prisma.__digestRuns[0].status).toBe('SENT');
+    expect(prisma.__emailLogs[0].status).toBe('SENT');
+  });
+
+  it('sends a digest for a no-prefs employee with the default hour (8 AM IST)', async () => {
+    // Cross-check: a null-prefs row should also match the default hour
+    // (8) so the existing 8 AM behaviour is preserved for users who
+    // never opened the Preferences page. beforeEach pins the hour to 8.
+    const notif = SAMPLE_NOTIF();
+    const prisma = makePrisma({
+      employees: [SAMPLE_EMP({ notificationPreference: null })],
+      notifications: [notif],
+    });
+    const res = await request(buildApp(prisma))
+      .post('/api/internal/digest/run')
+      .set(TOKEN_HEADER)
+      .send();
+    expect(res.status).toBe(200);
+    expect(res.body.sent).toBe(1);
+    expect(res.body.skipped).toBe(0);
+  });
+});
+
+// ─── 12. S3-2: emailEnabled=false → EMPTY with email-disabled reason ─────
+describe('S3-2: master emailEnabled kill switch is honoured', () => {
+  it('marks the digest EMPTY with an email-disabled reason when emailEnabled=false', async () => {
+    // Before the fix, the digest path read only digestEnabled + typeMutes
+    // and ignored emailEnabled entirely — a user who turned OFF all
+    // email still received daily digests (compliance-adjacent). After
+    // the fix, emailEnabled=false routes through shouldSkipSend and
+    // produces an EMPTY DigestRun with an explanatory errorMessage so
+    // operators can distinguish "user opted out" from "nothing happened".
+    const notif = SAMPLE_NOTIF();
+    const prefs = { emailEnabled: false, digestEnabled: true, typeMutes: {}, digestHourLocal: 8 };
+    const prisma = makePrisma({
+      employees: [SAMPLE_EMP({ notificationPreference: prefs })],
+      notifications: [notif],
+    });
+    const res = await request(buildApp(prisma))
+      .post('/api/internal/digest/run')
+      .set(TOKEN_HEADER)
+      .send();
+    expect(res.status).toBe(200);
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(res.body.sent).toBe(0);
+    expect(res.body.empty).toBe(1);
+    expect(prisma.__digestRuns).toHaveLength(1);
+    expect(prisma.__digestRuns[0].status).toBe('EMPTY');
+    expect(prisma.__digestRuns[0].errorMessage).toMatch(/email/i);
+    expect(res.body.results[0]).toMatchObject({ status: 'EMPTY', reason: expect.stringMatching(/email/i) });
+  });
+
+  it('emailEnabled=false on a null-prefs employee still defaults to enabled (permissive default)', async () => {
+    // Cross-check: a missing notification_preference row should NOT
+    // accidentally trip the emailEnabled gate — the documented contract
+    // is that null = permissive defaults. shouldSkipSend's null-row
+    // handling ensures this.
+    const notif = SAMPLE_NOTIF();
+    const prisma = makePrisma({
+      employees: [SAMPLE_EMP({ notificationPreference: null })],
+      notifications: [notif],
+    });
+    const res = await request(buildApp(prisma))
+      .post('/api/internal/digest/run')
+      .set(TOKEN_HEADER)
+      .send();
+    expect(res.status).toBe(200);
+    expect(res.body.sent).toBe(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── 13. S3-4: already-read notifications are excluded ──────────────────
+describe('S3-4: already-read notifications are excluded from the digest', () => {
+  it('adds isRead:false to the notifications query', async () => {
+    // Direct contract assertion: the where clause passed to
+    // notification.findMany must include `isRead: false`. This is the
+    // fix the S3-4 review called out — the predicate was missing.
+    const prisma = makePrisma({
+      employees: [SAMPLE_EMP()],
+      notifications: [SAMPLE_NOTIF()],
+    });
+    await request(buildApp(prisma))
+      .post('/api/internal/digest/run')
+      .set(TOKEN_HEADER)
+      .send();
+    const args = prisma.notification.findMany.mock.calls[0][0];
+    expect(args.where.isRead).toBe(false);
+  });
+
+  it('a read notification (isRead=true) does not appear in the rendered digest', async () => {
+    // Behavioural cross-check: pass one read + one unread notification
+    // and verify only the unread one ends up in the email body. The
+    // mock above filters notifications by the where clause's isRead
+    // predicate so the handler's read notification never reaches the
+    // group builder. Use non-overlapping sentinel strings so the
+    // not-toMatch assertion can't false-positive on a substring.
+    const unread = SAMPLE_NOTIF({ id: 'n-unread', message: 'DPR-REVIEW-UNREAD-77' });
+    const read = SAMPLE_NOTIF({ id: 'n-read', message: 'DPR-REVIEW-ALREADY-OPENED-99', isRead: true });
+    const prisma = makePrisma({
+      employees: [SAMPLE_EMP()],
+      notifications: [unread, read],
+    });
+    const res = await request(buildApp(prisma))
+      .post('/api/internal/digest/run')
+      .set(TOKEN_HEADER)
+      .send();
+    expect(res.status).toBe(200);
+    expect(res.body.sent).toBe(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const html = sendEmail.mock.calls[0][0].html;
+    expect(html).toMatch(/DPR-REVIEW-UNREAD-77/);
+    expect(html).not.toMatch(/DPR-REVIEW-ALREADY-OPENED-99/);
+    // The DigestItem table only links the unread notification.
+    expect(prisma.__digestItems).toHaveLength(1);
+    expect(prisma.__digestItems[0].notificationId).toBe('n-unread');
+  });
+});
+
+// ─── 14. S3-3: digestHourLocal honoured ──────────────────────────────────
+describe('S3-3: per-user digestHourLocal is honoured', () => {
+  it('skips an employee whose digestHourLocal does not match the current IST hour', async () => {
+    // Pin the wall clock to 20:00 IST. An employee with digestHourLocal=8
+    // should be silently skipped (no DigestRun row written) so the
+    // matching 8 AM fire tomorrow can pick them up.
+    _setCurrentIstHourForTest(20);
+    const notif = SAMPLE_NOTIF();
+    const prefs = { emailEnabled: true, digestEnabled: true, typeMutes: {}, digestHourLocal: 8 };
+    const prisma = makePrisma({
+      employees: [SAMPLE_EMP({ notificationPreference: prefs })],
+      notifications: [notif],
+    });
+    const res = await request(buildApp(prisma))
+      .post('/api/internal/digest/run')
+      .set(TOKEN_HEADER)
+      .send();
+    expect(res.status).toBe(200);
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(res.body.results[0]).toMatchObject({ skipped: true, reason: 'hour_mismatch' });
+    expect(prisma.__digestRuns).toHaveLength(0);
+  });
+
+  it('sends the digest when the current IST hour matches digestHourLocal', async () => {
+    // Same employee, but pretend the cron fires at 14:00 IST and their
+    // preference is 14. The digest should fire.
+    _setCurrentIstHourForTest(14);
+    const notif = SAMPLE_NOTIF();
+    const prefs = { emailEnabled: true, digestEnabled: true, typeMutes: {}, digestHourLocal: 14 };
+    const prisma = makePrisma({
+      employees: [SAMPLE_EMP({ notificationPreference: prefs })],
+      notifications: [notif],
+    });
+    const res = await request(buildApp(prisma))
+      .post('/api/internal/digest/run')
+      .set(TOKEN_HEADER)
+      .send();
+    expect(res.status).toBe(200);
+    expect(res.body.sent).toBe(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(prisma.__digestRuns[0].status).toBe('SENT');
+  });
+
+  it('default digestHourLocal (8) still fires at hour 8 — regression guard', async () => {
+    // beforeEach pins the hour to 8, and SAMPLE_EMP's prefs omit
+    // digestHourLocal so the handler's default of 8 kicks in. This
+    // re-asserts the legacy behaviour: untouched prefs → 8 AM digest.
+    const notif = SAMPLE_NOTIF();
+    const prisma = makePrisma({
+      employees: [SAMPLE_EMP()],
+      notifications: [notif],
+    });
+    const res = await request(buildApp(prisma))
+      .post('/api/internal/digest/run')
+      .set(TOKEN_HEADER)
+      .send();
+    expect(res.status).toBe(200);
+    expect(res.body.sent).toBe(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
   });
 });

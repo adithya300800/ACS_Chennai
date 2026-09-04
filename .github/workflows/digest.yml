@@ -1,10 +1,14 @@
 name: Daily notification digest
 
 # Round-25: daily digest cron — replaces the would-be Render Cron Job.
-# Fires at 02:30 UTC (= 08:00 IST) every day. The endpoint is idempotent
+# Fires every hour. The endpoint filters employees by their per-user
+# digestHourLocal preference (see backend/src/routes/internal-digest.js,
+# S3-3 fix), so each fire only sends to the slice of users whose
+# preferred hour matches the current IST hour. The endpoint is idempotent
 # via DigestRun.@@unique([employeeId, scheduledFor]) so a delayed/retry
 # fire (GitHub Actions can lag by up to 30 min during peak times) is
-# safe — the second call short-circuits.
+# safe — the second call short-circuits, and the matching-hour fire is
+# the only one that creates a DigestRun for a given (employee, date).
 #
 # Authentication: the endpoint expects header `X-Internal-Token` matching
 # the backend's `INTERNAL_API_TOKEN` env var. We pass it as a GitHub
@@ -15,8 +19,10 @@ name: Daily notification digest
 
 on:
   schedule:
-    # 02:30 UTC = 08:00 IST (Asia/Kolkata is UTC+5:30, no DST).
-    - cron: '30 2 * * *'
+    # Every hour on the hour. The handler picks the per-user hour via
+    # getCurrentIstHour(); non-matching employees are silently skipped
+    # (no DigestRun row written).
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       date_override:
