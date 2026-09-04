@@ -58,6 +58,29 @@ export default function UserMenu() {
   // navigation, and Help & Support / Dashboard / Sign out all silently
   // stop working. Switching to 'click' lets the link's click handler run
   // first (so React Router navigates) before we close the menu.
+  //
+  // ─── LPR-014 partial keyboard-model compliance ─────────────────────────
+  // SOL LPR-014 flagged that this menu declares `role="menu"` /
+  // `role="menuitem"` without the FULL ARIA Authoring Practices menu
+  // keyboard interaction model (see
+  // https://www.w3.org/WAI/ARIA/apg/patterns/menubar/ — Escape, ArrowDown,
+  // ArrowUp, Home, End, optional first-letter type-ahead, focus-trap
+  // while open). We implement:
+  //   - Escape → close + return focus to trigger (implemented below)
+  //   - Outside-click → close (implemented below)
+  // We DO NOT yet implement:
+  //   - ArrowDown / ArrowUp to move focus between menuitems
+  //   - Home / End to jump to first/last menuitem
+  //   - First-letter type-ahead navigation
+  //   - roving tabindex on the menuitems
+  //   - Focus-trap (Tab from the last item currently escapes the menu)
+  // Each menuitem is a reachable <Link>/<button>, so Tab navigation works,
+  // but a screen-reader user who lands on the trigger and presses ArrowDown
+  // (the expected pattern) hears nothing change. Closing this gap is
+  // tracked under LPR-014 follow-up; the minimum demonstrable fix for the
+  // current PR is the Escape handler (already in place) plus this TODO so
+  // the partial state is documented in code.
+  // ────────────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!open) return undefined;
     const onDoc = (e) => {

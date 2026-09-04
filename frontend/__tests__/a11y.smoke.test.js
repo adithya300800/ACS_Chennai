@@ -15,6 +15,35 @@
  *   - live E2E browser a11y tree — covered by the Playwright suite,
  *     not Jest.
  *
+ * ─── LPR-014: this file does NOT mount a real route ────────────────────────
+ * SOL LPR-014 observed that "accessibility tests exercise synthetic fixtures
+ * rather than real routed pages." That is intentional and documented here
+ * so a future maintainer does not assume coverage that does not exist.
+ *
+ * Why fixtures, not routes:
+ *   1. Mounting the real portal tree pulls in AuthContext + ToastProvider +
+ *      BrowserRouter + Zustand stores + an authenticated employee fixture.
+ *      Doing that for every rendered route is brittle (auth changes, route
+ *      shape changes) and slow.
+ *   2. The bug class DR-022 exists to catch — unlabelled inputs, missing
+ *      alt text, broken heading order — is independent of the route it
+ *      ships inside. A fixture that exercises the pattern catches the
+ *      pattern anywhere it ships.
+ *   3. The full-page a11y tree IS asserted on production pages — but in
+ *      the Playwright suite, against the deployed environment, with axe-
+ *      core against a real browser DOM. That's the right layer for "every
+ *      page is clean"; this Jest suite is the right layer for "the
+ *      patterns we care about never regress in isolation".
+ *
+ * What this file is NOT a substitute for:
+ *   - A per-page jest-axe mount test. The LPR-014 follow-up is to add
+ *     one focused test per top-level route (Login, Portal/Dashboard,
+ *     Portal/Notifications, Portal/Training, Admin/Overview, …) that
+ *     mounts the real component with the production provider tree and
+ *     runs axe against it. That work is intentionally out of scope for
+ *     this commit (it would inflate this PR and the LPR-014 closure
+ *     requires per-route baseline snapshots first).
+ *
  * The fixture set is hand-curated. A NEW page should ship with at least
  * one test that mounts the production component with the same provider
  * tree it gets in `main.jsx`, runs jest-axe against the rendered output,
