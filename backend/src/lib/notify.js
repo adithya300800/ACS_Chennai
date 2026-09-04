@@ -39,8 +39,66 @@ const CRITICAL_TYPES = new Set([
   'INSPECTION_REJECTED',
 ]);
 
+// LPR-010: audit-status vocabulary. The EmailLog.status column is a free-
+// form String (schema.prisma line 578) so we can introduce new values
+// without a migration. SKIPPED_OPT_OUT is reserved for *user-driven* opt-
+// outs (emailEnabled=false or digestEnabled=false). SKIPPED_NOT_CONFIGURED
+// covers the case where the operator hasn't provisioned a transport
+// (RESEND_API_KEY unset) — semantically distinct from an opt-out so the
+// audit log doesn't lie about why nothing was attempted.
+const STATUS_SENT = 'SENT';
+const STATUS_FAILED = 'FAILED';
+const STATUS_SKIPPED_OPT_OUT = 'SKIPPED_OPT_OUT';
+const STATUS_SKIPPED_TYPE_MUTED = 'SKIPPED_TYPE_MUTED';
+const STATUS_SKIPPED_NO_ADDRESS = 'SKIPPED_NO_ADDRESS';
+const STATUS_SKIPPED_NOT_CONFIGURED = 'SKIPPED_NOT_CONFIGURED';
+const STATUS_QUEUED = 'QUEUED';
+
 function isCritical(type) {
   return CRITICAL_TYPES.has(type);
+}
+
+/**
+ * LPR-010: canonical "should we even try to send?" policy. Previously each
+ * call site (immediate fan-out, admin fan-out, digest enqueue) had its own
+ * ad-hoc sequence of `if (prefs && prefs.emailEnabled === false) ...` and
+ * missed the digestEnabled check on the immediate path, leading to a
+ * divergent contract between what the UI promised and what the backend
+ * honoured. One helper returns a uniform verdict so adding a new toggle
+ * (or honouring a per-type master) is a one-line change.
+ *
+ *   channel: 'IMMEDIATE' | 'DIGEST' | 'ADMIN_IMMEDIATE' | 'ADMIN_DIGEST'
+ *
+ * Returns:
+ *   { skip: true, status, errorMessage? }  → caller writes an EmailLog
+ *   { skip: false }                        → caller continues to render+send
+ *
+ * A *missing* prefs row is treated as fully enabled (matches the defaults
+ * the notifications API already serialises) so digest employee selection
+ * doesn't drop rows that have no NotificationPreference yet.
+ */
+function shouldSkipSend(prefs, type, channel) {
+  const safePrefs = prefs && typeof prefs === 'object' ? prefs : {};
+  const isAdminChannel = channel === 'ADMIN_IMMEDIATE' || channel === 'ADMIN_DIGEST';
+
+  // Master kill switch: emailEnabled. A missing row or undefined is enabled.
+  if (safePrefs.emailEnabled === false) {
+    return { skip: true, status: STATUS_SKIPPED_OPT_OUT, errorMessage: 'email disabled' };
+  }
+
+  // Digest master switch: only applies to digest-class channels so an
+  // employee with digestEnabled=false still receives immediate notifications.
+  if ((channel === 'DIGEST' || channel === 'ADMIN_DIGEST') && safePrefs.digestEnabled === false) {
+    return { skip: true, status: STATUS_SKIPPED_OPT_OUT, errorMessage: 'digest disabled' };
+  }
+
+  // Per-type mute (default = not muted).
+  const typeMutes = (safePrefs.typeMutes && typeof safePrefs.typeMutes === 'object') ? safePrefs.typeMutes : {};
+  if (typeMutes[type] === true) {
+    return { skip: true, status: STATUS_SKIPPED_TYPE_MUTED, errorMessage: `type ${type} muted` };
+  }
+
+  return { skip: false };
 }
 
 /**
@@ -91,10 +149,17 @@ async function fanOutEmail(notification, prisma, context = {}) {
 /**
  * Critical-type path: render → send → audit.
  *
- * Honours three opt-out signals before attempting to send:
- *   1. master emailEnabled = false      → SKIPPED_OPT_OUT
- *   2. typeMutes[type] = true           → SKIPPED_TYPE_MUTED
- *   3. employee has no email address    → SKIPPED_NO_ADDRESS
+ * Honours four opt-out signals before attempting to send:
+ *   1. master emailEnabled = false         → SKIPPED_OPT_OUT
+ *   2. master digestEnabled = false (only on digest channels)  → SKIPPED_OPT_OUT
+ *   3. typeMutes[type] = true              → SKIPPED_TYPE_MUTED
+ *   4. employee has no email address       → SKIPPED_NO_ADDRESS
+ *
+ * LPR-010: gate logic funnels through shouldSkipSend() — the same helper
+ * the admin + digest paths use — so a toggle change is a one-line edit.
+ * Unconfigured transport (RESEND_API_KEY unset) now records
+ * SKIPPED_NOT_CONFIGURED (formerly misclassified as SKIPPED_OPT_OUT, which
+ * lied about why nothing was attempted).
  */
 async function sendImmediate(notification, prisma, context) {
   if (!prisma) return;
@@ -112,25 +177,14 @@ async function sendImmediate(notification, prisma, context) {
     return;
   }
 
-  // Master kill switch (default = on, so a missing prefs row is treated as enabled).
-  if (prefs && prefs.emailEnabled === false) {
+  const verdict = shouldSkipSend(prefs, notification.type, 'IMMEDIATE');
+  if (verdict.skip) {
     await writeEmailLog({
       prisma,
       notification,
       channel: 'IMMEDIATE',
-      status: 'SKIPPED_OPT_OUT',
-    });
-    return;
-  }
-
-  // Per-type mute (default = not muted).
-  const typeMutes = (prefs && prefs.typeMutes && typeof prefs.typeMutes === 'object') ? prefs.typeMutes : {};
-  if (typeMutes[notification.type] === true) {
-    await writeEmailLog({
-      prisma,
-      notification,
-      channel: 'IMMEDIATE',
-      status: 'SKIPPED_TYPE_MUTED',
+      status: verdict.status,
+      errorMessage: verdict.errorMessage || null,
     });
     return;
   }
@@ -163,11 +217,16 @@ async function sendImmediate(notification, prisma, context) {
   }
 
   if (!isConfigured()) {
+    // LPR-010: previously recorded as SKIPPED_OPT_OUT — incorrect; the
+    // user did NOT opt out, the operator forgot to provision a transport.
+    // SKIPPED_NOT_CONFIGURED is the accurate audit status so dashboards
+    // / alerts can distinguish "we deliberately didn't email this user"
+    // from "we'd have emailed them if RESEND_API_KEY were set".
     await writeEmailLog({
       prisma,
       notification,
       channel: 'IMMEDIATE',
-      status: 'SKIPPED_OPT_OUT', // "we deliberately didn't try"
+      status: STATUS_SKIPPED_NOT_CONFIGURED,
       recipientEmail,
       errorMessage: 'RESEND_API_KEY not set',
     });
@@ -191,7 +250,7 @@ async function sendImmediate(notification, prisma, context) {
       prisma,
       notification,
       channel: 'IMMEDIATE',
-      status: 'FAILED',
+      status: STATUS_FAILED,
       recipientEmail,
       errorMessage: `template: ${err?.message?.split('\n')[0] || 'unknown'}`,
     });
@@ -203,7 +262,7 @@ async function sendImmediate(notification, prisma, context) {
     prisma,
     notification,
     channel: 'IMMEDIATE',
-    status: result.ok ? 'SENT' : 'FAILED',
+    status: result.ok ? STATUS_SENT : STATUS_FAILED,
     recipientEmail,
     subject,
     providerMessageId: result.messageId || null,
@@ -216,8 +275,11 @@ async function sendImmediate(notification, prisma, context) {
  *
  * M1 leaves the actual digest send for the cron job (M2). Here we record the
  * candidate in the EmailLog so we have an audit trail of what was queued
- * (status = PENDING_DIGEST, so an operator scanning email_log can see the
- * intent even before the digest cron ships).
+ * (status = QUEUED, so an operator scanning email_log can see the intent
+ * even before the digest cron ships).
+ *
+ * LPR-010: gate logic funnels through shouldSkipSend() so emailEnabled,
+ * digestEnabled, and typeMutes all check in one canonical place.
  */
 async function enqueueForDigest(notification, prisma, context) {
   if (!prisma) return;
@@ -235,34 +297,14 @@ async function enqueueForDigest(notification, prisma, context) {
     return;
   }
 
-  // Master switches for the digest path.
-  if (prefs && prefs.emailEnabled === false) {
+  const verdict = shouldSkipSend(prefs, notification.type, 'DIGEST');
+  if (verdict.skip) {
     await writeEmailLog({
       prisma,
       notification,
       channel: 'DIGEST',
-      status: 'SKIPPED_OPT_OUT',
-    });
-    return;
-  }
-  if (prefs && prefs.digestEnabled === false) {
-    await writeEmailLog({
-      prisma,
-      notification,
-      channel: 'DIGEST',
-      status: 'SKIPPED_OPT_OUT',
-      errorMessage: 'digest disabled',
-    });
-    return;
-  }
-
-  const typeMutes = (prefs && prefs.typeMutes && typeof prefs.typeMutes === 'object') ? prefs.typeMutes : {};
-  if (typeMutes[notification.type] === true) {
-    await writeEmailLog({
-      prisma,
-      notification,
-      channel: 'DIGEST',
-      status: 'SKIPPED_TYPE_MUTED',
+      status: verdict.status,
+      errorMessage: verdict.errorMessage || null,
     });
     return;
   }
@@ -300,7 +342,7 @@ async function enqueueForDigest(notification, prisma, context) {
     prisma,
     notification,
     channel: 'DIGEST',
-    status: 'QUEUED',
+    status: STATUS_QUEUED,
     recipientEmail,
   });
 }
@@ -391,14 +433,15 @@ async function fanOutToAdmins(payload, prisma, context = {}) {
   }
 
   if (!isConfigured()) {
-    // No RESEND key — record SKIPPED per admin so an operator scanning
-    // email_log can see WHY nothing was attempted.
+    // No RESEND key — record SKIPPED_NOT_CONFIGURED per admin so an operator
+    // scanning email_log can see WHY nothing was attempted. LPR-010: was
+    // previously misclassified as SKIPPED_OPT_OUT.
     for (const admin of admins) {
       await writeEmailLog({
         prisma,
         notification: { id: null, employeeId: admin.id },
         channel: 'ADMIN_IMMEDIATE',
-        status: 'SKIPPED_OPT_OUT',
+        status: STATUS_SKIPPED_NOT_CONFIGURED,
         recipientEmail: admin.email || '',
         errorMessage: 'RESEND_API_KEY not set',
       });
@@ -458,26 +501,16 @@ async function fanOutToAdmins(payload, prisma, context = {}) {
         });
       }
 
-      // Master kill switch.
-      if (prefs && prefs.emailEnabled === false) {
+      // LPR-010: route the per-recipient gate through shouldSkipSend() so
+      // emailEnabled / digestEnabled / typeMutes all check in one place.
+      const verdict = shouldSkipSend(prefs, payload.type, 'ADMIN_IMMEDIATE');
+      if (verdict.skip) {
         await writeEmailLog({
           prisma,
           notification: { id: null, employeeId: admin.id },
           channel: 'ADMIN_IMMEDIATE',
-          status: 'SKIPPED_OPT_OUT',
-        });
-        skipped += 1;
-        continue;
-      }
-
-      // Per-type mute.
-      const typeMutes = (prefs && prefs.typeMutes && typeof prefs.typeMutes === 'object') ? prefs.typeMutes : {};
-      if (typeMutes[payload.type] === true) {
-        await writeEmailLog({
-          prisma,
-          notification: { id: null, employeeId: admin.id },
-          channel: 'ADMIN_IMMEDIATE',
-          status: 'SKIPPED_TYPE_MUTED',
+          status: verdict.status,
+          errorMessage: verdict.errorMessage || null,
         });
         skipped += 1;
         continue;
@@ -501,7 +534,7 @@ async function fanOutToAdmins(payload, prisma, context = {}) {
         prisma,
         notification: { id: null, employeeId: admin.id },
         channel: 'ADMIN_IMMEDIATE',
-        status: result.ok ? 'SENT' : 'FAILED',
+        status: result.ok ? STATUS_SENT : STATUS_FAILED,
         recipientEmail,
         subject,
         providerMessageId: result.messageId || null,
@@ -530,6 +563,14 @@ module.exports = {
   enqueueForDigest,
   isCritical,
   CRITICAL_TYPES,
+  STATUS_SENT,
+  STATUS_FAILED,
+  STATUS_SKIPPED_OPT_OUT,
+  STATUS_SKIPPED_TYPE_MUTED,
+  STATUS_SKIPPED_NO_ADDRESS,
+  STATUS_SKIPPED_NOT_CONFIGURED,
+  STATUS_QUEUED,
+  shouldSkipSend,
   setPrisma,
   getPrisma,
 };

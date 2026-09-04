@@ -70,6 +70,64 @@ function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
 
+// ─── Stale-PENDING recovery (LPR-010) ─────────────────────────────────────
+//
+// A DigestRun row is created with status='PENDING' at the top of the /run
+// loop, then mutated to SENT / EMPTY / FAILED as the work completes. If the
+// process dies between create and update — Render free-plan cold-start
+// timeout, OOM, uncaught exception — the row stays PENDING forever. Every
+// subsequent /run for that (employee, scheduledFor) sees the PENDING row,
+// falls into the "in_flight" branch below, and skips the employee. The
+// digest silently never re-attempts.
+//
+// recoverStalePendingRuns() finds any PENDING row older than
+// STALE_PENDING_MIN_AGE_MS (= 1 hour) and flips it to FAILED with an
+// errorMessage that names the recovery path. The next /run for that
+// (employee, scheduledFor) will then see status='FAILED', delete the row
+// (per the existing FAILED-cleanup branch in /run), and retry.
+//
+// Idempotent — safe to call on every /run. Uses a single UPDATE ... WHERE
+// to avoid a TOCTOU between the findMany and the per-row update.
+const STALE_PENDING_MIN_AGE_MS = 60 * 60 * 1000; // 1 hour
+
+async function recoverStalePendingRuns(prisma) {
+  const cutoff = new Date(Date.now() - STALE_PENDING_MIN_AGE_MS);
+  try {
+    const stale = await prisma.digestRun.findMany({
+      where: {
+        status: 'PENDING',
+        createdAt: { lt: cutoff },
+      },
+      select: { id: true, employeeId: true, scheduledFor: true, createdAt: true },
+      take: 500, // bounded so a backlog can't lock the request indefinitely
+    });
+    if (stale.length === 0) return { recovered: 0 };
+
+    const ids = stale.map((r) => r.id);
+    const result = await prisma.digestRun.updateMany({
+      where: {
+        id: { in: ids },
+        status: 'PENDING', // defence: re-check status atomically
+      },
+      data: {
+        status: 'FAILED',
+        errorMessage: 'auto-recovered from stale PENDING (process died mid-run)',
+      },
+    });
+    console.log('[internal-digest] recovered stale PENDING runs', {
+      recovered: result.count,
+      cutoff: cutoff.toISOString(),
+    });
+    return { recovered: result.count };
+  } catch (err) {
+    // Recovery is best-effort — never fail the /run request because of it.
+    console.error('[internal-digest] stale-PENDING recovery error', {
+      message: err?.message?.split('\n')[0],
+    });
+    return { recovered: 0, error: true };
+  }
+}
+
 // ─── Token gate (mirrors /version in index.js) ────────────────────────────
 // 404 when unset (so a misconfigured deploy doesn't silently expose the
 // endpoint). 403 when the header doesn't match. This is the same pattern
@@ -168,6 +226,12 @@ router.post('/run', requireInternalToken, asyncHandler(async (req, res) => {
     windowEnd: scheduledFor.toISOString(),
     emailConfigured: isConfigured(),
   });
+
+  // LPR-010: clear any PENDING runs that outlived their owning process
+  // (Render cold-start timeout, OOM, uncaught exception). Without this the
+  // "in_flight" branch below short-circuits every subsequent /run for that
+  // (employee, scheduledFor) and the digest silently never re-attempts.
+  const recovery = await recoverStalePendingRuns(prisma);
 
   if (!isConfigured()) {
     // No SMTP credentials — refuse to do work that would just create
@@ -386,7 +450,9 @@ router.post('/run', requireInternalToken, asyncHandler(async (req, res) => {
 
   console.log('[internal-digest] run done', {
     date: targetDateStr,
-    sent, empty, failed, skipped, totalEmployees: employeesWithDigest.length,
+    sent, empty, failed, skipped,
+    totalEmployees: employeesWithDigest.length,
+    recoveredFromStalePending: recovery.recovered || 0,
   });
 
   res.json({
@@ -394,6 +460,7 @@ router.post('/run', requireInternalToken, asyncHandler(async (req, res) => {
     scheduledFor: scheduledFor.toISOString(),
     sent, empty, failed, skipped,
     totalEmployees: employeesWithDigest.length,
+    recoveredFromStalePending: recovery.recovered || 0,
     results,
   });
 }));
