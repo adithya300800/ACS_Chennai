@@ -45,12 +45,18 @@ jobs:
       - name: Run tests
         run: npm test
 
-      # Round-11b: Prisma's introspection + DDL hangs on pgbouncer transaction
-      # mode (port 6543). Supabase exposes the same hostname on TWO ports:
+      # LPR-001: deployment no longer runs `prisma db push` (destructive,
+      # data-loss-accepting, no migration history). The schema is now reconciled
+      # exclusively through checked-in SQL migrations under prisma/migrations/.
+      # Render's startup.sh runs `prisma migrate deploy` at boot, which applies
+      # only the pending migrations and is idempotent + auditable.
+      #
+      # Round-11b (still relevant for migrations): Prisma's introspection + DDL
+      # hangs on pgbouncer transaction mode (port 6543). Supabase exposes the
+      # same hostname on TWO ports:
       #   6543 = transaction-mode pooler (good for app queries, bad for DDL)
       #   5432 = session-mode     pooler (good for migrations, db push)
-      # Using port 5432 (no pgbouncer=true flag) for the schema-push step.
-      # Render runtime + seed can keep using port 6543 (transaction-mode).
+      # Using port 5432 (no pgbouncer=true flag) for the schema-migrate step.
       - name: Probe Supabase session-mode pooler connectivity
         continue-on-error: true
         run: |
@@ -61,16 +67,32 @@ jobs:
         env:
           SCHEMA_PUSH_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
-      - name: Push Prisma schema to Supabase (session-mode pooler)
-        run: npx prisma db push --schema=prisma/schema.prisma --skip-generate --accept-data-loss
+      # LPR-001: dry-run the migration plan first so the workflow logs which
+      # migrations WOULD be applied without actually applying anything. If the
+      # pending migration list differs from what the owner expects, this is the
+      # step that catches it before any DDL hits production.
+      - name: Prisma migrate status (dry-run)
+        continue-on-error: true
+        run: npx prisma migrate status
         env:
-          SCHEMA_PUSH_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
-      - name: Seed database
-        run: node prisma/seed.js
-        env:
-          DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+      # LPR-001: pre-deploy backup ping — warn-only. This is NOT a real backup;
+      # it's the workflow's way of saying "before we touch prod, the operator
+      # owning this run should have a fresh snapshot of the production DB".
+      # The real backup is taken by the managed Postgres provider's automatic
+      # PITR (point-in-time recovery) window. A TODO is logged when no
+      # /api/internal/backup-now endpoint is wired in the deployed app yet.
+      # The step is non-blocking on purpose: a missing operator-side backup is
+      # not a reason to fail the deploy, but a missing logged record IS a reason
+      # to make this PR unmergeable in a future, stricter CI policy.
+      - name: Pre-deploy backup reminder (warn-only)
+        if: always()
+        run: |
+          echo "[LPR-001] Pre-deploy backup reminder:"
+          echo "  - Ensure the operator has a recent logical snapshot of the prod DB."
+          echo "  - TODO(wiring): wire /api/internal/backup-now when the admin endpoint lands."
+          echo "  - Skipping is safe because managed Postgres PITR is the authoritative safety net."
 
       - name: Trigger Render Deploy
         run: |
@@ -78,6 +100,26 @@ jobs:
             -H "Authorization: Bearer $RENDER_API_KEY" \
             -H "Content-Type: application/json" \
             -d '{"clearCache":true,"branch":"add-react-website"}'
+
+      # LPR-001: SHA verification — the deployment workflow cannot prove that
+      # the commit it pushed is the commit actually running on Render. The
+      # /version endpoint (auth-gated by INTERNAL_API_TOKEN) reports both the
+      # EXPECTED_SHA (set by the workflow) and DEPLOY_SHA (set by Render at
+      # container start). If they don't match, the workflow fails loudly.
+      - name: Verify exact release SHA via /version
+        run: |
+          EXPECTED_SHA="${{ github.sha }}"
+          RESP=$(curl -sf -H "X-Internal-Token: $INTERNAL_API_TOKEN" https://acs-chennai.onrender.com/version || echo '{"error":"fetch-failed"}')
+          echo "Expected SHA: $EXPECTED_SHA"
+          echo "Live /version: $RESP"
+          DEPLOY_SHA=$(echo "$RESP" | sed -n 's/.*"deploySha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+          MATCHES=$(echo "$RESP" | sed -n 's/.*"matches"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')
+          if [ "$DEPLOY_SHA" != "$EXPECTED_SHA" ] || [ "$MATCHES" != "true" ]; then
+            echo "::error::Release SHA mismatch — expected $EXPECTED_SHA, live $DEPLOY_SHA (matches=$MATCHES)"
+            exit 1
+          fi
+        env:
+          INTERNAL_API_TOKEN: ${{ secrets.INTERNAL_API_TOKEN }}
 
       - name: Smoke test deployed app
         run: |

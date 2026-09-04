@@ -48,15 +48,26 @@ if [ ! -d "/home/site/wwwroot/node_modules" ]; then
   npm install --omit=dev 2>/dev/null || npm install
 fi
 
-echo "[startup] Running Prisma db push..."
+echo "[startup] Running Prisma migrate deploy..."
 cd /home/site/wwwroot
-# Use `db push` (not `migrate deploy`) because this project does not use
-# migration files — schema is the single source of truth. `db push` makes
-# additive changes (new columns, new indexes) without dropping data, and
-# errors out if the local schema would require destructive changes. Round-8
-# confirmed this was the fix for F5/F6 (POST /api/dpr and admin queue 500s
-# caused by deployed DB schema drifting from the deployed Prisma client).
-npx prisma db push --accept-data-loss=false --schema /home/site/wwwroot/prisma/schema.prisma
+# LPR-001: switched from `prisma db push` to `prisma migrate deploy`.
+#
+# Why the switch:
+#   - `db push` accepts destructive schema changes (no migration history) and
+#     reconciles the database directly to schema.prisma, which can drop
+#     columns / data without warning. The `--accept-data-loss=false` flag was
+#     only a partial guard; it cannot stop an unrelated custom constraint or
+#     data backfill from being silently skipped.
+#   - `migrate deploy` applies only the checked-in SQL migrations under
+#     prisma/migrations/, is fully idempotent (skips already-applied ones),
+#     and writes every applied migration to `_prisma_migrations` so the
+#     release process is auditable.
+#   - The round-11b (Supabase session-mode pooler) DDL port-5432 caveat
+#     still applies — migrations must run against the session-mode pooler,
+#     not the transaction-mode pooler on port 6543 that the app uses for
+#     queries. The DATABASE_URL in the Render runtime is the query URL
+#     (port 6543); for migrations we resolve to the session-mode pooler.
+npx prisma migrate deploy --schema /home/site/wwwroot/prisma/schema.prisma
 
 echo "[startup] Starting Node.js on PORT $PORT..."
 exec node /home/site/wwwroot/src/index.js

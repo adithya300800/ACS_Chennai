@@ -3,6 +3,17 @@ const bcrypt = require('bcryptjs');
 
 const prisma = new PrismaClient();
 
+// LPR-001: refuse to run in production. The seed script overwrites known
+// employee/admin credentials, names, roles, and profiles — running it against
+// production would silently reset every test user on every deploy.
+// Developers can still run `npm run db:seed` locally (NODE_ENV is unset or
+// not 'production'); the GitHub Actions deploy workflow no longer invokes
+// this script at all. NODE_ENV is set to 'production' in startup.sh.
+if (process.env.NODE_ENV === 'production') {
+  console.warn('[seed] Refusing to run: NODE_ENV=production. Seed data must never overwrite production employee records.');
+  process.exit(0);
+}
+
 async function main() {
   console.log('Seeding employees...');
 
