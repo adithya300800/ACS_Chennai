@@ -24,6 +24,10 @@ const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/curso
 // DR-027: parseStrictISODate only validates calendar shape, so a well-formed
 // future date used to persist. rejectIfFutureReportDate is the authority.
 const { rejectIfFutureReportDate, assertNotFutureReportDate } = require('../lib/reportDate');
+// LPR-013: dashboard "today" stats now derive from the IST business-day
+// helper (matches how Attendance.date and DPR.reportDate are keyed) instead
+// of UTC midnight of `new Date()`. Half-open [gte, lt) range is unchanged.
+const { getTodayBusinessDate } = require('../lib/dateOnly');
 // Round-25: email fan-out for in-app notifications. Fire-and-forget —
 // the helper swallows its own errors and never throws to the caller.
 // Invoked inside the tx callback AFTER the notification row is created so
@@ -567,10 +571,17 @@ router.get('/stats', inspectionStatsAdminGuard, asyncHandler(async (req, res) =>
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
   }
 
-  // Same UTC [start, end) window convention as /api/dpr/stats. reportDate
-  // is @db.Date so { gte: today, lt: tomorrow } covers the full day.
-  const startOfToday = new Date();
-  startOfToday.setUTCHours(0, 0, 0, 0);
+  // LPR-013: same IST-day window convention as /api/dpr/stats — derive
+  // "today" via getTodayBusinessDate() so the bucket lands on the correct
+  // calendar day for an India-based workforce. The previous
+  // `setUTCHours(0,0,0,0)` was wrong: between 00:00 and 05:29 IST an
+  // inspection filed in IST was being counted under yesterday's UTC bucket
+  // and between 18:30 UTC and midnight UTC (= 00:00–05:30 IST the next day)
+  // a tomorrow-filed IST inspection was already counted under today.
+  // reportDate is @db.Date so { gte: today, lt: tomorrow } covers the full
+  // day; updatedAt (used by closedToday) is a DateTime column but we want
+  // the same wall-clock-day definition, so we share the helper.
+  const startOfToday = getTodayBusinessDate();
   const endOfToday = new Date(startOfToday);
   endOfToday.setUTCDate(endOfToday.getUTCDate() + 1);
 
@@ -630,9 +641,16 @@ router.get('/stats', inspectionStatsAdminGuard, asyncHandler(async (req, res) =>
     pendingReview,
     totalActive,
     window: {
+      // Echo back the window so the client can render "as of <ts>" if it
+      // wants to — useful for diagnosing clock-skew between server and DB.
+      // LPR-013: timezone is now the IST business day (was 'UTC'). The
+      // instant values are unchanged shape — UTC midnights of consecutive
+      // IST calendar days — but the label tells the reader which day
+      // boundary is in effect so a future debugger doesn't have to
+      // re-derive it.
       start: startOfToday.toISOString(),
       end: endOfToday.toISOString(),
-      timezone: 'UTC',
+      timezone: 'Asia/Kolkata',
     },
   });
 }));

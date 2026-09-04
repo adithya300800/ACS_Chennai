@@ -6,6 +6,7 @@ import StatusBadge from '../../components/StatusBadge.jsx';
 import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { CalendarIcon, MapPinIcon, CameraIcon, ClipboardIcon } from '../../components/Icons.jsx';
+import { formatDateOnly } from '../../lib/format.js';
 
 // Round-22: admin cross-org DPR list. The previous "My Daily Reports" page
 // (DprList at /portal/dpr/my) rendered every org DPR for admins because the
@@ -145,7 +146,7 @@ function DprDetailModal({ dprSummary, onClose }) {
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
               <div>
                 <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Report date</div>
-                <div style={{ color: 'var(--navy)' }}>{dpr.reportDate ? new Date(dpr.reportDate).toLocaleDateString() : '—'}</div>
+                <div style={{ color: 'var(--navy)' }}>{dpr.reportDate ? formatDateOnly(dpr.reportDate) : '—'}</div>
               </div>
               <div>
                 <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Location</div>
@@ -413,7 +414,7 @@ export default function DprAll() {
                     <div className="dpr-card-meta" style={{ marginTop: '0.5rem' }}>
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
                         <CalendarIcon size={13} style={{ color: 'var(--steel)' }} />
-                        {dpr.reportDate ? new Date(dpr.reportDate).toLocaleDateString() : '—'}
+                        {dpr.reportDate ? formatDateOnly(dpr.reportDate) : '—'}
                       </span>
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
                         <MapPinIcon size={13} style={{ color: 'var(--steel)' }} />
