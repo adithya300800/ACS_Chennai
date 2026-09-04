@@ -1189,6 +1189,16 @@ router.post('/:id/review', async (req, res) => {
       });
     }
 
+    // Round-25d fix: hoist `notifMessage` to outer scope so the fanOutEmail
+    // call below can read it. It is assigned inside the `$transaction` async
+    // callback but referenced after the tx resolves. A `const` declared inside
+    // the tx callback would be out of scope by the time fanOutEmail runs
+    // (ReferenceError: notifMessage is not defined). Same pattern repeats in
+    // /:id/approve, /:id/reject, and /bulk-review — the outer `let` +
+    // inner bare assignment is the minimum-diff fix that keeps the existing
+    // message-building logic exactly where it was.
+    let notifMessage;
+
     const updated = await prisma.$transaction(async (tx) => {
       const conditionalUpdate = await tx.dPR.update({
         where: { id, status: dpr.status, version: dpr.version },
@@ -1211,7 +1221,7 @@ router.post('/:id/review', async (req, res) => {
         },
       });
 
-      const notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was reviewed. ${adminNotes || ''}`.trim();
+      notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was reviewed. ${adminNotes || ''}`.trim();
       await tx.notification.create({
         data: {
           employeeId: dpr.submittedById,
@@ -1293,6 +1303,11 @@ router.post('/:id/approve', async (req, res) => {
       });
     }
 
+    // Round-25d: hoist `notifMessage` to outer scope. See /:id/review for the
+    // full explanation — this handler bit a live user on 2026-09-04 (Render
+    // log: `DPR approve error { message: 'notifMessage is not defined' }`).
+    let notifMessage;
+
     const updated = await prisma.$transaction(async (tx) => {
       const conditionalUpdate = await tx.dPR.update({
         where: { id, status: dpr.status, version: dpr.version },
@@ -1314,7 +1329,7 @@ router.post('/:id/approve', async (req, res) => {
         },
       });
 
-      const notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was approved. ${adminNotes || ''}`.trim();
+      notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was approved. ${adminNotes || ''}`.trim();
       await tx.notification.create({
         data: {
           employeeId: dpr.submittedById,
@@ -1407,6 +1422,10 @@ router.post('/:id/reject', async (req, res) => {
       });
     }
 
+    // Round-25d: hoist `notifMessage` to outer scope. See /:id/review for the
+    // full explanation — same scope bleed across the $transaction callback.
+    let notifMessage;
+
     const updated = await prisma.$transaction(async (tx) => {
       const conditionalUpdate = await tx.dPR.update({
         where: { id, status: dpr.status, version: dpr.version },
@@ -1429,7 +1448,7 @@ router.post('/:id/reject', async (req, res) => {
       });
 
       const combinedNotes = [reason.trim(), adminNotes].filter(Boolean).join('\n\n');
-      const notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was rejected: ${reason.trim()}${adminNotes ? `\n${adminNotes}` : ''}`.trim();
+      notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was rejected: ${reason.trim()}${adminNotes ? `\n${adminNotes}` : ''}`.trim();
       await tx.notification.create({
         data: {
           employeeId: dpr.submittedById,
@@ -1554,6 +1573,11 @@ router.post('/bulk-review', async (req, res) => {
   // roll back 99 successful updates.
   for (const id of uniqueIds) {
     try {
+      // Round-25d: hoist `notifMessage` to outer scope so the fanOutEmail
+      // call below the tx can read what the if/else branches assigned inside
+      // the tx. Same scope-bleed fix as the single-record handlers.
+      let notifMessage;
+
       const result = await prisma.$transaction(async (tx) => {
         const dpr = await tx.dPR.findUnique({ where: { id }, include: DPR_INCLUDE });
         if (!dpr) {
@@ -1564,7 +1588,7 @@ router.post('/bulk-review', async (req, res) => {
         let nextStatus;
         let updateData;
         let notifType;
-        let notifMessage;
+        // notifMessage now declared OUTSIDE the tx callback (above) — assigned below.
 
         if (action === 'APPROVE') {
           allowedFrom = APPROVABLE_FROM;
