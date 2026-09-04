@@ -43,6 +43,7 @@ model Employee {
   notificationPreference NotificationPreference?
   emailLogs              EmailLog[]
   digestRuns             DigestRun[]
+  uploadIntents          UploadIntent[]
 
   @@map("employees")
 }
@@ -633,4 +634,49 @@ model DigestRun {
   @@unique([employeeId, scheduledFor])
   @@index([status])
   @@map("digest_run")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LPR-012 (round-26): UploadIntent — durable record of a presigned-upload
+// handshake.
+//
+// Before round-26, upload intents lived in a process-local Map
+// (`pendingUploads` in src/lib/uploadRoutes.js). That worked for a single
+// Render instance but meant:
+//   - Intent could be lost on a process restart mid-upload
+//   - Multi-instance horizontal scale could not share the registry
+//   - There was no audit trail of who attempted which upload
+//   - Foreign-employee confirmation was enforced only by Map lookup
+//
+// UploadIntent persists the (employeeId, ulid) pair, the scoped blob path,
+// and the lifecycle (PENDING → CONFIRMED | EXPIRED). /sas-url writes the
+// intent BEFORE returning the presigned URL; /confirm-upload validates
+// ownership and marks the intent CONFIRMED inside the same transaction
+// that consumes the upload (so a confirm can never orphan an intent).
+//
+// The in-process pendingUploads Map still exists as a hot-path cache for
+// the 20-min TTL sweep — the DB row is the source of truth.
+// ─────────────────────────────────────────────────────────────────────────────
+model UploadIntent {
+  id          String    @id @default(uuid())
+  employeeId  String    @map("employee_id")
+  ulid        String    @map("ulid")
+  container   String    @map("container")
+  blobPath    String    @map("blob_path")
+  contentType String    @map("content_type")
+  status      String    @default("PENDING") @map("status") // PENDING | CONFIRMED | EXPIRED
+  expiresAt   DateTime  @map("expires_at")
+  confirmedAt DateTime? @map("confirmed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  // An intent is identified by (employeeId, ulid). Two intents for the
+  // same ulid from different employees is impossible because ulid is
+  // server-generated AND scoped under employeeId in the blob path —
+  // the unique constraint is defence-in-depth.
+  @@unique([employeeId, ulid])
+  @@index([status, expiresAt])
+  @@index([employeeId, status])
+  @@map("upload_intent")
 }
