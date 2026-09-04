@@ -9,7 +9,7 @@
 //                    ├── CRITICAL_TYPES.has(type)
 //                    │       └─► sendImmediate()       (5 critical types)
 //                    │               ├─► render template → HTML
-//                    │               ├─► ZeptoMail send
+//                    │               ├─► Resend HTTP send
 //                    │               └─► EmailLog row (SENT / FAILED / SKIPPED_*)
 //                    │
 //                    └── default
@@ -168,7 +168,7 @@ async function sendImmediate(notification, prisma, context) {
       channel: 'IMMEDIATE',
       status: 'SKIPPED_OPT_OUT', // "we deliberately didn't try"
       recipientEmail,
-      errorMessage: 'ZEPTOMAIL_API_KEY not set',
+      errorMessage: 'RESEND_API_KEY not set',
     });
     return;
   }
