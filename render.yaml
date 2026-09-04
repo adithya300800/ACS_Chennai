@@ -37,7 +37,16 @@ services:
     region: singapore
     plan: free
     buildCommand: npm install && npx prisma generate
-    startCommand: node src/index.js
+    # [B-1] Apply pending Prisma migrations before serving traffic.
+    # `migrate deploy` is idempotent (only applies never-applied migrations
+    # from prisma/migrations/), so re-running on every boot is cheap and safe.
+    # On a cold start the schema is updated before any query path runs.
+    # Uses DIRECT_DATABASE_URL (session-mode pooler, port 5432) via the
+    # `directUrl` field in prisma/schema.prisma — the transaction-mode
+    # pooler (port 6543) used by DATABASE_URL cannot service DDL.
+    # On a failed migration the startCommand exits non-zero, Render marks
+    # the deploy failed, and traffic is not routed to the broken revision.
+    startCommand: npx prisma migrate deploy && node src/index.js
 
     envVars:
       # Runtime query connection. Supabase transaction-mode pooler (6543).

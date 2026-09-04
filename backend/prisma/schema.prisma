@@ -10,8 +10,13 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // [B-1] DDL/migration URL. Supabase splits queries (port 6543, transaction
+  // pooler) from DDL (port 5432, session pooler) — Prisma's transaction pooler
+  // cannot service migration introspection. Both env vars are declared
+  // sync: false in render.yaml.
+  directUrl = env("DIRECT_DATABASE_URL")
 }
 
 model Employee {
