@@ -165,13 +165,19 @@ jobs:
       #   3. Render returns 202 Accepted for a deploy trigger; we fail loudly
       #      on anything other than 202 (or 200) and echo the response body
       #      for forensics.
+      #
+      # Round-27 follow-up: Render's API no longer accepts `clearCache` in
+      # the body — sending {"clearCache":true,"branch":"..."} returns 400
+      # "invalid JSON". The cache-clear option was dropped (or moved to a
+      # separate endpoint). Removed it; deploys with no cache clear still
+      # pick up fresh npm install via Render's normal build flow.
       - name: Trigger Render Deploy
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
           url="https://api.render.com/v1/services/srv-da9jvkhf2nfc73fpq230/deploys"
-          body='{"clearCache":true,"branch":"add-react-website"}'
-          echo "[render] POST $url"
+          body='{"branch":"add-react-website"}'
+          echo "[render] POST $url (body=$body)"
           response=$(curl -fsS -m 30 -X POST "$url" \
             -H "Authorization: Bearer $RENDER_API_KEY" \
             -H "Content-Type: application/json" \
@@ -180,8 +186,8 @@ jobs:
           echo "$response"
           status=$(echo "$response" | tail -n 1 | sed 's/HTTP_STATUS://')
           case "$status" in
-            200|202) echo "[render] deploy accepted (status=$status) — proceeding to SHA verify" ;;
-            *) echo "::error::Render deploy trigger returned status=$status (expected 200/202)"; exit 1 ;;
+            200|201|202) echo "[render] deploy accepted (status=$status) — proceeding to SHA verify" ;;
+            *) echo "::error::Render deploy trigger returned status=$status (expected 200/201/202)"; exit 1 ;;
           esac
 
       # [B-4] SHA verification — polls /version until the new SHA is live OR
