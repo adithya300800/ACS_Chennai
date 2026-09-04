@@ -521,6 +521,12 @@ model TrainingEnrollment {
   // can reconcile duplicate webhooks against the original enrollment row.
   providerSessionId String?                  @map("provider_session_id") @db.VarChar(120)
   employeeNote      String?                  @map("employee_note") @db.VarChar(500)
+  // [S3-6] Last successful admin-notification attempt for this enrollment
+  // (any status where fan-out delivered to at least one admin). Distinct
+  // from updatedAt so the retry pass can find rows that flipped to
+  // OVERDUE but never got notified (e.g. Resend outage at 00:30 IST) and
+  // re-attempt the fan-out without re-flipping. Null until first success.
+  overdueNotifiedAt DateTime?                @map("overdue_notified_at")
   createdAt         DateTime                 @default(now()) @map("created_at")
   updatedAt         DateTime                 @updatedAt @map("updated_at")
 

@@ -1,0 +1,43 @@
+-- [S3-6] Add `overdue_notified_at` to training_enrollments.
+--
+-- Context:
+--   The training-overdue cron (POST /api/internal/training/overdue/sweep)
+--   flips rows from {ASSIGNED, IN_PROGRESS} to OVERDUE and then fires an
+--   admin fan-out email. The fan-out is best-effort: it can produce zero
+--   sends (all admins muted, no admins configured, Resend outage, etc.).
+--
+--   Today, if the flip succeeds but the fan-out produces zero sends, the
+--   row stays OVERDUE forever and the next day's sweep skips it via the
+--   atomic guard — the admin never learns about it (silent miss).
+--
+--   The fix is a retry pass that finds OVERDUE rows with no successful
+--   notification within the last day and re-attempts the fan-out. To
+--   support that without scanning every OVERDUE row every day, we record
+--   the LAST successful fan-out timestamp on the row itself.
+--
+-- Why a separate column instead of reusing `updatedAt`:
+--   `updatedAt` is touched by every status transition (admin cancel,
+--   employee self-complete, retry pass, etc.) so it's not a stable
+--   proxy for "was the admin notified?". A dedicated column keeps the
+--   retry query a clean index-friendly predicate:
+--     status = 'OVERDUE' AND (
+--       overdue_notified_at IS NULL OR
+--       overdue_notified_at < now() - interval '1 day'
+--     )
+--
+-- Idempotency:
+--   ALTER TABLE ... ADD COLUMN IF NOT EXISTS is supported on Postgres
+--   9.6+, which Supabase runs. Re-running this migration on a database
+--   that already has the column is a no-op (NOT a duplicate-column error).
+--   Verified against the r25_notifications migration pattern (B-2).
+--
+-- Apply order:
+--   This is a no-op schema change for fresh DBs (the column is nullable
+--   with no default). The route code already handles null correctly
+--   (treats it as "never notified yet"). Safe to apply before or after
+--   the next deploy — only the route code at
+--   backend/src/routes/internal-training-overdue.js needs to be aware of
+--   the new column to write it.
+
+ALTER TABLE training_enrollments
+  ADD COLUMN IF NOT EXISTS overdue_notified_at TIMESTAMP NULL;

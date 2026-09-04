@@ -24,8 +24,30 @@
 //   timeout mid-loop left the DB in a half-flipped state (rows already
 //   OVERDUE but never notified). Re-running the next day would skip
 //   those rows via the atomic guard and they would never get notified.
-//   This is the same shape of bug as S3-6 — partially addressed there by
-//   the per-flipped-row audit, fully fixed here by bounding the loop.
+//   S3-6 addresses the silent-notification half; S3-5 addresses the
+//   runaway-volume half. The S3-6 retry pass added below depends on
+//   the S3-5 bounded loop staying bounded — a runaway retry pass would
+//   defeat the purpose.
+//
+// [S3-6] Notification retry — the original flip-then-email flow had a
+//   silent-miss window. `fanOutToAdmins` is best-effort: it returns
+//   { sent: 0 } when every admin has the type muted, when no admins
+//   exist, when Resend is unreachable, or when the HTTP call fails.
+//   Because the row was already flipped to OVERDUE before fan-out ran,
+//   and the next day's sweep skips OVERDUE rows via the atomic guard,
+//   the admin never learned about the overdue state — silent miss.
+//
+//   The fix is two halves:
+//     1. Record `overdueNotifiedAt = now()` ONLY when fan-out returns
+//        `sent > 0`. Rows that flip but produce zero sends stay with
+//        `overdueNotifiedAt = NULL`.
+//     2. Add a second pass (after the flip pass) that finds OVERDUE
+//        rows with stale/null `overdueNotifiedAt` and re-attempts the
+//        fan-out. Because these rows are already OVERDUE we do NOT
+//        re-flip — we just retry the email side-effect.
+//
+//   Both halves share the per-run time budget, so an admin-side outage
+//   cannot starve tomorrow's flip pass.
 //
 //   The fix is a bounded-batch loop with a per-run cap and a soft time
 //   budget. Default bounds (env-overridable):
@@ -207,7 +229,13 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
       flippedEnrollmentIds.push(row.id);
 
       // Fire one admin-targeted email per flipped row. fanOutToAdmins never
-      // throws, but a per-row failure must not stop the rest of the sweep.
+      // throws and always returns { sent, skipped, failed } — `sent > 0`
+      // means at least one admin actually received the email; `sent === 0`
+      // (with skipped/failed accounting for the rest) means nobody got it.
+      // [S3-6] We record `overdueNotifiedAt = now()` only on `sent > 0`
+      // so the retry pass below can find rows that flipped but never got
+      // a notification (Resend outage, all admins muted, no admins, etc.).
+      let fanoutResult = null;
       try {
         const dueDateLabel = row.dueDate instanceof Date
           ? getIstDateLabel(row.dueDate)
@@ -216,7 +244,7 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
           ? Math.max(1, Math.floor((todayIstUtc.getTime() - row.dueDate.getTime()) / (24 * 60 * 60 * 1000)))
           : null;
 
-        await fanOutToAdmins(
+        fanoutResult = await fanOutToAdmins(
           {
             type: 'ADMIN_TRAINING_OVERDUE',
             message: `Training overdue: ${row.course?.title || 'a course'} for ${row.employee?.name || 'an employee'}`,
@@ -230,6 +258,24 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
           },
           prisma,
         );
+
+        if (fanoutResult && fanoutResult.sent > 0) {
+          // Mark the row as notified. Surviving the catch below so a
+          // throw doesn't leave us with "notified=true, sent=0".
+          await prisma.trainingEnrollment.update({
+            where: { id: row.id },
+            data: { overdueNotifiedAt: new Date() },
+          });
+        } else {
+          console.warn('[internal-training-overdue] admin fan-out produced zero sends', {
+            enrollmentId: row.id,
+            sent: fanoutResult?.sent ?? 0,
+            skipped: fanoutResult?.skipped ?? 0,
+            failed: fanoutResult?.failed ?? 0,
+            // The row is now OVERDUE but with overdueNotifiedAt IS NULL —
+            // the retry pass below (or tomorrow's cron) will re-attempt.
+          });
+        }
       } catch (err) {
         console.error('[internal-training-overdue] admin fan-out failed', {
           enrollmentId: row.id,
@@ -244,6 +290,94 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
     if (candidates.length < PER_BATCH) {
       break;
     }
+  }
+
+  // [S3-6] Retry pass — find OVERDUE rows that flipped but never got a
+  // successful admin notification (Resend outage at 00:30 IST, all admins
+  // had the type muted on the day the flip happened, etc.) and re-attempt
+  // the fan-out. Distinct from the flip pass because:
+  //   - these rows are already OVERDUE — we must NOT re-flip, just retry
+  //     the side-effect (the email). The atomic guard is wrong here.
+  //   - the predicate is `overdueNotifiedAt IS NULL OR < threshold`, not
+  //     `status IN [ASSIGNED, IN_PROGRESS]`.
+  //
+  // We bound this pass against the SAME time budget so a Resend outage
+  // doesn't let retries starve tomorrow's flip pass. There is no per-run
+  // flip cap on retries because retries do not flip rows; the budget
+  // alone is the right bound.
+  let retriedNotified = 0;
+  let retriedStillPending = 0;
+  let retryBatches = 0;
+  const NOTIFICATION_STALENESS_MS = 24 * 60 * 60 * 1000; // retry once per day
+
+  retryLoop: while (Date.now() - startTime < RUN_BUDGET_MS) {
+    retryBatches += 1;
+    const staleRows = await prisma.trainingEnrollment.findMany({
+      where: {
+        status: 'OVERDUE',
+        OR: [
+          { overdueNotifiedAt: null },
+          { overdueNotifiedAt: { lt: new Date(Date.now() - NOTIFICATION_STALENESS_MS) } },
+        ],
+      },
+      include: {
+        employee: { select: { id: true, name: true } },
+        course: { select: { id: true, title: true } },
+      },
+      orderBy: { overdueNotifiedAt: { sort: 'asc', nulls: 'first' } },
+      take: PER_BATCH,
+    });
+
+    if (staleRows.length === 0) break;
+
+    for (const row of staleRows) {
+      if (Date.now() - startTime >= RUN_BUDGET_MS) {
+        stoppedReason = 'time_budget';
+        break retryLoop;
+      }
+      try {
+        const dueDateLabel = row.dueDate instanceof Date
+          ? getIstDateLabel(row.dueDate)
+          : 'unknown';
+        const daysOverdue = row.dueDate instanceof Date
+          ? Math.max(1, Math.floor((todayIstUtc.getTime() - row.dueDate.getTime()) / (24 * 60 * 60 * 1000)))
+          : null;
+
+        const fanoutResult = await fanOutToAdmins(
+          {
+            type: 'ADMIN_TRAINING_OVERDUE',
+            message: `Training overdue: ${row.course?.title || 'a course'} for ${row.employee?.name || 'an employee'} (retry)`,
+            meta: {
+              employeeName: row.employee?.name || 'an employee',
+              courseTitle: row.course?.title || 'Untitled course',
+              dueDate: dueDateLabel,
+              daysOverdue,
+              enrollmentId: row.id,
+              retry: true,
+            },
+          },
+          prisma,
+        );
+        if (fanoutResult && fanoutResult.sent > 0) {
+          await prisma.trainingEnrollment.update({
+            where: { id: row.id },
+            data: { overdueNotifiedAt: new Date() },
+          });
+          retriedNotified += 1;
+        } else {
+          retriedStillPending += 1;
+        }
+      } catch (err) {
+        console.error('[internal-training-overdue] retry fan-out failed', {
+          enrollmentId: row.id,
+          recipient: row.employee?.id ? hashIdentifier(row.employee.id) : null,
+          message: err?.message?.split('\n')[0],
+        });
+        retriedStillPending += 1;
+      }
+    }
+
+    if (staleRows.length < PER_BATCH) break;
   }
 
   // [S3-5] Remaining estimate — count of rows still in (ASSIGNED,
@@ -265,13 +399,39 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
     });
   }
 
+  // [S3-6] Un-notified estimate — count of OVERDUE rows with no recent
+  // admin notification. After a healthy run this should be 0; if it's
+  // large (>0 sustained) it means the retry pass can't catch up, and an
+  // operator should investigate the admin-side delivery chain (muted
+  // prefs, Resend outage, etc.).
+  let unnotifiedEstimate = 0;
+  try {
+    unnotifiedEstimate = await prisma.trainingEnrollment.count({
+      where: {
+        status: 'OVERDUE',
+        OR: [
+          { overdueNotifiedAt: null },
+          { overdueNotifiedAt: { lt: new Date(Date.now() - NOTIFICATION_STALENESS_MS) } },
+        ],
+      },
+    });
+  } catch (err) {
+    console.warn('[internal-training-overdue] un-notified estimate count failed', {
+      message: err?.message?.split('\n')[0],
+    });
+  }
+
   console.log('[internal-training-overdue] sweep done', {
     date: targetDateStr,
     flipped,
     skipped,
     batches,
+    retryBatches,
+    retriedNotified,
+    retriedStillPending,
     stoppedReason,
     remainingEstimate,
+    unnotifiedEstimate,
     elapsedMs: Date.now() - startTime,
   });
 
@@ -282,7 +442,11 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
     flipped,
     skipped,
     batches,
+    retryBatches,
+    retriedNotified,
+    retriedStillPending,
     remainingEstimate,
+    unnotifiedEstimate,
     stoppedReason,
     flippedEnrollmentIds,
   });

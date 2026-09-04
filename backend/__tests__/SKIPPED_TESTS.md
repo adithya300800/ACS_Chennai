@@ -22,7 +22,7 @@ file. Re-enabling integration tests is now a contract, not a TODO.
 |------|--------------------|--------|-----------|
 | `__tests__/dateOnly.test.js` | `dateOnlyToUtc` describe block (1 test) | Pure helper, no Prisma or external deps — verified the implementation matches the assertion before un-skipping. The remaining 30 tests in this file stay `.skip` and are tracked below. | LPR-004 |
 | `__tests__/cursor.test.js` | Already enabled (26 tests passing) | DR-008 wire-format regression; was never skipped. Acts as the baseline for "what a clean suite looks like". | DR-008 |
-| `__tests__/admin-training-overdue.test.js` | All 15 tests across 3 describes (was: header skipped) | S3-5: added 6 new tests pinning the bounded-batch sweep contract (take / orderBy / per-run cap / time budget / partial-batch short-circuit). Re-derived the wire-key `ADMIN_TRAINING_OVERDUE` semantics from the round-24 fan-out refactor. | REPORT-S3-5 |
+| `__tests__/admin-training-overdue.test.js` | All 20 tests across 3 describes (was: header skipped; was 15 after S3-5) | S3-6: added 5 more tests pinning the silent-miss retry contract (`overdueNotifiedAt` recorded only on `sent > 0`; retry pass picks up null/stale rows; retry meta includes `retry: true`; response exposes `unnotifiedEstimate`). The 15 from S3-5 were the bounded-batch sweep (take / orderBy / per-run cap / time budget / partial-batch short-circuit). | REPORT-S3-6 |
 
 ## Skipped file inventory (unit suite, not protected by the CI guard)
 

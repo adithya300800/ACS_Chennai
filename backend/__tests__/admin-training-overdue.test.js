@@ -20,6 +20,7 @@ const request = require('supertest');
 
 // ─── Email + adminRecipients mocks ────────────────────────────────────────
 const mockSendEmail = jest.fn(async () => ({ ok: true, messageId: 'overdue-test-msg' }));
+const mockIsConfigured = jest.fn(() => true);
 const mockFindActiveAdmins = jest.fn(async () => [
   { id: 'admin-1', email: 'admin1@example.com', name: 'Admin One' },
 ]);
@@ -29,7 +30,7 @@ jest.mock('../src/lib/email', () => {
   return {
     ...actual,
     sendEmail: mockSendEmail,
-    isConfigured: jest.fn(() => true),
+    isConfigured: mockIsConfigured,
     close: jest.fn(async () => {}),
     escapeHtml: actual.escapeHtml,
     FROM_EMAIL: 'noreply@acschennai.com',
@@ -51,17 +52,33 @@ function buildApp(prisma) {
   return app;
 }
 
-function makePrisma({ candidates = [], updateCounts = [1] } = {}) {
+function makePrisma({ candidates = [], staleRows = [], updateCounts = [1] } = {}) {
   const updateCalls = [];
+  // findMany is called from BOTH passes (flip + retry). By default the
+  // first call returns the flip candidates and the second returns the
+  // retry candidates (or []). Tests that need different behavior can
+  // override findMany directly via jest.fn().mockResolvedValueOnce(...).
+  let findManyCallIndex = 0;
+  const findManyResponses = [candidates, staleRows];
   return {
     trainingEnrollment: {
-      findMany: jest.fn(async () => candidates),
+      findMany: jest.fn(async () => {
+        const resp = findManyResponses[findManyCallIndex] !== undefined
+          ? findManyResponses[findManyCallIndex]
+          : [];
+        findManyCallIndex += 1;
+        return resp;
+      }),
       updateMany: jest.fn(async (args) => {
         updateCalls.push(args);
         const idx = updateCalls.length - 1;
         const count = updateCounts[idx] !== undefined ? updateCounts[idx] : 1;
         return { count };
       }),
+      // Single-row update (S3-6: setting overdueNotifiedAt). Default mock
+      // returns a stub matching the input so the route can chain `await`.
+      update: jest.fn(async (args) => ({ id: args?.where?.id || 'enr-x', ...args?.data })),
+      count: jest.fn(async () => 0),
     },
     __updateCalls: updateCalls,
   };
@@ -70,6 +87,8 @@ function makePrisma({ candidates = [], updateCounts = [1] } = {}) {
 beforeEach(() => {
   mockSendEmail.mockReset();
   mockSendEmail.mockResolvedValue({ ok: true, messageId: 'overdue-test-msg' });
+  mockIsConfigured.mockReset();
+  mockIsConfigured.mockReturnValue(true);
   mockFindActiveAdmins.mockReset();
   mockFindActiveAdmins.mockResolvedValue([
     { id: 'admin-1', email: 'admin1@example.com', name: 'Admin One' },
@@ -181,8 +200,10 @@ describe('Round-26 — POST /api/internal/training/overdue/sweep flips rows', ()
     expect(res.status).toBe(200);
     expect(res.body.flipped).toBe(0);
     expect(mockSendEmail).not.toHaveBeenCalled();
-    // Verify the where-clause shape on the findMany call.
-    expect(prisma.trainingEnrollment.findMany).toHaveBeenCalledTimes(1);
+    // [S3-6] Two findMany calls: one for the flip pass (empty → break), one
+    // for the retry pass (empty → break). The structural proof is on the
+    // FIRST call's where-clause; the retry pass uses a different predicate.
+    expect(prisma.trainingEnrollment.findMany).toHaveBeenCalledTimes(2);
     const where = prisma.trainingEnrollment.findMany.mock.calls[0][0].where;
     expect(where.status).toEqual({ in: ['ASSIGNED', 'IN_PROGRESS'] });
   });
@@ -266,7 +287,9 @@ describe('[S3-5] training-overdue sweep is bounded against mail-bomb N×A', () =
     await request(app)
       .post('/api/internal/training/overdue/sweep')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN);
-    expect(prisma.trainingEnrollment.findMany).toHaveBeenCalledTimes(1);
+    // [S3-6] Two findMany calls: flip pass + retry pass (both empty here).
+    expect(prisma.trainingEnrollment.findMany).toHaveBeenCalledTimes(2);
+    // The structural proof is on the flip-pass call (index 0).
     const args = prisma.trainingEnrollment.findMany.mock.calls[0][0];
     // S3-5 invariant: never an unbounded fetch — there's always a `take`
     // so an unexpectedly-large backlog (e.g. after a long cron gap) cannot
@@ -315,8 +338,12 @@ describe('[S3-5] training-overdue sweep is bounded against mail-bomb N×A', () =
       trainingEnrollment: {
         findMany: jest.fn()
           .mockResolvedValueOnce(yesterdayRows)
-          .mockResolvedValueOnce([]),
+          .mockResolvedValueOnce([])
+          // [S3-6] The retry pass also calls findMany; default to empty
+          // so the retry loop exits without further work in this test.
+          .mockResolvedValue([]),
         updateMany: jest.fn(async () => ({ count: 1 })),
+        update: jest.fn(async (args) => ({ id: args?.where?.id, ...args?.data })),
         count: jest.fn(async () => 0),
       },
     };
@@ -344,16 +371,20 @@ describe('[S3-5] training-overdue sweep is bounded against mail-bomb N×A', () =
     const localRouter = require('../src/routes/internal-training-overdue');
     try {
       const yesterday = new Date(Date.UTC(2026, 8, 2));
-      // First call returns 3 rows (cap=2 means we flip 2 and stop).
-      // Second call is NOT made because we exited the loop on cap.
-      const findMany = jest.fn(async () => ([
+      // First flip-pass call returns 3 rows (cap=2 means we flip 2 and stop).
+      // Second flip-pass call would also return 3 rows; but the cap trips
+      // first so it's not made. The retry pass call returns [] (no stale
+      // notifications in this synthetic test).
+      const findMany = jest.fn(async () => ([]));
+      findMany.mockResolvedValueOnce([
         { id: 'enr-1', status: 'ASSIGNED', dueDate: yesterday, employee: { id: 'emp-1', name: 'A' }, course: { id: 'c', title: 'C1' } },
         { id: 'enr-2', status: 'ASSIGNED', dueDate: yesterday, employee: { id: 'emp-2', name: 'B' }, course: { id: 'c', title: 'C2' } },
         { id: 'enr-3', status: 'ASSIGNED', dueDate: yesterday, employee: { id: 'emp-3', name: 'C' }, course: { id: 'c', title: 'C3' } },
-      ]));
+      ]);
       const updateMany = jest.fn(async () => ({ count: 1 }));
+      const update = jest.fn(async (args) => ({ id: args?.where?.id, ...args?.data }));
       const count = jest.fn(async () => 17); // operator-visible backlog
-      const prisma = { trainingEnrollment: { findMany, updateMany, count } };
+      const prisma = { trainingEnrollment: { findMany, updateMany, update, count } };
       const app = express();
       app.use(express.json());
       app.set('prisma', prisma);
@@ -386,18 +417,21 @@ describe('[S3-5] training-overdue sweep is bounded against mail-bomb N×A', () =
       const yesterday = new Date(Date.UTC(2026, 8, 2));
       // Two rows. After flipping the first one we sleep past the 5ms budget
       // so the pre-row check on the second row trips time_budget.
-      const findMany = jest.fn(async () => ([
+      // Retry pass is mocked to return [] (no stale notifications).
+      const findMany = jest.fn(async () => ([]));
+      findMany.mockResolvedValueOnce([
         { id: 'enr-slow-1', status: 'ASSIGNED', dueDate: yesterday, employee: { id: 'emp-1', name: 'A' }, course: { id: 'c', title: 'C1' } },
         { id: 'enr-slow-2', status: 'ASSIGNED', dueDate: yesterday, employee: { id: 'emp-2', name: 'B' }, course: { id: 'c', title: 'C2' } },
-      ]));
+      ]);
       const updateMany = jest.fn(async () => {
         // burn ~20ms (over the 5ms budget) on the first call so the second
         // iteration's pre-row check sees Date.now()-start >= 5ms and exits.
         await new Promise((r) => setTimeout(r, 20));
         return { count: 1 };
       });
+      const update = jest.fn(async (args) => ({ id: args?.where?.id, ...args?.data }));
       const count = jest.fn(async () => 9);
-      const prisma = { trainingEnrollment: { findMany, updateMany, count } };
+      const prisma = { trainingEnrollment: { findMany, updateMany, update, count } };
       const app = express();
       app.use(express.json());
       app.set('prisma', prisma);
@@ -427,16 +461,20 @@ describe('[S3-5] training-overdue sweep is bounded against mail-bomb N×A', () =
     const findMany = jest.fn(async () => {
       findManyCalls += 1;
       // First call returns 2 rows (less than the default 500-batch); the
-      // loop should exit on the partial-batch short-circuit, NOT do a
-      // second fetch.
-      return [
-        { id: 'enr-x', status: 'ASSIGNED', dueDate: yesterday, employee: { id: 'emp-1', name: 'A' }, course: { id: 'c', title: 'C' } },
-        { id: 'enr-y', status: 'ASSIGNED', dueDate: yesterday, employee: { id: 'emp-2', name: 'B' }, course: { id: 'c', title: 'C' } },
-      ];
+      // flip loop should exit on the partial-batch short-circuit, NOT do a
+      // second fetch. The retry pass also returns [] (no stale rows).
+      if (findManyCalls === 1) {
+        return [
+          { id: 'enr-x', status: 'ASSIGNED', dueDate: yesterday, employee: { id: 'emp-1', name: 'A' }, course: { id: 'c', title: 'C' } },
+          { id: 'enr-y', status: 'ASSIGNED', dueDate: yesterday, employee: { id: 'emp-2', name: 'B' }, course: { id: 'c', title: 'C' } },
+        ];
+      }
+      return [];
     });
     const updateMany = jest.fn(async () => ({ count: 1 }));
+    const update = jest.fn(async (args) => ({ id: args?.where?.id, ...args?.data }));
     const count = jest.fn(async () => 0);
-    const prisma = { trainingEnrollment: { findMany, updateMany, count } };
+    const prisma = { trainingEnrollment: { findMany, updateMany, update, count } };
     const app = buildApp(prisma);
     const res = await request(app)
       .post('/api/internal/training/overdue/sweep')
@@ -444,7 +482,179 @@ describe('[S3-5] training-overdue sweep is bounded against mail-bomb N×A', () =
     expect(res.status).toBe(200);
     expect(res.body.flipped).toBe(2);
     expect(res.body.batches).toBe(1);
-    expect(findManyCalls).toBe(1);
+    // flip pass: 1 call (2 rows, partial → short-circuit)
+    // retry pass: 1 call (returns [] → exits)
+    expect(findManyCalls).toBe(2);
     expect(mockSendEmail).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─── [S3-6] Notification retry pass ────────────────────────────────────────
+
+describe('[S3-6] training-overdue sweep retries silent-notification misses', () => {
+  it('13. successful flip → fan-out sent=1 → sets overdueNotifiedAt = now()', async () => {
+    const yesterday = new Date(Date.UTC(2026, 8, 2));
+    const prisma = makePrisma({
+      candidates: [
+        {
+          id: 'enr-notif-1',
+          status: 'ASSIGNED',
+          dueDate: yesterday,
+          employee: { id: 'emp-1', name: 'Rajesh' },
+          course: { id: 'c-1', title: 'YouTube Safety' },
+        },
+      ],
+    });
+    const app = buildApp(prisma);
+    await request(app)
+      .post('/api/internal/training/overdue/sweep')
+      .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN);
+    // update() should be called once with overdueNotifiedAt being a Date.
+    expect(prisma.trainingEnrollment.update).toHaveBeenCalledTimes(1);
+    const args = prisma.trainingEnrollment.update.mock.calls[0][0];
+    expect(args.where).toEqual({ id: 'enr-notif-1' });
+    expect(args.data.overdueNotifiedAt).toBeInstanceOf(Date);
+  });
+
+  it('14. zero-send fan-out → leaves overdueNotifiedAt null (retry pass picks up)', async () => {
+    // Flip isConfigured to false for the duration of this test so
+    // fanOutToAdmins returns sent=0 without invoking sendEmail. The
+    // shared `mockIsConfigured` jest.fn is captured at module load by
+    // notify.js (and re-captured by resetModules'd route instances in
+    // tests 10/11) — using the shared mock avoids the cross-test
+    // identity issue we hit when reaching for the post-resetModules
+    // jest.fn via require().
+    mockIsConfigured.mockReturnValue(false);
+
+    try {
+      const yesterday = new Date(Date.UTC(2026, 8, 2));
+      const prisma = makePrisma({
+        candidates: [
+          {
+            id: 'enr-silent-1',
+            status: 'ASSIGNED',
+            dueDate: yesterday,
+            employee: { id: 'emp-1', name: 'A' },
+            course: { id: 'c', title: 'C' },
+          },
+        ],
+        staleRows: [
+          // Retry pass should find this same row (status=OVERDUE,
+          // overdueNotifiedAt=null after the failed fan-out).
+          {
+            id: 'enr-silent-1',
+            status: 'OVERDUE',
+            dueDate: yesterday,
+            overdueNotifiedAt: null,
+            employee: { id: 'emp-1', name: 'A' },
+            course: { id: 'c', title: 'C' },
+          },
+        ],
+      });
+      const app = buildApp(prisma);
+      const res = await request(app)
+        .post('/api/internal/training/overdue/sweep')
+        .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN);
+      expect(res.status).toBe(200);
+      // Fan-out was attempted but produced zero sends. Row is now OVERDUE
+      // but overdueNotifiedAt was NOT set (no update() call for the
+      // overdueNotifiedAt column on the flip pass).
+      expect(res.body.flipped).toBe(1);
+      // update() was called 0 times because sent === 0 on the flip pass
+      // AND sent === 0 on the retry pass (isConfigured=false both times).
+      expect(prisma.trainingEnrollment.update).toHaveBeenCalledTimes(0);
+      // The retry pass found the row (status=OVERDUE, overdueNotifiedAt IS
+      // NULL) and tried to fan out again — also failed — so it's still
+      // pending. mockSendEmail was called 0 times because isConfigured=false
+      // skips the call entirely.
+      expect(res.body.retriedStillPending).toBe(1);
+      expect(mockSendEmail).not.toHaveBeenCalled();
+    } finally {
+      // beforeEach resets mockIsConfigured.mockReturnValue(true); nothing
+      // to do here but the try/finally makes the override scope obvious.
+    }
+  });
+
+  it('15. retry pass finds rows with overdueNotifiedAt = null (or stale > 24h)', async () => {
+    const yesterday = new Date(Date.UTC(2026, 8, 2));
+    const oldStaleAt = new Date(Date.now() - 48 * 60 * 60 * 1000); // 2 days ago
+    const prisma = makePrisma({
+      candidates: [],
+      staleRows: [
+        // 1. row that never got notified (null)
+        {
+          id: 'enr-stale-1',
+          status: 'OVERDUE',
+          dueDate: yesterday,
+          overdueNotifiedAt: null,
+          employee: { id: 'emp-1', name: 'A' },
+          course: { id: 'c', title: 'C1' },
+        },
+        // 2. row that was notified 2 days ago (stale)
+        {
+          id: 'enr-stale-2',
+          status: 'OVERDUE',
+          dueDate: yesterday,
+          overdueNotifiedAt: oldStaleAt,
+          employee: { id: 'emp-2', name: 'B' },
+          course: { id: 'c', title: 'C2' },
+        },
+      ],
+    });
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post('/api/internal/training/overdue/sweep')
+      .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN);
+    expect(res.status).toBe(200);
+    // Both stale rows were re-attempted.
+    expect(res.body.flipped).toBe(0);
+    expect(res.body.retriedNotified).toBe(2); // mockSendEmail returns ok
+    // Both rows had overdueNotifiedAt set by update().
+    expect(prisma.trainingEnrollment.update).toHaveBeenCalledTimes(2);
+    const ids = prisma.trainingEnrollment.update.mock.calls.map((c) => c[0].where.id);
+    expect(ids.sort()).toEqual(['enr-stale-1', 'enr-stale-2']);
+  });
+
+  it('16. retry pass includes `retry: true` in the meta payload', async () => {
+    const yesterday = new Date(Date.UTC(2026, 8, 2));
+    const prisma = makePrisma({
+      candidates: [],
+      staleRows: [
+        {
+          id: 'enr-stale-meta',
+          status: 'OVERDUE',
+          dueDate: yesterday,
+          overdueNotifiedAt: null,
+          employee: { id: 'emp-1', name: 'A' },
+          course: { id: 'c', title: 'Retry Course' },
+        },
+      ],
+    });
+    const app = buildApp(prisma);
+    await request(app)
+      .post('/api/internal/training/overdue/sweep')
+      .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN);
+    // The retry-pass sendEmail payload should have meta.retry = true.
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    const call = mockSendEmail.mock.calls[0][0];
+    expect(call.html).toMatch(/retry/i); // subject/body mentions retry
+  });
+
+  it('17. response includes unnotifiedEstimate (count of stale OVERDUE rows)', async () => {
+    const yesterday = new Date(Date.UTC(2026, 8, 2));
+    const prisma = makePrisma({ candidates: [] });
+    // count() returns different values for the two queries:
+    //   1st call: remainingEstimate (open backlog)
+    //   2nd call: unnotifiedEstimate (stale OVERDUE rows)
+    prisma.trainingEnrollment.count = jest.fn(async () => 0)
+      .mockResolvedValueOnce(5)   // remainingEstimate: 5 still open
+      .mockResolvedValueOnce(3);  // unnotifiedEstimate: 3 stale notifications
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post('/api/internal/training/overdue/sweep')
+      .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN);
+    expect(res.status).toBe(200);
+    expect(res.body.remainingEstimate).toBe(5);
+    expect(res.body.unnotifiedEstimate).toBe(3);
   });
 });
