@@ -1,7 +1,7 @@
 name: Admin email notifications
 
-# Round-26: Two admin-targeted email cron jobs, scheduled in IST
-# (Asia/Kolkata is UTC+5:30, no DST).
+# Round-27 (S3-10): split the schedule dispatch into one job per target so
+# GH Actions' well-known scheduling lag can't silently skip either fire.
 #
 #   1. Training overdue sweep — 06:00 IST daily (= 00:30 UTC)
 #      Flips TrainingEnrollment rows with status IN (ASSIGNED, IN_PROGRESS)
@@ -14,16 +14,34 @@ name: Admin email notifications
 #      digest email to every active admin.
 #
 # Both endpoints are token-gated by `INTERNAL_API_TOKEN` (a GitHub repo
-# secret already used by digest.yml).
+# secret already used by digest.yml and cron-warmup.yml).
 #
-# Both endpoints are idempotent:
+# Both endpoints are idempotent on the data side:
 #   - Overdue sweep: already-OVERDUE rows excluded by where-clause; no
 #     re-fire possible.
-#   - Attendance digest: re-fire just re-sends the same email; the
-#     EmailLog table provides the audit trail.
+#   - Attendance digest: a successful daily run writes a DigestRun row
+#     keyed by scheduledFor so a re-fire is a no-op (and the in-progress
+#     S3-11 follow-up will add an Idempotency-Key for manual operator
+#     re-fires that bypass the DB-side guard).
 #
-# GH Actions lag is safe here (next-day would be noticed anyway — the
-# user gets the email late but not lost).
+# Why one job per schedule (S3-10):
+#   The previous single-job implementation derived the target endpoint
+#   from `date -u +%H` and bailed with exit 1 when the wall-clock hour
+#   was neither 00 nor 13. GH Actions scheduled runs can lag by up to
+#   ~30 min during peak times — a `30 0 * * *` cron that starts at
+#   01:00 UTC would match neither branch, and that day's
+#   training-overdue sweep would be silently skipped with no retry.
+#   The fix is structural: each schedule expression is bound to its own
+#   job, and each job's `if:` clause uses `github.event.schedule`
+#   (the workflow trigger's own expression, not wall-clock) to confirm
+#   the cron matches before firing. A schedule lag still produces an
+#   extra late fire, never a missed fire.
+#
+# Manual dispatch:
+#   Actions → "Admin email notifications" → "Run workflow" → pick the
+#   job. workflow_dispatch fires both jobs' `if:` clauses as well, so
+#   the same workflow_dispatch payload hits exactly one cron job via
+#   the `inputs.job` discriminator.
 
 on:
   schedule:
@@ -43,48 +61,30 @@ on:
 
 concurrency:
   # One in-flight run per cron so a delayed + manual fire don't double up.
-  group: 'admin-emails'
+  # The group key includes the job name so the two crons don't block
+  # each other when both schedules happen to fire within the 5-min window.
+  group: 'admin-emails-${{ github.job }}'
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  fire:
+  overdue-sweep:
+    name: Training overdue sweep
+    # S3-10: branch on `github.event.schedule` (the workflow trigger's own
+    # cron expression) rather than wall-clock. Schedule lag now fires the
+    # late cron instead of skipping it.
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '30 0 * * *') ||
+      (github.event_name == 'workflow_dispatch' && inputs.job == 'training-overdue')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fire admin email cron
+      - name: Fire training overdue sweep
         run: |
-          # Manual dispatch lets the operator pick which cron to fire
-          # (useful when ops wants to backfill / debug a single endpoint
-          # without waiting for the schedule).
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            case "${{ inputs.job }}" in
-              training-overdue)
-                path="training/overdue/sweep" ;;
-              attendance-digest)
-                path="attendance/digest/run" ;;
-              *)
-                echo "[admin-emails] unknown job: ${{ inputs.job }}"; exit 1 ;;
-            esac
-          else
-            # Scheduled fires — pick based on the current hour. The two
-            # cron expressions above guarantee this branch is reached
-            # only at 00:30 UTC or 13:30 UTC, so a simple hour check is
-            # sufficient.
-            hour=$(date -u +%H)
-            if [ "$hour" = "00" ]; then
-              path="training/overdue/sweep"
-            elif [ "$hour" = "13" ]; then
-              path="attendance/digest/run"
-            else
-              echo "[admin-emails] unexpected schedule hour: $hour"; exit 1
-            fi
-          fi
-
-          url="https://acs-chennai.onrender.com/api/internal/${path}"
-          echo "[admin-emails] POST $url"
+          url="https://acs-chennai.onrender.com/api/internal/training/overdue/sweep"
+          echo "[admin-emails/overdue-sweep] POST $url"
           response=$(curl -X POST "$url" \
             -H "X-Internal-Token: ${{ secrets.INTERNAL_API_TOKEN }}" \
             -H "Content-Type: application/json" \
@@ -93,6 +93,33 @@ jobs:
           echo "$response"
           status=$(echo "$response" | tail -n 1 | sed 's/HTTP_STATUS://')
           if [ "$status" != "200" ]; then
-            echo "[admin-emails] non-200 response (status=$status) — failing so GH Actions surfaces it"
+            echo "[admin-emails/overdue-sweep] non-200 response (status=$status) — failing so GH Actions surfaces it"
+            exit 1
+          fi
+
+  attendance-digest:
+    name: Admin attendance digest
+    # S3-10: branch on `github.event.schedule`. The `13` (hour 13) is the
+    # sole discriminator between this job and the overdue-sweep job, since
+    # `github.event.schedule` is the exact cron expression that fired.
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '30 13 * * *') ||
+      (github.event_name == 'workflow_dispatch' && inputs.job == 'attendance-digest')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fire attendance digest
+        run: |
+          url="https://acs-chennai.onrender.com/api/internal/attendance/digest/run"
+          echo "[admin-emails/attendance-digest] POST $url"
+          response=$(curl -X POST "$url" \
+            -H "X-Internal-Token: ${{ secrets.INTERNAL_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -fsS -m 180 -w "\nHTTP_STATUS:%{http_code}")
+
+          echo "$response"
+          status=$(echo "$response" | tail -n 1 | sed 's/HTTP_STATUS://')
+          if [ "$status" != "200" ]; then
+            echo "[admin-emails/attendance-digest] non-200 response (status=$status) — failing so GH Actions surfaces it"
             exit 1
           fi
