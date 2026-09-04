@@ -4,6 +4,11 @@ const router = express.Router();
 const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
 const { generateReadSASUrl, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
+// Round-27: shared IST date helpers. The `month` query shortcut on the list
+// endpoint uses `getMonthRangeUtc` to expand `?month=YYYY-MM` into a
+// half-open [gte, lt) `reportDate` window aligned to the company's
+// Asia/Kolkata calendar (see backend/src/lib/dateOnly.js).
+const { getMonthRangeUtc, InvalidMonthRangeError } = require('../lib/dateOnly');
 const { hashIdentifier } = require('../lib/pii');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
 // Round-25: post-write email fan-out for the in-app notification system.
@@ -628,7 +633,7 @@ router.get('/', asyncHandler(async (req, res) => {
   // result set server-side — a 500+ row org doesn't need to ship everything
   // to the browser just so the client can filter. submittedById is the
   // canonical cuid; projectName is a free-text contains search.
-  const { cursor, limit = '20', status: statusFilter, from, to, my, projectName, submittedById: submittedByIdFilter } = req.query;
+  const { cursor, limit = '20', status: statusFilter, from, to, my, projectName, submittedById: submittedByIdFilter, month } = req.query;
 
   const take = Math.min(parseInt(limit) || 20, 100);
 
@@ -657,6 +662,14 @@ router.get('/', asyncHandler(async (req, res) => {
 
   // Validate date-range filters (used by frontend list UI). Accept either
   // YYYY-MM-DD (parsed as a date) or a full ISO timestamp.
+  //
+  // Round-27: a `month=YYYY-MM` query shortcut expands to the canonical IST
+  // half-open [gte, lt) window for that calendar month
+  // (backend/src/lib/dateOnly.js: getMonthRangeUtc). Combining `month` with
+  // `from`/`to` is a client mistake — both expand the same `reportDate`
+  // predicate, so we reject with 400 rather than silently AND-merge and
+  // produce an unexpected window. Leaving `month` empty + filling `from`/`to`
+  // manually keeps the existing open-ended behaviour.
   const dateFilter = {};
   const parseFilterDate = (v) => {
     if (!v) return null;
@@ -667,15 +680,39 @@ router.get('/', asyncHandler(async (req, res) => {
     const dt = new Date(v);
     return isNaN(dt.getTime()) ? null : dt;
   };
-  if (from) {
-    const d = parseFilterDate(from);
-    if (!d) return res.status(400).json({ error: 'INVALID_FROM', message: 'from must be a valid ISO date' });
-    dateFilter.gte = d;
+
+  if (month && (from || to)) {
+    return res.status(400).json({
+      error: 'month cannot be combined with from/to',
+      code: 'MONTH_AND_RANGE_CONFLICT',
+    });
   }
-  if (to) {
-    const d = parseFilterDate(to);
-    if (!d) return res.status(400).json({ error: 'INVALID_TO', message: 'to must be a valid ISO date' });
-    dateFilter.lte = d;
+  if (month) {
+    let monthRange;
+    try {
+      monthRange = getMonthRangeUtc(String(month));
+    } catch (e) {
+      if (e instanceof InvalidMonthRangeError) {
+        return res.status(400).json({ error: e.message, code: 'INVALID_MONTH' });
+      }
+      throw e;
+    }
+    // Half-open [gte, lt) so the upper bound is exclusive — avoids the
+    // off-by-one risk of inclusive `lte` against a UTC-midnight end of
+    // month (matches the attendance-export endpoint convention).
+    dateFilter.gte = monthRange.startDate;
+    dateFilter.lt = monthRange.endDate;
+  } else {
+    if (from) {
+      const d = parseFilterDate(from);
+      if (!d) return res.status(400).json({ error: 'INVALID_FROM', message: 'from must be a valid ISO date' });
+      dateFilter.gte = d;
+    }
+    if (to) {
+      const d = parseFilterDate(to);
+      if (!d) return res.status(400).json({ error: 'INVALID_TO', message: 'to must be a valid ISO date' });
+      dateFilter.lte = d;
+    }
   }
 
   try {

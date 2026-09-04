@@ -27,7 +27,7 @@ const { rejectIfFutureReportDate, assertNotFutureReportDate } = require('../lib/
 // LPR-013: dashboard "today" stats now derive from the IST business-day
 // helper (matches how Attendance.date and DPR.reportDate are keyed) instead
 // of UTC midnight of `new Date()`. Half-open [gte, lt) range is unchanged.
-const { getTodayBusinessDate } = require('../lib/dateOnly');
+const { getTodayBusinessDate, getMonthRangeUtc, InvalidMonthRangeError } = require('../lib/dateOnly');
 // Round-25: email fan-out for in-app notifications. Fire-and-forget —
 // the helper swallows its own errors and never throws to the caller.
 // Invoked inside the tx callback AFTER the notification row is created so
@@ -380,7 +380,7 @@ router.post('/', async (req, res) => {
 // gets that record and nothing else.
 router.get('/', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
-  const { cursor, limit = '20', dprId, reportDate, from, to, inspectionType, status, severity, my } = req.query;
+  const { cursor, limit = '20', dprId, reportDate, from, to, inspectionType, status, severity, my, month } = req.query;
 
   const take = Math.min(parseInt(limit) || 20, 100);
 
@@ -463,6 +463,34 @@ router.get('/', asyncHandler(async (req, res) => {
     if (toDate) rangeFilter.lte = toDate;
   }
 
+  // Round-27: `month=YYYY-MM` query shortcut on the list endpoint. Same
+  // contract as dpr.js — half-open [gte, lt) window aligned to the IST
+  // business calendar (see backend/src/lib/dateOnly.js). Combining `month`
+  // with `from`/`to` would expand the same `reportDate` predicate twice
+  // and risk an unexpected intersection, so we reject explicitly with 400.
+  // (Also rejected by dpr.js via MONTH_AND_RANGE_CONFLICT for symmetry.)
+  if (month && (from || to)) {
+    return res.status(400).json({
+      error: 'month cannot be combined with from/to',
+      code: 'MONTH_AND_RANGE_CONFLICT',
+    });
+  }
+  if (month) {
+    let monthRange;
+    try {
+      monthRange = getMonthRangeUtc(String(month));
+    } catch (e) {
+      if (e instanceof InvalidMonthRangeError) {
+        return res.status(400).json({ error: e.message, code: 'INVALID_MONTH' });
+      }
+      throw e;
+    }
+    // Same shape as a manually-typed from/to range so the existing
+    // mergedDate logic below (which AND-merges reportDate + rangeFilter)
+    // picks it up without a separate branch.
+    rangeFilter = { gte: monthRange.startDate, lt: monthRange.endDate };
+  }
+
   try {
     const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
     const isAdmin = employee && employee.isAdmin;
@@ -489,6 +517,13 @@ router.get('/', asyncHandler(async (req, res) => {
         mergedDate.gte = rangeFilter.gte;
       }
       if (rangeFilter.lte) mergedDate.lte = rangeFilter.lte;
+      // Round-27: half-open `lt` (exclusive upper bound) — currently set
+      // only by `?month=` (rangeFilter.lt) and by single-day `reportDate`
+      // (reportDateFilter.lt). When both are present, take the tighter
+      // one so the merged window can never be wider than either source.
+      if (rangeFilter.lt && (!mergedDate.lt || rangeFilter.lt < mergedDate.lt)) {
+        mergedDate.lt = rangeFilter.lt;
+      }
     }
     const reportDateWhere = Object.keys(mergedDate).length > 0 ? mergedDate : undefined;
 
