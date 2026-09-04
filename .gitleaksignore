@@ -1,0 +1,27 @@
+# .gitleaksignore — stop-words for gitleaks scan (see .github/workflows/secret-scan.yml).
+#
+# Each non-comment line is a "stop word" that suppresses a finding whose file
+# path matches it. Only entries below are intentional.
+#
+# -----------------------------------------------------------------------------
+# LPR-002 / DR-001 — historical Resend live-key leak in test-resend.js
+# -----------------------------------------------------------------------------
+# test-resend.js contained a live Resend API key (`re_...`) in git history
+# from the introduction of the file through commit f181cec (parent of b11f9f5),
+# which scrubbed it to a `REDACTED_USE_RESEND_API_KEY_ENV` placeholder. The
+# placeholder commit did NOT rewrite history, so the original key is still in
+# the object store and every clone/fork/cached checkout.
+#
+# This allowlist exists ONLY so the scanner can keep detecting NEW leaks
+# rather than failing forever on a historical one that has already been
+# triaged and is owned under LPR-002.
+#
+# The exposed key MUST still be rotated at the Resend dashboard. Removing this
+# allowlist line after history is purged (git filter-repo + coordinated
+# force-push) is part of closing LPR-002 — not optional.
+#
+# Scope: this entry ignores ALL findings in the file `test-resend.js` across
+# every commit. A regression that puts a NEW secret into a recreated
+# `test-resend.js` would still be caught by the HEAD-only `credential-marker`
+# job in the secret-scan workflow — defense-in-depth, not a free pass.
+test-resend.js
