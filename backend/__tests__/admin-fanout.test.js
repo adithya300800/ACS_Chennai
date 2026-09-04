@@ -140,6 +140,13 @@ function makePrisma({
         return { id: 'log-' + emailLogWrites.length, ...data };
       }),
     },
+    // S3-9 (round-27): inspection POST's fresh-admin gate (inspection.js:213)
+    // re-reads Employee.isAdmin from the DB. The mock honours the JWT claim
+    // by default; tests that want to simulate a stale claim can override
+    // via prisma.employee.findUnique.mockResolvedValueOnce({ isAdmin: false }).
+    employee: {
+      findUnique: jest.fn(async () => ({ isAdmin: true })),
+    },
     // DPR POST (dpr.js:496) + inspection POST's optional dprId lookup (inspection.js:241)
     dPR: {
       create: jest.fn(async (args) => dprDefaultCreate(args)),

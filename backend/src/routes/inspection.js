@@ -215,12 +215,24 @@ router.post('/', async (req, res) => {
       code: 'STATUS_INVALID',
     });
   }
-  if (requestedStatus !== 'OPEN' && !req.isAdmin) {
-    return res.status(403).json({
-      error: 'Only admins can create inspections in a non-OPEN status',
-      code: 'STATUS_ADMIN_ONLY',
-      currentStatus: requestedStatus,
+  if (requestedStatus !== 'OPEN') {
+    // S3-9 (round-27): do NOT trust req.isAdmin from the JWT. A user demoted
+    // from admin via the team page keeps a valid token for up to
+    // JWT_TTL_MINUTES; trusting the cached claim would let them POST a
+    // CLOSED inspection and skip the review queue for that window.
+    // Inline DB re-read mirrors the assertFreshAdmin pattern at
+    // training.js:716. Cost: one indexed PK read per non-OPEN POST.
+    const fresh = await prisma.employee.findUnique({
+      where: { id: req.employeeId },
+      select: { isAdmin: true },
     });
+    if (!fresh || !fresh.isAdmin) {
+      return res.status(403).json({
+        error: 'Only admins can create inspections in a non-OPEN status',
+        code: 'STATUS_ADMIN_ONLY',
+        currentStatus: requestedStatus,
+      });
+    }
   }
   const finalStatus = requestedStatus;
 
