@@ -72,19 +72,64 @@ jobs:
       # pending migration list differs from what the owner expects, this is the
       # step that catches it before any DDL hits production.
       #
-      # [B-4] This step is now BLOCKING. A drift between schema.prisma and
-      # the deployed migration history means Render's new container will
-      # either fail to start (B-1's `prisma migrate deploy` errors) or, if
-      # `prisma db push` were still in use, silently mutate the production
-      # schema. Either is a deploy-blocking regression.
+      # [B-4] Drift gate — fail the deploy if schema.prisma has drifted from
+      # the migration folder (a schema change without a checked-in SQL
+      # migration). If this ever triggers, the right fix is one of:
+      #   1. Add a new migration under prisma/migrations/ capturing the change, OR
+      #   2. Revert the schema.prisma edit so it matches the migrations.
+      #
+      # Implementation note (round-27 follow-up): the previous implementation
+      # ran `prisma migrate status`, which exits non-zero for BOTH "drift" AND
+      # "pending migrations". Pending migrations are the EXPECTED state on
+      # every deploy that introduces a new migration (this round added 3 for
+      # S3-6, S3-7, S3-11; previous rounds added 6 more), so the old gate was
+      # a false-positive blocker. We considered `prisma migrate diff`, but
+      # v5.x requires `--shadow-database-url` to diff against the migrations
+      # folder, which adds operational cost and concurrency risk on a shared
+      # pooler. Instead we keep `migrate status` (cheap, no shadow DB) and
+      # parse its output: "have not yet been applied" → pending (allow;
+      # `prisma migrate deploy` in B-1's Render startup.sh will apply them);
+      # "Drift" or any other warning/error → real drift or schema error (fail).
       #
       # B-1 follow-up: schema.prisma declares `directUrl = env("DIRECT_DATABASE_URL")`,
       # which Prisma validates at config-load time even for a `migrate status`
       # probe. The drift gate must provide BOTH urls — using the same
       # session-mode (port 5432) pooler is fine because this step only reads
-      # `_prisma_migrations`; it never opens a transactional app-query session.
-      - name: Prisma migrate status (drift gate)
-        run: npx prisma migrate status
+      # `_prisma_migrations`.
+      - name: Prisma drift gate (status + drift-only fail)
+        run: |
+          echo "Running prisma migrate status…"
+          set +e
+          OUTPUT=$(npx prisma migrate status 2>&1)
+          RC=$?
+          set -e
+          echo "---"
+          echo "$OUTPUT"
+          echo "---"
+          echo "migrate status exit code: $RC"
+
+          if [ "$RC" -eq 0 ]; then
+            echo "[drift-gate] DB matches migrations — no pending, no drift"
+            exit 0
+          fi
+
+          # Non-zero exit. Differentiate pending (expected before a deploy
+          # that adds new migrations) from drift (schema changed without a
+          # migration — deploy blocker).
+          if echo "$OUTPUT" | grep -qiE 'drift|error|failed'; then
+            echo "::error::Drift or schema error detected in prisma migrate status output — see above."
+            echo "Either add a migration capturing the change, or revert schema.prisma."
+            exit 1
+          fi
+
+          if echo "$OUTPUT" | grep -qi 'have not yet been applied'; then
+            echo "[drift-gate] Pending migrations detected — allowed; B-1's prisma migrate deploy in Render's startup.sh will apply them."
+            exit 0
+          fi
+
+          # Unknown non-zero exit with no recognized pattern — fail safe.
+          echo "::error::prisma migrate status exited $RC with no recognized pattern (not 'drift' and not 'pending')."
+          exit 1
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
           DIRECT_DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
