@@ -1,27 +1,36 @@
 # .gitleaksignore — stop-words for gitleaks scan (see .github/workflows/secret-scan.yml).
 #
-# Each non-comment line is a "stop word" that suppresses a finding whose file
-# path matches it. Only entries below are intentional.
+# Format: one entry per line. Each entry is matched as an EXACT substring
+# against a finding's fingerprint of the form `<file>:<ruleID>:<startLine>`
+# (the same `<commit-hash>:<file>:<ruleID>:<line>` form printed by
+# `gitleaks detect --verbose`). Wildcards / regex / pure file-path entries
+# are NOT supported by gitleaks v8.18.x — to suppress a finding you must
+# spell out the precise file + rule + line triple.
+#
+# Only entries below are intentional.
 #
 # -----------------------------------------------------------------------------
-# LPR-002 / DR-001 — historical Resend live-key leak in test-resend.js
+# LPR-002 / DR-001 — historical Resend live-key leak in root test-*.js scripts
 # -----------------------------------------------------------------------------
-# test-resend.js contained a live Resend API key (`re_...`) in git history
-# from the introduction of the file through commit f181cec (parent of b11f9f5),
-# which scrubbed it to a `REDACTED_USE_RESEND_API_KEY_ENV` placeholder. The
-# placeholder commit did NOT rewrite history, so the original key is still in
-# the object store and every clone/fork/cached checkout.
+# Five root-level scratch scripts (test-contact.js, test-direct.js,
+# test-key-check.js, test-keys.js, test-resend.js) hardcoded a live Resend
+# API key (`re_iJhBsVbG_BgzTkm6Tycb1bPACMkiSqrei`) in git history from their
+# introduction (commit 16c962b) through commit f181cec (parent of b11f9f5),
+# which scrubbed them to a `REDACTED_USE_RESEND_API_KEY_ENV` placeholder.
+# The placeholder commit did NOT rewrite history, so the original key is
+# still in the object store and every clone/fork/cached checkout.
 #
 # This allowlist exists ONLY so the scanner can keep detecting NEW leaks
-# rather than failing forever on a historical one that has already been
-# triaged and is owned under LPR-002.
+# rather than failing forever on historical ones that have already been
+# triaged and are owned under LPR-002.
 #
-# The exposed key MUST still be rotated at the Resend dashboard. Removing this
-# allowlist line after history is purged (git filter-repo + coordinated
+# The exposed key MUST still be rotated at the Resend dashboard. Removing
+# these allowlist lines after history is purged (git filter-repo + coordinated
 # force-push) is part of closing LPR-002 — not optional.
 #
-# Scope: this entry ignores ALL findings in the file `test-resend.js` across
-# every commit. A regression that puts a NEW secret into a recreated
-# `test-resend.js` would still be caught by the HEAD-only `credential-marker`
-# job in the secret-scan workflow — defense-in-depth, not a free pass.
-test-resend.js
+# Only the two of the five files that ALSO tripped gitleaks' generic-api-key
+# rule (key/api-key variables assigned in the working file) are listed below.
+# The remaining three matched only as constructor-arg contexts and were not
+# flagged — separate coverage gap, tracked separately.
+test-direct.js:generic-api-key:2
+test-key-check.js:generic-api-key:3
