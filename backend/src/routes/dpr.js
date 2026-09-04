@@ -973,6 +973,23 @@ router.get('/:id', async (req, res) => {
 });
 
 // ─── PUT /api/dpr/:id ────────────────────────────────────────────────────────
+//
+// LPR-008: the conditional update WHERE (below) pins the CLIENT-supplied
+// `version` (taken from `req.body`), not the just-read `existing.version`.
+// The previous predicate was self-defeating: a client whose fresh view of
+// the row shows version=N could send {version: N, ...edits}. We read the
+// row, saw it was at version=N (matching), then conditionally updated
+// WHERE version = existing.version (= N). If no one else mutated in
+// between, the update succeeded — silently overwriting a row that another
+// writer had ALREADY advanced past us, but that hadn't yet written when
+// our read happened. Pinning the client version rejects that stale
+// reader's update with P2025 → 409 VERSION_CONFLICT.
+//
+// The status pin in the same WHERE clause is the older DR-006 race fix:
+// a concurrent admin /review can move DRAFT → UNDER_REVIEW between our
+// read and our update, and without the status pin we'd silently land on
+// top of the in-review row. Same wire code (409 VERSION_CONFLICT) for
+// both races; both signal "the row moved, refetch and retry".
 router.put('/:id', async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
@@ -1063,18 +1080,18 @@ router.put('/:id', async (req, res) => {
   }
 
   try {
-    // DR-006 (round-20): tighten the conditional update WHERE to also
-    // pin the status we read. The previous WHERE only pinned version —
-    // a concurrent admin /review could move status DRAFT → UNDER_REVIEW
-    // between our read and our update, and we'd silently overwrite an
-    // in-review DPR with stale field edits. Adding status to the WHERE
-    // makes Prisma reject the update with P2025 → we translate to 409
-    // VERSION_CONFLICT (same wire code as a version-only race; both
-    // signal "the row moved, refetch and retry").
+    // DR-006 (round-20) + LPR-008: tighten the conditional update WHERE
+    // to pin the CLIENT-supplied `version` (so a stale reader's update
+    // is rejected with P2025 → 409 VERSION_CONFLICT instead of silently
+    // overwriting a row that another writer has already advanced) AND
+    // the status we read (a concurrent admin /review could move status
+    // DRAFT → UNDER_REVIEW between our read and our update; pinning both
+    // makes that race safe too). Same wire code (VERSION_CONFLICT) for
+    // both races — both signal "the row moved, refetch and retry".
     const updated = await prisma.dPR.update({
       where: {
         id,
-        version: existing.version,
+        version,
         status: existing.status,
       },
       data: {

@@ -711,10 +711,16 @@ router.get('/:id', async (req, res) => {
 //      schema (see prisma/schema.prisma: model InspectionRecord). The
 //      WHERE clause never matched and every PUT 409'd with
 //      VERSION_CONFLICT. We now accept a plain PUT body without a
-//      version field and update by `id`. Race-safety on the
-//      status=OPEN lock is provided by the explicit status check
-//      above; admins transition status through dedicated endpoints
-//      that use a different race-safe pattern.
+//      version field and update by `id`.
+//
+// LPR-008: read-time status check (below) plus a `status: 'OPEN'` pin
+// on the WHERE makes the owner PUT race-safe against a concurrent admin
+// transition. Scenario: owner reads row at OPEN, admin /acknowledge
+// moves it to ACKNOWLEDGED in between, owner PUT lands. Without the
+// WHERE pin the update would silently overwrite the acknowledged row;
+// now the conditional WHERE matches no row, Prisma throws P2025, and
+// the catch translates that to a 409 INSPECTION_LOCKED — same wire
+// shape the read-time check uses, so clients only see one error.
 router.put('/:id', async (req, res) => {
   const prisma = getPrisma(req);
   const { id } = req.params;
@@ -799,8 +805,13 @@ router.put('/:id', async (req, res) => {
   }
 
   try {
+    // LPR-008: pin `status: 'OPEN'` on the WHERE so a concurrent admin
+    // ack/close/reject between our read and our update cannot be
+    // silently overwritten. If Prisma rejects with P2025, the catch
+    // below maps it to 409 INSPECTION_LOCKED (same wire shape as the
+    // read-time check) so clients only see one error code.
     const updated = await prisma.inspectionRecord.update({
-      where: { id },
+      where: { id, status: 'OPEN' },
       data: {
         ...fields,
         updatedAt: new Date(),
@@ -819,6 +830,20 @@ router.put('/:id', async (req, res) => {
       prismaCode: err.code,
       message: err.message?.split('\n')[0],
     });
+    // LPR-008: a P2025 from the conditional WHERE means the row's
+    // status drifted off OPEN between our read and our write (an admin
+    // ack/close/reject landed in between). Translate to the same
+    // 409 INSPECTION_LOCKED the read-time check uses, so the client
+    // only sees one error code for the same condition. mapPrismaError
+    // would otherwise surface this as a generic 404 NOT_FOUND, which
+    // is the wrong wire shape.
+    if (err.code === 'P2025') {
+      return res.status(409).json({
+        error: 'INSPECTION_LOCKED',
+        code: 'INSPECTION_LOCKED',
+        message: 'Inspection moved out of OPEN during edit; refetch and retry',
+      });
+    }
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to update inspection record' });
