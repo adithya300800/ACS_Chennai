@@ -191,10 +191,18 @@ export default function TrainingDashboard() {
     return enrollments.filter(isOverdue);
   }, [enrollments, filter, businessDateKey]);
 
+  // Round-20 (DR-010): every terminal evidence class is bucketed into
+  // COMPLETED so the "Completed" stat tile (and the filter-tab count)
+  // stay consistent with the canonical terminal list. The earlier
+  // `c[e.status] != null` lookup silently dropped all four *_COMPLETED
+  // values because the counter object only had a literal `COMPLETED` key.
+  // Mirrors src/pages/portal/Training.jsx:~109.
   const counts = useMemo(() => {
     const c = { ALL: enrollments.length, ASSIGNED: 0, IN_PROGRESS: 0, COMPLETED: 0, OVERDUE: 0 };
     enrollments.forEach((e) => {
-      if (c[e.status] != null) c[e.status] += 1;
+      if (e.status === TRAINING_STATUSES.ASSIGNED) c.ASSIGNED += 1;
+      else if (e.status === TRAINING_STATUSES.IN_PROGRESS) c.IN_PROGRESS += 1;
+      else if (isTrainingTerminal(e.status)) c.COMPLETED += 1;
       if (isOverdue(e)) c.OVERDUE += 1;
     });
     return c;
@@ -434,7 +442,14 @@ export default function TrainingDashboard() {
                   )}
                 </div>
                 <div className="training-card-side">
-                  {e.status !== 'COMPLETED' && (
+                  {/* S3-8: gate via isTrainingTerminal so the four
+                      evidence-class terminal states (SELF_ATTESTED_COMPLETED,
+                      PLAYER_OBSERVED_COMPLETED, PROVIDER_VERIFIED_COMPLETED,
+                      ADMIN_OVERRIDE_COMPLETED) all hide this affordance —
+                      previously a literal-equality check against the legacy
+                      COMPLETED value let the button render for rows that
+                      were already done. */}
+                  {!isTrainingTerminal(e.status) && (
                     <button
                       type="button"
                       className="training-btn training-btn-ghost"
