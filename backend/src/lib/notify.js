@@ -25,6 +25,7 @@
 const { hashIdentifier } = require('./pii');
 const { sendEmail, isConfigured } = require('./email');
 const { renderTemplate } = require('../templates/email');
+const { findActiveAdmins } = require('./adminRecipients');
 
 // Single source of truth for which notification types fire immediately vs.
 // wait for the daily digest. Changing this set is a one-line code edit;
@@ -344,8 +345,187 @@ let _cachedPrisma = null;
 function setPrisma(p) { _cachedPrisma = p; }
 function getPrisma() { return _cachedPrisma; }
 
+/**
+ * Round-26: Admin-targeted fan-out.
+ *
+ * Iterates every active admin (Employee.isAdmin = true) and sends each one
+ * an individual email honouring their personal NotificationPreference:
+ *   - master emailEnabled = false      → SKIPPED_OPT_OUT
+ *   - typeMutes[type] = true           → SKIPPED_TYPE_MUTED
+ *   - employee has no email address    → SKIPPED_NO_ADDRESS
+ *
+ * The audit trail is per-recipient EmailLog rows with channel =
+ * 'ADMIN_IMMEDIATE'. Unlike the employee fan-out we do NOT create a
+ * Notification row per recipient — admins see submissions via the relevant
+ * dashboards (DPR list, inspection queue, leave requests, training), and
+ * creating N notification rows per event would balloon the bell.
+ *
+ * `payload` shape:
+ *   {
+ *     type: 'ADMIN_DPR_SUBMITTED' | 'ADMIN_INSPECTION_OPENED' | ...,
+ *     message: string,             // PII-safe log message (e.g. "New DPR submitted by Rajesh")
+ *     meta: { projectName, reportDate, dprId, employeeName, ... }
+ *   }
+ *
+ * Never throws — every per-admin block is wrapped in try/catch so a single
+ * misconfigured admin cannot stop the rest of the fan-out.
+ */
+async function fanOutToAdmins(payload, prisma, context = {}) {
+  if (!payload || !payload.type) {
+    return { sent: 0, skipped: 0, failed: 0 };
+  }
+  if (!prisma) {
+    console.warn('[notify/admin] fanOutToAdmins called without prisma; skipping');
+    return { sent: 0, skipped: 0, failed: 0 };
+  }
+
+  let admins;
+  try {
+    admins = await findActiveAdmins(prisma);
+  } catch (err) {
+    console.error('[notify/admin] admin lookup failed', {
+      type: payload.type,
+      message: err?.message?.split('\n')[0],
+    });
+    return { sent: 0, skipped: 0, failed: 0 };
+  }
+
+  if (!isConfigured()) {
+    // No RESEND key — record SKIPPED per admin so an operator scanning
+    // email_log can see WHY nothing was attempted.
+    for (const admin of admins) {
+      await writeEmailLog({
+        prisma,
+        notification: { id: null, employeeId: admin.id },
+        channel: 'ADMIN_IMMEDIATE',
+        status: 'SKIPPED_OPT_OUT',
+        recipientEmail: admin.email || '',
+        errorMessage: 'RESEND_API_KEY not set',
+      });
+    }
+    return { sent: 0, skipped: admins.length, failed: 0 };
+  }
+
+  // Render once — the HTML is identical for every admin recipient for a
+  // given payload. Per-admin variation (name, signature, etc.) is not
+  // needed; the chrome footer already addresses the admin user.
+  let subject;
+  let html;
+  try {
+    const rendered = renderTemplate(payload.type, {
+      notification: { type: payload.type, message: payload.message || '' },
+      context: payload.meta || {},
+      recipientEmail: '',
+    });
+    subject = rendered.subject;
+    html = rendered.html;
+  } catch (err) {
+    console.error('[notify/admin] template render failed', {
+      type: payload.type,
+      message: err?.message?.split('\n')[0],
+    });
+    for (const admin of admins) {
+      await writeEmailLog({
+        prisma,
+        notification: { id: null, employeeId: admin.id },
+        channel: 'ADMIN_IMMEDIATE',
+        status: 'FAILED',
+        recipientEmail: admin.email || '',
+        errorMessage: `template: ${err?.message?.split('\n')[0] || 'unknown'}`,
+      });
+    }
+    return { sent: 0, skipped: 0, failed: admins.length };
+  }
+
+  let sent = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const admin of admins) {
+    try {
+      // Per-recipient preference lookup. The volume is small (≤ ~10 admins
+      // today); if this grows past ~50 we can batch the prefs lookup via
+      // findMany.
+      let prefs = null;
+      try {
+        prefs = await prisma.notificationPreference.findUnique({
+          where: { employeeId: admin.id },
+        });
+      } catch (err) {
+        console.error('[notify/admin] preference lookup failed', {
+          recipient: hashIdentifier(admin.id),
+          message: err?.message?.split('\n')[0],
+        });
+      }
+
+      // Master kill switch.
+      if (prefs && prefs.emailEnabled === false) {
+        await writeEmailLog({
+          prisma,
+          notification: { id: null, employeeId: admin.id },
+          channel: 'ADMIN_IMMEDIATE',
+          status: 'SKIPPED_OPT_OUT',
+        });
+        skipped += 1;
+        continue;
+      }
+
+      // Per-type mute.
+      const typeMutes = (prefs && prefs.typeMutes && typeof prefs.typeMutes === 'object') ? prefs.typeMutes : {};
+      if (typeMutes[payload.type] === true) {
+        await writeEmailLog({
+          prisma,
+          notification: { id: null, employeeId: admin.id },
+          channel: 'ADMIN_IMMEDIATE',
+          status: 'SKIPPED_TYPE_MUTED',
+        });
+        skipped += 1;
+        continue;
+      }
+
+      const recipientEmail = admin.email || '';
+      if (!recipientEmail) {
+        await writeEmailLog({
+          prisma,
+          notification: { id: null, employeeId: admin.id },
+          channel: 'ADMIN_IMMEDIATE',
+          status: 'SKIPPED_NO_ADDRESS',
+          recipientEmail: '',
+        });
+        skipped += 1;
+        continue;
+      }
+
+      const result = await sendEmail({ to: recipientEmail, subject, html });
+      await writeEmailLog({
+        prisma,
+        notification: { id: null, employeeId: admin.id },
+        channel: 'ADMIN_IMMEDIATE',
+        status: result.ok ? 'SENT' : 'FAILED',
+        recipientEmail,
+        subject,
+        providerMessageId: result.messageId || null,
+        errorMessage: result.ok ? null : (result.error || `HTTP_${result.statusCode}`),
+      });
+      if (result.ok) sent += 1; else failed += 1;
+    } catch (err) {
+      // Defence in depth — a per-admin error must NEVER propagate to the
+      // caller (the caller is a POST handler that already returned 201).
+      console.error('[notify/admin] per-recipient dispatch failed', {
+        recipient: hashIdentifier(admin.id),
+        type: payload.type,
+        message: err?.message?.split('\n')[0],
+      });
+      failed += 1;
+    }
+  }
+
+  return { sent, skipped, failed };
+}
+
 module.exports = {
   fanOutEmail,
+  fanOutToAdmins,
   sendImmediate,
   enqueueForDigest,
   isCritical,

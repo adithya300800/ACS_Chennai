@@ -11,6 +11,10 @@ const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/curso
 // after their existing tx/SSE emit. fire-and-forget — never blocks the
 // user-facing response, never throws (helper swallows its own errors).
 const { fanOutEmail } = require('../lib/notify');
+// Round-26: admin-targeted fan-out for the POST /api/dpr → submitted event.
+// Admins get an immediate email per recipient, with per-admin preferences
+// (emailEnabled + typeMutes) honoured by the helper.
+const { fanOutToAdmins } = require('../lib/notify');
 // DR-021 (round-20): shared upload routes (sas-url + confirm-upload) live
 // in src/lib/uploadRoutes.js. DPR uses the "client-pick from allowlist"
 // mode because the frontend can upload to dpr-photos, dpr-documents, or
@@ -541,6 +545,35 @@ router.post('/', async (req, res) => {
     }
 
     res.status(201).json(dpr);
+
+    // Round-26: fire admin-targeted fan-out for SUBMITTED DPRs (DRAFTs
+    // don't trigger admin notifications — they're the employee's local
+    // save state). Best-effort: any error is swallowed inside the helper.
+    if (dpr.status === 'SUBMITTED') {
+      try {
+        await fanOutToAdmins(
+          {
+            type: 'ADMIN_DPR_SUBMITTED',
+            message: `New DPR submitted by ${dpr.submittedBy?.name || 'an employee'} for ${dpr.projectName}`,
+            meta: {
+              employeeName: dpr.submittedBy?.name || 'an employee',
+              projectName: dpr.projectName,
+              reportDate: formatReportDate(dpr.reportDate),
+              dprId: dpr.id,
+            },
+          },
+          prisma,
+        );
+      } catch (adminErr) {
+        // Defence in depth — fanOutToAdmins never throws, but if anything
+        // escapes we MUST NOT poison the request lifecycle that already
+        // returned 201.
+        console.error('DPR admin fan-out error', {
+          dprId: dpr.id,
+          message: adminErr?.message?.split('\n')[0],
+        });
+      }
+    }
   } catch (err) {
     // Log the Prisma error code + meta only — never the full request body
     // (P1-7). Then map the error to a meaningful HTTP status (P1-1).

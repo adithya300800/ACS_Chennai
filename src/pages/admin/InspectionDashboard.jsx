@@ -108,11 +108,54 @@ export default function InspectionDashboard() {
   const [bulkRejectReason, setBulkRejectReason] = useState('');
 
   const REVIEWABLE_STATUSES = new Set(['OPEN', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
+  // Round-26.5: per-action allowed-from sets that mirror the backend
+  // ACK_FROM / CLOSE_FROM / REJECT_FROM constants in routes/inspection.js.
+  // Without this, an admin who selects an OPEN record and clicks "Close" gets
+  // a generic "Bulk close failed for all 1 IDs" toast because OPEN→CLOSED is
+  // not a valid transition. The backend rejects per-ID; the UI now disables
+  // the offending button + surfaces which row(s) blocked it.
+  const ACK_ALLOWED_FROM = new Set(['OPEN']);
+  const CLOSE_ALLOWED_FROM = new Set(['ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
+  const REJECT_ALLOWED_FROM = new Set(['OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
   const selectableInspections = inspections.filter((i) => REVIEWABLE_STATUSES.has(i.status));
   const selectableIds = selectableInspections.map((i) => i.id);
   const allSelected =
     selectableIds.length > 0 &&
     selectableIds.every((id) => selectedIds.has(id));
+
+  // Per-action compatibility for the currently-selected IDs. Returns the IDs
+  // that are incompatible with the action AND the human-readable status(es)
+  // they hold, so we can disable the button + show a tooltip / count.
+  const incompatibleForAction = (action) => {
+    const allowed =
+      action === 'ACKNOWLEDGE' ? ACK_ALLOWED_FROM
+      : action === 'CLOSE' ? CLOSE_ALLOWED_FROM
+      : action === 'REJECT' ? REJECT_ALLOWED_FROM
+      : null;
+    if (!allowed) return { blockedIds: [], blockedStatuses: [] };
+    const blockedIds = [];
+    const blockedStatuses = new Set();
+    for (const id of selectedIds) {
+      const insp = inspections.find((i) => i.id === id);
+      if (!insp) continue;
+      if (!allowed.has(insp.status)) {
+        blockedIds.push(id);
+        blockedStatuses.add(insp.status);
+      }
+    }
+    return { blockedIds, blockedStatuses: [...blockedStatuses] };
+  };
+  const ackCompat = incompatibleForAction('ACKNOWLEDGE');
+  const closeCompat = incompatibleForAction('CLOSE');
+  const rejectCompat = incompatibleForAction('REJECT');
+  const ackBlockedCount = ackCompat.blockedIds.length;
+  const closeBlockedCount = closeCompat.blockedIds.length;
+  const rejectBlockedCount = rejectCompat.blockedIds.length;
+  const formatBlockedHint = (compat) => {
+    if (compat.blockedIds.length === 0) return '';
+    const statuses = compat.blockedStatuses.join(', ');
+    return `${compat.blockedIds.length} row${compat.blockedIds.length === 1 ? '' : 's'} in ${statuses} — not eligible`;
+  };
 
   const fetchPage = useCallback(async (cursor = null) => {
     const params = { limit: '50' };
@@ -191,6 +234,13 @@ export default function InspectionDashboard() {
   // network round-trip for N IDs (vs N trips). Per-ID results so the admin
   // can see which rows failed (e.g. already moved to CLOSED via the detail
   // page while the bulk was in flight).
+  //
+  // Round-26.5: pre-flight validation against the same per-action allowed-from
+  // sets the backend enforces. If ANY selected ID is in a status that the
+  // action can't accept (e.g. OPEN → CLOSE), we abort the request entirely
+  // and surface a precise message. Otherwise we'd still pay the round-trip
+  // cost, the server would NACK every row, and the admin would see the
+  // generic "Bulk close failed for all 1 IDs" toast with no clue why.
   const handleBulkAction = async (action) => {
     const ids = [...selectedIds];
     if (ids.length === 0) return;
@@ -200,11 +250,25 @@ export default function InspectionDashboard() {
       return;
     }
 
+    // Pre-flight: filter out IDs that can't be transitioned by this action.
+    // The backend will reject them anyway; better UX is to send only the
+    // eligible subset and tell the admin what got skipped.
+    const compat = incompatibleForAction(action);
+    if (compat.blockedIds.length === ids.length) {
+      toast.push(
+        `None of the ${ids.length} selected inspection${ids.length === 1 ? ' is' : 's are'} eligible to ${action.toLowerCase()}. Current statuses: ${compat.blockedStatuses.join(', ')}.`,
+        'error'
+      );
+      return;
+    }
+    const eligibleIds = ids.filter((id) => !compat.blockedIds.includes(id));
+    const skippedCount = compat.blockedIds.length;
+
     setBulkActionLoading(true);
     try {
       const result = await api.bulkReviewInspections(
         {
-          ids,
+          ids: eligibleIds,
           action,
           reason: action === 'REJECT' ? bulkRejectReason.trim() : undefined,
         },
@@ -215,12 +279,33 @@ export default function InspectionDashboard() {
         action === 'ACKNOWLEDGE' ? 'acknowledged' :
         action === 'CLOSE' ? 'closed' :
         action === 'REJECT' ? 'rejected' : 'updated';
-      if (result.failedCount === 0) {
+      // Build a per-row error breakdown when ANY rows failed, so the admin
+      // doesn't have to guess whether the issue was status, network, or
+      // something else. The server returns `failed: [{id, error, code}]`.
+      const failureBreakdown = (result.failed || [])
+        .reduce((acc, f) => {
+          acc[f.code || 'INTERNAL'] = (acc[f.code || 'INTERNAL'] || 0) + 1;
+          return acc;
+        }, {});
+      const failureSummary = Object.keys(failureBreakdown).length
+        ? ` (${Object.entries(failureBreakdown).map(([code, n]) => `${code}: ${n}`).join(', ')})`
+        : '';
+
+      if (result.failedCount === 0 && skippedCount === 0) {
         toast.push(`${result.succeededCount} inspection${result.succeededCount === 1 ? '' : 's'} ${verb}.`, 'success');
+      } else if (result.succeededCount === 0 && skippedCount === 0) {
+        toast.push(`Bulk ${action.toLowerCase()} failed for all ${result.failedCount} IDs${failureSummary}.`, 'error');
       } else if (result.succeededCount === 0) {
-        toast.push(`Bulk ${action.toLowerCase()} failed for all ${result.failedCount} IDs.`, 'error');
+        toast.push(
+          `Bulk ${action.toLowerCase()} skipped (${skippedCount} ineligible) and failed (${result.failedCount})${failureSummary}.`,
+          'error'
+        );
       } else {
-        toast.push(`${verb}: ${result.succeededCount} ok, ${result.failedCount} failed.`, 'warning');
+        toast.push(
+          `${verb}: ${result.succeededCount} ok, ${result.failedCount} failed${failureSummary}` +
+            (skippedCount > 0 ? `, ${skippedCount} skipped (ineligible status)` : '') + '.',
+          'warning'
+        );
       }
       setSelectedIds(new Set());
       setBulkRejectReason('');
@@ -508,26 +593,38 @@ export default function InspectionDashboard() {
               type="button"
               className="btn btn-secondary btn-sm"
               onClick={() => handleBulkAction('ACKNOWLEDGE')}
-              disabled={bulkActionLoading}
+              disabled={bulkActionLoading || ackBlockedCount === selectedIds.size}
+              title={ackBlockedCount > 0 ? formatBlockedHint(ackCompat) : ''}
             >
-              {bulkActionLoading ? '...' : '✓ Acknowledge'}
+              {bulkActionLoading ? '...' : `✓ Acknowledge${ackBlockedCount > 0 ? ` (${selectedIds.size - ackBlockedCount})` : ''}`}
             </button>
             <button
               type="button"
               className="btn btn-success btn-sm"
               onClick={() => handleBulkAction('CLOSE')}
-              disabled={bulkActionLoading}
+              disabled={bulkActionLoading || closeBlockedCount === selectedIds.size}
+              title={closeBlockedCount > 0 ? formatBlockedHint(closeCompat) : ''}
             >
-              {bulkActionLoading ? '...' : '✓ Close'}
+              {bulkActionLoading ? '...' : `✓ Close${closeBlockedCount > 0 ? ` (${selectedIds.size - closeBlockedCount})` : ''}`}
             </button>
             <button
               type="button"
               className="btn btn-danger btn-sm"
               onClick={() => handleBulkAction('REJECT')}
-              disabled={bulkActionLoading || !bulkRejectReason.trim()}
-              title={!bulkRejectReason.trim() ? 'Enter a reject reason first' : ''}
+              disabled={
+                bulkActionLoading ||
+                !bulkRejectReason.trim() ||
+                rejectBlockedCount === selectedIds.size
+              }
+              title={
+                !bulkRejectReason.trim()
+                  ? 'Enter a reject reason first'
+                  : rejectBlockedCount > 0
+                  ? formatBlockedHint(rejectCompat)
+                  : ''
+              }
             >
-              {bulkActionLoading ? '...' : '✗ Reject'}
+              {bulkActionLoading ? '...' : `✗ Reject${rejectBlockedCount > 0 && bulkRejectReason.trim() ? ` (${selectedIds.size - rejectBlockedCount})` : ''}`}
             </button>
           </div>
         </div>

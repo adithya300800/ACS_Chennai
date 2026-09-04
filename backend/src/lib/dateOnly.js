@@ -186,6 +186,42 @@ function formatDateOnly(date) {
   return `${y}-${m}-${d}`;
 }
 
+// Round-26: hoist IST display helpers from routes/internal-digest.js so the
+// admin-targeted templates + cron endpoints can reuse them. The IST offset is
+// hard-coded to Asia/Kolkata (matches the company timezone set in index.js).
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5h30m in ms
+
+// Returns `YYYY-MM-DD` for the given instant in IST. Used by the daily digest
+// for the `?date=` query-param contract and by the admin attendance digest
+// for the same default-today lookup.
+function getIstDateString(d) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(d);
+}
+
+// Returns a human-friendly label like `3 Sept 2026` for the given instant in
+// IST. Used in email subject lines + bodies for both the employee digest and
+// the admin attendance digest.
+function getIstDateLabel(d) {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    day: 'numeric', month: 'short', year: 'numeric',
+  }).format(d);
+}
+
+// Compute the IST midnight Date for a given IST date string (YYYY-MM-DD).
+// Returns a UTC Date that is the wall-clock 00:00 IST of that date.
+// 00:00 IST on 2026-09-03 → 18:30 UTC on 2026-09-02.
+function istMidnightUtcFromDateString(dateStr) {
+  const [y, m, day] = dateStr.split('-').map(Number);
+  if (!y || !m || !day) {
+    throw new InvalidDateOnlyError(`Invalid IST date string: ${dateStr}`);
+  }
+  return new Date(Date.UTC(y, m - 1, day, 0, 0, 0) - IST_OFFSET_MS);
+}
+
 module.exports = {
   InvalidDateOnlyError,
   InvalidMonthRangeError,
@@ -195,4 +231,8 @@ module.exports = {
   getMonthRangeUtc,
   isSameUtcCalendarDay,
   formatDateOnly,
+  getIstDateString,
+  getIstDateLabel,
+  istMidnightUtcFromDateString,
+  IST_OFFSET_MS,
 };

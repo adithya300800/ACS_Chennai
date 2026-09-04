@@ -102,7 +102,7 @@ function doRefresh() {
     });
 }
 
-async function request(method, path, body, token, { _retried } = {}) {
+async function request(method, path, body, token, { _retried, _networkRetried } = {}) {
   const opts = {
     method,
     headers: {
@@ -119,7 +119,29 @@ async function request(method, path, body, token, { _retried } = {}) {
   try {
     res = await fetchWithTimeout(`${API_BASE}/api${path}`, opts, DEFAULT_TIMEOUT_MS);
   } catch (err) {
-    // fetchWithTimeout already throws ApiError for timeout / network failures.
+    // Round-26.5: cold-start network-error self-heal for mutating requests.
+    // Render's free plan spins the service down after 15 min idle; the very
+    // first request after a sleep often gets a TCP-level reset from the
+    // waking server (the connection drops before the response begins). The
+    // browser's fetch surfaces that as a TypeError, which fetchWithTimeout
+    // translates to ApiError('Network error — is the server running?',
+    // 0, 'NETWORK_ERROR'). For mutating verbs (POST/PUT/DELETE) a single
+    // retry almost always succeeds — the server is now awake and the second
+    // round-trip lands cleanly. GETs are skipped (browsers cache + retries
+    // can confuse the user with duplicate loads). Token-bearing requests
+    // are safe to retry because the server-side handlers are idempotent or
+    // guarded with state-machine checks (DPR DELETE requires DRAFT; a second
+    // DELETE returns 404, which the caller surfaces as "already deleted").
+    if (
+      err.code === 'NETWORK_ERROR' &&
+      !_networkRetried &&
+      method !== 'GET' &&
+      !path.startsWith('/auth/')
+    ) {
+      // Small backoff so the waking server has a beat to bind its socket.
+      await new Promise((r) => setTimeout(r, 750));
+      return request(method, path, body, token, { _retried, _networkRetried: true });
+    }
     throw err;
   }
 

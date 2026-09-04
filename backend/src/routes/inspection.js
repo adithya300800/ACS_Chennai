@@ -30,6 +30,12 @@ const { rejectIfFutureReportDate, assertNotFutureReportDate } = require('../lib/
 // the email leaves after (or concurrently with) the row commit; a failed
 // tx rolls back the notification row AND the email send in-flight.
 const { fanOutEmail } = require('../lib/notify');
+// Round-26: admin-targeted fan-out for the POST /api/inspection → opened
+// event. Admins get an immediate email per recipient, with per-admin
+// preferences honoured. Guarded on `record.status === 'OPEN'` — admin-set
+// non-OPEN statuses (e.g. ACKNOWLEDGED) are not the "first signal" admins
+// need an email for.
+const { fanOutToAdmins } = require('../lib/notify');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -305,6 +311,33 @@ router.post('/', async (req, res) => {
     });
 
     res.status(201).json(record);
+
+    // Round-26: fire admin-targeted fan-out for newly-OPENED inspections.
+    // Guard on `record.status === 'OPEN'` — admin-set non-OPEN statuses
+    // (e.g. ACKNOWLEDGED) are not the "first signal" admins need an email
+    // for. Best-effort: any error is swallowed inside the helper.
+    if (record.status === 'OPEN') {
+      try {
+        await fanOutToAdmins(
+          {
+            type: 'ADMIN_INSPECTION_OPENED',
+            message: `New inspection opened by ${record.submittedBy?.name || 'an employee'}: ${record.inspectionType || 'inspection'}`,
+            meta: {
+              employeeName: record.submittedBy?.name || 'an employee',
+              recordTitle: record.projectName || record.inspectionType || 'an inspection',
+              inspectionType: record.inspectionType || '',
+              inspectionId: record.id,
+            },
+          },
+          prisma,
+        );
+      } catch (adminErr) {
+        console.error('Inspection admin fan-out error', {
+          inspectionId: record.id,
+          message: adminErr?.message?.split('\n')[0],
+        });
+      }
+    }
   } catch (err) {
     console.error('Inspection create error', {
       employeeHash: hashIdentifier(req.employeeId),

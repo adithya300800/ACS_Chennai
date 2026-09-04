@@ -132,6 +132,21 @@ export default function Leave() {
     [fieldErrors]
   );
 
+  // Round-26.5: clear the top-of-form alert as soon as the live validation
+  // passes again. Otherwise a stale "End date must be on or after start date"
+  // message lingers after the user fixes the dates (the alert was only ever
+  // cleared at the start of a successful submit, not on field change).
+  // Use a ref to skip the initial render so we don't clobber a server error
+  // message set during handleSubmit before the user has a chance to read it.
+  const formErrorMounted = React.useRef(false);
+  useEffect(() => {
+    if (!formErrorMounted.current) {
+      formErrorMounted.current = true;
+      return;
+    }
+    if (!hasError && formError) setFormError('');
+  }, [hasError, formError]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     // SOL-P1#7: mark every field touched on submit so all inline errors

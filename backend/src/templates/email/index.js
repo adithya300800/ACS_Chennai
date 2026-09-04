@@ -16,7 +16,7 @@
 // single-file edit.
 
 const { escapeHtml } = require('../../lib/email');
-const { types, renderDigest } = require('./types');
+const { types, renderDigest, renderAdminAttendanceDigest } = require('./types');
 
 const PORTAL_URL = process.env.FRONTEND_URL || 'https://acschennai.com';
 
@@ -100,4 +100,4 @@ function renderDigestTemplate(payload) {
   return renderDigest({ ...payload, wrapHtml, ctaButton, escapeHtml, portalUrl: PORTAL_URL });
 }
 
-module.exports = { renderTemplate, renderDigestTemplate, wrapHtml, ctaButton, escapeHtml };
+module.exports = { renderTemplate, renderDigestTemplate, renderAdminAttendanceDigest, wrapHtml, ctaButton, escapeHtml, PORTAL_URL };

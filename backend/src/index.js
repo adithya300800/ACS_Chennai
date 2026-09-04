@@ -346,6 +346,20 @@ function createApp(deps = {}) {
   // the /version probe. Render Cron Job hits this at 02:30 UTC = 08:00 IST.
   const internalDigestRoutes = require('./routes/internal-digest');
   app.use('/api/internal/digest', internalDigestRoutes);
+  // Round-26: admin-targeted training-overdue sweep. Same INTERNAL_API_TOKEN
+  // gate. Render Cron Job hits this at 00:30 UTC = 06:00 IST.
+  const internalTrainingOverdueRoutes = require('./routes/internal-training-overdue');
+  app.use('/api/internal/training/overdue', internalTrainingOverdueRoutes);
+  // Round-26: admin-targeted daily attendance digest. Same gate. Render
+  // Cron Job hits this at 13:30 UTC = 19:00 IST.
+  const internalAdminAttendanceRoutes = require('./routes/internal-admin-attendance');
+  app.use('/api/internal/attendance/digest', internalAdminAttendanceRoutes);
+  // Round-26.5: cold-start warm-up ping. Render Cron Job hits this every
+  // 10 minutes (UTC) to keep the free-tier service above the 15-min idle
+  // spin-down threshold. See backend/src/routes/internal-warmup.js for
+  // the cost math + design rationale.
+  const internalWarmupRoutes = require('./routes/internal-warmup');
+  app.use('/api/internal/warmup', internalWarmupRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ error: 'Not found' });

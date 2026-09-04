@@ -174,6 +174,15 @@ const types = {
   TRAINING_CANCELLED: renderTrainingCancelled,
   TRAINING_IN_PROGRESS: renderTrainingInProgress,
   TRAINING_COMPLETED: renderTrainingCompleted,
+  // Round-26: admin-targeted IMMEDIATE types. These bypass the daily digest
+  // (they don't go through `notify.js#fanOutEmail`) — `fanOutToAdmins`
+  // renders + sends synchronously because the source event (DPR submit,
+  // inspection open, etc.) is already the IMPLICIT signal that an admin
+  // needs to act.
+  ADMIN_DPR_SUBMITTED: renderAdminDprSubmitted,
+  ADMIN_INSPECTION_OPENED: renderAdminInspectionOpened,
+  ADMIN_LEAVE_REQUESTED: renderAdminLeaveRequested,
+  ADMIN_TRAINING_OVERDUE: renderAdminTrainingOverdue,
 };
 
 /**
@@ -223,4 +232,136 @@ function renderDigest({ context, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
   };
 }
 
-module.exports = { types, renderDigest };
+// ─── Round-26: Admin-targeted renderers ──────────────────────────────────
+//
+// Four IMMEDIATE admin types (DPR_SUBMITTED, INSPECTION_OPENED,
+// LEAVE_REQUESTED, TRAINING_OVERDUE) and one DIGEST (ADMIN_ATTENDANCE_DAILY).
+// The IMMEDIATE types are registered in the `types` registry below so the
+// existing `renderTemplate(type, payload)` dispatch in index.js routes to
+// them; the attendance digest is exported separately because, like the
+// employee `renderDigest`, it takes pre-grouped data.
+//
+// All five follow the same chrome as the employee templates (heading +
+// paragraph + CTA) but skip the employee-facing "your DPR was approved"
+// voice — admins get a terse, action-oriented subject + body so they can
+// scan the inbox and decide whether to open the portal.
+
+function renderAdminDprSubmitted({ context, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
+  const projectName = context.projectName || 'a project';
+  const employeeName = context.employeeName || 'an employee';
+  const reportDate = context.reportDate || '';
+  return {
+    subject: `New DPR: ${projectName} — ${employeeName}${reportDate ? ` · ${reportDate}` : ''}`,
+    html: wrapHtml({
+      preheader: `New DPR submitted by ${employeeName}.`,
+      bodyHtml: heading('New Daily Progress Report submitted')
+        + paragraph(`<strong>${escapeHtml(employeeName)}</strong> submitted a DPR for <strong>${escapeHtml(projectName)}</strong>${reportDate ? ` on <strong>${escapeHtml(reportDate)}</strong>` : ''}.`)
+        + (context.dprId ? ctaButton({ href: `${portalUrl}/portal/dpr/${escapeHtml(context.dprId)}`, label: 'Review DPR' }) : ctaButton({ href: `${portalUrl}/portal/dpr`, label: 'Open DPR queue' })),
+    }),
+  };
+}
+
+function renderAdminInspectionOpened({ context, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
+  const employeeName = context.employeeName || 'an employee';
+  const recordTitle = context.recordTitle || 'an inspection';
+  const inspectionType = context.inspectionType || '';
+  return {
+    subject: `New inspection: ${recordTitle} — ${employeeName}`,
+    html: wrapHtml({
+      preheader: `New inspection opened by ${employeeName}.`,
+      bodyHtml: heading('New inspection opened')
+        + paragraph(`<strong>${escapeHtml(employeeName)}</strong> opened a new inspection: <strong>${escapeHtml(recordTitle)}</strong>${inspectionType ? ` (${escapeHtml(inspectionType)})` : ''}.`)
+        + (context.inspectionId ? ctaButton({ href: `${portalUrl}/portal/inspection/${escapeHtml(context.inspectionId)}`, label: 'Review inspection' }) : ctaButton({ href: `${portalUrl}/portal/inspection`, label: 'Open inspection queue' })),
+    }),
+  };
+}
+
+function renderAdminLeaveRequested({ context, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
+  const employeeName = context.employeeName || 'an employee';
+  const fromDate = context.fromDate || '';
+  const toDate = context.toDate || '';
+  const leaveType = context.leaveType || '';
+  const daysCount = context.daysCount;
+  return {
+    subject: `Leave requested: ${employeeName}${fromDate && toDate ? ` · ${fromDate} → ${toDate}` : ''}`,
+    html: wrapHtml({
+      preheader: `Leave request from ${employeeName}.`,
+      bodyHtml: heading('New leave request')
+        + paragraph(`<strong>${escapeHtml(employeeName)}</strong> requested leave${leaveType ? ` (${escapeHtml(leaveType)})` : ''}.`)
+        + (fromDate && toDate ? paragraph(`<strong>Dates:</strong> ${escapeHtml(fromDate)} → ${escapeHtml(toDate)}${daysCount ? ` · <strong>${escapeHtml(String(daysCount))}</strong> day${Number(daysCount) === 1 ? '' : 's'}` : ''}.`) : '')
+        + ctaButton({ href: `${portalUrl}/portal/leave`, label: 'Review leave request' }),
+    }),
+  };
+}
+
+function renderAdminTrainingOverdue({ context, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
+  const employeeName = context.employeeName || 'an employee';
+  const courseTitle = context.courseTitle || 'a course';
+  const dueDate = context.dueDate || '';
+  const daysOverdue = context.daysOverdue;
+  const priority = context.priority || '';
+  return {
+    subject: `Overdue: ${courseTitle} — ${employeeName}`,
+    html: wrapHtml({
+      preheader: `Training course overdue for ${employeeName}.`,
+      bodyHtml: heading('Training course overdue')
+        + paragraph(`<strong>${escapeHtml(employeeName)}</strong> has not completed <strong>${escapeHtml(courseTitle)}</strong> by the due date.`)
+        + (dueDate ? paragraph(`<strong>Due:</strong> ${escapeHtml(dueDate)}${daysOverdue != null ? ` · <strong>${escapeHtml(String(daysOverdue))}</strong> day${Number(daysOverdue) === 1 ? '' : 's'} overdue` : ''}${priority ? ` · <strong>Priority:</strong> ${escapeHtml(priority)}` : ''}.`) : '')
+        + (context.enrollmentId ? ctaButton({ href: `${portalUrl}/portal/training/${escapeHtml(context.enrollmentId)}`, label: 'Open enrollment' }) : ctaButton({ href: `${portalUrl}/portal/training`, label: 'Open training queue' })),
+    }),
+  };
+}
+
+/**
+ * Round-26: admin-targeted daily attendance digest. Different shape from
+ * the employee `renderDigest` — instead of a grouped list of recent
+ * notifications, this is a per-employee status grid (Present / On approved
+ * leave / Absent). The cron in routes/internal-admin-attendance.js computes
+ * the three sections and passes them here.
+ *
+ * `context` shape:
+ *   {
+ *     istDateLabel: '3 Sept 2026',
+ *     present: [{ name, checkInLabel }],
+ *     onLeave: [{ name }],
+ *     absent: [{ name }],
+ *   }
+ */
+function renderAdminAttendanceDigest({ context, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
+  const dateLabel = context.istDateLabel || '';
+  const present = Array.isArray(context.present) ? context.present : [];
+  const onLeave = Array.isArray(context.onLeave) ? context.onLeave : [];
+  const absent = Array.isArray(context.absent) ? context.absent : [];
+  const totalEmployees = present.length + onLeave.length + absent.length;
+
+  function renderSection(headingText, items, emptyText) {
+    const headingHtml = `<h2 style="margin:16px 0 8px 0;font-size:15px;line-height:1.3;color:#0a2540;font-weight:600;">${escapeHtml(headingText)} <span style="color:#6b7280;font-weight:400;">(${items.length})</span></h2>`;
+    if (items.length === 0) {
+      return headingHtml + `<p style="margin:0 0 0 20px;padding:0;font-size:14px;color:#6b7280;font-style:italic;">${escapeHtml(emptyText)}</p>`;
+    }
+    const rows = items.map((item) => {
+      const secondary = item.checkInLabel ? ` <span style="color:#6b7280;">· check-in ${escapeHtml(item.checkInLabel)}</span>` : '';
+      return `<li style="margin:0 0 6px 0;font-size:14px;line-height:1.45;color:#111;">${escapeHtml(item.name)}${secondary}</li>`;
+    }).join('');
+    return headingHtml + `<ul style="margin:0 0 0 20px;padding:0;">${rows}</ul>`;
+  }
+
+  const summary = `<p style="margin:0 0 12px 0;font-size:15px;line-height:1.5;color:#111;"><strong>${present.length}</strong> present · <strong>${onLeave.length}</strong> on approved leave · <strong>${absent.length}</strong> absent</p>`;
+  const bodyHtml = `<h1 style="margin:0 0 12px 0;font-size:18px;line-height:1.3;color:#0a2540;font-weight:600;">Daily attendance${dateLabel ? ` · ${escapeHtml(dateLabel)}` : ''}</h1>`
+    + `<p style="margin:0 0 12px 0;font-size:15px;line-height:1.5;color:#111;">Here is the attendance roll-up for <strong>${escapeHtml(dateLabel)}</strong> (${totalEmployees} active employees).</p>`
+    + summary
+    + renderSection('Present', present, 'No one checked in today.')
+    + renderSection('On approved leave', onLeave, 'No one on approved leave.')
+    + renderSection('Absent', absent, 'No one is absent.')
+    + ctaButton({ href: `${portalUrl}/portal/attendance`, label: 'View timesheet' });
+
+  return {
+    subject: `Daily attendance${dateLabel ? ` · ${dateLabel}` : ''}`,
+    html: wrapHtml({
+      preheader: `${present.length} present · ${onLeave.length} on leave · ${absent.length} absent`,
+      bodyHtml,
+    }),
+  };
+}
+
+module.exports = { types, renderDigest, renderAdminAttendanceDigest };

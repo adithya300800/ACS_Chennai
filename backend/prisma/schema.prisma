@@ -568,7 +568,12 @@ model EmailLog {
   notificationId    String?  @map("notification_id")
   recipientEmail    String   @map("recipient_email")
   subject           String
-  // "IMMEDIATE" — single notification email. "DIGEST" — daily digest bundle.
+  // "IMMEDIATE" — single employee notification email.
+  // "DIGEST" — daily employee digest bundle.
+  // "ADMIN_IMMEDIATE" — round-26: admin-targeted immediate (DPR submit, inspection open,
+  //   leave request, training overdue). One row per admin recipient.
+  // "ADMIN_DIGEST" — round-26: admin-targeted daily attendance digest (7 PM IST).
+  // The column is a free-form String so adding new values is a no-op migration.
   channel           String   @map("channel")
   // "SENT" | "FAILED" | "SKIPPED_OPT_OUT" | "SKIPPED_NO_EMAIL" | "SKIPPED_TYPE_MUTED" | "SKIPPED_NO_ADDRESS".
   // One row per dispatch ATTEMPT so a retry that succeeds leaves a clear

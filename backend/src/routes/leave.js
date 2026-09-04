@@ -41,6 +41,10 @@ const { hashIdentifier } = require('../lib/pii');
 // swallows its own errors so a misconfigured SMTP transport can't 500 the
 // admin's approve/reject.
 const { fanOutEmail } = require('../lib/notify');
+// Round-26: admin-targeted fan-out for the POST /api/leave → submitted
+// event. status is hard-coded to PENDING on create, so the admin fan-out
+// fires on every successful POST (no guard needed).
+const { fanOutToAdmins } = require('../lib/notify');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -158,6 +162,32 @@ router.post('/', leaveCreateLimiter, asyncHandler(async (req, res) => {
     });
 
     res.status(201).json(serializeLeave(created));
+
+    // Round-26: fire admin-targeted fan-out for every new leave request
+    // (status is hard-coded to PENDING on create, so no guard needed).
+    // Best-effort: any error is swallowed inside the helper.
+    try {
+      await fanOutToAdmins(
+        {
+          type: 'ADMIN_LEAVE_REQUESTED',
+          message: `Leave request from ${created.employee?.name || 'an employee'}: ${leaveType} for ${inclusiveDayCount(startDate, endDate)} day(s)`,
+          meta: {
+            employeeName: created.employee?.name || 'an employee',
+            fromDate: toDateStr(created.startDate),
+            toDate: toDateStr(created.endDate),
+            leaveType: created.leaveType || '',
+            daysCount: inclusiveDayCount(created.startDate, created.endDate),
+            leaveId: created.id,
+          },
+        },
+        prisma,
+      );
+    } catch (adminErr) {
+      console.error('Leave admin fan-out error', {
+        leaveId: created.id,
+        message: adminErr?.message?.split('\n')[0],
+      });
+    }
   } catch (err) {
     // DR-009: the PostgreSQL exclusion constraint `no_overlap_leave` is the
     // authority for "no two overlapping PENDING/APPROVED leaves for the same

@@ -33,6 +33,10 @@ const { sendEmail, isConfigured } = require('../lib/email');
 const { renderDigestTemplate } = require('../templates/email');
 const { CRITICAL_TYPES } = require('../lib/notify');
 const { hashIdentifier } = require('../lib/pii');
+// Round-26: date helpers hoisted to lib/dateOnly.js so admin-targeted
+// templates + cron endpoints can reuse them. Internal-digest stays the
+// canonical caller but no longer owns the implementation.
+const { getIstDateString, getIstDateLabel, istMidnightUtcFromDateString } = require('../lib/dateOnly');
 
 // The 6 digest-type notifications (complement of CRITICAL_TYPES).
 const DIGEST_TYPES = [
@@ -56,41 +60,9 @@ const DIGEST_GROUPS = [
 ];
 
 // ─── Time helpers ────────────────────────────────────────────────────────
-// All time math is in IST (UTC+5:30) because the user lives in Chennai and
-// the digest anchors on their wall clock. The cron schedule is in UTC
-// (02:30 UTC = 08:00 IST) so we re-anchor here.
-
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5h30m in ms
-
-function getIstDateString(d) {
-  // Returns 'YYYY-MM-DD' for the given instant in IST.
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(d);
-}
-
-function getIstDateLabel(d) {
-  // Human-friendly label for the email subject + body: "3 Sept 2026".
-  return new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Kolkata',
-    day: 'numeric', month: 'short', year: 'numeric',
-  }).format(d);
-}
-
-/**
- * Compute the IST midnight Date for a given IST date string (YYYY-MM-DD).
- * Returns a UTC Date that is the wall-clock 00:00 IST of that date.
- */
-function istMidnightUtcFromDateString(dateStr) {
-  const [y, m, day] = dateStr.split('-').map(Number);
-  if (!y || !m || !day) {
-    throw new Error(`Invalid IST date string: ${dateStr}`);
-  }
-  // Naive UTC interpretation of the IST date, then shift back by IST offset.
-  // 00:00 IST on 2026-09-03 → 18:30 UTC on 2026-09-02.
-  return new Date(Date.UTC(y, m - 1, day, 0, 0, 0) - IST_OFFSET_MS);
-}
+// Round-26: getIstDateString, getIstDateLabel, istMidnightUtcFromDateString
+// moved to lib/dateOnly.js so admin-targeted templates + cron endpoints
+// can reuse them. Internal-digest imports them above.
 
 function getPrisma(req) { return req.app.get('prisma'); }
 
