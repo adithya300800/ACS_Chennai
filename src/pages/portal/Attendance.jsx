@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatDate, formatFullDate, formatTime, getMapUrl, formatCoords } from '../../lib/format.js';
+import { formatDate, formatFullDate, formatTime, getMapUrl, formatCoords, getCurrentIstMonth } from '../../lib/format.js';
 import { getBusinessToday } from '../../lib/businessDate.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
@@ -13,10 +13,12 @@ export default function Attendance() {
   const { accessToken } = useAuth();
   const [todayRecord, setTodayRecord] = useState(null);
   const [monthRecords, setMonthRecords] = useState([]);
-  const [currentMonth, setCurrentMonth] = useState(() => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-  });
+  // S3-12 (round-27 audit): default to the IST month so a user west of
+  // UTC whose browser-local clock has rolled into the next month before
+  // the IST business day does not see last month selected while their
+  // check-in lands in the current one. `getCurrentIstMonth` is the
+  // client-side mirror of the backend canonical helper.
+  const [currentMonth, setCurrentMonth] = useState(() => getCurrentIstMonth());
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
   // Round-9 P0 #4: track geolocation permission state so we can disable the

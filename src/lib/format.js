@@ -1,6 +1,6 @@
 // C-03: shared date/time/coordinate formatters. Previously duplicated in
 // Attendance.jsx + Admin.jsx (formatDate, formatTime, formatFullDate,
-// getMapUrl, formatCoords, toDateString). Pulled into src/lib so any
+// getMapUrl, formatCoords). Pulled into src/lib so any
 // future page that needs them imports from one place.
 //
 // Behavior matches the originals pixel-for-pixel — verified against the
@@ -112,17 +112,6 @@ export function formatDateOnly(value, options) {
   }
 
   return '';
-}
-
-// Convert any Date to a YYYY-MM-DD local string. The calendar grid uses this
-// to bucket "today" by local date, not UTC (round-14 bugfix: an Indian user
-// checking in at 1:30am IST was previously counted as the prior day).
-export function toDateString(date) {
-  const d = new Date(date);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
 }
 
 // OpenStreetMap embed iframe src. Returns null when coords are missing or

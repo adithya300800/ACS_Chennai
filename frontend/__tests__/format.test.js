@@ -28,7 +28,6 @@ const {
   formatFullDate,
   formatTime,
   formatTimeOrDash,
-  toDateString,
   getMapUrl,
   formatCoords,
 } = require('../../src/lib/format.js');
@@ -113,11 +112,6 @@ describe('format.js — pre-existing helpers are unchanged', () => {
     expect(formatTimeOrDash('2026-09-02T15:00:00.000Z')).toBeTruthy();
     expect(formatTimeOrDash(null)).toBe('—');
     expect(formatTime(null)).toBe('');
-  });
-
-  test('toDateString returns local YYYY-MM-DD', () => {
-    const d = new Date(2026, 8, 2);
-    expect(toDateString(d)).toBe('2026-09-02');
   });
 
   test('getMapUrl returns null for (0,0) and missing coords', () => {
