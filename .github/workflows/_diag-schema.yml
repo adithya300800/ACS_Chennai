@@ -1,0 +1,67 @@
+# [PHASE-4 DIAGNOSIS ONLY — DELETE AFTER USE]
+# Round-27 follow-up: the prod training enrollment endpoints (/enrollments,
+# /enrollments/my) 500 with P2022 ("column does not exist"). The S3-6
+# migration that should have added `overdue_notified_at` used
+# `ALTER TABLE training_enrollments` (plural) but the live Prisma model
+# maps to `training_enrollment` (singular). Need to confirm:
+#   1. Which table(s) actually exist on prod (singular / plural / both).
+#   2. Whether the S3-6 column landed in either of them.
+#   3. Whether `_prisma_migrations` recorded the S3-6 migration as applied.
+# This workflow is the fastest way to query the prod DB without exposing
+# the password outside GitHub's runner. Delete this file once the diagnosis
+# is recorded in docs/PHASE_4_BASELINE.md.
+name: Diag — Prod DB Schema Introspection
+
+on:
+  workflow_dispatch:
+
+jobs:
+  introspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pg
+        run: npm install --no-save pg
+
+      - name: Introspect training tables
+        env:
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          node --input-type=module -e "
+          import pg from 'pg';
+          const url = 'postgresql://postgres.tqmmspqvqtajbijbbsii:' + process.env.SUPABASE_DB_PASSWORD + '@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require';
+          const c = new pg.Client({ connectionString: url, ssl: { rejectUnauthorized: false } });
+          await c.connect();
+
+          console.log('=== A. Tables matching training% ===');
+          const t = await c.query(\"SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'training%' ORDER BY table_name\");
+          console.log(t.rows.map(r => r.table_name).join('\n') || '(none)');
+
+          for (const tbl of ['training_enrollment', 'training_enrollments']) {
+            console.log('');
+            console.log(\`=== B. Columns of \${tbl} ===\`);
+            const cols = await c.query(\`SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='public' AND table_name=\$1 ORDER BY ordinal_position\`, [tbl]);
+            if (cols.rows.length === 0) {
+              console.log('(table does not exist)');
+            } else {
+              for (const r of cols.rows) console.log('  ' + r.column_name + '  ' + r.data_type);
+            }
+          }
+
+          console.log('');
+          console.log('=== C. _prisma_migrations rows ===');
+          const m = await c.query('SELECT migration_name, applied_steps_count, finished_at IS NOT NULL as applied FROM _prisma_migrations ORDER BY started_at');
+          if (m.rows.length === 0) {
+            console.log('(table missing OR empty)');
+          } else {
+            for (const r of m.rows) console.log((r.applied?'[applied]  ':'[NOT app]  ') + r.migration_name + '  steps=' + r.applied_steps_count);
+          }
+
+          await c.end();
+          "
