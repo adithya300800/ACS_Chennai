@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatDate, formatFullDate, formatTime, toDateString, getMapUrl, formatCoords } from '../../lib/format.js';
+import { formatDate, formatFullDate, formatTime, getMapUrl, formatCoords } from '../../lib/format.js';
+import { getBusinessToday } from '../../lib/businessDate.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // (Round-15+ C-03: format helpers moved to src/lib/format.js — the file
@@ -41,8 +42,16 @@ export default function Attendance() {
   const [calYear, calMonth] = currentMonth.split('-').map(Number);
   const monthLabel = new Date(calYear, calMonth - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
 
-  // Get today's date string
-  const todayDateStr = toDateString(new Date());
+  // Get today's date string.
+  //
+  // LPR-006: must come from the central IST helper (`getBusinessToday`),
+  // not from `toDateString(new Date())`. The browser-local getter is the
+  // bug class this whole page used to have: a user in California looking
+  // at the portal after 5:30pm IST would resolve to "yesterday" while
+  // their check-in already wrote "today". `getBusinessToday()` returns
+  // the same `YYYY-MM-DD` the backend writes under the (employeeId, date)
+  // unique key, so reading and writing always agree.
+  const todayDateStr = getBusinessToday();
 
   // Check if an open session exists
   const hasOpenSession = todayRecord?.sessions?.some(s => !s.checkOut);
@@ -50,26 +59,28 @@ export default function Attendance() {
   // Fetch today's attendance
   const fetchToday = useCallback(async () => {
     try {
-      const localDate = toDateString(new Date());
+      // LPR-006: send the IST business day. The backend now rejects a
+      // localDate that does not equal the server's business today with
+      // 400 INVALID_DATE — so any drift (e.g. the user's clock is wrong
+      // or they're in a different TZ) surfaces as a caught error rather
+      // than silently returning the wrong row.
+      const localDate = getBusinessToday();
       const data = await api.get(`/attendance/today?localDate=${localDate}`, accessToken);
-      // DR-023: verify the server's `date` field actually matches the
-      // calendar day we asked for. After the backend refactor the
-      // server returns YYYY-MM-DD strings built from UTC components, and
-      // `toDateString` (local time) should agree on the same day for
-      // IST users. If the server somehow returns a row from a different
-      // day (stale cache, half-written DB state, mid-rollover glitch),
-      // treat it as null so the "Mark Attendance" button shows. We log
-      // a non-blocking warning — no toast, no UI noise.
-      if (data && data.date) {
-        const serverDay = toDateString(data.date);
-        if (serverDay !== localDate) {
-          console.warn('[attendance] today record date mismatch — discarding', {
-            requested: localDate,
-            returned: serverDay,
-          });
-          setTodayRecord(null);
-          return;
-        }
+      // LPR-006: the server returns `data.date` as a YYYY-MM-DD string
+      // (the same canonical helper). Compare as STRINGS, never via
+      // `new Date(...).toLocaleDateString()` — re-parsing a date-only
+      // string through Date() was the previous wrong-day bug class
+      // (DR-032) for negative-offset browsers. If the server somehow
+      // returns a row from a different day (stale cache, half-written
+      // DB state, mid-rollover glitch), treat it as null so the "Mark
+      // Attendance" button shows.
+      if (data && data.date && String(data.date) !== localDate) {
+        console.warn('[attendance] today record date mismatch — discarding', {
+          requested: localDate,
+          returned: data.date,
+        });
+        setTodayRecord(null);
+        return;
       }
       setTodayRecord(data);
     } catch {
@@ -98,11 +109,14 @@ export default function Attendance() {
   // date-equality check (rather than `startsWith(currentMonth)` alone)
   // catches the edge case where today is the 1st of a new month and
   // yesterday's record would otherwise fall into last month's cell.
+  //
+  // LPR-006: gone through `toDateString(...)` reparse. The backend now
+  // returns `todayRecord.date` as a canonical YYYY-MM-DD string and our
+  // `todayDateStr` is the IST `getBusinessToday()` — compare directly.
   useEffect(() => {
     if (!todayRecord) return;
-    const todayStr = toDateString(todayRecord.date);
-    const requestedToday = toDateString(new Date());
-    if (todayStr !== requestedToday) return; // stale; will be re-fetched
+    const todayStr = String(todayRecord.date);
+    if (todayStr !== todayDateStr) return; // stale; will be re-fetched
     if (todayStr.startsWith(currentMonth)) {
       setMonthRecords(prev => {
         const exists = prev.some(r => r.id === todayRecord.id);
@@ -110,7 +124,7 @@ export default function Attendance() {
         return [...prev, todayRecord];
       });
     }
-  }, [todayRecord, currentMonth]);
+  }, [todayRecord, currentMonth, todayDateStr]);
 
   // DR-023: refresh today's record when the tab regains visibility.
   // Without this, a user who backgrounds the tab across midnight would
@@ -130,17 +144,21 @@ export default function Attendance() {
   }, [fetchToday]);
 
   // DR-023: midnight-rollover refresh. The backend's canonical helper
-  // uses the business TZ (Asia/Kolkata), so this client-side check
-  // matches: `toDateString(new Date())` returns the IST calendar day
-  // string. When that changes, we re-fetch today AND roll `currentMonth`
-  // forward so the calendar header follows the page.
+  // uses the business TZ (Asia/Kolkata), so this client-side check MUST
+  // too — `getBusinessToday()` returns the IST calendar day string. The
+  // previous `toDateString(new Date())` was the browser-local getter
+  // (LPR-006): a user on a non-IST clock would only roll over at their
+  // local midnight, drifting from the persisted attendance date.
   useEffect(() => {
     const interval = setInterval(() => {
-      const nowStr = toDateString(new Date());
+      const nowStr = getBusinessToday();
       if (nowStr !== todayDateStr) {
         setTodayRecord(null);
         fetchToday();
-        const nowMonth = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+        // Roll the calendar header forward into the new business-month.
+        // Derive the YYYY-MM from the same IST day so the boundary lines
+        // up with the day-bucket the backend just wrote under.
+        const nowMonth = nowStr.slice(0, 7);
         setCurrentMonth(prev => (prev === nowMonth ? prev : nowMonth));
       }
     }, 60_000);
@@ -253,11 +271,16 @@ export default function Attendance() {
     const firstDay = new Date(calYear, calMonth - 1, 1).getDay();
     const daysInMonth = new Date(calYear, calMonth, 0).getDate();
 
-    // Map records by date string
+    // Map records by date string.
+    //
+    // LPR-006: backend now returns `r.date` as a canonical YYYY-MM-DD
+    // string. We bucket by it directly. The previous `toDateString(r.date)`
+    // reparsed the YYYY-MM-DD through `new Date(...)`, which lost a day
+    // in negative-offset browsers and rendered the present-dot in the
+    // wrong calendar cell.
     const recordMap = {};
     monthRecords.forEach(r => {
-      const dateStr = toDateString(r.date);
-      recordMap[dateStr] = r;
+      recordMap[r.date] = r;
     });
 
     const weeks = [];

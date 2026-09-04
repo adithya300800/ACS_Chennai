@@ -201,6 +201,17 @@ function getIstDateString(d) {
   }).format(d);
 }
 
+// LPR-006: server-side authoritative "today" in the company calendar.
+// Returns the IST `YYYY-MM-DD` string for the current instant — same shape
+// the frontend's `getBusinessToday()` produces, so a round-trip via the
+// `localDate` query param is just a string equality check. Routes that
+// accept a client-supplied date MUST compare it against this value rather
+// than trusting it; trusting the client date was the original wrong-day
+// bug class (DR-023 / DR-024).
+function getBusinessToday(now = new Date()) {
+  return getIstDateString(now);
+}
+
 // Returns a human-friendly label like `3 Sept 2026` for the given instant in
 // IST. Used in email subject lines + bodies for both the employee digest and
 // the admin attendance digest.
@@ -228,6 +239,7 @@ module.exports = {
   dateOnlyToUtc,
   parseDateOnlyToUtc,
   getTodayBusinessDate,
+  getBusinessToday,
   getMonthRangeUtc,
   isSameUtcCalendarDay,
   formatDateOnly,

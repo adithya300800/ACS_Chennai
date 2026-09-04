@@ -7,9 +7,11 @@ const { hashIdentifier } = require('../lib/pii');
 const {
   parseDateOnlyToUtc,
   getTodayBusinessDate,
+  getBusinessToday,
   getMonthRangeUtc,
   formatDateOnly,
   InvalidMonthRangeError,
+  InvalidDateOnlyError,
 } = require('../lib/dateOnly');
 
 // Helper: compute the attendance "day bucket" for a given instant.
@@ -121,26 +123,44 @@ router.get('/', async (req, res) => {
 });
 
 // GET /api/attendance/today?localDate=YYYY-MM-DD
+//
+// LPR-006: a client-supplied `localDate` is no longer trusted. The server's
+// IST business day is the only authoritative source. If a client sends
+// `localDate`, it MUST equal the server's `getBusinessToday()` value;
+// anything else returns 400 INVALID_DATE so a misconfigured client (or an
+// attacker on a non-IST clock) cannot force the lookup to land on the
+// wrong calendar day. When `localDate` is absent the server resolves to
+// its own business today.
 router.get('/today', async (req, res) => {
   const prisma = req.app.get('prisma');
   const { localDate } = req.query;
 
-  // Resolve the bucket: use frontend-supplied YYYY-MM-DD if it parses,
-  // otherwise fall back to today in the business TZ (Asia/Kolkata).
-  // DR-023: both paths return UTC midnight so the lookup key matches
-  // what check-in writes (the previous local-midnight path was the
-  // IST off-by-one bug).
   let attendanceDate;
-  if (localDate && /^\d{4}-\d{2}-\d{2}$/.test(localDate)) {
-    try {
-      attendanceDate = parseDateOnlyToUtc(String(localDate));
-    } catch (_e) {
-      // Malformed date-only string from the client — fall back to today
-      // rather than 500ing. The frontend already gates this shape.
-      attendanceDate = getTodayBusinessDate();
+  try {
+    if (localDate) {
+      // Strict shape check: 10-char YYYY-MM-DD only. parseDateOnlyToUtc
+      // validates month/day ranges too so we catch 2026-02-30 etc.
+      parseDateOnlyToUtc(String(localDate));
+      const serverToday = getBusinessToday();
+      if (String(localDate) !== serverToday) {
+        return res.status(400).json({
+          error: 'INVALID_DATE',
+          code: 'INVALID_DATE',
+          message: `localDate must equal the server business day (${serverToday})`,
+          serverToday,
+        });
+      }
     }
-  } else {
     attendanceDate = getTodayBusinessDate();
+  } catch (e) {
+    if (e instanceof InvalidDateOnlyError) {
+      return res.status(400).json({
+        error: 'INVALID_DATE',
+        code: 'INVALID_DATE',
+        message: 'localDate must be a valid YYYY-MM-DD string',
+      });
+    }
+    throw e;
   }
 
   try {
@@ -194,15 +214,25 @@ router.get('/status', async (req, res) => {
   try {
     let attendanceDate;
     const { localDate } = req.query;
-    if (localDate && /^\d{4}-\d{2}-\d{2}$/.test(localDate)) {
-      try {
-        attendanceDate = parseDateOnlyToUtc(String(localDate));
-      } catch (_e) {
-        attendanceDate = getTodayBusinessDate();
+    // LPR-006: see /today. The /status lookup must agree with /today on
+    // the day key, so we apply the same equality gate here. Without it, a
+    // client sending localDate=2026-09-03 while the server's IST day is
+    // 2026-09-04 would return a "none" status for a session that actually
+    // exists under the 2026-09-04 bucket, and the UI would re-show the
+    // "Mark Attendance" button on the wrong day.
+    if (localDate) {
+      parseDateOnlyToUtc(String(localDate));
+      const serverToday = getBusinessToday();
+      if (String(localDate) !== serverToday) {
+        return res.status(400).json({
+          error: 'INVALID_DATE',
+          code: 'INVALID_DATE',
+          message: `localDate must equal the server business day (${serverToday})`,
+          serverToday,
+        });
       }
-    } else {
-      attendanceDate = getTodayBusinessDate();
     }
+    attendanceDate = getTodayBusinessDate();
     const record = await prisma.attendance.findFirst({
       where: { employeeId: req.employeeId, date: attendanceDate },
       include: { sessions: { orderBy: { checkIn: 'asc' } } },
