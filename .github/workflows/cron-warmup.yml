@@ -1,0 +1,66 @@
+name: Portal warm-up ping
+
+# Round-26.5: Cold-start warm-up ping. Render's free plan spins the service
+# down after 15 min idle; the first request after a sleep pays a ~30-60s
+# cold-start tax AND frequently hits a TCP-level reset. This workflow fires
+# the new /api/internal/warmup/ping endpoint every 10 minutes — well under
+# the 15-min idle window — to keep the HTTP path AND DB pool warm.
+#
+# Why GitHub Actions instead of Render Cron Job:
+#   - Render Cron Job requires a paid plan (starter+) with a card on file.
+#     Public repos get unlimited free GitHub Actions minutes, so a 10-min
+#     cron costs effectively nothing.
+#   - Already used for round-25's daily digest (see digest.yml) — same
+#     pattern, same secret, same operational characteristics.
+#
+# GH Actions lag note: scheduled runs can lag up to ~30 min during peak
+# times. If a ping is delayed, the server may briefly spin down — the
+# client-side retry-once-on-NETWORK_ERROR in src/lib/api.js covers that
+# case for mutating verbs (POST/PUT/DELETE). So the worst case is "one
+# user action pays a cold-start tax" rather than "users see errors".
+#
+# Authentication: header `X-Internal-Token` matching backend env var
+# `INTERNAL_API_TOKEN` (already a GitHub repository secret, used by
+# digest.yml and the backend deploy workflows).
+#
+# Manual fire: Actions → "Portal warm-up ping" → "Run workflow". Useful
+# when an operator wants to verify the warm-up is working end-to-end.
+
+on:
+  schedule:
+    # Every 10 minutes. Worst-case GH Actions lag of ~30 min would put
+    # pings up to ~40 min apart, which exceeds Render's 15-min idle
+    # threshold — but the client retry absorbs that one cold-start. For
+    # typical 1-2 min lag this keeps the server continuously warm.
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  # If a scheduled fire gets delayed and a manual fire happens at the
+  # same time, dedupe them so we don't ping the server twice.
+  group: 'warmup'
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fire-warmup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Fire warm-up ping
+        run: |
+          url="https://acs-chennai.onrender.com/api/internal/warmup/ping"
+          echo "[warmup] POST $url"
+          response=$(curl -X POST "$url" \
+            -H "X-Internal-Token: ${{ secrets.INTERNAL_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -fsS -m 60 -w "\nHTTP_STATUS:%{http_code}")
+
+          echo "$response"
+          status=$(echo "$response" | tail -n 1 | sed 's/HTTP_STATUS://')
+          if [ "$status" != "200" ]; then
+            echo "[warmup] non-200 response (status=$status) — failing so GH Actions surfaces it"
+            exit 1
+          fi

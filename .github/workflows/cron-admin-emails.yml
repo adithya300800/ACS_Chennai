@@ -1,0 +1,98 @@
+name: Admin email notifications
+
+# Round-26: Two admin-targeted email cron jobs, scheduled in IST
+# (Asia/Kolkata is UTC+5:30, no DST).
+#
+#   1. Training overdue sweep — 06:00 IST daily (= 00:30 UTC)
+#      Flips TrainingEnrollment rows with status IN (ASSIGNED, IN_PROGRESS)
+#      AND dueDate < todayIST → OVERDUE via atomic updateMany, then fires
+#      one admin fan-out email per flipped row.
+#
+#   2. Admin attendance digest — 19:00 IST daily (= 13:30 UTC)
+#      Partitions every active employee into present / on-leave / absent
+#      for today's IST date (admins excluded), renders + sends a single
+#      digest email to every active admin.
+#
+# Both endpoints are token-gated by `INTERNAL_API_TOKEN` (a GitHub repo
+# secret already used by digest.yml).
+#
+# Both endpoints are idempotent:
+#   - Overdue sweep: already-OVERDUE rows excluded by where-clause; no
+#     re-fire possible.
+#   - Attendance digest: re-fire just re-sends the same email; the
+#     EmailLog table provides the audit trail.
+#
+# GH Actions lag is safe here (next-day would be noticed anyway — the
+# user gets the email late but not lost).
+
+on:
+  schedule:
+    # 00:30 UTC = 06:00 IST daily — overdue sweep
+    - cron: '30 0 * * *'
+    # 13:30 UTC = 19:00 IST daily — attendance digest
+    - cron: '30 13 * * *'
+  workflow_dispatch:
+    inputs:
+      job:
+        description: 'Which cron to fire manually'
+        required: true
+        type: choice
+        options:
+          - training-overdue
+          - attendance-digest
+
+concurrency:
+  # One in-flight run per cron so a delayed + manual fire don't double up.
+  group: 'admin-emails'
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fire admin email cron
+        run: |
+          # Manual dispatch lets the operator pick which cron to fire
+          # (useful when ops wants to backfill / debug a single endpoint
+          # without waiting for the schedule).
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            case "${{ inputs.job }}" in
+              training-overdue)
+                path="training/overdue/sweep" ;;
+              attendance-digest)
+                path="attendance/digest/run" ;;
+              *)
+                echo "[admin-emails] unknown job: ${{ inputs.job }}"; exit 1 ;;
+            esac
+          else
+            # Scheduled fires — pick based on the current hour. The two
+            # cron expressions above guarantee this branch is reached
+            # only at 00:30 UTC or 13:30 UTC, so a simple hour check is
+            # sufficient.
+            hour=$(date -u +%H)
+            if [ "$hour" = "00" ]; then
+              path="training/overdue/sweep"
+            elif [ "$hour" = "13" ]; then
+              path="attendance/digest/run"
+            else
+              echo "[admin-emails] unexpected schedule hour: $hour"; exit 1
+            fi
+          fi
+
+          url="https://acs-chennai.onrender.com/api/internal/${path}"
+          echo "[admin-emails] POST $url"
+          response=$(curl -X POST "$url" \
+            -H "X-Internal-Token: ${{ secrets.INTERNAL_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -fsS -m 180 -w "\nHTTP_STATUS:%{http_code}")
+
+          echo "$response"
+          status=$(echo "$response" | tail -n 1 | sed 's/HTTP_STATUS://')
+          if [ "$status" != "200" ]; then
+            echo "[admin-emails] non-200 response (status=$status) — failing so GH Actions surfaces it"
+            exit 1
+          fi
