@@ -4,9 +4,10 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
+import MonthFilter from '../../components/MonthFilter.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { CalendarIcon, MapPinIcon, CameraIcon, ClipboardIcon } from '../../components/Icons.jsx';
-import { formatDateOnly } from '../../lib/format.js';
+import { formatDateOnly, getCurrentIstMonth } from '../../lib/format.js';
 
 // Round-22: admin cross-org DPR list. The previous "My Daily Reports" page
 // (DprList at /portal/dpr/my) rendered every org DPR for admins because the
@@ -212,8 +213,24 @@ export default function DprAll() {
   // `status`, `from`, `to` (date range on reportDate), `projectName`
   // (case-insensitive contains), and `submittedById` (cuid). The first
   // three were already wired in r21; we added projectName + submittedById
-  // in r22.5. Result count is computed from the loaded list.
-  const [filter, setFilter] = useState({ status: '', from: '', to: '', projectName: '', submittedById: '' });
+  // in r22.5.
+  //
+  // Round-27: `month` is added on top of the existing filters, defaulted
+  // to the current IST business month so the page lands on a bounded
+  // window rather than every-org-row on first load. The backend
+  // (`backend/src/routes/dpr.js` GET /) treats `month` as exclusive of
+  // `from`/`to` and emits 400 MONTH_AND_RANGE_CONFLICT if both are sent
+  // — the FE prevents that by clearing the matching filter when month
+  // changes. Setting `month` to '' opts the admin out into an "all-time"
+  // view; the Clear button snaps back to current month instead of empty.
+  const [filter, setFilter] = useState(() => ({
+    month: getCurrentIstMonth(),
+    status: '',
+    from: '',
+    to: '',
+    projectName: '',
+    submittedById: '',
+  }));
   const [showFilters, setShowFilters] = useState(false);
 
   const load = useCallback(async () => {
@@ -225,6 +242,10 @@ export default function DprAll() {
       // restrictToSelf check is `!isAdmin || my === 'true'`. Limit 100
       // matches InspectionAll's browse-view contract.
       const params = { limit: '100' };
+      // Round-27: send `month` as the YYYY-MM string. The backend
+      // expands to a half-open IST window via getMonthRangeUtc() and
+      // refuses `from`/`to` in the same request with 400.
+      if (filter.month) params.month = filter.month;
       if (filter.status) params.status = filter.status;
       if (filter.from) params.from = filter.from;
       if (filter.to) params.to = filter.to;
@@ -234,6 +255,9 @@ export default function DprAll() {
       setDprs(data.dprs || []);
     } catch (err) {
       if (err.status !== 401) {
+        // MONTH_AND_RANGE_CONFLICT and INVALID_MONTH surface here as a
+        // 400; the FE keeps the filter state and shows the message so
+        // the admin can back one filter out.
         setError(err.message || 'Failed to load all daily reports.');
         toast.push(err.message || 'Failed to load all daily reports.', 'error');
       }
@@ -245,14 +269,38 @@ export default function DprAll() {
   useEffect(() => { load(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, [accessToken, filter]);
 
   const handleFilterChange = (key, value) => {
-    setFilter((f) => ({ ...f, [key]: value }));
+    setFilter((f) => {
+      // Round-27: backend refuses `month` combined with `from`/`to`.
+      // Clearing the date-range half when a month is picked keeps the FE
+      // honest with the wire contract — the admin reselects a range
+      // explicitly if they want one.
+      if (key === 'month' && value && (f.from || f.to)) {
+        return { ...f, month: value, from: '', to: '' };
+      }
+      if ((key === 'from' || key === 'to') && value && f.month) {
+        return { ...f, month: '', [key]: value };
+      }
+      return { ...f, [key]: value };
+    });
   };
 
   const clearFilters = () => {
-    setFilter({ status: '', from: '', to: '', projectName: '', submittedById: '' });
+    // Round-27: snap-back to the CURRENT month so the page never lands
+    // on the unbounded "every org row" view after a Clear. Admins who
+    // want all-time pick "All-time" explicitly from the Month dropdown.
+    setFilter({
+      month: getCurrentIstMonth(),
+      status: '',
+      from: '',
+      to: '',
+      projectName: '',
+      submittedById: '',
+    });
   };
 
-  const hasActiveFilters = filter.status || filter.from || filter.to || filter.projectName || filter.submittedById;
+  const hasActiveFilters = Boolean(
+    filter.status || filter.from || filter.to || filter.projectName || filter.submittedById
+  );
 
   // The submitter dropdown is populated from the unique names found in the
   // currently loaded list. This avoids a separate /api/employees fetch and
@@ -290,7 +338,15 @@ export default function DprAll() {
 
       {showFilters && (
         <div className="dpr-card" style={{ marginBottom: '1rem' }}>
+          {/* Round-27: month filter sits above the existing per-field
+              filters so it visually anchors the time scope. Month-wise
+              view is the default; other filters narrow within it. */}
           <div className="form-row">
+            <MonthFilter
+              id="dprall-filter-month"
+              value={filter.month}
+              onChange={(v) => handleFilterChange('month', v)}
+            />
             <div className="form-group">
               <label htmlFor="dprall-filter-status">Status</label>
               <select
