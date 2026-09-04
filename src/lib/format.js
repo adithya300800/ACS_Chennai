@@ -139,3 +139,53 @@ export function formatCoords(lat, lng) {
   const lngDir = lng >= 0 ? 'E' : 'W';
   return `${Math.abs(lat).toFixed(4)}°${latDir}, ${Math.abs(lng).toFixed(4)}°${lngDir}`;
 }
+
+// Round-27: mirror of backend/src/lib/dateOnly.js:getBusinessToday() for
+// the client. Returns the current calendar month in IST as `YYYY-MM`.
+// The two helpers are intentionally separate so the client never has
+// to talk to the server to know which month to default the list filters
+// to — and so the backend stays the only source of truth for any date
+// math that ends up in the database.
+//
+// We deliberately use `Intl.DateTimeFormat` rather than relying on the
+// browser's `Date` timezone because some users (and many QA rigs) run in
+// non-IST locales — without an explicit timezone, `new Date().getMonth()`
+// can return a value that disagrees with the company's calendar day.
+export function getCurrentIstMonth(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+  }).formatToParts(now);
+  const year = parts.find((p) => p.type === 'year').value;
+  const month = parts.find((p) => p.type === 'month').value;
+  return `${year}-${month}`;
+}
+
+// Round-27: human-friendly label for a `YYYY-MM` month string.
+// "2026-09" → "September 2026", "2026-01" → "January 2026".
+export function formatMonthLabel(yearMonth) {
+  if (!yearMonth || !/^\d{4}-\d{2}$/.test(String(yearMonth))) return '';
+  const [y, m] = yearMonth.split('-').map(Number);
+  if (!y || !m || m < 1 || m > 12) return '';
+  // Anchor on the 15th so any locale's TZ never accidentally flips to
+  // the previous or next month via a midnight edge (mid-month is safe).
+  const local = new Date(y, m - 1, 15);
+  return local.toLocaleDateString('en-GB', {
+    month: 'long',
+    year: 'numeric',
+  });
+}
+
+// Round-27: shift a YYYY-MM string by ±N months. Pure calendar math; no
+// timezone interpolation needed because we always re-anchor on day 15 of
+// the resulting calendar month.
+export function shiftMonth(yearMonth, delta) {
+  if (!yearMonth || !/^\d{4}-\d{2}$/.test(String(yearMonth))) return yearMonth;
+  const [y, m] = yearMonth.split('-').map(Number);
+  if (!y || !m || m < 1 || m > 12) return yearMonth;
+  const d = new Date(y, m - 1 + delta, 15);
+  const newY = d.getFullYear();
+  const newM = String(d.getMonth() + 1).padStart(2, '0');
+  return `${newY}-${newM}`;
+}
