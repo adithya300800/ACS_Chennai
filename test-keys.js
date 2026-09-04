@@ -2,7 +2,7 @@
 import { Resend } from 'resend';
 
 console.log('=== Test 1: Valid key ===');
-const validResend = new Resend('re_iJhBsVbG_BgzTkm6Tycb1bPACMkiSqrei');
+const validResend = new Resend('REDACTED_USE_RESEND_API_KEY_ENV');
 const r1 = await validResend.emails.send({
   from: 'info@acschennai.com',
   to: 'info@acschennai.com',

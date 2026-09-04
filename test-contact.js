@@ -1,6 +1,6 @@
 import { Resend } from 'resend';
 
-const resend = new Resend('re_iJhBsVbG_BgzTkm6Tycb1bPACMkiSqrei');
+const resend = new Resend('REDACTED_USE_RESEND_API_KEY_ENV');
 
 // Test 1: Simple test like the working test-resend.js
 console.log('=== Test 1: Simple send ===');

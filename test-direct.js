@@ -1,5 +1,5 @@
 // Test with direct fetch instead of SDK - simulating browser behavior
-const apiKey = 're_iJhBsVbG_BgzTkm6Tycb1bPACMkiSqrei';
+const apiKey = 'REDACTED_USE_RESEND_API_KEY_ENV';
 
 console.log('=== Testing direct fetch to Resend API ===');
 

@@ -1,6 +1,6 @@
 // Simulating what the browser does - testing the key check logic
 const testCases = [
-  { name: 'Valid key', key: 're_iJhBsVbG_BgzTkm6Tycb1bPACMkiSqrei' },
+  { name: 'Valid key', key: 'REDACTED_USE_RESEND_API_KEY_ENV' },
   { name: 'Empty string', key: '' },
   { name: 'Undefined', key: undefined },
   { name: 'Missing env var', key: (typeof process !== 'undefined' && process.env ? process.env.VITE_RESEND_API_KEY : undefined) },
