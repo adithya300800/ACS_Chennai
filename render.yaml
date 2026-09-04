@@ -1,0 +1,147 @@
+# render.yaml — Render Blueprint for the ACS Chennai portal
+#
+# [GP-1] Until now the entire Render configuration lived only as dashboard
+# state, with nothing in version control. This file mirrors the LIVE
+# workspace (tea-da9jr7dg1s2s73alcuvg) so the config is reviewable,
+# diffable, and reproducible. It declares exactly the two services that
+# exist today; it invents nothing.
+#
+# Schema reference: https://render.com/docs/blueprint-spec
+#   - `type: web` covers BOTH web services and static sites; a static site
+#     is `type: web` + `runtime: static` (there is no `static_site` type).
+#   - The publish directory key is `staticPublishPath` (not `publishPath`).
+#   - `runtime:` replaces the deprecated `env:` key.
+#
+# --------------------------------------------------------------------------
+# SECRET HANDLING
+# --------------------------------------------------------------------------
+# Any env var holding a secret MUST be declared with `sync: false`. That
+# tells Render "this variable exists, but its value is owned by the
+# dashboard and must not be overwritten by a Blueprint apply." An entry
+# with a literal `value:` IS pushed to Render on apply — never put an API
+# key, database URL, or signing secret in a `value:`.
+# --------------------------------------------------------------------------
+
+services:
+
+  # ========================================================================
+  # 1. Backend API  —  srv-da9jvkhf2nfc73fpq230
+  #    https://acs-chennai.onrender.com
+  # ========================================================================
+  - type: web
+    name: ACS_Chennai
+    runtime: node
+    repo: https://github.com/adithya300800/ACS_Chennai
+    branch: add-react-website
+    rootDir: backend
+    region: singapore
+    plan: free
+    buildCommand: npm install && npx prisma generate
+    startCommand: node src/index.js
+
+    envVars:
+      # Runtime query connection. Supabase transaction-mode pooler (6543).
+      - key: DATABASE_URL
+        sync: false
+
+      # [B-1] Session-mode connection (port 5432) used ONLY for DDL.
+      # Prisma introspection and migrations hang on the pgbouncer
+      # transaction-mode pooler, so `migrate deploy` must use this URL via
+      # the `directUrl` field in prisma/schema.prisma. Not used for queries.
+      - key: DIRECT_DATABASE_URL
+        sync: false
+
+      # CORS allow-list, read at backend/src/index.js:86 as a comma-separated
+      # list. NOT hard-coded in source. index.js:91 throws at boot in
+      # production if this (and FRONTEND_URL) are both empty.
+      #
+      # [GP-1] Must contain BOTH origins during the Pages->Render cutover:
+      #   https://acschennai.com,https://acs-portal-spa.onrender.com
+      # Do not drop the apex entry when Pages is retired — after cutover the
+      # apex is served BY Render and is still the browser origin.
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+      # Auth signing secrets. Both are hard-required by the app at boot.
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+
+      # Required at module load by backend/src/lib/pii.js — the app cannot
+      # boot without it.
+      - key: PII_LOG_SALT
+        sync: false
+
+      # Gates the /version endpoint and the /api/internal/* cron routes.
+      # When unset those routes deliberately return 404.
+      - key: INTERNAL_API_TOKEN
+        sync: false
+
+      # Transactional email (Resend).
+      # NOTE: the key in use is the one leaked in git history per GP-2 and
+      # MUST be rotated. Rotating it means updating this value in the
+      # Render dashboard.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false
+
+      # Cloudflare R2 object storage (DPR/inspection photo evidence).
+      # Either R2_CONNECTION_STRING alone, or the account/key trio.
+      - key: R2_CONNECTION_STRING
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+
+      # Zoho OAuth (contact form / mail integration).
+      - key: ZOHO_CLIENT_ID
+        sync: false
+      - key: ZOHO_CLIENT_SECRET
+        sync: false
+      - key: ZOHO_REDIRECT_URI
+        sync: false
+
+  # ========================================================================
+  # 2. Frontend SPA (static site)  —  srv-dad741lg1s2s73fatpf0
+  #    https://acs-portal-spa.onrender.com
+  # ========================================================================
+  - type: web
+    runtime: static
+    name: acs-portal-spa
+    repo: https://github.com/adithya300800/ACS_Chennai
+    branch: add-react-website
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+
+    # SPA deep-link fallback: rewrite every unmatched path to /index.html so
+    # React Router can handle /portal/login, /portal/dpr/all, etc.
+    #
+    # This duplicates public/_redirects on purpose. _redirects is kept
+    # because it is what the running service uses today; this block is the
+    # version-controlled equivalent for a Blueprint apply. Note that
+    # dist/404.html (emitted by the vite.config.js plugin, see GP-4) is the
+    # GitHub Pages equivalent and is independent of both.
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+    envVars:
+      # Public API base URL baked into the bundle at build time. Not a
+      # secret — it is visible in the shipped JS either way — so pinning the
+      # verified-good value here is safe and aids reproducibility.
+      - key: VITE_API_URL
+        value: https://acs-chennai.onrender.com
+
+# --------------------------------------------------------------------------
+# NOT DECLARED HERE (deliberate)
+# --------------------------------------------------------------------------
+# Custom domains (acschennai.com / www.acschennai.com) are attached via the
+# Render dashboard rather than a `domains:` block, because applying a domain
+# before the apex actually resolves to Render is brittle. Add them back here
+# for full IaC once the cutover in docs/HOSTING_CUTOVER.md is complete.

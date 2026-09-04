@@ -1,3 +1,31 @@
+# ============================================================
+# DEPLOY-WORKFLOW RETIREMENT NOTICE — read before editing
+# ============================================================
+# This workflow ships the production frontend bundle to GitHub
+# Pages at https://acschennai.com.
+#
+# It is SCHEDULED FOR RETIREMENT once acschennai.com has been cut
+# over from GitHub Pages to the Render static site. The full
+# ordered runbook lives in docs/HOSTING_CUTOVER.md.
+#
+# DO NOT disable or delete this workflow until DNS cutover has
+# been verified end-to-end. While acschennai.com still resolves
+# to GitHub Pages, removing this workflow would freeze the
+# production frontend (no further deploys to acschennai.com).
+#
+# Cutover status (as of last edit):
+#   - Render static site https://acs-portal-spa.onrender.com
+#     is live and serves the current bundle.
+#   - VITE_API_URL is already wired to the Render backend.
+#   - Backend CORS already permits both origins.
+#   - render.yaml at repo root version-controls the Render config.
+#   - What remains: add custom domain, change DNS, verify TLS,
+#     disable THIS workflow, then flip the repo private.
+#
+# See docs/HOSTING_CUTOVER.md sections 5-8 for the exact
+# trigger-disable + rollback procedure.
+# ============================================================
+
 name: Deploy to GitHub Pages
 
 on:
