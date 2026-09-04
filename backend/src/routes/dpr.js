@@ -26,6 +26,12 @@ const { fanOutToAdmins } = require('../lib/notify');
 // inspection-photos depending on whether the photo is the daily narrative,
 // a generated PDF, or an inspection-record photo.
 const { mountUploadRoutes } = require('../lib/uploadRoutes');
+// [S3-7] Consumption half of LPR-012. `validatePhotoIntents` refuses any
+// photo whose ulid has no CONFIRMED intent owned by the caller (closing
+// both the no-intent-at-all gap and the cross-employee IDOR); once the
+// DPR row exists, `bindPhotoIntents` stamps boundType/boundAt so the
+// durable sweep knows the blob has an owner. See lib/uploadIntentBinding.js.
+const { validatePhotoIntents, bindPhotoIntents } = require('../lib/uploadIntentBinding');
 // DR-027: parseStrictISODate only validates calendar shape, so a well-formed
 // future date used to persist. rejectIfFutureReportDate is the authority.
 const { rejectIfFutureReportDate } = require('../lib/reportDate');
@@ -507,6 +513,20 @@ router.post('/', async (req, res) => {
     }
   }
 
+  // [S3-7] Every photo must be backed by a CONFIRMED upload intent owned
+  // by THIS employee. The loop above only checks the ulid's 26-char
+  // Crockford shape, which a client can trivially fabricate — before this
+  // gate a DPR could reference a blob that never existed, or another
+  // employee's blob. The lookup is scoped by req.employeeId, so a foreign
+  // ulid and a nonexistent one produce the same 400 (no oracle).
+  const intentErr = await validatePhotoIntents({
+    prisma,
+    employeeId: req.employeeId,
+    photos,
+    context: 'dpr.create',
+  });
+  if (intentErr) return res.status(intentErr.status).json(intentErr.body);
+
   try {
     const dpr = await prisma.dPR.create({
       data: {
@@ -553,6 +573,24 @@ router.post('/', async (req, res) => {
         submittedBy: { select: { id: true, name: true, email: true } },
         inspections: { select: { id: true, inspectionType: true, status: true, severity: true } },
       },
+    });
+
+    // [S3-7] Consume the upload intents this DPR just took ownership of.
+    // Runs before the 201 so binding is part of the create contract, not a
+    // background afterthought: once the client is told "created", the
+    // blobs behind those photos must already be marked as owned or the
+    // durable sweep will retire them out from under the record.
+    //
+    // Best-effort on failure — the DPR exists and the client has earned
+    // its 201. A short count is logged (with the PII-hashed employee id)
+    // by the helper so an operator can see the create path racing the
+    // sweep, which is the only way this legitimately happens.
+    await bindPhotoIntents({
+      prisma,
+      employeeId: req.employeeId,
+      photos,
+      boundType: 'dpr',
+      recordId: dpr.id,
     });
 
     if (idempotencyKey && typeof idempotencyKey === 'string' && bodyHash) {

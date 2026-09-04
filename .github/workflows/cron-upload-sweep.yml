@@ -1,0 +1,93 @@
+name: Upload intent sweep
+
+# [S3-7] Durable upload-intent sweep — every 15 minutes.
+#
+# The LPR-012 migration promised an orphan-cleanup cron and even created an
+# index for it, but the job was never written. Until this workflow existed,
+# orphaned upload blobs were reclaimed only by an in-process `setTimeout` in
+# backend/src/lib/uploadRoutes.js — which does not survive a redeploy, an
+# OOM, or Render's free-tier spin-down. Every restart silently dropped every
+# scheduled cleanup, which is exactly the failure LPR-012 was raised to fix.
+#
+# The endpoint runs three passes, sharing one time budget:
+#   1. PENDING past its 20-min upload TTL   → delete blob, mark EXPIRED
+#   2. CONFIRMED with no binding, older     → delete blob, mark EXPIRED
+#      than the 1h grace window                (the S3-7 orphan class)
+#   3. EXPIRED whose blob delete previously → retry delete, mark swept
+#      failed, older than 24h
+#
+# ── Why every 15 minutes ──────────────────────────────────────────────────
+#
+# Cadence is set by pass 1: a PENDING intent expires 20 minutes after
+# /sas-url, so a 15-minute cron reclaims those blobs within ~35 minutes
+# worst case. Slower (hourly) would let a burst of abandoned uploads sit in
+# R2 paying storage; faster buys nothing, since pass 2's grace window is an
+# hour anyway.
+#
+# GitHub Actions rather than a Render Cron Job for the same reason as
+# cron-warmup.yml: Render cron requires a paid plan, and public-repo Actions
+# minutes are free. Scheduled runs can lag ~30 min at peak — harmless here,
+# because every pass is idempotent (atomic status guards skip rows another
+# fire already handled) and the backlog simply drains on the next run.
+#
+# ── Bounded by design ─────────────────────────────────────────────────────
+#
+# The endpoint returns 200 with `stoppedReason: 'per_run_max' | 'time_budget'`
+# when it hits a bound, matching the S3-5 contract — a bounded stop is a
+# healthy outcome, not a failure. We echo `stoppedReason` and
+# `remainingEstimate` into the Actions log so a run that keeps tripping a
+# bound is visible without opening Render's logs. Tune via backend env vars:
+#   UPLOAD_SWEEP_BATCH             (default 500)
+#   UPLOAD_SWEEP_RUN_MAX           (default 2000)
+#   UPLOAD_SWEEP_RUN_BUDGET_MS     (default 110000)
+#   UPLOAD_SWEEP_CONFIRMED_GRACE_MS (default 3600000)
+#
+# Authentication: header `X-Internal-Token` matching backend env var
+# `INTERNAL_API_TOKEN` (already a repository secret used by digest.yml,
+# cron-admin-emails.yml, and cron-warmup.yml).
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  # A delayed scheduled fire plus a manual fire must not sweep concurrently
+  # — the atomic guards make that safe, but it wastes R2 delete calls.
+  group: 'upload-sweep'
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fire upload intent sweep
+        run: |
+          url="https://acs-chennai.onrender.com/api/internal/upload/sweep"
+          echo "[upload-sweep] POST $url"
+          response=$(curl -X POST "$url" \
+            -H "X-Internal-Token: ${{ secrets.INTERNAL_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -fsS -m 180 -w "\nHTTP_STATUS:%{http_code}")
+
+          echo "$response"
+          status=$(echo "$response" | tail -n 1 | sed 's/HTTP_STATUS://')
+          if [ "$status" != "200" ]; then
+            echo "[upload-sweep] non-200 response (status=$status) — failing so GH Actions surfaces it"
+            exit 1
+          fi
+
+          # Surface a bounded stop in the job log. `stoppedReason: null` is
+          # the healthy drained case; per_run_max / time_budget mean the
+          # backlog outran one fire and the next one will continue it. A
+          # value that persists across many fires is the signal to raise
+          # UPLOAD_SWEEP_RUN_MAX or investigate R2 delete failures.
+          body=$(echo "$response" | sed '$d')
+          reason=$(echo "$body" | grep -o '"stoppedReason":[^,}]*' || true)
+          remaining=$(echo "$body" | grep -o '"remainingEstimate":[^,}]*' || true)
+          orphans=$(echo "$body" | grep -o '"blobsStillOrphan":[^,}]*' || true)
+          echo "[upload-sweep] ${reason:-stoppedReason:unknown} ${remaining:-} ${orphans:-}"

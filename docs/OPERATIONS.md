@@ -48,7 +48,35 @@ Rehearsal results are required before LPR-015 can be marked Done for a quarter.
 
 ## 4. Orphan upload cleanup
 
-`sweepOrphanUploads.js` exists (see `_sweepOrphanUploadsCore.js`). Wire it to a Render Cron Job or GH Actions weekly schedule (cron `17 3 * * 1` = 03:17 UTC Mondays). Owner: platform.
+Two layers, deliberately kept distinct:
+
+- **Hot-path eviction.** `pendingUploads` Map + `setTimeout` in
+  `lib/uploadRoutes.js` — instant cleanup while the process lives, but
+  does NOT survive a restart. Owner: platform.
+- **Durable sweep (S3-7).** `POST /api/internal/upload/sweep` is the
+  restart-surviving replacement. Wired by GH Actions cron
+  `*/15 * * * *` (`cron-upload-sweep.yml`). Three passes share one time
+  budget:
+  1. `PENDING` past its 20-min upload TTL → `EXPIRED` + deleteBlob.
+  2. `CONFIRMED` with no binding past the 1h grace → `EXPIRED` +
+     deleteBlob (the silent orphan class LPR-012 left open).
+  3. `EXPIRED` whose delete previously failed, older than 24h → retry
+     delete and stamp `boundType='swept'` so the pass terminates.
+  Atomic guards (`where: { id, status: { in: [...] }, boundAt: null }`)
+  are the serialization point against a concurrent DPR/Inspection POST
+  binding the row. A bounded stop returns 200 with `stoppedReason` and
+  `remainingEstimate` — see the workflow's grep-echo for log signals.
+  Owner: platform.
+
+Env vars (defaults shown):
+
+- `UPLOAD_SWEEP_BATCH` — findMany `take` per batch (500)
+- `UPLOAD_SWEEP_RUN_MAX` — total actions per fire (2000)
+- `UPLOAD_SWEEP_RUN_BUDGET_MS` — wall-clock cap per fire (110000,
+  leaves slack under the 180s GH Actions curl timeout)
+- `UPLOAD_SWEEP_CONFIRMED_GRACE_MS` — pass-2 grace window (3600000 = 1h)
+- `UPLOAD_SWEEP_EXPIRED_VERIFY_MS` — pass-3 retry window
+  (86400000 = 24h)
 
 ## 5. Digest run recovery
 

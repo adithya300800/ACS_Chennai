@@ -396,6 +396,14 @@ function createApp(deps = {}) {
   // the cost math + design rationale.
   const internalWarmupRoutes = require('./routes/internal-warmup');
   app.use('/api/internal/warmup', internalWarmupRoutes);
+  // [S3-7] Durable upload-intent sweep. Same INTERNAL_API_TOKEN gate.
+  // GH Actions cron (cron-upload-sweep.yml) hits this every 15 minutes.
+  // This is the cron LPR-012's migration promised but never shipped —
+  // until now, orphaned upload blobs were reclaimed only by an in-process
+  // setTimeout that does not survive a restart. See
+  // backend/src/routes/internal-upload-sweep.js for the three passes.
+  const internalUploadSweepRoutes = require('./routes/internal-upload-sweep');
+  app.use('/api/internal/upload', internalUploadSweepRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ error: 'Not found' });

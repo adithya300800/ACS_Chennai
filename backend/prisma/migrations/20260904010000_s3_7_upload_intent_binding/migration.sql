@@ -1,0 +1,64 @@
+-- S3-7 (round-27): atomic consumption of durable upload intents.
+--
+-- ── The silent-orphan class this closes ──────────────────────────────────
+--
+-- LPR-012 (migration 20260903000000) built the `upload_intent` registry but
+-- nothing ever CONSUMED it. Report creation attached photos straight from
+-- the client array — `dpr.js` `photos: { create: photos.map(...) }` and the
+-- same line in `inspection.js` — and neither read, validated, nor consumed
+-- the intent. Repo-wide, `uploadIntent` was referenced only in
+-- `lib/uploadRoutes.js` and its tests. The PENDING → CONFIRMED flip was a
+-- separate HTTP call, fully decoupled from the DPR/Inspection transaction.
+--
+-- Three failure modes followed, all of them SILENT (no error, no alert, no
+-- log — the only symptom is a storage bill that grows and never shrinks):
+--
+--   1. Confirmed-but-never-posted. A client marks an intent CONFIRMED and
+--      never POSTs the DPR. The blob is bound to nothing, and the LPR-012
+--      cleanup deliberately skipped CONFIRMED rows (they were assumed to
+--      be referenced). Permanent orphan, permanent storage cost.
+--
+--   2. Posted-with-no-intent. A client POSTs a DPR carrying a `ulid` that
+--      has no intent row at all. Only the 26-char Crockford regex shape was
+--      checked, so the photo row pointed at a blob that may never have
+--      existed — or, worse, at another employee's blob (IDOR).
+--
+--   3. The durable sweep was never built. The LPR-012 migration header
+--      promised a cron and even created `upload_intent_status_expires_at_idx`
+--      for it, but no such job existed. Cleanup still depended on the
+--      in-process `setTimeout` + `pendingUploads` Map, which does not
+--      survive a restart — exactly the failure LPR-012 was raised to fix.
+--
+-- ── What this migration adds ─────────────────────────────────────────────
+--
+--   * `bound_type` — which business record consumed the blob:
+--       'dpr' | 'inspection' | 'swept'
+--     ('swept' is a terminal sentinel written by the sweep's third pass
+--      after it verifies the blob is gone; it gives that pass a
+--      termination condition so it does not re-scan dead rows forever.)
+--   * `bound_at`   — when the binding happened. This is the serialization
+--     point between the binder and the sweep: the CONFIRMED-orphan pass
+--     guards on `bound_at IS NULL`, so a DPR POST that binds a row
+--     mid-sweep lands as `count = 0` and its blob is left alone.
+--   * `upload_intent_status_bound_at_idx` — supports all three sweep
+--     passes without a table scan.
+--
+-- The status enum is UNCHANGED (PENDING | CONFIRMED | EXPIRED). Binding is
+-- expressed by the two new nullable columns, not by a fourth status, so
+-- every existing status predicate in the codebase keeps its meaning.
+--
+-- Idempotent per the r25_notifications pattern — `IF NOT EXISTS`
+-- everywhere, so a re-run against a partially-migrated database is a
+-- no-op rather than an error.
+--
+-- Backfill: none. Pre-existing rows keep `bound_type = NULL`. CONFIRMED
+-- rows written before this migration are genuinely un-attributable (the
+-- binding information never existed), so the sweep's 1-hour grace window
+-- will retire them on its first pass. That is the intended one-time
+-- reclamation of the orphan backlog this finding is about.
+
+ALTER TABLE "upload_intent" ADD COLUMN IF NOT EXISTS "bound_type" TEXT NULL;
+ALTER TABLE "upload_intent" ADD COLUMN IF NOT EXISTS "bound_at" TIMESTAMP(3) NULL;
+
+CREATE INDEX IF NOT EXISTS "upload_intent_status_bound_at_idx"
+  ON "upload_intent"("status", "bound_at");

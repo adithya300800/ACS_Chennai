@@ -20,6 +20,11 @@ const {
 } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
 const { mountUploadRoutes } = require('../lib/uploadRoutes');
+// [S3-7] Consumption half of LPR-012 — same contract as dpr.js. Photos
+// must carry a CONFIRMED intent owned by the caller, and the created
+// record stamps boundType/boundAt so the durable sweep leaves the blobs
+// alone. See lib/uploadIntentBinding.js for the full rationale.
+const { validatePhotoIntents, bindPhotoIntents } = require('../lib/uploadIntentBinding');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
 // DR-027: parseStrictISODate only validates calendar shape, so a well-formed
 // future date used to persist. rejectIfFutureReportDate is the authority.
@@ -280,6 +285,18 @@ router.post('/', async (req, res) => {
     }
   }
 
+  // [S3-7] Mirror of the dpr.js gate: every photo must map to a CONFIRMED
+  // upload intent owned by THIS employee. The loop above only validates
+  // the ulid's shape, so without this a client could attach a fabricated
+  // ulid — or another employee's — to an inspection record.
+  const intentErr = await validatePhotoIntents({
+    prisma,
+    employeeId: req.employeeId,
+    photos,
+    context: 'inspection.create',
+  });
+  if (intentErr) return res.status(intentErr.status).json(intentErr.body);
+
   try {
     const record = await prisma.inspectionRecord.create({
       data: {
@@ -312,6 +329,18 @@ router.post('/', async (req, res) => {
         submittedBy: { select: { id: true, name: true, email: true } },
         dpr: { select: { id: true, reportDate: true, projectName: true } },
       },
+    });
+
+    // [S3-7] Consume the upload intents this record just took ownership
+    // of, before the 201 — same contract as dpr.js. Best-effort: the
+    // record exists, so a bind failure is logged (PII-hashed) rather than
+    // turned into a 500.
+    await bindPhotoIntents({
+      prisma,
+      employeeId: req.employeeId,
+      photos,
+      boundType: 'inspection',
+      recordId: record.id,
     });
 
     res.status(201).json(record);

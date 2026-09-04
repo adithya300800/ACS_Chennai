@@ -695,6 +695,32 @@ model UploadIntent {
   confirmedAt DateTime? @map("confirmed_at")
   createdAt   DateTime  @default(now()) @map("created_at")
 
+  // [S3-7] Binding columns — the missing half of LPR-012.
+  //
+  // LPR-012 built the registry but nothing ever CONSUMED it: the DPR and
+  // Inspection POST handlers attached photos straight from the client
+  // array without reading, validating, or consuming the intent. A
+  // CONFIRMED intent whose DPR was never posted therefore became a
+  // permanent orphan (the LPR-012 sweep deliberately skipped CONFIRMED
+  // rows), and a client could POST a photo whose ulid had no intent at
+  // all — only the regex shape was checked.
+  //
+  // `boundType` records WHICH business record consumed the blob:
+  //   'dpr'        — bound by POST /api/dpr
+  //   'inspection' — bound by POST /api/inspection
+  //   'swept'      — terminal sentinel written by the sweep's third pass
+  //                  after it has verified the blob is gone. It is NOT a
+  //                  business binding; it exists so the EXPIRED-cleanup
+  //                  pass has a termination condition and does not
+  //                  re-scan the same dead rows every 15 minutes forever.
+  //
+  // `boundAt` is the serialization point between the binder and the
+  // sweep: the sweep's CONFIRMED-orphan pass guards on `boundAt IS NULL`,
+  // so a DPR POST that binds a row mid-sweep lands as `count = 0` and
+  // the blob is left alone.
+  boundType   String?   @map("bound_type")
+  boundAt     DateTime? @map("bound_at")
+
   employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 
   // An intent is identified by (employeeId, ulid). Two intents for the
@@ -704,5 +730,11 @@ model UploadIntent {
   @@unique([employeeId, ulid])
   @@index([status, expiresAt])
   @@index([employeeId, status])
+  // [S3-7] Drives all three passes of the durable sweep
+  // (src/routes/internal-upload-sweep.js):
+  //   PENDING-expire      → (status='PENDING')
+  //   CONFIRMED-orphan    → (status='CONFIRMED', boundAt IS NULL)
+  //   EXPIRED-blob-verify → (status='EXPIRED',   boundAt IS NULL)
+  @@index([status, boundAt])
   @@map("upload_intent")
 }
