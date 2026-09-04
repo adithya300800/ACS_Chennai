@@ -77,10 +77,17 @@ jobs:
       # either fail to start (B-1's `prisma migrate deploy` errors) or, if
       # `prisma db push` were still in use, silently mutate the production
       # schema. Either is a deploy-blocking regression.
+      #
+      # B-1 follow-up: schema.prisma declares `directUrl = env("DIRECT_DATABASE_URL")`,
+      # which Prisma validates at config-load time even for a `migrate status`
+      # probe. The drift gate must provide BOTH urls — using the same
+      # session-mode (port 5432) pooler is fine because this step only reads
+      # `_prisma_migrations`; it never opens a transactional app-query session.
       - name: Prisma migrate status (drift gate)
         run: npx prisma migrate status
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+          DIRECT_DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
       # LPR-001: pre-deploy backup ping — warn-only. This is NOT a real backup;
       # it's the workflow's way of saying "before we touch prod, the operator
