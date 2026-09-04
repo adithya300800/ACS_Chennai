@@ -6,10 +6,42 @@
 //     Optional: ?date=YYYY-MM-DD  (for backfill / dry-runs; default = today IST)
 //
 // Architecture:
-//   The Render Cron Job fires this endpoint at 00:30 UTC (= 06:00 IST) every
-//   day. We find every TrainingEnrollment with status IN (ASSIGNED, IN_PROGRESS)
-//   and dueDate < todayIST, flip the status to OVERDUE, and fire one admin
-//   email per flipped row.
+//   cron-admin-emails.yml fires this endpoint at 00:30 UTC (= 06:00 IST)
+//   every day. We find every TrainingEnrollment with status IN
+//   (ASSIGNED, IN_PROGRESS) and dueDate < todayIST, flip the status to
+//   OVERDUE, and fire one admin email per flipped row.
+//
+// [S3-5] Backlog-bounded sweep — the original implementation loaded every
+//   candidate in a single `findMany` with no `take:` limit and processed
+//   them in a single loop. With N overdue rows × A admins that produces
+//   N×A Resend HTTPS calls per cron fire, easily enough to:
+//     - saturate the 180s curl timeout on cron-admin-emails.yml (which
+//       then aborts and reports a false failure to GH Actions)
+//     - exceed the 5-minute GH Actions job timeout
+//     - trip Resend's per-second rate limiter (silent per-row failure)
+//     - balloon EmailLog writes (≈ N×A rows in one DB transaction stream)
+//   Worse, because we flipped-then-emailed in the same loop, a curl
+//   timeout mid-loop left the DB in a half-flipped state (rows already
+//   OVERDUE but never notified). Re-running the next day would skip
+//   those rows via the atomic guard and they would never get notified.
+//   This is the same shape of bug as S3-6 — partially addressed there by
+//   the per-flipped-row audit, fully fixed here by bounding the loop.
+//
+//   The fix is a bounded-batch loop with a per-run cap and a soft time
+//   budget. Default bounds (env-overridable):
+//
+//     TRAINING_OVERDUE_BATCH          = 500   // findMany take per batch
+//     TRAINING_OVERDUE_RUN_MAX_FLIPS  = 1000  // total flips per cron fire
+//     TRAINING_OVERDUE_RUN_BUDGET_MS  = 110000 // 110s, leaves 70s slack
+//                                             // for the 180s curl timeout
+//                                             // + network egress
+//
+//   A cron fire that hits the cap or the time budget returns 200 with
+//   `stoppedReason: 'per_run_max' | 'time_budget'` and a
+//   `remainingEstimate` count of rows still in (ASSIGNED, IN_PROGRESS).
+//   The next day's fire (or an operator's manual workflow_dispatch)
+//   picks up the rest — idempotent because the atomic guard
+//   `where: { id, status: { in: [...] } }` skips already-OVERDUE rows.
 //
 // Idempotency:
 //   - Rows already in OVERDUE are excluded by the where-clause (no re-flip).
@@ -51,6 +83,24 @@ function requireInternalToken(req, res, next) {
   next();
 }
 
+// [S3-5] Bounds — read once at route definition. Env-tunable so an operator
+// can lower them for a noisy day without a code change. Defaults are sized
+// for the production cron window: 110s budget × ~6 rows/s Resend throughput
+// ≈ 660 row-flips achievable before the budget trips. 1000-flip cap is
+// the hard ceiling; pick whichever fires first.
+const PER_BATCH = (() => {
+  const v = parseInt(process.env.TRAINING_OVERDUE_BATCH || '500', 10);
+  return Number.isFinite(v) && v > 0 ? v : 500;
+})();
+const PER_RUN_MAX_FLIPS = (() => {
+  const v = parseInt(process.env.TRAINING_OVERDUE_RUN_MAX_FLIPS || '1000', 10);
+  return Number.isFinite(v) && v > 0 ? v : 1000;
+})();
+const RUN_BUDGET_MS = (() => {
+  const v = parseInt(process.env.TRAINING_OVERDUE_RUN_BUDGET_MS || '110000', 10);
+  return Number.isFinite(v) && v > 0 ? v : 110000;
+})();
+
 router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma) {
@@ -70,93 +120,171 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
   console.log('[internal-training-overdue] sweep start', {
     date: targetDateStr,
     todayIstUtc: todayIstUtc.toISOString(),
+    perBatch: PER_BATCH,
+    perRunMaxFlips: PER_RUN_MAX_FLIPS,
+    runBudgetMs: RUN_BUDGET_MS,
   });
 
-  // 1. Find every ASSIGNED | IN_PROGRESS enrollment with dueDate strictly
-  //    before today IST. The half-open comparison `< todayIstUtc` (= start
-  //    of today, exclusive) means an enrollment with `dueDate = today`
-  //    is NOT flipped yet — exactly the user-facing semantics of "due today".
-  const candidates = await prisma.trainingEnrollment.findMany({
-    where: {
-      status: { in: ['ASSIGNED', 'IN_PROGRESS'] },
-      dueDate: { lt: todayIstUtc },
-    },
-    include: {
-      employee: { select: { id: true, name: true } },
-      course: { select: { id: true, title: true } },
-    },
-  });
-
+  // [S3-5] Bounded-batch sweep. Loops findMany(...,{ take: PER_BATCH }) →
+  // per-row updateMany → per-row fan-out until one of:
+  //   - findMany returns 0 rows (drained)
+  //   - PER_RUN_MAX_FLIPS reached (hard cap)
+  //   - RUN_BUDGET_MS elapsed (soft time budget)
+  // On non-drain stop the route still returns 200 with `stoppedReason` so
+  // cron-admin-emails.yml sees a clean POST and the next day's fire picks
+  // up the rest (idempotent via the per-row atomic guard).
+  const startTime = Date.now();
   let flipped = 0;
   let skipped = 0;
-  const flippedRows = [];
+  let batches = 0;
+  let stoppedReason = null;
+  const flippedEnrollmentIds = [];
 
-  for (const row of candidates) {
-    // Atomic guard: only update if the row is still in an open status.
-    // If a concurrent employee completion or admin cancel flipped the
-    // status between the findMany and here, update.count = 0 → skipped.
-    const updated = await prisma.trainingEnrollment.updateMany({
+  outer: while (true) {
+    if (flipped >= PER_RUN_MAX_FLIPS) {
+      stoppedReason = 'per_run_max';
+      break;
+    }
+    if (Date.now() - startTime >= RUN_BUDGET_MS) {
+      stoppedReason = 'time_budget';
+      break;
+    }
+
+    batches += 1;
+
+    // Find up to PER_BATCH oldest-due ASSIGNED|IN_PROGRESS enrollments
+    // whose dueDate is strictly before today IST.
+    //
+    // `orderBy: dueDate asc` makes batching deterministic: each cron fire
+    // processes the same rows first across days, so a row that's been
+    // stuck for a week gets priority over one that's been stuck for a day.
+    const candidates = await prisma.trainingEnrollment.findMany({
       where: {
-        id: row.id,
         status: { in: ['ASSIGNED', 'IN_PROGRESS'] },
+        dueDate: { lt: todayIstUtc },
       },
-      data: { status: 'OVERDUE' },
+      include: {
+        employee: { select: { id: true, name: true } },
+        course: { select: { id: true, title: true } },
+      },
+      orderBy: { dueDate: 'asc' },
+      take: PER_BATCH,
     });
 
-    if (updated.count === 0) {
-      skipped += 1;
-      continue;
+    if (candidates.length === 0) {
+      // Drained — no more rows match the where-clause.
+      break;
     }
-    flipped += 1;
-    flippedRows.push(row);
 
-    // Fire one admin-targeted email per flipped row. fanOutToAdmins never
-    // throws, but a per-row failure must not stop the rest of the sweep.
-    try {
-      const dueDateLabel = row.dueDate instanceof Date
-        ? getIstDateLabel(row.dueDate)
-        : 'unknown';
-      const daysOverdue = row.dueDate instanceof Date
-        ? Math.max(1, Math.floor((todayIstUtc.getTime() - row.dueDate.getTime()) / (24 * 60 * 60 * 1000)))
-        : null;
+    for (const row of candidates) {
+      // Re-check the bounds at the top of each row so we don't overshoot
+      // a partial batch when we hit the cap or budget mid-batch.
+      if (flipped >= PER_RUN_MAX_FLIPS) {
+        stoppedReason = 'per_run_max';
+        break outer;
+      }
+      if (Date.now() - startTime >= RUN_BUDGET_MS) {
+        stoppedReason = 'time_budget';
+        break outer;
+      }
 
-      await fanOutToAdmins(
-        {
-          type: 'ADMIN_TRAINING_OVERDUE',
-          message: `Training overdue: ${row.course?.title || 'a course'} for ${row.employee?.name || 'an employee'}`,
-          meta: {
-            employeeName: row.employee?.name || 'an employee',
-            courseTitle: row.course?.title || 'Untitled course',
-            dueDate: dueDateLabel,
-            daysOverdue,
-            enrollmentId: row.id,
-          },
+      // Atomic guard: only update if the row is still in an open status.
+      // If a concurrent employee completion or admin cancel flipped the
+      // status between the findMany and here, update.count = 0 → skipped.
+      const updated = await prisma.trainingEnrollment.updateMany({
+        where: {
+          id: row.id,
+          status: { in: ['ASSIGNED', 'IN_PROGRESS'] },
         },
-        prisma,
-      );
-    } catch (err) {
-      console.error('[internal-training-overdue] admin fan-out failed', {
-        enrollmentId: row.id,
-        recipient: row.employee?.id ? hashIdentifier(row.employee.id) : null,
-        message: err?.message?.split('\n')[0],
+        data: { status: 'OVERDUE' },
       });
+
+      if (updated.count === 0) {
+        skipped += 1;
+        continue;
+      }
+      flipped += 1;
+      flippedEnrollmentIds.push(row.id);
+
+      // Fire one admin-targeted email per flipped row. fanOutToAdmins never
+      // throws, but a per-row failure must not stop the rest of the sweep.
+      try {
+        const dueDateLabel = row.dueDate instanceof Date
+          ? getIstDateLabel(row.dueDate)
+          : 'unknown';
+        const daysOverdue = row.dueDate instanceof Date
+          ? Math.max(1, Math.floor((todayIstUtc.getTime() - row.dueDate.getTime()) / (24 * 60 * 60 * 1000)))
+          : null;
+
+        await fanOutToAdmins(
+          {
+            type: 'ADMIN_TRAINING_OVERDUE',
+            message: `Training overdue: ${row.course?.title || 'a course'} for ${row.employee?.name || 'an employee'}`,
+            meta: {
+              employeeName: row.employee?.name || 'an employee',
+              courseTitle: row.course?.title || 'Untitled course',
+              dueDate: dueDateLabel,
+              daysOverdue,
+              enrollmentId: row.id,
+            },
+          },
+          prisma,
+        );
+      } catch (err) {
+        console.error('[internal-training-overdue] admin fan-out failed', {
+          enrollmentId: row.id,
+          recipient: row.employee?.id ? hashIdentifier(row.employee.id) : null,
+          message: err?.message?.split('\n')[0],
+        });
+      }
     }
+
+    // Short-circuit: if this batch was smaller than the take we requested,
+    // there are no more rows to fetch on a subsequent iteration.
+    if (candidates.length < PER_BATCH) {
+      break;
+    }
+  }
+
+  // [S3-5] Remaining estimate — count of rows still in (ASSIGNED,
+  // IN_PROGRESS) with dueDate < today. After a non-drain stop this is the
+  // backlog for the next fire; after a drain it should be 0. Counting is
+  // O(N) on the index but cheap relative to the sweep we just ran, and
+  // gives operators a single number to alert on.
+  let remainingEstimate = 0;
+  try {
+    remainingEstimate = await prisma.trainingEnrollment.count({
+      where: {
+        status: { in: ['ASSIGNED', 'IN_PROGRESS'] },
+        dueDate: { lt: todayIstUtc },
+      },
+    });
+  } catch (err) {
+    console.warn('[internal-training-overdue] remaining-estimate count failed', {
+      message: err?.message?.split('\n')[0],
+    });
   }
 
   console.log('[internal-training-overdue] sweep done', {
     date: targetDateStr,
-    candidates: candidates.length,
     flipped,
     skipped,
+    batches,
+    stoppedReason,
+    remainingEstimate,
+    elapsedMs: Date.now() - startTime,
   });
 
   res.json({
     date: targetDateStr,
     todayIstUtc: todayIstUtc.toISOString(),
-    candidates: candidates.length,
+    candidates: flippedEnrollmentIds.length,
     flipped,
     skipped,
-    flippedEnrollmentIds: flippedRows.map((r) => r.id),
+    batches,
+    remainingEstimate,
+    stoppedReason,
+    flippedEnrollmentIds,
   });
 }));
 

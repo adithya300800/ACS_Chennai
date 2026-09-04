@@ -22,6 +22,7 @@ file. Re-enabling integration tests is now a contract, not a TODO.
 |------|--------------------|--------|-----------|
 | `__tests__/dateOnly.test.js` | `dateOnlyToUtc` describe block (1 test) | Pure helper, no Prisma or external deps — verified the implementation matches the assertion before un-skipping. The remaining 30 tests in this file stay `.skip` and are tracked below. | LPR-004 |
 | `__tests__/cursor.test.js` | Already enabled (26 tests passing) | DR-008 wire-format regression; was never skipped. Acts as the baseline for "what a clean suite looks like". | DR-008 |
+| `__tests__/admin-training-overdue.test.js` | All 15 tests across 3 describes (was: header skipped) | S3-5: added 6 new tests pinning the bounded-batch sweep contract (take / orderBy / per-run cap / time budget / partial-batch short-circuit). Re-derived the wire-key `ADMIN_TRAINING_OVERDUE` semantics from the round-24 fan-out refactor. | REPORT-S3-5 |
 
 ## Skipped file inventory (unit suite, not protected by the CI guard)
 
@@ -35,7 +36,6 @@ break CI if mass-unskipped).
 |------|---------------|------------------|--------------------|
 | `__tests__/admin-attendance-digest.test.js` | behavior description (header) | LPR-004 / DR-022 | Body uses inline overrides of shared mocks — needs rewrite against the new digest cron contract before it's stable. |
 | `__tests__/admin-fanout.test.js` | behavior description (header) | LPR-004 / DR-022 | Same as above — admin-fanout semantics changed in round-25 (per-user preferences). |
-| `__tests__/admin-training-overdue.test.js` | behavior description (header) | LPR-004 / DR-024 | Training-overdue cron is round-24 fresh; tests need to be re-derived from the new wire keys (`employeeEmails` vs cuid, see round-24 lesson). |
 | `__tests__/attendance.datebucket.test.js` | header skipped | LPR-004 / DR-023 | Datebucket helper tests for IST; unskip separately after `dateOnly.test.js` finishes its phased re-enable. |
 | `__tests__/attendance.session-idempotency.test.js` | `DR-025 — one open session per attendance row` | LPR-004 / DR-025 | Blocked on DR-025 schema migration that hasn't run on the deployed DB. Re-enable when the migration is applied. |
 | `__tests__/attendance.test.js` | `Attendance Routes`, `Date Handling`, `GET /api/attendance`, `GET /api/attendance/today`, `POST /api/attendance/check-in`, `IST off-by-one`, `Authentication Middleware`, `Map URL Generation`, `Time Formatting` | LPR-004 | Multiple describes — broad attendance coverage; needs staged re-enable because some sub-tests depend on the live Postgres. |
