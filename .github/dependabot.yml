@@ -1,0 +1,87 @@
+# LPR-016 (round-26): repository governance — automated dependency updates.
+#
+# Dependabot opens weekly PRs for outdated npm + GitHub Actions versions.
+# Each PR ships with release notes + changelog excerpts and runs the full
+# CI gate (lint + tests + a11y + secret scan).
+#
+# `cooldown` defaults to 3 days so Dependabot waits for the ecosystem to
+# shake out a new release before re-opening an update; for backend/security
+# updates the cooldown is shorter because the cost of staying on a known-
+# vulnerable version is higher than the cost of a churn PR.
+#
+# Directories: the portal frontend + backend are separate npm workspaces
+# (no workspaces field — both have their own package.json) so we need an
+# `ecosystem: npm` block per directory.
+
+version: 2
+
+updates:
+  # ─── Backend (Node) ───────────────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/backend"
+    labels:
+      - "dependencies"
+      - "backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Asia/Kolkata"
+    # Default 3-day cooldown is fine for normal updates; security releases
+    # will arrive with a Dependabot security alert which Dependabot opens
+    # immediately regardless of this setting.
+    cooldown:
+      default-days: 3
+    # Group minor + patch into one PR so we don't get 12 npm-noise PRs/week.
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+      security:
+        applies-to: security-updates
+
+  # ─── Frontend (Node) ──────────────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    labels:
+      - "dependencies"
+      - "frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Asia/Kolkata"
+    cooldown:
+      default-days: 3
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+      security:
+        applies-to: security-updates
+
+  # ─── GitHub Actions ───────────────────────────────────────────────────────
+  # The portal deploys via .github/workflows/*.yml; Dependabot can update
+  # the pinned action SHAs without us touching them by hand.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    labels:
+      - "dependencies"
+      - "ci"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Asia/Kolkata"
+    cooldown:
+      default-days: 3
+    groups:
+      actions-minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"

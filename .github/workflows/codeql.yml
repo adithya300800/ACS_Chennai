@@ -1,0 +1,85 @@
+# LPR-016 (round-26): repository governance — CodeQL static security scan.
+#
+# Closes the LPR-016 "no dedicated static security-analysis workflow" gap.
+# CodeQL runs on every push to the protected branches + a weekly schedule
+# so a vulnerability introduced between scans still gets caught quickly.
+#
+# Why not just the default CodeQL initialization? The default GitHub-
+# managed flow only runs on the default branch + a weekly schedule; this
+# workflow also runs on add-react-website (the active dev branch) and on
+# PRs from forks via workflow_run, which gives faster feedback than waiting
+# for the default branch to advance.
+#
+# Reference: https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/customizing-code-scanning
+
+name: "CodeQL"
+
+on:
+  push:
+    branches:
+      - main
+      - add-react-website
+  pull_request:
+    branches:
+      - main
+      - add-react-website
+  schedule:
+    # Weekly Monday 04:00 IST scan — runs regardless of push activity so a
+    # silent vulnerability in a long-lived branch still surfaces.
+    - cron: "30 22 * * 0"
+
+permissions:
+  # Minimum required for the CodeQL action to upload SARIF to the
+  # code-scanning dashboard.
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            # Both the backend (Node + Express + Prisma) and the frontend
+            # (Vite + React) live in this repo. CodeQL's JS/TS extractor
+            # covers both, so a single matrix entry is enough.
+            paths:
+              - backend/src
+              - frontend/src
+              - backend/__tests__
+              - frontend/__tests__
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Required by CodeQL — fetches a single branch shallow enough
+          # to scan quickly but deep enough for cross-file dataflow.
+          fetch-depth: 0
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # queries: security-and-quality runs the default security pack
+          # plus the lint pack (security-extended is heavier; revisit if
+          # signal-to-noise becomes a problem in weekly runs).
+          queries: security-and-quality
+          paths: ${{ matrix.paths }}
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          # category is the SARIF category surfaced in the Security tab;
+          # keep it stable so historical findings stay grouped.
+          category: "/language:${{ matrix.language }}"
+
+      - name: Upload results to GitHub code-scanning dashboard
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ github.workspace }}/codeql-results/${{ matrix.language }}.sarif

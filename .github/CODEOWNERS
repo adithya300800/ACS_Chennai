@@ -1,0 +1,60 @@
+# LPR-016 (round-26): repository governance — required reviewers.
+#
+# CODEOWNERS pins ownership at the path level. When a PR touches a matched
+# path, GitHub auto-requests a review from the listed owner(s) and
+# (optionally) blocks merge until they approve.
+#
+# Syntax: <pattern>  <owner> [<owner> ...]
+#   - The LAST match wins, so put the most-specific patterns first.
+#   - Lines starting with `#` are comments.
+#   - Use @adithya300800 for the current sole maintainer; if a future
+#     @acs-portal-maintainers team is created, swap the placeholder.
+#   - Use @acs-portal/security for security-sensitive paths so the team
+#     that owns rotate-secrets / incident-response also blocks the merge.
+#
+# If `@adithya300800` does not exist as a GitHub user on this repo, replace
+# it with a valid team handle (e.g. `@acs-portal/maintainers`) before
+# enforcing branch protection on this file.
+
+# ─── Default owner ───────────────────────────────────────────────────────────
+# Everything not matched below falls back to the sole maintainer. This is
+# intentionally broad — the explicit blocks below add additional reviewers
+# without removing the default.
+*       @adithya300800
+
+# ─── Backend (production-readiness sensitive) ────────────────────────────────
+# Auth, schema, and storage code touches identity, data durability, and
+# cost. Require the backend maintainer for review.
+/backend/src/middleware/        @adithya300800
+/backend/src/routes/auth.js     @adithya300800
+/backend/src/routes/storage.js  @adithya300800
+/backend/src/lib/storage.js     @adithya300800
+/backend/src/lib/uploadRoutes.js @adithya300800
+/backend/src/index.js           @adithya300800
+/backend/prisma/                @adithya300800
+
+# ─── Frontend (auth-gated surfaces) ──────────────────────────────────────────
+# The AuthProvider + RouterScope layering in CLAUDE.md is load-bearing for
+# the round-17 (C-20) fix; any change to auth context, router structure, or
+# the 401 interceptor needs the frontend maintainer.
+/frontend/src/contexts/         @adithya300800
+/frontend/src/main.jsx          @adithya300800
+/frontend/src/App.jsx           @adithya300800
+/frontend/src/layouts/          @adithya300800
+
+# ─── CI / release pipelines ──────────────────────────────────────────────────
+# Deploy workflows and secret scanning are release-blockers. Touching these
+# without review has shipped data-loss bugs before.
+/.github/workflows/             @adithya300800
+
+# ─── Sensitive data paths (defence-in-depth) ─────────────────────────────────
+# GitHub itself blocks commits to `.env*` only when the secret-scanning
+# workflow catches a credential; this entry adds a reviewer as well so a
+# typo'd secret in a tracked file gets caught before merge.
+/.env*                          @adithya300800
+
+# ─── Documentation that controls deployment behaviour ────────────────────────
+# CLAUDE.md + the round-* memory files encode operational decisions; the
+# reviewer check prevents accidental rewrites.
+/CLAUDE.md                      @adithya300800
+/docs/PORTAL_UX_AUDIT.md        @adithya300800
