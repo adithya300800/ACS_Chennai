@@ -19,10 +19,34 @@
 //   admin then gets one email rendered from renderAdminAttendanceDigest.
 //
 // Idempotency:
-//   This endpoint does NOT pin idempotency at the application layer — the
-//   digests are read-only and idempotent by construction (the data didn't
-//   change between two fires on the same date). If a double-fire ever
-//   becomes a concern, add a DigestRun-style unique key on (date, employee).
+//   Pinned at the application layer by the AdminDigestRun table
+//   (backend/prisma/migrations/<ts>_s3_11_admin_digest_run). Per-admin
+//   lifecycle:
+//     1. Atomic claim: prisma.adminDigestRun.create({ adminId, scheduledFor,
+//        status: 'PENDING' }) — Prisma raises P2002 if a row already exists
+//        for this (admin, date). P2002 → increment idempotentSkips + skip
+//        the entire per-admin block (read-only idempotency; no EmailLog
+//        row, no Resend call).
+//     2. Terminal update: after the EmailLog row is written, update the
+//        AdminDigestRun with status = SENT / SKIPPED_* / FAILED and link
+//        emailLogId. If the EmailLog.create throws, the per-admin block's
+//        outer catch stamps status = 'FAILED' + the error message.
+//
+//   Double-fire scenarios:
+//     - workflow_dispatch firing the same job twice within seconds
+//       (scheduled + manual). The second fire finds every admin already
+//       claimed → idempotentSkips == adminsFound, sent == 0, no Resend
+//       traffic. Operators alert on idempotentSkips > 0 across two fires
+//       that are not supposed to overlap (e.g. a daily cron fire AND a
+//       manual backfill fire on the same calendar day).
+//     - Two concurrent in-flight fires (TOCTOU). The @@unique([adminId,
+//       scheduledFor]) constraint race-safes the claim; whichever
+//       transaction loses the INSERT race gets P2002 and short-circuits.
+//
+//   Force-replay: deliberately NOT supported in this PR. A future
+//   `?force=true` opt-in is a separate design decision (the simplest
+//   implementation is `deleteMany({ adminId, scheduledFor })` before the
+//   claim, but that destroys audit history). Out of scope here.
 //
 // Section counts:
 //   present + onLeave + absent = (active employees − admins). Each section
@@ -222,17 +246,43 @@ router.post('/run', requireInternalToken, asyncHandler(async (req, res) => {
   let sent = 0;
   let skipped = 0;
   let failed = 0;
+  let idempotentSkips = 0;
 
   for (const admin of admins) {
     try {
+      // [REPORT-S3-11] Atomic claim. Inserting (adminId, scheduledFor)
+      // raises P2002 if a prior fire already claimed this admin for this
+      // date — we short-circuit the entire per-admin block (no email,
+      // no EmailLog row). The @@unique constraint races-safe against any
+      // concurrent in-flight fire on the same date.
+      try {
+        await prisma.adminDigestRun.create({
+          data: {
+            adminId: admin.id,
+            scheduledFor: dateIstUtc,
+            status: 'PENDING',
+          },
+        });
+      } catch (claimErr) {
+        if (claimErr && claimErr.code === 'P2002') {
+          idempotentSkips += 1;
+          continue;
+        }
+        throw claimErr;
+      }
+
       // Per-admin prefs gate. Admins who flipped their master switch or
       // explicitly muted this type stay silent; we still audit-log.
       const prefs = await prisma.notificationPreference.findUnique({
         where: { employeeId: admin.id },
       }).catch(() => null);
 
+      let terminalStatus;
+      let emailLogId = null;
+      let errorMessage = null;
+
       if (prefs && prefs.emailEnabled === false) {
-        await prisma.emailLog.create({
+        const logRow = await prisma.emailLog.create({
           data: {
             employeeId: admin.id,
             notificationId: null,
@@ -242,59 +292,114 @@ router.post('/run', requireInternalToken, asyncHandler(async (req, res) => {
             status: 'SKIPPED_OPT_OUT',
           },
         });
+        emailLogId = logRow.id;
+        terminalStatus = 'SKIPPED_OPT_OUT';
         skipped += 1;
-        continue;
-      }
-      const typeMutes = (prefs && prefs.typeMutes && typeof prefs.typeMutes === 'object') ? prefs.typeMutes : {};
-      if (typeMutes.ADMIN_ATTENDANCE_DAILY === true) {
-        await prisma.emailLog.create({
-          data: {
-            employeeId: admin.id,
-            notificationId: null,
-            recipientEmail: admin.email || '',
-            subject: rendered.subject,
-            channel: 'ADMIN_DIGEST',
-            status: 'SKIPPED_TYPE_MUTED',
-          },
-        });
-        skipped += 1;
-        continue;
+      } else {
+        const typeMutes = (prefs && prefs.typeMutes && typeof prefs.typeMutes === 'object') ? prefs.typeMutes : {};
+        if (typeMutes.ADMIN_ATTENDANCE_DAILY === true) {
+          const logRow = await prisma.emailLog.create({
+            data: {
+              employeeId: admin.id,
+              notificationId: null,
+              recipientEmail: admin.email || '',
+              subject: rendered.subject,
+              channel: 'ADMIN_DIGEST',
+              status: 'SKIPPED_TYPE_MUTED',
+            },
+          });
+          emailLogId = logRow.id;
+          terminalStatus = 'SKIPPED_TYPE_MUTED';
+          skipped += 1;
+        } else if (!admin.email) {
+          const logRow = await prisma.emailLog.create({
+            data: {
+              employeeId: admin.id,
+              notificationId: null,
+              recipientEmail: '',
+              subject: rendered.subject,
+              channel: 'ADMIN_DIGEST',
+              status: 'SKIPPED_NO_ADDRESS',
+            },
+          });
+          emailLogId = logRow.id;
+          terminalStatus = 'SKIPPED_NO_ADDRESS';
+          skipped += 1;
+        } else {
+          const result = await sendEmail({ to: admin.email, subject: rendered.subject, html: rendered.html });
+          const logRow = await prisma.emailLog.create({
+            data: {
+              employeeId: admin.id,
+              notificationId: null,
+              recipientEmail: admin.email,
+              subject: rendered.subject,
+              channel: 'ADMIN_DIGEST',
+              status: result.ok ? 'SENT' : 'FAILED',
+              providerMessageId: result.messageId || null,
+              errorMessage: result.ok ? null : (result.error || `HTTP_${result.statusCode}`),
+            },
+          });
+          emailLogId = logRow.id;
+          if (result.ok) {
+            terminalStatus = 'SENT';
+            sent += 1;
+          } else {
+            terminalStatus = 'FAILED';
+            errorMessage = result.error || `HTTP_${result.statusCode}`;
+            failed += 1;
+          }
+        }
       }
 
-      if (!admin.email) {
-        await prisma.emailLog.create({
+      // Terminal update — links the resulting EmailLog row and stamps the
+      // final status. Wrapped in its own try/catch so a failure here does
+      // not double-count into the outer `failed += 1` (the EmailLog was
+      // already written and is the source of truth for the dispatch).
+      try {
+        await prisma.adminDigestRun.update({
+          where: {
+            adminId_scheduledFor: {
+              adminId: admin.id,
+              scheduledFor: dateIstUtc,
+            },
+          },
           data: {
-            employeeId: admin.id,
-            notificationId: null,
-            recipientEmail: '',
-            subject: rendered.subject,
-            channel: 'ADMIN_DIGEST',
-            status: 'SKIPPED_NO_ADDRESS',
+            status: terminalStatus,
+            emailLogId,
+            errorMessage,
           },
         });
-        skipped += 1;
-        continue;
+      } catch (updateErr) {
+        console.error('[internal-admin-attendance] AdminDigestRun terminal update failed', {
+          recipient: hashIdentifier(admin.id),
+          message: updateErr?.message?.split('\n')[0],
+        });
       }
-
-      const result = await sendEmail({ to: admin.email, subject: rendered.subject, html: rendered.html });
-      await prisma.emailLog.create({
-        data: {
-          employeeId: admin.id,
-          notificationId: null,
-          recipientEmail: admin.email,
-          subject: rendered.subject,
-          channel: 'ADMIN_DIGEST',
-          status: result.ok ? 'SENT' : 'FAILED',
-          providerMessageId: result.messageId || null,
-          errorMessage: result.ok ? null : (result.error || `HTTP_${result.statusCode}`),
-        },
-      });
-      if (result.ok) sent += 1; else failed += 1;
     } catch (err) {
       console.error('[internal-admin-attendance] per-admin send failed', {
         recipient: hashIdentifier(admin.id),
         message: err?.message?.split('\n')[0],
       });
+      // Stamp FAILED on the AdminDigestRun so the bookkeeping reflects
+      // the dispatch attempt even when the EmailLog write blew up. The
+      // terminal update above only runs on the happy path; we attempt a
+      // best-effort update here too.
+      try {
+        await prisma.adminDigestRun.update({
+          where: {
+            adminId_scheduledFor: {
+              adminId: admin.id,
+              scheduledFor: dateIstUtc,
+            },
+          },
+          data: {
+            status: 'FAILED',
+            errorMessage: err?.message?.split('\n')[0] || 'unknown error',
+          },
+        });
+      } catch (_) {
+        // Swallow — the outer failure is already logged above.
+      }
       failed += 1;
     }
   }
@@ -302,7 +407,7 @@ router.post('/run', requireInternalToken, asyncHandler(async (req, res) => {
   console.log('[internal-admin-attendance] digest done', {
     date: targetDateStr,
     admins: admins.length,
-    sent, skipped, failed,
+    sent, skipped, failed, idempotentSkips,
     sections: { present: present.length, onLeave: onLeave.length, absent: absent.length },
   });
 
@@ -312,6 +417,12 @@ router.post('/run', requireInternalToken, asyncHandler(async (req, res) => {
     sent,
     skipped,
     failed,
+    // [REPORT-S3-11] Count of admins already claimed for this date by a
+    // prior fire. > 0 indicates a double-fire (workflow_dispatch re-
+    // firing the cron, two parallel cron workers, manual backfill
+    // overlap). Operators alert on non-zero values that don't have a
+    // known reason.
+    idempotentSkips,
     sections: {
       present: present.length,
       onLeave: onLeave.length,

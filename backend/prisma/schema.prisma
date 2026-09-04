@@ -20,13 +20,13 @@ datasource db {
 }
 
 model Employee {
-  id                     String               @id @default(uuid())
-  email                  String               @unique
+  id                     String                  @id @default(uuid())
+  email                  String                  @unique
   password               String?
   name                   String
   designation            String?
   department             String?
-  isAdmin                Boolean              @default(false) @map("is_admin")
+  isAdmin                Boolean                 @default(false) @map("is_admin")
   // LPR-011 (smallest demonstrable fix): Zoho access + refresh tokens
   // are stored as plaintext columns. A database compromise (lost
   // backup, leaked read replica, SQL injection) hands an attacker the
@@ -42,27 +42,33 @@ model Employee {
   // in this commit — it changes the column type, breaks every
   // existing row, and requires a backfill migration. Documenting the
   // gap is the explicit deliverable for LPR-011 in this round.
-  zohoAccessToken        String?              @map("zoho_access_token")
-  zohoRefreshToken       String?              @map("zoho_refresh_token")
-  createdAt              DateTime             @default(now()) @map("created_at")
-  updatedAt              DateTime             @updatedAt @map("updated_at")
+  zohoAccessToken        String?                 @map("zoho_access_token")
+  zohoRefreshToken       String?                 @map("zoho_refresh_token")
+  createdAt              DateTime                @default(now()) @map("created_at")
+  updatedAt              DateTime                @updatedAt @map("updated_at")
   attendance             Attendance[]
-  dprSubmitted           DPR[]                @relation("DPRSubmitter")
-  dprReviewed            DPR[]                @relation("DPRReviewer")
-  dprApproved            DPR[]                @relation("DPRApprover")
-  inspectionSubmitted    InspectionRecord[]   @relation("InspectionSubmitter")
+  dprSubmitted           DPR[]                   @relation("DPRSubmitter")
+  dprReviewed            DPR[]                   @relation("DPRReviewer")
+  dprApproved            DPR[]                   @relation("DPRApprover")
+  inspectionSubmitted    InspectionRecord[]      @relation("InspectionSubmitter")
   notifications          Notification[]
-  leaveRequests          LeaveRequest[]       @relation("LeaveSubmitter")
-  leaveReviewed          LeaveRequest[]       @relation("LeaveReviewer")
-  trainingCoursesCreated TrainingCourse[]     @relation("CourseCreatedBy")
-  trainingEnrollments    TrainingEnrollment[] @relation("EnrollEmployee")
-  trainingAssignedByMe   TrainingEnrollment[] @relation("EnrollAssignedBy")
+  leaveRequests          LeaveRequest[]          @relation("LeaveSubmitter")
+  leaveReviewed          LeaveRequest[]          @relation("LeaveReviewer")
+  trainingCoursesCreated TrainingCourse[]        @relation("CourseCreatedBy")
+  trainingEnrollments    TrainingEnrollment[]    @relation("EnrollEmployee")
+  trainingAssignedByMe   TrainingEnrollment[]    @relation("EnrollAssignedBy")
   // Round-25: email notification preferences + audit log + digest runs.
   // NotificationPreference is 1:1 (PK = employeeId); EmailLog / DigestRun
   // are 1:N and outlive notification rows via onDelete: SetNull.
   notificationPreference NotificationPreference?
   emailLogs              EmailLog[]
   digestRuns             DigestRun[]
+  // [REPORT-S3-11] Admin-targeted daily attendance digest bookkeeping.
+  // Mirrors DigestRun's (employeeId, scheduledFor) idempotency contract
+  // for the admin recipient: a second cron fire on the same date is a
+  // no-op. See src/routes/internal-admin-attendance.js header for the
+  // claim/update pattern + the P2002 catch race-safety.
+  adminDigestRuns        AdminDigestRun[]
   uploadIntents          UploadIntent[]
 
   @@map("employees")
@@ -111,7 +117,7 @@ model RefreshToken {
   // hand out usable 7-day credentials.
   tokenHash  String @unique @map("token_hash")
 
-  createdAt DateTime @default(now()) @map("created_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
   // Rotation chain: points at the row this token replaced. Lets an operator
   // walk a session's history and lets the reuse-detection path prove that a
   // replayed token really was superseded rather than forged.
@@ -571,18 +577,18 @@ model TrainingEnrollment {
 //     notifications were bundled into a given run.
 
 model NotificationPreference {
-  employeeId       String   @id @map("employee_id")
-  emailEnabled     Boolean  @default(true) @map("email_enabled")
-  digestEnabled    Boolean  @default(true) @map("digest_enabled")
+  employeeId      String   @id @map("employee_id")
+  emailEnabled    Boolean  @default(true) @map("email_enabled")
+  digestEnabled   Boolean  @default(true) @map("digest_enabled")
   // Free-form JSON object: { "<NOTIFICATION_TYPE>": true }. Reads tolerate
   // unknown type strings (forward-compat) and missing keys (default = false,
   // i.e. NOT muted).
-  typeMutes        Json     @default("{}") @map("type_mutes")
+  typeMutes       Json     @default("{}") @map("type_mutes")
   // 0-23, default 8 AM IST. Out-of-range values are rejected at the API
   // layer; the cron uses Date.now() in TZ=Asia/Kolkata for the actual send
   // window matching.
-  digestHourLocal  Int      @default(8) @map("digest_hour_local")
-  updatedAt        DateTime @updatedAt @map("updated_at")
+  digestHourLocal Int      @default(8) @map("digest_hour_local")
+  updatedAt       DateTime @updatedAt @map("updated_at")
 
   employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 
@@ -610,13 +616,18 @@ model EmailLog {
   errorMessage      String?  @map("error_message")
   sentAt            DateTime @default(now()) @map("sent_at")
 
-  employee     Employee      @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  notification Notification? @relation(fields: [notificationId], references: [id], onDelete: SetNull)
+  employee       Employee        @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  notification   Notification?   @relation(fields: [notificationId], references: [id], onDelete: SetNull)
   // Back-relation required by Prisma's validation when DigestRun declares
   // `emailLog EmailLog? @relation(...)` on the other side. Optional because
   // emailLogId is nullable + @unique — at most one DigestRun points at this
   // email log row (e.g. when the digest send succeeds and gets audited).
-  digestRun    DigestRun?
+  digestRun      DigestRun?
+  // [REPORT-S3-11] AdminDigestRun mirrors the same nullable + @unique
+  // contract as DigestRun above: at most one admin-digest-run can point
+  // at any given EmailLog row. SetNull mirrors digest_run's behaviour so
+  // pruning audit rows does not orphan the bookkeeping.
+  adminDigestRun AdminDigestRun?
 
   @@index([employeeId, sentAt])
   @@index([notificationId])
@@ -625,11 +636,11 @@ model EmailLog {
 }
 
 model DigestItem {
-  id              String   @id @default(uuid())
-  digestRunId     String   @map("digest_run_id")
-  employeeId      String   @map("employee_id")
-  notificationId  String   @map("notification_id")
-  includedAt      DateTime @default(now()) @map("included_at")
+  id             String   @id @default(uuid())
+  digestRunId    String   @map("digest_run_id")
+  employeeId     String   @map("employee_id")
+  notificationId String   @map("notification_id")
+  includedAt     DateTime @default(now()) @map("included_at")
 
   digestRun DigestRun @relation(fields: [digestRunId], references: [id], onDelete: Cascade)
 
@@ -641,14 +652,14 @@ model DigestItem {
 }
 
 model DigestRun {
-  id            String    @id @default(uuid())
-  employeeId    String    @map("employee_id")
-  scheduledFor  DateTime  @map("scheduled_for")            // business-date key (00:00 IST)
-  status        String    @default("PENDING")              // "PENDING" | "SENT" | "EMPTY" | "FAILED"
-  emailLogId    String?   @unique @map("email_log_id")
-  errorMessage  String?   @map("error_message")
-  completedAt   DateTime? @map("completed_at")
-  createdAt     DateTime  @default(now()) @map("created_at")
+  id           String    @id @default(uuid())
+  employeeId   String    @map("employee_id")
+  scheduledFor DateTime  @map("scheduled_for") // business-date key (00:00 IST)
+  status       String    @default("PENDING") // "PENDING" | "SENT" | "EMPTY" | "FAILED"
+  emailLogId   String?   @unique @map("email_log_id")
+  errorMessage String?   @map("error_message")
+  completedAt  DateTime? @map("completed_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
 
   employee Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
   items    DigestItem[]
@@ -660,6 +671,56 @@ model DigestRun {
   @@unique([employeeId, scheduledFor])
   @@index([status])
   @@map("digest_run")
+}
+
+// [REPORT-S3-11] Admin-targeted daily attendance digest bookkeeping.
+//
+// The admin attendance digest cron
+// (POST /api/internal/attendance/digest/run) hands every active admin a
+// single email summarising present / on-leave / absent for the target
+// date. The handler previously had no application-layer idempotency: any
+// manual re-fire via workflow_dispatch re-sent the digest to every
+// admin, because nothing pinned a "we already sent this admin the
+// digest for date X" record.
+//
+// AdminDigestRun is the admin-recipient analogue of DigestRun. One row
+// per (admin, scheduledFor); the @@unique constraint is the idempotency
+// key — Prisma P2002 → caller treats as already-claimed and short-
+// circuits the per-admin send block entirely.
+//
+// Lifecycle:
+//   PENDING               — claimed by an in-flight fire (created with status='PENDING').
+//   SENT                  — email dispatch succeeded (result.ok === true).
+//   SKIPPED_OPT_OUT       — admin has emailEnabled=false (master kill switch).
+//   SKIPPED_TYPE_MUTED    — admin muted ADMIN_ATTENDANCE_DAILY.
+//   SKIPPED_NO_ADDRESS    — admin row has no email address.
+//   FAILED                — sendEmail returned ok:false (transport / 4xx / 5xx).
+//
+// Cleanup is intentionally NOT scoped to this PR (a future round adds a
+// 90-day prune sweep). The volume is bounded: 1 row per admin per date —
+// for a single-tenant deployment with O(10) admins and O(365) days of
+// retention, the table never exceeds O(3650) rows.
+model AdminDigestRun {
+  id           String   @id @default(uuid())
+  adminId      String   @map("admin_id")
+  scheduledFor DateTime @map("scheduled_for") // business-date key (00:00 IST)
+  status       String   @default("PENDING") // PENDING | SENT | SKIPPED_OPT_OUT | SKIPPED_TYPE_MUTED | SKIPPED_NO_ADDRESS | FAILED
+  // One AdminDigestRun → one EmailLog (the audit row written by the
+  // handler). Nullable + @unique mirrors DigestRun.emailLogId so the
+  // optional relation is well-formed.
+  emailLogId   String?  @unique @map("email_log_id")
+  errorMessage String?  @map("error_message")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  admin    Employee  @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  emailLog EmailLog? @relation(fields: [emailLogId], references: [id], onDelete: SetNull)
+
+  // Idempotency: a second cron fire for the same admin + business date
+  // is a no-op. The unique constraint races-safe against the per-admin
+  // claim — Prisma P2002 → caller treats as already-claimed.
+  @@unique([adminId, scheduledFor])
+  @@index([scheduledFor])
+  @@map("admin_digest_run")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -718,8 +779,8 @@ model UploadIntent {
   // sweep: the sweep's CONFIRMED-orphan pass guards on `boundAt IS NULL`,
   // so a DPR POST that binds a row mid-sweep lands as `count = 0` and
   // the blob is left alone.
-  boundType   String?   @map("bound_type")
-  boundAt     DateTime? @map("bound_at")
+  boundType String?   @map("bound_type")
+  boundAt   DateTime? @map("bound_at")
 
   employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 

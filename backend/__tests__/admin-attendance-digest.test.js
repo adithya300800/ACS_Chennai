@@ -59,6 +59,9 @@ function makePrisma({
   prefsByAdmin = {},
 } = {}) {
   const emailLogWrites = [];
+  // [REPORT-S3-11] Track AdminDigestRun writes so tests can assert on
+  // the per-admin bookkeeping. Each create+update pair is one row.
+  const adminDigestRunWrites = [];
   return {
     employee: {
       findMany: jest.fn(async () => employees),
@@ -78,7 +81,32 @@ function makePrisma({
         return { id: 'log-' + emailLogWrites.length, ...data };
       }),
     },
+    adminDigestRun: {
+      // Atomic claim — never raises P2002 here because the legacy suite
+      // only fires the handler once per test. The new idempotency suite
+      // (admin-attendance-digest-idempotency.test.js) has its own mock
+      // factory that honours the @@unique constraint.
+      create: jest.fn(async ({ data }) => {
+        const row = {
+          id: 'adr-' + (adminDigestRunWrites.length + 1),
+          ...data,
+        };
+        adminDigestRunWrites.push(row);
+        return row;
+      }),
+      update: jest.fn(async ({ where, data }) => {
+        const row = adminDigestRunWrites.find(
+          (r) =>
+            r.adminId === where.adminId_scheduledFor.adminId &&
+            r.scheduledFor.getTime() === where.adminId_scheduledFor.scheduledFor.getTime()
+        );
+        if (!row) throw new Error('AdminDigestRun not found');
+        Object.assign(row, data);
+        return row;
+      }),
+    },
     __emailLogWrites: emailLogWrites,
+    __adminDigestRunWrites: adminDigestRunWrites,
   };
 }
 
