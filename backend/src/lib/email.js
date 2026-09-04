@@ -43,16 +43,6 @@ function isConfigured() {
   return Boolean(RESEND_API_KEY);
 }
 
-// Round-25b debug: log Resend env state once at module load so we can prove
-// RESEND_API_KEY is wired without leaking the key. Strip on next round.
-console.log('[email] module loaded', {
-  resend_key_set: Boolean(RESEND_API_KEY),
-  resend_key_len: RESEND_API_KEY.length,
-  resend_key_sha8: RESEND_API_KEY ? require('crypto').createHash('sha256').update(RESEND_API_KEY).digest('hex').slice(0, 8) : 'EMPTY',
-  from_email: FROM_EMAIL,
-  from_name: FROM_NAME,
-});
-
 /**
  * Escape an arbitrary string for safe interpolation into HTML email bodies.
  * Email clients vary wildly in built-in sanitization — escape explicitly.

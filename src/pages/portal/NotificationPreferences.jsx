@@ -286,9 +286,9 @@ export default function NotificationPreferences() {
         <section className="notification-pref-section" aria-labelledby="pref-admin">
           <h2 id="pref-admin">Admin: SMTP wire check</h2>
           <p className="notification-pref-section-desc">
-            Send a single test email to your own mailbox to verify the Zoho SMTP
-            credentials are configured and deliverable. Use this after rotating the
-            app password on Render.
+            Send a single test email to your own mailbox to verify Resend is
+            configured and deliverable. Use this after rotating the API key on
+            Render or the Resend dashboard.
           </p>
           <button
             type="button"
