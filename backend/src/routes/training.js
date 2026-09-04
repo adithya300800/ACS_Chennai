@@ -42,6 +42,11 @@ const {
   isCompleted,
   markComplete,
   httpStatusForCode,
+  // LPR-009: canonical terminal-status list — single source of truth for the
+  // "row is in any *_COMPLETED state" guard used in updateWhere clauses and
+  // the progress-route locking check. Mirrors the frontend
+  // `TRAINING_TERMINAL_STATUSES` export in src/lib/constants.js.
+  TERMINAL_STATUSES,
 } = require('../lib/trainingRules');
 const { mapPrismaError } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
@@ -870,12 +875,8 @@ router.post('/enrollments/:id/admin-override', trainingWriteLimiter, requireFres
     const updated = await prisma.trainingEnrollment.update({
       where: {
         id,
-        status: { notIn: [
-          'SELF_ATTESTED_COMPLETED',
-          'PLAYER_OBSERVED_COMPLETED',
-          'PROVIDER_VERIFIED_COMPLETED',
-          'ADMIN_OVERRIDE_COMPLETED',
-        ] },
+        // LPR-009: canonical terminal list — see TERMINAL_STATUSES export.
+        status: { notIn: TERMINAL_STATUSES },
       },
       data: patch,
       include: {

@@ -60,11 +60,21 @@ const STATUS_TO_EVIDENCE = Object.fromEntries(
 
 // Returns true for any of the four completed-states. (Overdue + Cancelled
 // are NOT completed — they're terminal-but-not-done states.)
+//
+// LPR-009: export `TERMINAL_STATUSES` as the single source of truth so the
+// routes and the frontend share the same list. Frontend mirrors this in
+// src/lib/constants.js (TRAINING_TERMINAL_STATUSES) — both sides must
+// stay in sync.
+const TERMINAL_STATUSES = Object.freeze([
+  'SELF_ATTESTED_COMPLETED',
+  'PLAYER_OBSERVED_COMPLETED',
+  'PROVIDER_VERIFIED_COMPLETED',
+  'ADMIN_OVERRIDE_COMPLETED',
+]);
+const TERMINAL_STATUS_SET = new Set(TERMINAL_STATUSES);
+
 function isCompleted(status) {
-  return status === 'SELF_ATTESTED_COMPLETED'
-    || status === 'PLAYER_OBSERVED_COMPLETED'
-    || status === 'PROVIDER_VERIFIED_COMPLETED'
-    || status === 'ADMIN_OVERRIDE_COMPLETED';
+  return TERMINAL_STATUS_SET.has(status);
 }
 
 const ALLOWED_PRIORITIES = new Set([
@@ -754,6 +764,8 @@ module.exports = {
   canTransition,
   canAutoCompleteFromPlayer,
   isCompleted,
+  TERMINAL_STATUSES,
+  TERMINAL_STATUS_SET,
   markComplete,
   httpStatusForCode,
 };

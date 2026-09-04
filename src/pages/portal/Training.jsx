@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { TRAINING_PROVIDER_LABELS, TRAINING_STATUSES, TRACKABLE_PROVIDERS } from '../../lib/constants.js';
+import { TRAINING_PROVIDER_LABELS, TRAINING_STATUSES, TRACKABLE_PROVIDERS, isTrainingTerminal, TRAINING_TERMINAL_STATUSES } from '../../lib/constants.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { getBusinessToday, useBusinessDateKey } from '../../lib/businessDate.js';
 
@@ -12,15 +12,25 @@ import { getBusinessToday, useBusinessDateKey } from '../../lib/businessDate.js'
 // but is read-only — assignments come from admin; this page just lists
 // them with a status filter.
 
+// LPR-009: human-readable labels for every stored status enum value. The
+// four evidence-class terminal states all collapse to "Completed" on the
+// pill so an employee never sees raw enum text, but the underlying status
+// string is still queryable on the row for reports / badge detail.
 const STATUS_LABELS = {
   ASSIGNED: 'Assigned',
   IN_PROGRESS: 'In Progress',
   COMPLETED: 'Completed',
+  SELF_ATTESTED_COMPLETED: 'Completed',
+  PLAYER_OBSERVED_COMPLETED: 'Completed',
+  PROVIDER_VERIFIED_COMPLETED: 'Completed',
+  ADMIN_OVERRIDE_COMPLETED: 'Completed',
 };
 
 // Filter tabs at the top. "Overdue" is a derived view (assigned/in-progress
 // with a past dueDate) — we don't add a column, just compute on the client
-// so the user can surface what needs attention.
+// so the user can surface what needs attention. The COMPLETED tab matches
+// the canonical terminal list (LPR-009) so any of the four evidence-class
+// completions land in the same bucket as legacy `COMPLETED`.
 const FILTERS = [
   { key: 'ALL', label: 'All' },
   { key: 'ASSIGNED', label: 'Assigned' },
@@ -36,9 +46,12 @@ const formatDueDate = (dateStr) => {
   return new Date(y, m - 1, d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 };
 
+// LPR-009: terminal-check uses the canonical list — a row in any of the
+// four *_COMPLETED evidence states is no longer eligible to be flagged
+// overdue (the enrollment is done).
 const isOverdue = (enrollment) => {
   if (!enrollment?.dueDate) return false;
-  if (enrollment.status === TRAINING_STATUSES.COMPLETED) return false;
+  if (isTrainingTerminal(enrollment.status)) return false;
   const due = String(enrollment.dueDate).split('T')[0];
   const today = getBusinessToday();
   return due < today;
@@ -86,10 +99,14 @@ export default function Training() {
   }, [fetchEnrollments]);
 
   // Tab counts shown in the filter header. Drives the "5 overdue" callout.
+  // LPR-009: every terminal evidence class is bucketed into COMPLETED so
+  // the counts and the filter stay consistent with the canonical list.
   const counts = useMemo(() => {
     const c = { ALL: enrollments.length, ASSIGNED: 0, IN_PROGRESS: 0, COMPLETED: 0, OVERDUE: 0 };
     enrollments.forEach((e) => {
-      if (c[e.status] != null) c[e.status] += 1;
+      if (e.status === TRAINING_STATUSES.ASSIGNED) c.ASSIGNED += 1;
+      else if (e.status === TRAINING_STATUSES.IN_PROGRESS) c.IN_PROGRESS += 1;
+      else if (isTrainingTerminal(e.status)) c.COMPLETED += 1;
       if (isOverdue(e)) c.OVERDUE += 1;
     });
     return c;
@@ -98,6 +115,7 @@ export default function Training() {
   const visible = useMemo(() => {
     if (filter === 'ALL') return enrollments;
     if (filter === 'OVERDUE') return enrollments.filter(isOverdue);
+    if (filter === 'COMPLETED') return enrollments.filter((e) => isTrainingTerminal(e.status));
     return enrollments.filter((e) => e.status === filter);
   }, [enrollments, filter, businessDateKey]);
 
@@ -203,9 +221,9 @@ export default function Training() {
                   <Link
                     to={`/portal/training/${e.id}`}
                     className="training-btn training-btn-primary"
-                    aria-label={`${e.status === 'COMPLETED' ? 'Replay' : 'Continue'} ${e.course?.title || 'course'}`}
+                    aria-label={`${isTrainingTerminal(e.status) ? 'Replay' : 'Continue'} ${e.course?.title || 'course'}`}
                   >
-                    {e.status === 'COMPLETED' ? 'Replay' : e.status === 'ASSIGNED' ? 'Start' : 'Continue'}
+                    {isTrainingTerminal(e.status) ? 'Replay' : e.status === 'ASSIGNED' ? 'Start' : 'Continue'}
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                       <line x1="5" y1="12" x2="19" y2="12" />
                       <polyline points="12 5 19 12 12 19" />

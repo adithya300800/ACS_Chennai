@@ -10,6 +10,7 @@ import {
   TRAINING_PROGRESS_PING_MS,
   TRAINING_PROVIDER_LABELS,
   TRAINING_STATUSES,
+  isTrainingTerminal,
 } from '../../lib/constants.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
@@ -95,9 +96,11 @@ export default function TrainingDetail() {
 
   // Throttled progress POST — runs once every TRAINING_PROGRESS_PING_MS,
   // picking up whatever the latest player event left in latestRef.
+  // LPR-009: terminal-check uses the canonical list so progress pings stop
+  // on every *_COMPLETED state, not just the legacy `COMPLETED` value.
   useEffect(() => {
     if (!enrollment) return undefined;
-    if (enrollment.status === TRAINING_STATUSES.COMPLETED) return undefined;
+    if (isTrainingTerminal(enrollment.status)) return undefined;
 
     const id = setInterval(async () => {
       if (!dirtyRef.current) return;
@@ -114,11 +117,12 @@ export default function TrainingDetail() {
         setPendingPct(updated.progressPct || 0);
         setLastPingAt(Date.now());
         // Mirror status into local state so the pill / progress bar update
-        // without a full refetch. Important when we transition to COMPLETED
-        // mid-watch — the interval must stop firing after that.
+        // without a full refetch. Important when we transition to a
+        // terminal state mid-watch — the interval must stop firing after
+        // that.
         if (updated.status !== enrollment.status) {
           setEnrollment((prev) => ({ ...prev, status: updated.status, progressPct: updated.progressPct }));
-          if (updated.status === TRAINING_STATUSES.COMPLETED) {
+          if (isTrainingTerminal(updated.status)) {
             push('Course marked complete.', 'success');
           }
         }
@@ -154,9 +158,11 @@ export default function TrainingDetail() {
   // evidenceMetadata.sessionId. Sending the same sessionIdRef used by the
   // interval pings lets the route validate the chain as a single iframe
   // session.
+  // LPR-009: terminal-check uses the canonical list so a row that already
+  // landed in any *_COMPLETED state short-circuits here.
   const handleEnded = useCallback(async () => {
     if (!enrollment) return;
-    if (enrollment.status === TRAINING_STATUSES.COMPLETED) return;
+    if (isTrainingTerminal(enrollment.status)) return;
     try {
       const updated = await api.updateTrainingProgress(
         enrollment.id,
@@ -178,9 +184,10 @@ export default function TrainingDetail() {
   // Manual mark-complete — required for non-trackable providers; also
   // serves as the employee-side safety net if the auto-capture missed
   // the ended event (e.g. browser killed the tab mid-video).
+  // LPR-009: terminal-check uses the canonical list.
   const handleManualComplete = useCallback(async () => {
     if (!enrollment) return;
-    if (enrollment.status === TRAINING_STATUSES.COMPLETED) return;
+    if (isTrainingTerminal(enrollment.status)) return;
     if (!window.confirm('Mark this course as complete?')) return;
     setCompleting(true);
     try {
@@ -221,7 +228,8 @@ export default function TrainingDetail() {
   }
 
   const course = enrollment.course || {};
-  const isComplete = enrollment.status === TRAINING_STATUSES.COMPLETED;
+  // LPR-009: any of the four *_COMPLETED evidence states counts as done.
+  const isComplete = isTrainingTerminal(enrollment.status);
 
   return (
     <div className="training-page training-detail-page">
@@ -247,7 +255,11 @@ export default function TrainingDetail() {
         <h1 className="training-detail-title" aria-label={`Training: ${course.title || 'Untitled course'}`}>{course.title || 'Untitled course'}</h1>
         <div className="training-detail-sub">
           <span className={`training-pill training-pill-${enrollment.status.toLowerCase()}`}>
-            {enrollment.status === 'IN_PROGRESS' ? 'In Progress' : enrollment.status === 'COMPLETED' ? 'Completed' : 'Assigned'}
+            {enrollment.status === 'IN_PROGRESS'
+              ? 'In Progress'
+              : isTrainingTerminal(enrollment.status)
+                ? 'Completed'
+                : 'Assigned'}
           </span>
           <span className="training-detail-divider">·</span>
           <span>{TRAINING_PROVIDER_LABELS[course.provider] || 'External'}</span>

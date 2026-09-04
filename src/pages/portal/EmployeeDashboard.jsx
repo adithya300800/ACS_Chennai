@@ -7,7 +7,7 @@ import { formatTime } from '../../lib/format.js';
 import { getBusinessToday } from '../../lib/businessDate.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { MapPinIcon, ClockIcon, DocIcon, BookIcon, PlaneIcon, BellIcon } from '../../components/Icons.jsx';
-import { TRAINING_STATUSES } from '../../lib/constants.js';
+import { isTrainingTerminal } from '../../lib/constants.js';
 
 // SOL-P2#16: employee home dashboard. Lands employees on a single screen
 // with their today-check-in status, open DPR draft, training due,
@@ -23,16 +23,19 @@ import { TRAINING_STATUSES } from '../../lib/constants.js';
 //   /leave/my                               → leave balance widget
 //   /dpr/notifications/list                 → last 5 notifications
 
+// LPR-009: terminal-check uses the canonical list — a row in any of the
+// four *_COMPLETED evidence states is no longer eligible for overdue/due-soon
+// counters.
 const isOverdue = (e) => {
   if (!e?.dueDate) return false;
-  if (e.status === TRAINING_STATUSES.COMPLETED) return false;
+  if (isTrainingTerminal(e.status)) return false;
   const due = String(e.dueDate).split('T')[0];
   return due < getBusinessToday();
 };
 
 const isDueSoon = (e) => {
   if (!e?.dueDate) return false;
-  if (e.status === TRAINING_STATUSES.COMPLETED) return false;
+  if (isTrainingTerminal(e.status)) return false;
   const due = String(e.dueDate).split('T')[0];
   const today = getBusinessToday();
   if (due < today) return false; // overdue already handled separately

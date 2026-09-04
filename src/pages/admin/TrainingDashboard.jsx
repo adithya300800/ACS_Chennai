@@ -6,6 +6,7 @@ import { api } from '../../lib/api.js';
 import {
   TRAINING_PROVIDER_LABELS,
   TRAINING_STATUSES,
+  isTrainingTerminal,
 } from '../../lib/constants.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { getBusinessToday, useBusinessDateKey } from '../../lib/businessDate.js';
@@ -75,7 +76,7 @@ const formatDateTime = (dateStr) => {
 
 const isOverdue = (e) => {
   if (!e?.dueDate) return false;
-  if (e.status === TRAINING_STATUSES.COMPLETED) return false;
+  if (isTrainingTerminal(e.status)) return false;
   const due = String(e.dueDate).split('T')[0];
   const today = getBusinessToday();
   return due < today;

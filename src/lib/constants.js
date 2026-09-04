@@ -46,6 +46,27 @@ export const TRAINING_STATUSES = {
   COMPLETED: 'COMPLETED',
 };
 
+// LPR-009: canonical terminal-status list shared between the backend
+// (`backend/src/lib/trainingRules.js` isCompleted()) and every frontend
+// filter, label, action guard, and progress loop. Mirrors the four
+// evidence-class terminal states on the server.
+//
+// A row is "terminal" if it represents a finished enrollment — the union
+// of the legacy `COMPLETED` value and the four evidence-class completions
+// introduced in round-20. Both lists must stay in sync; the test suite in
+// backend/__tests__/trainingRules.test.js pins the membership.
+export const TRAINING_TERMINAL_STATUSES = [
+  'COMPLETED',
+  'SELF_ATTESTED_COMPLETED',
+  'PLAYER_OBSERVED_COMPLETED',
+  'PROVIDER_VERIFIED_COMPLETED',
+  'ADMIN_OVERRIDE_COMPLETED',
+];
+
+export const TRAINING_TERMINAL_STATUS_SET = new Set(TRAINING_TERMINAL_STATUSES);
+
+export const isTrainingTerminal = (status) => TRAINING_TERMINAL_STATUS_SET.has(status);
+
 // Priority — used to sort + colour the pill on admin rows.
 export const TRAINING_PRIORITIES = {
   LOW: 'LOW',
