@@ -837,7 +837,8 @@ router.get('/stats', dprStatsAdminGuard, asyncHandler(async (req, res) => {
   // IST DPR was already counted under today. The IST helper closes both
   // windows.
   const startOfToday = getTodayBusinessDate();
-  const endOfToday = getTodayBusinessDate(new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000));
+  const endOfToday = new Date(startOfToday);
+  endOfToday.setUTCDate(endOfToday.getUTCDate() + 1);
 
   // Count queries run in parallel — each is a single COUNT() against an
   // indexed column. Worst case: six tiny aggregates, ~tens of ms total.
