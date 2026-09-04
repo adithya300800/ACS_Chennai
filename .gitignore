@@ -37,3 +37,14 @@ test-azure-backend.js
 test-api.js
 test-migration.mjs
 happy-path.js
+
+# [GP-2] Developer scratch scripts that instantiate live provider SDKs.
+# These are the ROOT CAUSE of the LPR-002 Resend key leak: test-resend.js
+# carried a live `re_...` key that is still reachable in git history at
+# b11f9f5^. The working tree was redacted to REDACTED_USE_RESEND_API_KEY_ENV,
+# but redaction is not remediation and these files will simply re-leak the
+# next time someone pastes a real key to debug. They are untracked now and
+# must stay untracked. If you need to smoke-test a provider, read the key
+# from process.env and keep the script out of git.
+test-*.js
+test-*.mjs
