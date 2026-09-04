@@ -906,9 +906,14 @@ router.get('/stats', dprStatsAdminGuard, asyncHandler(async (req, res) => {
     window: {
       // Echo back the window so the client can render "as of <ts>" if it
       // wants to — useful for diagnosing clock-skew between server and DB.
+      // LPR-013: timezone is now the IST business day (was 'UTC'). The
+      // instant values are unchanged shape — UTC midnights of consecutive
+      // IST calendar days — but the label tells the reader which day
+      // boundary is in effect so a future debugger doesn't have to
+      // re-derive it.
       start: startOfToday.toISOString(),
       end: endOfToday.toISOString(),
-      timezone: 'UTC',
+      timezone: 'Asia/Kolkata',
     },
   });
 }));
