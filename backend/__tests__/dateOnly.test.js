@@ -34,8 +34,8 @@ const {
   formatDateOnly,
 } = require('../src/lib/dateOnly');
 
-describe.skip('dateOnly — canonical helpers (DR-023)', () => {
-  describe.skip('dateOnlyToUtc', () => {
+describe('dateOnly — canonical helpers (DR-023)', () => {
+  describe('dateOnlyToUtc', () => {
     it('returns UTC midnight for a valid (y, m, d)', () => {
       const d = dateOnlyToUtc(2026, 9, 2);
       expect(d.toISOString()).toBe('2026-09-02T00:00:00.000Z');

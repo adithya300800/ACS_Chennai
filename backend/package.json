@@ -10,7 +10,9 @@
     "db:seed": "node prisma/seed.js",
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:round13": "node scripts/round13-tests.js"
+    "test:round13": "node scripts/round13-tests.js",
+    "test:no-skipped": "node scripts/no-skipped-tests.js",
+    "pretest": "node scripts/no-skipped-tests.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1121.0",
