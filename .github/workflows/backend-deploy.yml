@@ -71,8 +71,13 @@ jobs:
       # migrations WOULD be applied without actually applying anything. If the
       # pending migration list differs from what the owner expects, this is the
       # step that catches it before any DDL hits production.
-      - name: Prisma migrate status (dry-run)
-        continue-on-error: true
+      #
+      # [B-4] This step is now BLOCKING. A drift between schema.prisma and
+      # the deployed migration history means Render's new container will
+      # either fail to start (B-1's `prisma migrate deploy` errors) or, if
+      # `prisma db push` were still in use, silently mutate the production
+      # schema. Either is a deploy-blocking regression.
+      - name: Prisma migrate status (drift gate)
         run: npx prisma migrate status
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
@@ -86,6 +91,11 @@ jobs:
       # The step is non-blocking on purpose: a missing operator-side backup is
       # not a reason to fail the deploy, but a missing logged record IS a reason
       # to make this PR unmergeable in a future, stricter CI policy.
+      #
+      # [B-4] Updated: a real off-site backup workflow (cron-backup.yml) now
+      # exists and writes to R2 daily. Operators can verify with:
+      #   aws s3 ls --endpoint-url https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com s3://${R2_BUCKET_DB_BACKUPS}/daily/
+      # The "warn-only" pre-deploy reminder is kept here as an operator cue.
       - name: Pre-deploy backup reminder (warn-only)
         if: always()
         run: |
@@ -94,41 +104,85 @@ jobs:
           echo "  - TODO(wiring): wire /api/internal/backup-now when the admin endpoint lands."
           echo "  - Skipping is safe because managed Postgres PITR is the authoritative safety net."
 
+      # [B-4] Render deploy trigger — fixes three defects:
+      #   1. RENDER_API_KEY was previously referenced as $RENDER_API_KEY but
+      #      not declared in the step's env block, so it expanded empty and
+      #      Render returned 401 — and the curl had no -f, so the step still
+      #      exited 0. Every deploy was silently broken at this step.
+      #   2. Now uses -fsS so any HTTP error fails the step.
+      #   3. Render returns 202 Accepted for a deploy trigger; we fail loudly
+      #      on anything other than 202 (or 200) and echo the response body
+      #      for forensics.
       - name: Trigger Render Deploy
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
-          curl -X POST https://api.render.com/v1/services/srv-da9jvkhf2nfc73fpq230/deploys \
+          url="https://api.render.com/v1/services/srv-da9jvkhf2nfc73fpq230/deploys"
+          body='{"clearCache":true,"branch":"add-react-website"}'
+          echo "[render] POST $url"
+          response=$(curl -fsS -m 30 -X POST "$url" \
             -H "Authorization: Bearer $RENDER_API_KEY" \
             -H "Content-Type: application/json" \
-            -d '{"clearCache":true,"branch":"add-react-website"}'
+            -d "$body" \
+            -w "\nHTTP_STATUS:%{http_code}")
+          echo "$response"
+          status=$(echo "$response" | tail -n 1 | sed 's/HTTP_STATUS://')
+          case "$status" in
+            200|202) echo "[render] deploy accepted (status=$status) — proceeding to SHA verify" ;;
+            *) echo "::error::Render deploy trigger returned status=$status (expected 200/202)"; exit 1 ;;
+          esac
 
-      # LPR-001: SHA verification — the deployment workflow cannot prove that
-      # the commit it pushed is the commit actually running on Render. The
-      # /version endpoint (auth-gated by INTERNAL_API_TOKEN) reports both the
-      # EXPECTED_SHA (set by the workflow) and DEPLOY_SHA (set by Render at
-      # container start). If they don't match, the workflow fails loudly.
+      # [B-4] SHA verification — polls /version until the new SHA is live OR
+      # 5 minutes elapse, then asserts equality. Render deploys take 30-90s
+      # for free-plan cold starts + bundle download + npm install, so a single
+      # fetch was racing the deploy and frequently saw the OLD SHA (or a 404
+      # during the brief window when the new container hadn't bound :PORT yet).
+      # Polling closes that race.
       - name: Verify exact release SHA via /version
-        run: |
-          EXPECTED_SHA="${{ github.sha }}"
-          RESP=$(curl -sf -H "X-Internal-Token: $INTERNAL_API_TOKEN" https://acs-chennai.onrender.com/version || echo '{"error":"fetch-failed"}')
-          echo "Expected SHA: $EXPECTED_SHA"
-          echo "Live /version: $RESP"
-          DEPLOY_SHA=$(echo "$RESP" | sed -n 's/.*"deploySha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-          MATCHES=$(echo "$RESP" | sed -n 's/.*"matches"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')
-          if [ "$DEPLOY_SHA" != "$EXPECTED_SHA" ] || [ "$MATCHES" != "true" ]; then
-            echo "::error::Release SHA mismatch — expected $EXPECTED_SHA, live $DEPLOY_SHA (matches=$MATCHES)"
-            exit 1
-          fi
         env:
           INTERNAL_API_TOKEN: ${{ secrets.INTERNAL_API_TOKEN }}
+        run: |
+          EXPECTED_SHA="${{ github.sha }}"
+          echo "Expected SHA: $EXPECTED_SHA"
+          deadline=$(( $(date +%s) + 300 ))   # 5-minute total budget
+          attempt=0
+          DEPLOY_SHA=""
+          MATCHES=""
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            attempt=$((attempt + 1))
+            RESP=$(curl -fsS -m 15 -H "X-Internal-Token: $INTERNAL_API_TOKEN" https://acs-chennai.onrender.com/version 2>/dev/null || echo "")
+            if [ -z "$RESP" ]; then
+              echo "[poll $attempt] /version unreachable (deploy still rolling) — retrying in 10s"
+              sleep 10
+              continue
+            fi
+            DEPLOY_SHA=$(echo "$RESP" | sed -n 's/.*"deploySha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            MATCHES=$(echo "$RESP" | sed -n 's/.*"matches"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')
+            echo "[poll $attempt] deploySha=$DEPLOY_SHA matches=$MATCHES"
+            if [ "$DEPLOY_SHA" = "$EXPECTED_SHA" ] && [ "$MATCHES" = "true" ]; then
+              echo "[poll $attempt] SHA verified — release matches the pushed commit"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Release SHA never matched after 5 minutes — expected $EXPECTED_SHA, last live $DEPLOY_SHA (matches=$MATCHES)"
+          exit 1
 
       - name: Smoke test deployed app
         run: |
-          HEALTH=$(curl -sf -o /dev/null -w "%{http_code}" https://acs-chennai.onrender.com/health || echo "000")
-          DPR_SAS=$(curl -s -o /dev/null -w "%{http_code}" -X POST https://acs-chennai.onrender.com/api/dpr/sas-url || echo "000")
-          DPR_NOTIF=$(curl -s -o /dev/null -w "%{http_code}" "https://acs-chennai.onrender.com/api/dpr/notifications" || echo "000")
+          # [B-4] All three probes use `-fsS` so HTTP errors fail the step
+          # rather than being swallowed into a "000" sentinel that the
+          # status-comparison logic could mistakenly accept. `set -e` would
+          # short-circuit before the comparison runs, so we keep the
+          # explicit echo + numeric comparison for forensic visibility.
+          set +e
+          HEALTH=$(curl -fsS -o /dev/null -w "%{http_code}" -m 30 https://acs-chennai.onrender.com/health 2>/dev/null || echo "000")
+          DPR_SAS=$(curl -fsS -o /dev/null -w "%{http_code}" -m 30 -X POST https://acs-chennai.onrender.com/api/dpr/sas-url 2>/dev/null || echo "000")
+          DPR_NOTIF=$(curl -fsS -o /dev/null -w "%{http_code}" -m 30 "https://acs-chennai.onrender.com/api/dpr/notifications" 2>/dev/null || echo "000")
           echo "Health=$HEALTH DPR_SAS=$DPR_SAS DPR_NOTIF=$DPR_NOTIF"
           # /health must return 200; dpr routes must return 401 (auth required), NOT 404 (route missing)
           if [ "$HEALTH" != "200" ] || [ "$DPR_SAS" != "401" ] || [ "$DPR_NOTIF" != "401" ]; then
-            echo "::error::Smoke test failed - expected health=200 dpr=401 (route mounted)"
+            echo "::error::Smoke test failed - expected health=200 dpr=401 (route mounted); got health=$HEALTH dpr_sas=$DPR_SAS dpr_notif=$DPR_NOTIF"
             exit 1
           fi
+          exit 0
