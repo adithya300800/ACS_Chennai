@@ -54,8 +54,32 @@ const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN
   || process.env.FRONTEND_URL
   || '*';
 
-// OAuth state store: in-memory with TTL. NOTE: lost on restart — see P3 finding.
-// For multi-instance deployments move to Redis.
+// OAuth state store: in-memory with TTL.
+//
+// LPR-011 (smallest demonstrable fix): a Map lives in this process's
+// heap. The implications, deliberately accepted for single-instance
+// Render deployments only:
+//   - Process restart drops pending states mid-flight. The /zoho route
+//     generates a new state on every start (no warm-up needed); a user
+//     who had a popup open during a render deploy will see "session
+//     expired, please try again" on the next /zoho/callback — they
+//     restart the popup flow. 5-minute TTL means the failure window
+//     is short.
+//   - Multi-instance deployment (two Render web services behind a
+//     load balancer, render-blue/green with overlapping instances)
+//     would let /zoho hit instance A while /zoho/callback lands on
+//     instance B and the state lookup misses → spurious login
+//     failures. Single-instance Render free/starter tier does NOT
+//     scale horizontally, so we have exactly one Map and the race
+//     is impossible.
+//   - A multi-instance migration MUST replace this Map with a shared
+//     store (Redis is the obvious choice — TTL is already per-entry;
+//     add `SET state <payload> NX EX 300` semantics, delete on read).
+//
+// TODO(LPR-011): persist OAuthState via Prisma so multi-instance
+// deployments are supported without code changes here. Out of scope
+// for this commit (single-instance is the documented deployment
+// shape); tracked under the same finding for the next migration.
 //
 // Round-9 hardening: every entry stores an explicit `expiresAt`. Both /zoho
 // (write) and /zoho/callback (read) check that `now > expiresAt` and reject
@@ -327,6 +351,21 @@ router.get('/zoho/callback', async (req, res) => {
     const { access_token, refresh_token } = tokens;
 
     // Get email from id_token (openid scope guarantees this)
+    //
+    // TODO(LPR-011): this is an UNVERIFIED base64url decode — the body
+    // bytes are split on '.', the middle segment is parsed as JSON,
+    // and `email` is taken at face value. A standards-compliant OIDC
+    // verifier (jose's `jwtVerify` or jsonwebtoken's `jwt.verify`)
+    // would additionally validate the issuer (`iss === ZOHO_DOMAIN`),
+    // the audience (`aud === ZOHO_CLIENT_ID`), the signature against
+    // Zoho's published JWKS (rotated keys, kid lookup, RS256), the
+    // `exp` and `nbf`, and the `nonce` we generated on /zoho. Without
+    // those checks, anyone who can MITM the access-token response can
+    // forge an id_token claiming any email in the customer's domain
+    // and get admitted. Today the access-token endpoint is HTTPS-only
+    // and Zoho's TLS chain is the actual defense; verifying the
+    // id_token proper would close the gap if Zoho's TLS or our DNS
+    // ever weakens. Out of scope for this commit.
     let email = null;
     if (tokens.id_token) {
       try {

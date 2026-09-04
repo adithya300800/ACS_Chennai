@@ -115,6 +115,42 @@ function createApp(deps = {}) {
   // needs.
   app.use(helmet({
     crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+    // LPR-011 (smallest demonstrable fix): spell out the CSP explicitly
+    // instead of relying on helmet's defaults. A JSON-only API has no
+    // legitimate need for inline scripts, eval, remote script origins,
+    // remote styles, images, frames, or form-action targets — every one
+    // of those is a downgrade surface under XSS or stored-CSS injection.
+    // The only directives we relax beyond `default-src 'self'`:
+    //   - `connect-src 'self' https://accounts.zoho.com https://*.zoho.com`:
+    //     the backend's outbound token-exchange + refresh call to Zoho's
+    //     OAuth endpoints. CSP applies to FETCHES initiated by documents
+    //     WE serve; the server-side `fetch` in /api/auth/zoho/callback
+    //     technically doesn't need this directive, but listing it keeps
+    //     the policy honest about where outbound traffic is allowed if a
+    //     future route calls a third party from a request context.
+    //   - `frame-ancestors 'none'`: blocks `<iframe>` embedding of any
+    //     JSON response, which would otherwise allow clickjacking of an
+    //     error page that leaked user-controlled content.
+    // No `unsafe-inline`, no `'unsafe-eval'`, no wildcard `*` — the
+    // CSP is tight. If a future feature needs an inline asset (a
+    // `/api/auth/zoho/callback` HTML page already does, and that's the
+    // ONLY HTML this server renders), it should serve that one page
+    // from a separate origin or add a per-route nonce.
+    contentSecurityPolicy: {
+      useDefaults: false,
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'"],
+        imgSrc: ["'self'", 'data:'],
+        fontSrc: ["'self'"],
+        connectSrc: ["'self'", 'https://accounts.zoho.com', 'https://*.zoho.com'],
+        frameAncestors: ["'none'"],
+        formAction: ["'self'"],
+        baseUri: ["'self'"],
+        objectSrc: ["'none'"],
+      },
+    },
   }));
 
   // ─── Request ID (DR-012) ───────────────────────────────────────────────────
