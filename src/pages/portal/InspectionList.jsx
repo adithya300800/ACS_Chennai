@@ -42,7 +42,13 @@ export default function InspectionList() {
     setLoading(true);
     setError('');
     try {
-      const params = { limit: '50' };
+      // N-3: the route is `/portal/inspection/my` — always filter to the
+      // signed-in user's own records regardless of role. Admins still
+      // have `/portal/inspection/all` for org-wide review; this page
+      // intentionally mirrors the URL contract ("my") instead of
+      // inheriting the role-default behaviour of `?my=` (which the
+      // backend interprets as "show everything when caller is admin").
+      const params = { limit: '50', my: 'true' };
       if (typeFilter) params.inspectionType = typeFilter;
       if (statusFilter) params.status = statusFilter;
       const data = await api.getInspections(params, accessToken);

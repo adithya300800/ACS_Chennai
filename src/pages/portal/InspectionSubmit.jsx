@@ -10,6 +10,7 @@ import {
 import WorkEntryAdder from './WorkEntryAdder.jsx';
 import FormProgress from '../../components/FormProgress.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import { getBusinessToday } from '../../lib/businessDate.js';
 import { loadDiagnostic as loadScopedDraft, save as saveScopedDraft, clear as clearScopedDraft } from '../../lib/ownerScopedDraft.js';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
@@ -455,19 +456,32 @@ export default function InspectionSubmit() {
       submittingRef.current = false;
       return;
     }
+    // N-4: validation depends on submit intent. DRAFT is "save for
+    // later" — it should accept the barest bones (just a project name)
+    // so an employee can capture half a record between meetings.
+    // OPEN (final Submit) keeps the strict contract: project + location
+    // + date + at least one structured workEntry.
+    const isDraftSave = submitStatus === 'DRAFT';
+
     const newFieldErrors = {};
     if (!form.projectName) newFieldErrors.projectName = 'Project name is required';
-    if (!form.location)    newFieldErrors.location    = 'Location is required';
-    if (!form.reportDate)  newFieldErrors.reportDate  = 'Date is required';
+    if (!isDraftSave) {
+      if (!form.location)    newFieldErrors.location    = 'Location is required';
+      if (!form.reportDate)  newFieldErrors.reportDate  = 'Date is required';
+    }
     if (Object.keys(newFieldErrors).length > 0) {
       setFieldErrors(newFieldErrors);
-      setFormError('Please fix the highlighted fields and try again.');
-      toast.push('Please fill in the highlighted fields.', 'warning');
+      setFormError(isDraftSave
+        ? 'Add a project name before saving a draft.'
+        : 'Please fix the highlighted fields and try again.');
+      toast.push(isDraftSave
+        ? 'Add a project name before saving a draft.'
+        : 'Please fill in the highlighted fields.', 'warning');
       focusFirstInvalid(newFieldErrors);
       submittingRef.current = false;
       return;
     }
-    if (!workEntry) {
+    if (!isDraftSave && !workEntry) {
       setFieldError('workEntry', 'Please add an inspection record before submitting');
       setFormError('Please fix the highlighted fields and try again.');
       toast.push('Please add an inspection record before submitting.', 'warning');
@@ -478,8 +492,8 @@ export default function InspectionSubmit() {
     // SOL DR-001: belt-and-braces — refuse to submit a workEntry whose
     // structured data has been lost. A correct serializer keeps `data` intact,
     // so reaching this branch means the in-memory draft was constructed
-    // unsafely.
-    if (!workEntry.data || typeof workEntry.data !== 'object') {
+    // unsafely. Skip for DRAFT since workEntry can legitimately be null.
+    if (!isDraftSave && (!workEntry.data || typeof workEntry.data !== 'object')) {
       const msg = 'This inspection record is missing its structured fields. Please re-add the record before submitting.';
       setFieldError('workEntry', msg);
       setFormError(msg);
@@ -488,14 +502,18 @@ export default function InspectionSubmit() {
       submittingRef.current = false;
       return;
     }
-    const dateErr = validateReportDate(form.reportDate);
-    if (dateErr) {
-      setFieldError('reportDate', dateErr);
-      setFormError(dateErr);
-      toast.push(dateErr, 'warning');
-      focusFirstInvalid({ reportDate: dateErr });
-      submittingRef.current = false;
-      return;
+    // Date sanity-check still applies to DRAFT if a date was entered —
+    // an invalid date string should not be persisted at all.
+    if (form.reportDate) {
+      const dateErr = validateReportDate(form.reportDate);
+      if (dateErr) {
+        setFieldError('reportDate', dateErr);
+        setFormError(dateErr);
+        toast.push(dateErr, 'warning');
+        focusFirstInvalid({ reportDate: dateErr });
+        submittingRef.current = false;
+        return;
+      }
     }
 
     setStatus('submitting');
@@ -521,13 +539,25 @@ export default function InspectionSubmit() {
       await api.createInspection(
         {
           projectName: form.projectName,
-          location: form.location,
-          reportDate: form.reportDate,
+          // N-4: DRAFT can be saved with bare-bones fields. The schema
+          // requires non-null `location`/`reportDate`/`inspectionType`,
+          // so when the user hasn't filled them in we substitute the
+          // same default the resume flow would otherwise need them to
+          // add before they could save at all. `reportDate` falls back
+          // to today (IST business day) so the draft always sits on a
+          // valid calendar bucket.
+          location: form.location || (isDraftSave ? 'TBD' : ''),
+          reportDate: form.reportDate || (isDraftSave ? getBusinessToday() : null),
           weather: form.weather || null,
           contractor: form.contractor || null,
           dprId: queryDprId || null,
-          inspectionType: workEntry.workType,
-          data: workEntry.data,
+          // `inspectionType` has a non-null DB constraint. For an OPEN
+          // row we already refuse to send without workEntry. For DRAFT
+          // we default to `material_inspection` (the most common entry)
+          // so the user can save now and change it on Resume; the data
+          // object stays null because there is no structured entry yet.
+          inspectionType: workEntry?.workType || 'material_inspection',
+          data: workEntry?.data || null,
           // SOL DR-005: the two buttons finally diverge. "Save as Draft"
           // stores an owner-visible DRAFT row that does NOT trigger admin
           // fan-out (backend/src/routes/inspection.js ALLOWED_STATUSES).

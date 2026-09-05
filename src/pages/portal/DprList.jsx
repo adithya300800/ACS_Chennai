@@ -393,15 +393,65 @@ export default function DprList() {
                     // SOL-P0#4: Resume button as a SIBLING of the
                     // detail button (no longer nested inside the
                     // clickable row wrapper, which is gone).
-                    <button
-                      type="button"
-                      className="btn btn-primary btn-sm"
-                      onClick={() => handleResumeDraft(dpr.id)}
-                      style={{ padding: '0.3rem 0.7rem', fontSize: '0.78rem' }}
-                      aria-label={`Resume editing ${dpr.projectName || 'draft'}`}
-                    >
-                      Resume
-                    </button>
+                    <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        onClick={() => handleResumeDraft(dpr.id)}
+                        style={{ padding: '0.3rem 0.7rem', fontSize: '0.78rem' }}
+                        aria-label={`Resume editing ${dpr.projectName || 'draft'}`}
+                      >
+                        Resume
+                      </button>
+                      {confirmDeleteId === dpr.id ? (
+                        <>
+                          <span style={{ fontSize: '0.78rem', color: 'var(--danger)' }}>
+                            Delete?
+                          </span>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ padding: '0.25rem 0.55rem', fontSize: '0.78rem' }}
+                            onClick={() => setConfirmDeleteId(null)}
+                            disabled={deleting}
+                          >
+                            No
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            style={{
+                              padding: '0.25rem 0.55rem',
+                              fontSize: '0.78rem',
+                              background: 'var(--danger)',
+                              color: '#fff',
+                              border: 'none',
+                            }}
+                            onClick={() => handleDeleteDraft(dpr.id)}
+                            disabled={deleting}
+                          >
+                            {deleting ? 'Deleting…' : 'Yes, delete'}
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          style={{
+                            padding: '0.25rem 0.55rem',
+                            fontSize: '0.78rem',
+                            color: 'var(--danger)',
+                          }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConfirmDeleteId(dpr.id);
+                          }}
+                          aria-label={`Delete draft ${dpr.projectName || 'untitled'}`}
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>

@@ -202,11 +202,23 @@ router.post('/', async (req, res) => {
     dprId, inspectionType, data, severity, status, photos = [],
   } = req.body || {};
 
+  // N-4: compute requested status BEFORE the type-allowlist gate so the
+  // DRAFT branch can relax the required-fields checks below. DRAFT is
+  // "save for later" — accept the barest bones; OPEN is final publish
+  // and keeps the strict contract.
+  const requestedStatus = status === undefined ? 'OPEN' : status;
+
   // typeof guards (mirror dpr.js P1-2 — reject non-string types before Prisma).
-  if (typeof projectName !== 'string' || !projectName.trim() ||
-      typeof location !== 'string' || !location.trim() ||
-      typeof reportDate !== 'string') {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'projectName, location, reportDate required' });
+  // DRAFT only requires projectName to be a non-empty string; the rest
+  // can be filled in on resume.
+  if (typeof projectName !== 'string' || !projectName.trim()) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'projectName required' });
+  }
+  if (requestedStatus !== 'DRAFT') {
+    if (typeof location !== 'string' || !location.trim() ||
+        typeof reportDate !== 'string') {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'projectName, location, reportDate required' });
+    }
   }
 
   // Length caps (mirror dpr.js MAX map).
@@ -218,7 +230,20 @@ router.post('/', async (req, res) => {
   }
 
   // inspectionType allowlist — server is source of truth.
-  if (!inspectionType || !ALLOWED_INSPECTION_TYPES.has(inspectionType)) {
+  // N-4: a DRAFT may legitimately have no inspectionType yet (the
+  // employee just typed a project name and wants to come back later).
+  // OPEN rows still require a real type because they enter the review
+  // workflow and the routing/admin fan-out needs to know what it is.
+  if (requestedStatus === 'DRAFT') {
+    if (inspectionType !== null && inspectionType !== undefined
+        && !ALLOWED_INSPECTION_TYPES.has(inspectionType)) {
+      return res.status(422).json({
+        error: `inspectionType must be one of: ${[...ALLOWED_INSPECTION_TYPES].join(', ')}`,
+        code: 'INSPECTION_TYPE_INVALID',
+        allowed: [...ALLOWED_INSPECTION_TYPES],
+      });
+    }
+  } else if (!inspectionType || !ALLOWED_INSPECTION_TYPES.has(inspectionType)) {
     return res.status(422).json({
       error: `inspectionType must be one of: ${[...ALLOWED_INSPECTION_TYPES].join(', ')}`,
       code: 'INSPECTION_TYPE_INVALID',
@@ -227,11 +252,15 @@ router.post('/', async (req, res) => {
   }
 
   // date validation — same strict YYYY-MM-DD parser as dpr.js.
-  const dateParsed = parseStrictISODate(reportDate);
-  if (!dateParsed.ok) {
-    return res.status(400).json({ error: 'INVALID_REPORT_DATE', message: 'reportDate must be a valid YYYY-MM-DD date' });
+  // DRAFT may have no date yet; OPEN must have a strict YYYY-MM-DD.
+  let dateUTC = null;
+  if (reportDate) {
+    const dateParsed = parseStrictISODate(reportDate);
+    if (!dateParsed.ok) {
+      return res.status(400).json({ error: 'INVALID_REPORT_DATE', message: 'reportDate must be a valid YYYY-MM-DD date' });
+    }
+    dateUTC = dateParsed.date;
   }
-  const dateUTC = dateParsed.date;
 
   // DR-027: mirror of the dpr.js create guard. A future-dated inspection sits
   // in the admin queue (OPEN) for a site visit that hasn't happened, and
@@ -257,7 +286,8 @@ router.post('/', async (req, res) => {
   // Admins creating inspections on behalf of a workflow (rare, but
   // legitimate for back-filling NCRs) use the same route with the
   // admin status explicitly — gated below by req.isAdmin.
-  const requestedStatus = status === undefined ? 'OPEN' : status;
+  // N-4: `requestedStatus` is now declared earlier (above the type
+  // allowlist gate) so the DRAFT branch can relax field requirements.
   if (!ALLOWED_STATUSES.has(requestedStatus)) {
     return res.status(422).json({
       error: `status must be one of: ${[...ALLOWED_STATUSES].join(', ')}`,
@@ -294,16 +324,26 @@ router.post('/', async (req, res) => {
   // data — must be a non-null object; cap string values to prevent abuse.
   // Per-field validation (required-ness) is the frontend's job (mirrors how
   // DPR.workEntries was handled pre-refactor).
-  if (data == null || typeof data !== 'object' || Array.isArray(data)) {
+  // N-4: DRAFT rows can have null data (no workEntry yet). OPEN rows
+  // require a JSON object so the inspection is renderable on the admin
+  // queue.
+  if (requestedStatus === 'DRAFT') {
+    if (data !== null && data !== undefined
+        && (typeof data !== 'object' || Array.isArray(data))) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'data must be a JSON object or null' });
+    }
+  } else if (data == null || typeof data !== 'object' || Array.isArray(data)) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'data must be a JSON object' });
   }
-  const oversized = findOversizedStrings(data, 'data', 5000);
-  if (oversized.length) {
-    return res.status(400).json({
-      error: 'VALIDATION_ERROR',
-      message: `data has oversized string fields: ${oversized.slice(0, 3).join('; ')}`,
-      field: 'data',
-    });
+  if (data != null) {
+    const oversized = findOversizedStrings(data, 'data', 5000);
+    if (oversized.length) {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        message: `data has oversized string fields: ${oversized.slice(0, 3).join('; ')}`,
+        field: 'data',
+      });
+    }
   }
 
   // dprId — optional, but if provided must be a valid UUID that exists.

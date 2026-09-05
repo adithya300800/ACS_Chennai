@@ -40,7 +40,14 @@ export default function Attendance() {
     }
   }, [selectedRecord]);
 
-  // Parse month for display
+  // Parse month for display. `formatMonthLabel` is the canonical helper
+  // introduced in the S5 refactor; we keep the destructuring so the
+  // calendar grid + nav buttons below still have year/month numbers to
+  // feed into Date() without re-parsing `currentMonth` themselves.
+  // (DR-N1 regression guard — without these destructured bindings every
+  // calendar render throws ReferenceError and the page is replaced by
+  // the error boundary.)
+  const [calYear, calMonth] = currentMonth.split('-').map(Number);
   const monthLabel = formatMonthLabel(currentMonth)
     || new Date(calYear, calMonth - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
 
