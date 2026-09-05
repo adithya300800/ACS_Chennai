@@ -245,6 +245,11 @@ export const api = {
   // client only needs to mint a key ONCE per submit intent.
   post: (path, body, token, idempotencyKey) => request('POST', path, body, token, { idempotencyKey }),
   put: (path, body, token, idempotencyKey) => request('PUT', path, body, token, { idempotencyKey }),
+  // Round-29: patch was added when cube-test (N5), project updates, and
+  // BOQ item updates all started using partial-update semantics.
+  // Forwarded with the same idempotency-key contract as post/put so a
+  // NETWORK_ERROR retry dedupes to the cached response.
+  patch: (path, body, token, idempotencyKey) => request('PATCH', path, body, token, { idempotencyKey }),
   delete: (path, token, idempotencyKey) => request('DELETE', path, null, token, { idempotencyKey }),
 
   // Round-13: download() — fetch a binary response (XLSX / CSV) and return

@@ -189,6 +189,19 @@ const BOOK_ICON = (
     <path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" />
   </svg>
 );
+// N7: BOQ registry (admin) + variance report (employee). Two icons:
+//   - LIST_ICON — registry table (admin)
+//   - CHART_ICON — variance bars (employee-facing)
+const LIST_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><circle cx="4" cy="6" r="1" /><circle cx="4" cy="12" r="1" /><circle cx="4" cy="18" r="1" />
+  </svg>
+);
+const CHART_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <line x1="18" y1="20" x2="18" y2="10" /><line x1="12" y1="20" x2="12" y2="4" /><line x1="6" y1="20" x2="6" y2="14" /><line x1="3" y1="20" x2="21" y2="20" />
+  </svg>
+);
 // Round-29 (N5): cube-test icon. A simple "beaker" + drop combo stands in
 // for a cube mould without dragging in another library. Same 18x18
 // stroke style as the rest of the sidebar.
@@ -203,11 +216,6 @@ const CUBE_ICON = (
 const BUILDING_ICON = (
   <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
     <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" />
-  </svg>
-);
-const CHART_ICON = (
-  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
-    <line x1="18" y1="20" x2="18" y2="10" /><line x1="12" y1="20" x2="12" y2="4" /><line x1="6" y1="20" x2="6" y2="14" /><line x1="3" y1="20" x2="21" y2="20" />
   </svg>
 );
 
@@ -231,6 +239,11 @@ const navGroups = [
       // filed records. The page hosts both the user's own cube tests
       // and (for admins) a deep-link to the org-wide review queue.
       { to: '/portal/cube-tests', label: 'My Cube Tests', icon: CUBE_ICON },
+      // N7: BOQ variance report — read-only contract-vs-executed view
+      // scoped to one project. The page is useful to anyone who files
+      // DPR / Inspection rows against a BOQ item, so it lives in the
+      // shared "My Reports" group rather than behind the admin tree.
+      { to: '/portal/boq', label: 'BOQ Variance', icon: CHART_ICON },
     ],
   },
   ...(employee?.isAdmin ? [
@@ -259,6 +272,10 @@ const navGroups = [
         // new projects or archive existing ones. Sits under Records because
         // it's the same browse-then-act shape as the other "All …" entries.
         { to: '/portal/admin/projects', label: 'Projects', icon: BUILDING_ICON },
+        // N7 — BOQ registry (full CRUD + per-row variance). Admin-only
+        // because PATCH/DELETE on boqItem is gated to creator-or-admin
+        // server-side; employees read variance on the public page.
+        { to: '/portal/admin/boq', label: 'BOQ Registry', icon: LIST_ICON },
       ],
     },
     {

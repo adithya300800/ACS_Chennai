@@ -43,6 +43,10 @@ export default function InspectionDetail() {
   const [error, setError] = useState('');
   // Round-28 #7: lightbox state. Null = closed. Number = open at index.
   const [lightboxIndex, setLightboxIndex] = useState(null);
+  // N5: linked cube tests for cube_casting inspections. Fetched after
+  // the record loads; non-cube-casting records leave this null so the
+  // conditional render below short-circuits cleanly.
+  const [linkedCubeTests, setLinkedCubeTests] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -50,6 +54,17 @@ export default function InspectionDetail() {
     try {
       const data = await api.getInspection(id, accessToken);
       setRecord(data);
+      // N5: only cube_casting inspections can have linked cube tests —
+      // the backend rejects non-cube-casting FKs at create time. Skip the
+      // round-trip for other inspection types. Failures are silent; the
+      // section just won't appear.
+      if (data?.inspectionType === 'cube_casting') {
+        api.getCubeTests({ castingRecordId: id, limit: '100' }, accessToken)
+          .then((res) => setLinkedCubeTests(res.tests || []))
+          .catch(() => setLinkedCubeTests([]));
+      } else {
+        setLinkedCubeTests(null);
+      }
     } catch (err) {
       if (err.status === 404) setError('Inspection record not found.');
       else if (err.status === 403) setError('You do not have access to this record.');
@@ -177,6 +192,26 @@ export default function InspectionDetail() {
           <div><strong>Date:</strong> {formatIndianDate(record.reportDate)}</div>
           {record.weather && <div><strong>Weather:</strong> {record.weather}</div>}
           {record.contractor && <div><strong>Contractor:</strong> {record.contractor}</div>}
+          {/* N7: linked BOQ item, same convention as the DPR detail
+              modal. Read-only here — the deep-link routes to the
+              variance report so reviewers can see the executed-qty
+              delta without leaving the page. */}
+          <div>
+            <strong>BOQ Item:</strong>{' '}
+            {record.boqItem ? (
+              <>
+                <span style={{ fontFamily: 'monospace' }}>{record.boqItem.itemCode}</span>
+                {' — '}
+                <span>{record.boqItem.description}</span>
+                {' · '}
+                <Link to={`/portal/boq?projectName=${encodeURIComponent(record.projectName || '')}`}>
+                  View variance
+                </Link>
+              </>
+            ) : (
+              <em className="text-placeholder">Not linked</em>
+            )}
+          </div>
           {record.dpr && (
             <div>
               <strong>Linked DPR:</strong>{' '}
@@ -246,6 +281,35 @@ export default function InspectionDetail() {
                 </button>
               ))}
             </div>
+          </div>
+        )}
+
+        {/* N5: linked cube tests for cube_casting inspections. Other
+            inspection types have no cube-test relationship so we hide
+            the section entirely. Empty array (no cubes yet) renders a
+            small helper line so the user knows cubes can be linked. */}
+        {record.inspectionType === 'cube_casting' && Array.isArray(linkedCubeTests) && (
+          <div style={{ marginBottom: '1.5rem' }}>
+            <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", fontSize: '1rem', marginBottom: '0.5rem', color: 'var(--navy)' }}>
+              Linked Cube Tests ({linkedCubeTests.length})
+            </h3>
+            {linkedCubeTests.length === 0 ? (
+              <div style={{ background: '#f8fafc', borderRadius: 6, padding: '0.625rem 0.875rem', fontSize: '0.85rem', color: 'var(--steel)', borderLeft: '3px solid var(--blue)' }}>
+                No cube tests have been linked to this casting record yet.
+              </div>
+            ) : (
+              <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                {linkedCubeTests.map((ct) => (
+                  <li key={ct.id} style={{ fontSize: '0.9rem' }}>
+                    <Link to={`/portal/cube-tests/${ct.id}`}>
+                      {ct.concreteGrade} · {ct.pourLocation}
+                    </Link>
+                    {' · '}
+                    <span style={{ color: 'var(--steel)' }}>{ct.status.replace(/_/g, ' ').toLowerCase()}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 

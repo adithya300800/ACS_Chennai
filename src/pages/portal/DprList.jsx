@@ -146,6 +146,11 @@ export default function DprList() {
   const [expandedDpr, setExpandedDpr] = useState(null);
   const [expandedLoading, setExpandedLoading] = useState(false);
   const [expandedError, setExpandedError] = useState('');
+  // N5: pour-summary cache keyed by dpr id. Filled in when the modal
+  // opens; failures are non-fatal — if the cube-test endpoint is down
+  // we just hide the section rather than gating the rest of the modal.
+  const [pourSummary, setPourSummary] = useState(null);
+  const [pourSummaryLoading, setPourSummaryLoading] = useState(false);
 
   const fetchDprs = useCallback(async (cursor = null) => {
     try {
@@ -232,6 +237,7 @@ export default function DprList() {
     setExpandedDpr({ ...dpr, photos: [] });
     setExpandedError('');
     setExpandedLoading(true);
+    setPourSummary(null);
     try {
       const full = await api.getDpr(dpr.id, accessToken);
       setExpandedDpr(full);
@@ -240,12 +246,27 @@ export default function DprList() {
     } finally {
       setExpandedLoading(false);
     }
+    // N5: also fetch the cube-test pour summary so the modal can show
+    // cast / passed / pending counts inline. Parallel to the DPR fetch
+    // so the modal still opens promptly when the cube-test endpoint is
+    // slow. Failures are silent — see setPourSummary's catch block.
+    setPourSummaryLoading(true);
+    try {
+      const summary = await api.getCubePourSummary(dpr.id, accessToken);
+      setPourSummary(summary);
+    } catch (_err) {
+      setPourSummary(null);
+    } finally {
+      setPourSummaryLoading(false);
+    }
   };
 
   const handleCloseModal = () => {
     setExpandedDpr(null);
     setExpandedError('');
     setExpandedLoading(false);
+    setPourSummary(null);
+    setPourSummaryLoading(false);
   };
 
   // SOL-P0#4: Resume / Edit / Delete draft actions.
@@ -725,6 +746,27 @@ export default function DprList() {
                     <div><strong>Weather:</strong> {expandedDpr.weather || '—'}</div>
                     <div><strong>Temperature:</strong> {expandedDpr.temperature || '—'}</div>
                     <div><strong>Contractor:</strong> {expandedDpr.contractor || '—'}</div>
+                    {/* N7: linked BOQ item. Server returns the related
+                        boqItem row joined in (boqItemId → boqItem).
+                        Render a deep-link into the variance report —
+                        admins can also jump to the BOQ registry edit
+                        page for the same item. */}
+                    <div>
+                      <strong>BOQ Item:</strong>{' '}
+                      {expandedDpr.boqItem ? (
+                        <>
+                          <span style={{ fontFamily: 'monospace' }}>{expandedDpr.boqItem.itemCode}</span>
+                          {' — '}
+                          <span>{expandedDpr.boqItem.description}</span>
+                          {' · '}
+                          <Link to={`/portal/boq?projectName=${encodeURIComponent(expandedDpr.projectName || '')}`}>
+                            View variance
+                          </Link>
+                        </>
+                      ) : (
+                        <em className="text-placeholder">Not linked</em>
+                      )}
+                    </div>
                     <div><strong>Submitted by:</strong> {expandedDpr.submittedBy?.name || '—'}</div>
                   </div>
 
@@ -778,6 +820,55 @@ export default function DprList() {
                           </li>
                         ))}
                       </ul>
+                    </div>
+                  )}
+
+                  {/* N5: cube-test pour summary — cast / passed / pending
+                      counts + a deep-link to each cube test row. Sourced
+                      from /api/cube-tests/pour-summary/:dprId, fetched
+                      in parallel with the DPR detail. Failures are silent
+                      — the user still sees the rest of the modal. */}
+                  {(pourSummary || pourSummaryLoading) && (
+                    <div style={{ marginTop: '1rem' }}>
+                      <h3 style={{ fontSize: '0.95rem', margin: '0 0 0.5rem', color: 'var(--navy)' }}>
+                        Cube Tests ({pourSummary?.counts?.cast ?? 0})
+                      </h3>
+                      {pourSummary && (
+                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', fontSize: '0.85rem', marginBottom: '0.5rem' }}>
+                          <span style={{ color: 'var(--steel)' }}>
+                            <strong style={{ color: 'var(--navy)' }}>{pourSummary.counts.passed}</strong> passed
+                          </span>
+                          <span style={{ color: 'var(--steel)' }}>
+                            <strong style={{ color: 'var(--navy)' }}>{pourSummary.counts.pending}</strong> pending
+                          </span>
+                          {pourSummary.counts.failed > 0 && (
+                            <span style={{ color: 'var(--danger, #dc2626)' }}>
+                              <strong>{pourSummary.counts.failed}</strong> failed
+                            </span>
+                          )}
+                          {pourSummary.counts.overdue > 0 && (
+                            <span style={{ color: 'var(--danger, #dc2626)' }}>
+                              <strong>{pourSummary.counts.overdue}</strong> overdue
+                            </span>
+                          )}
+                          <span style={{ marginLeft: 'auto', color: 'var(--steel)' }}>
+                            Billing: {pourSummary.billingStatus === 'READY' ? 'Ready' : 'In progress'}
+                          </span>
+                        </div>
+                      )}
+                      {pourSummary?.tests?.length > 0 && (
+                        <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                          {pourSummary.tests.map((ct) => (
+                            <li key={ct.id} style={{ fontSize: '0.9rem' }}>
+                              <Link to={`/portal/cube-tests/${ct.id}`}>
+                                {ct.concreteGrade} · {ct.pourLocation}
+                              </Link>
+                              {' · '}
+                              <span style={{ color: 'var(--steel)' }}>{ct.status.replace(/_/g, ' ').toLowerCase()}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </div>
                   )}
 

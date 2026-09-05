@@ -32,6 +32,18 @@ const DEFAULT_STATUS_MAP = {
   ASSIGNED: 'dpr-status-draft',
   COMPLETED: 'dpr-status-approved',
   OVERDUE: 'dpr-status-rejected',
+
+  // Round-29 (N5): Cube-test lifecycle. PENDING = awaiting results (grey),
+  // _PASSED states = green, _FAILED = red, OVERDUE = red. The 7d and 28d
+  // buckets share the same palette so a card doesn't need a per-status
+  // override — the visual differentiation is in the result row, not the
+  // pill.
+  PENDING_28D_PASSED: 'dpr-status-approved', // alias used by some legacy callers
+  SEVEN_DAY_PASSED: 'dpr-status-approved',
+  SEVEN_DAY_FAILED: 'dpr-status-rejected',
+  TWENTY_EIGHT_DAY_PASSED: 'dpr-status-approved',
+  TWENTY_EIGHT_DAY_FAILED: 'dpr-status-rejected',
+  CUBE_PENDING: 'dpr-status-review',
 };
 
 export default function StatusBadge({ status, map, className = '' }) {
