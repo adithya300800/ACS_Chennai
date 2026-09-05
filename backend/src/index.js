@@ -280,6 +280,37 @@ function createApp(deps = {}) {
     });
   });
 
+  // [PHASE-4 DIAGNOSIS ONLY — DELETE AFTER USE]
+  // Temporary endpoint to inspect what tables/columns actually exist on the
+  // live Supabase DB so we can confirm the S3-6 migration's
+  // `ALTER TABLE training_enrollments` (plural) didn't apply to the table
+  // Prisma is actually querying (singular, per `@@map` in schema.prisma).
+  // Guarded by INTERNAL_API_TOKEN so it can't leak prod schema publicly.
+  app.get('/diag/schema', async (req, res) => {
+    const expected = process.env.INTERNAL_API_TOKEN;
+    if (!expected || req.headers['x-internal-token'] !== expected) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    try {
+      const tables = await prisma.$queryRaw`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema='public' AND table_name LIKE 'training%'
+        ORDER BY table_name`;
+      const cols = await prisma.$queryRaw`
+        SELECT table_name, column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema='public' AND table_name LIKE 'training%'
+        ORDER BY table_name, ordinal_position`;
+      const mig = await prisma.$queryRaw`
+        SELECT migration_name, applied_steps_count,
+               finished_at IS NOT NULL as applied
+        FROM _prisma_migrations ORDER BY started_at`;
+      res.json({ tables, columns: cols, migrations: mig });
+    } catch (err) {
+      res.status(500).json({ error: err.message, code: err.code, meta: err.meta });
+    }
+  });
+
   app.get('/ready', async (req, res) => {
     // DR-017: every required R2 bucket must be reachable, not just dpr-photos.
     // The previous probe only checked dpr-photos, so /ready reported healthy
