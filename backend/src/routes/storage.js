@@ -158,7 +158,15 @@ router.post('/orphans/sweep', requireAuth, requireFreshAdmin, async (req, res) =
 
   let sweep;
   try {
-    sweep = require('../scripts/_sweepOrphanUploadsCore');
+    // DR-018: the core module ships at backend/scripts/_sweepOrphanUploadsCore.js.
+    // From backend/src/routes/storage.js we have to climb out of `routes/` and
+    // out of `src/` before reaching `scripts/`. The previous relative path
+    // (`../scripts/_sweepOrphanUploadsCore`) resolved to
+    // backend/src/scripts/_sweepOrphanUploadsCore — which does not exist —
+    // so every dry-run AND every real sweep fell through to the 501
+    // SWEEP_UNAVAILABLE fallback. Use `../../scripts/...` so we land on the
+    // real file. The 501 catch stays as a safety net for partial deploys.
+    sweep = require('../../scripts/_sweepOrphanUploadsCore');
   } catch {
     // The core module is shipped as scripts/_sweepOrphanUploadsCore.js so
     // this require stays stable even if scripts/README reorders. If the
