@@ -142,11 +142,17 @@ pg_restore -d "$SCRATCH_URL" \
   "./acs-portal-${DATE}.dump"
 
 # 3) Verify row counts against the dashboard's aggregates.
-psql "$SCRATCH_URL" -c "SELECT COUNT(*) FROM \"Employee\";"
-psql "$SCRATCH_URL" -c "SELECT COUNT(*) FROM \"DPR\";"
-psql "$SCRATCH_URL" -c "SELECT COUNT(*) FROM \"Inspection\";"
-psql "$SCRATCH_URL" -c "SELECT COUNT(*) FROM \"TrainingEnrollment\";"
-psql "$SCRATCH_URL" -c "SELECT COUNT(*) FROM \"LeaveRequest\";"
+#    DR-008 fix: query the PHYSICAL mapped table names (snake_case, plural
+#    for some models). Pre-fix, these examples used the LOGICAL Prisma
+#    model names ("Employee", "DPR", "Inspection") — which work in
+#    Prisma's client API but NOT in raw SQL. Every restore rehearsal
+#    failed at this step. See backend/prisma/schema.prisma @@map
+#    directives for the full list.
+psql "$SCRATCH_URL" -c "SELECT COUNT(*) FROM employees;"
+psql "$SCRATCH_URL" -c "SELECT COUNT(*) FROM dpr;"
+psql "$SCRATCH_URL" -c "SELECT COUNT(*) FROM inspection_record;"
+psql "$SCRATCH_URL" -c "SELECT COUNT(*) FROM training_enrollment;"
+psql "$SCRATCH_URL" -c "SELECT COUNT(*) FROM leave_request;"
 ```
 
 If row counts look wrong, the dump is corrupted or the schema drifted

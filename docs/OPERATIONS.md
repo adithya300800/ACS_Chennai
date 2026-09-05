@@ -40,8 +40,8 @@ Rehearsal steps (run quarterly):
 
 1. Create a fresh Supabase project (free tier). Copy its `DATABASE_URL`.
 2. Run `BACKUP_RESTORE_URL=<disposable-url> BACKUP_FILE=./backups/<latest>.dump.gz scripts/restore-database.sh`.
-3. `psql $BACKUP_RESTORE_URL -c 'select count(*) from "Employee";'` — must be > 0.
-4. `psql $BACKUP_RESTORE_URL -c 'select count(*) from "DPR";'` — must equal the dashboard's "Total Active DPRs" aggregate.
+3. `psql $BACKUP_RESTORE_URL -c 'select count(*) from employees;'` — must be > 0.
+4. `psql $BACKUP_RESTORE_URL -c 'select count(*) from dpr;'` — must equal the dashboard's "Total Active DPRs" aggregate.
 5. Time the run. Record elapsed seconds in the SRE change log as RTO evidence.
 
 Rehearsal results are required before LPR-015 can be marked Done for a quarter.

@@ -110,6 +110,18 @@ jobs:
       WEEKLY_RETENTION_DAYS: '28'
       R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
       BUCKET: ${{ secrets.R2_BUCKET_DB_BACKUPS }}
+      # DR-008: secrets must be present at job scope, not just inside the
+      # dump step. The previous workflow only exported these inside the
+      # "Run pg_dump" step's env block, so the "Verify required secrets"
+      # guard saw an empty environment and silently passed every time —
+      # meaning a missing secret was only caught by a misleading
+      # "connection refused" deep inside pg_dump. Declaring them here
+      # makes them available to every step, including the guard.
+      DIRECT_DATABASE_URL: ${{ secrets.DIRECT_DATABASE_URL }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_BUCKET_DB_BACKUPS: ${{ secrets.R2_BUCKET_DB_BACKUPS }}
     steps:
       - name: Install postgres client + jq
         # postgresql-client is NOT pre-installed on ubuntu-latest (it lives
@@ -120,8 +132,9 @@ jobs:
           sudo apt-get install -y postgresql-client jq
 
       - name: Verify required secrets
-        # Fail loudly with a useful message if any secret is missing, rather
-        # than waiting for a misleading "connection refused" later.
+        # DR-008 fix: with secrets now in job env, the indirect-expansion
+        # check below actually sees them. Pre-fix this step always
+        # printed "all good" because the env was empty inside the step.
         run: |
           missing=0
           for var in DIRECT_DATABASE_URL R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET_DB_BACKUPS; do
@@ -147,12 +160,9 @@ jobs:
           aws configure set default.output json
 
       - name: Run pg_dump + checksum + upload + sweep
-        env:
-          DIRECT_DATABASE_URL: ${{ secrets.DIRECT_DATABASE_URL }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET_DB_BACKUPS: ${{ secrets.R2_BUCKET_DB_BACKUPS }}
+        # DR-008: secrets are already in job env (moved there so the
+        # verify-required-secrets step could actually see them). No
+        # per-step env block here — the dump step just inherits.
         run: |
           set -euo pipefail
 
@@ -178,9 +188,16 @@ jobs:
           echo "[backup] dump size: $BYTES bytes"
 
           # ---- 2. SHA256 alongside ---------------------------------------
-          sha256sum "$DUMP_NAME" | awk '{print $1}' > "$SHA_NAME"
-          SHA=$(cat "$SHA_NAME")
+          # DR-008 fix: write sha256sum's FULL output ("<hash>  <filename>")
+          # not just the hash. sha256sum -c (used by the restore runbook
+          # in docs/BACKUPS.md § 4b) rejects a bare-hash sidecar and
+          # exits non-zero — so the pre-fix checksum file made every
+          # restore verification fail at the very last step. We still
+          # capture the hash separately for the summary echo below.
+          sha256sum "$DUMP_NAME" > "$SHA_NAME"
+          SHA=$(awk '{print $1}' "$SHA_NAME")
           echo "[backup] sha256: $SHA"
+          echo "[backup] sha256 sidecar written in sha256sum -c format"
 
           # ---- 3. Upload to daily/ ---------------------------------------
           DAILY_KEY="daily/${DUMP_NAME}"
@@ -244,6 +261,13 @@ jobs:
             if [ "$key_date" \< "$WEEKLY_CUTOFF" ]; then
               echo "[backup] prune weekly: $key (date=$key_date)"
               aws --endpoint-url "$R2_ENDPOINT" s3 rm "s3://${R2_BUCKET_DB_BACKUPS}/${key}" --no-progress
+              # DR-008 fix: mirror the daily-sweep contract — also delete
+              # the sibling .sha256 sidecar. Pre-fix, weekly/ kept stale
+              # checksums past the .dump's prune date, which polluted
+              # the bucket listing and confused the restore script's
+              # "is there a sidecar for this dump?" check.
+              sha_key="${key%.dump}.sha256"
+              aws --endpoint-url "$R2_ENDPOINT" s3 rm "s3://${R2_BUCKET_DB_BACKUPS}/${sha_key}" --no-progress 2>/dev/null || true
               PRUNED_WEEKLY="${PRUNED_WEEKLY}${key}\n"
             fi
           done < <(aws --endpoint-url "$R2_ENDPOINT" s3api list-objects-v2 \
