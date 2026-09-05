@@ -68,7 +68,7 @@ const {
 } = require('../templates/email');
 const { findActiveAdmins } = require('../lib/adminRecipients');
 const { hashIdentifier } = require('../lib/pii');
-const { getIstDateString, getIstDateLabel, istMidnightUtcFromDateString } = require('../lib/dateOnly');
+const { getIstDateString, getIstDateLabel, istMidnightUtcFromDateString, parseDateOnlyToUtc } = require('../lib/dateOnly');
 
 function getPrisma(req) { return req.app.get('prisma'); }
 
@@ -120,9 +120,27 @@ router.post('/run', requireInternalToken, asyncHandler(async (req, res) => {
   const dateParam = typeof req.query.date === 'string' ? req.query.date : null;
   const now = new Date();
   const targetDateStr = dateParam || getIstDateString(now);
+  // DR-013 fix: there are TWO date-typed columns this route talks to
+  // and they need different keys for the SAME calendar day:
+  //
+  //   1. Attendance.@db.Date        — a pure calendar day. We must query
+  //      it with UTC midnight of that day, because that's what the
+  //      check-in path (attendance.js:341) stored. Using IST midnight
+  //      (= `dateIstUtc`) would be `2026-09-03T18:30:00Z` for "Sept 4
+  //      IST", which PostgreSQL coerces to the WRONG DATE under pgbouncer
+  //      session-mode and the digest silently lists the previous day's
+  //      present/onLeave/absent split. (Same hazard that bit DR-023.)
+  //
+  //   2. AdminDigestRun.scheduledFor — a TIMESTAMP. The unique claim
+  //      keys on this value, so we must NOT change the existing key
+  //      shape or already-claimed (admin, date) rows would silently
+  //      re-fire. Keeping `dateIstUtc` here preserves the prior
+  //      dedup identity.
   let dateIstUtc;
+  let attendanceDateUtc;
   try {
     dateIstUtc = istMidnightUtcFromDateString(targetDateStr);
+    attendanceDateUtc = parseDateOnlyToUtc(targetDateStr);
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
@@ -154,8 +172,14 @@ router.post('/run', requireInternalToken, asyncHandler(async (req, res) => {
   //    @@unique([employeeId, date]) constraint. We ask for the first session
   //    check-in via the sessions relation ordered ASC so the earliest in-time
   //    of the day shows up.
+  //    DR-013 fix: `date` is a `@db.Date` column. We predicate with
+  //    `attendanceDateUtc` (UTC midnight of the IST calendar day) rather
+  //    than `dateIstUtc` (IST midnight = previous UTC date). The check-in
+  //    path also stores UTC midnight for the same column, so this
+  //    matches exactly. Using IST midnight silently listed the previous
+  //    day's employees on every cron fire.
   const attendanceRows = await prisma.attendance.findMany({
-    where: { date: dateIstUtc, status: 'Present' },
+    where: { date: attendanceDateUtc, status: 'Present' },
     select: {
       employeeId: true,
       sessions: {
