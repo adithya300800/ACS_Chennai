@@ -359,6 +359,9 @@ router.post('/', async (req, res) => {
     // server silently drops it — the Inspection page owns that data now.
     workExecutedToday, workLocation, manpowerSummary,
     risksHindrances, materialsReceivedSummary, customSections,
+    // N7 (round-28): optional BOQ link. Validated below so a foreign
+    // or inactive item can never slip past the FK.
+    boqItemId,
     status, photos = [],
   } = req.body || {};
 
@@ -368,6 +371,31 @@ router.post('/', async (req, res) => {
       typeof location !== 'string' || !location.trim() ||
       typeof reportDate !== 'string') {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'projectName, location, reportDate required' });
+  }
+
+  // N7 (round-28): BOQ link validation. boqItemId is optional, but if
+  // present MUST (a) be a string and (b) point at an active BoqItem
+  // belonging to the same projectName (so a DPR for Project A can't
+  // silently reference a BOQ item registered under Project B).
+  // The same projectName check is re-applied on PATCH; see below.
+  if (boqItemId !== undefined && boqItemId !== null && boqItemId !== '') {
+    if (typeof boqItemId !== 'string') {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'VALIDATION_ERROR', message: 'boqItemId must be a string' });
+    }
+    const boq = await prisma.boqItem.findUnique({ where: { id: boqItemId }, select: { id: true, projectName: true, isActive: true } });
+    if (!boq) {
+      return res.status(400).json({ error: 'BOQ_ITEM_NOT_FOUND', code: 'BOQ_ITEM_NOT_FOUND', message: 'Linked BOQ item does not exist' });
+    }
+    if (!boq.isActive) {
+      return res.status(400).json({ error: 'BOQ_ITEM_INACTIVE', code: 'BOQ_ITEM_INACTIVE', message: 'Linked BOQ item is archived (isActive=false)' });
+    }
+    if (boq.projectName.trim() !== projectName.trim()) {
+      return res.status(400).json({ error: 'BOQ_PROJECT_MISMATCH', code: 'BOQ_PROJECT_MISMATCH', message: 'Linked BOQ item belongs to a different projectName' });
+    }
+  } else {
+    // Normalise so the create payload doesn't carry an empty string that
+    // Prisma would reject with a type error.
+    var normalisedBoqItemId = null;
   }
 
   // Length caps (P1-3) — keep the database tidy, prevent abuse. Round-12:
@@ -512,6 +540,9 @@ router.post('/', async (req, res) => {
           risksHindrances: risksHindrances || null,
           materialsReceivedSummary: materialsReceivedSummary || null,
           customSections: customSections || null,
+          // N7 (round-28): BOQ link. null when omitted so the FK column
+          // is NULL (the row stays unlinked).
+          boqItemId: (boqItemId && typeof boqItemId === 'string') ? boqItemId : (normalisedBoqItemId === undefined ? null : normalisedBoqItemId),
           status: status || 'DRAFT',
           submittedById: req.employeeId,
           // P2-3: DRAFT saves don't have a submittedAt timestamp
@@ -533,6 +564,10 @@ router.post('/', async (req, res) => {
           photos: true,
           submittedBy: { select: { id: true, name: true, email: true } },
           inspections: { select: { id: true, inspectionType: true, status: true, severity: true } },
+          // N7 (round-28): include the linked BOQ item so the create
+          // response surfaces itemCode + description + unit for the
+          // billing engineer to read straight off the new row.
+          boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
         },
       });
 
@@ -749,6 +784,10 @@ router.get('/', asyncHandler(async (req, res) => {
       include: {
         photos: { select: { id: true, caption: true, contentType: true, ulid: true, container: true } },
         submittedBy: { select: { id: true, name: true, email: true } },
+        // N7 (round-28): BOQ summary on the list endpoint so admin
+        // queue cards can render the linked item code without a
+        // per-row roundtrip.
+        boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
       },
       orderBy: [{ reportDate: 'desc' }, { id: 'desc' }],
       take: take + 1,
@@ -1003,6 +1042,9 @@ router.get('/:id', async (req, res) => {
           select: { id: true, inspectionType: true, status: true, severity: true, createdAt: true },
           orderBy: { createdAt: 'desc' },
         },
+        // N7 (round-28): BOQ link summary on detail. Same select shape
+        // as the list endpoint.
+        boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
       },
     });
 
@@ -1096,11 +1138,16 @@ router.put('/:id', async (req, res) => {
   // approvedById, or any of the audit timestamps via PUT. Status transitions
   // go through /review, /approve, /reject endpoints only.
   // Round-12: extended with the 5 daily-narrative PMC fields + customSections.
+  // N7 (round-28): boqItemId is on the allowlist so an owner can link /
+  // unlink a DPR to a BOQ item through the same PUT path. Validation
+  // below mirrors the create handler (must exist + be active + match
+  // projectName).
   const ALLOWED_UPDATE_FIELDS = [
     'projectName', 'location', 'reportDate', 'weather', 'temperature',
     'contractor', 'workType', 'notes', 'workEntries',
     'workExecutedToday', 'workLocation', 'manpowerSummary',
     'risksHindrances', 'materialsReceivedSummary', 'customSections',
+    'boqItemId',
   ];
   const unknown = Object.keys(fields).filter(k => !ALLOWED_UPDATE_FIELDS.includes(k));
   if (unknown.length) {
@@ -1144,6 +1191,33 @@ router.put('/:id', async (req, res) => {
     // override only ever applies when the owner is themselves an admin;
     // `req.isAdmin` comes from the JWT claim set by requireAuth.
     if (rejectIfFutureReportDate(req, res, fields.reportDate, 'dpr.update')) return;
+  }
+
+  // N7 (round-28): boqItemId PUT validation. Same contract as POST —
+  // must exist + be active + match the (possibly-updated) projectName.
+  // boqItemId may also be set to null to unlink a DPR.
+  if (fields.boqItemId !== undefined) {
+    if (fields.boqItemId === null) {
+      // Allowed — clears the link. Will pass through to the update payload.
+    } else if (typeof fields.boqItemId !== 'string' || !fields.boqItemId) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'VALIDATION_ERROR', message: 'boqItemId must be a string or null' });
+    } else {
+      const boq = await prisma.boqItem.findUnique({ where: { id: fields.boqItemId }, select: { id: true, projectName: true, isActive: true } });
+      if (!boq) {
+        return res.status(400).json({ error: 'BOQ_ITEM_NOT_FOUND', code: 'BOQ_ITEM_NOT_FOUND', message: 'Linked BOQ item does not exist' });
+      }
+      if (!boq.isActive) {
+        return res.status(400).json({ error: 'BOQ_ITEM_INACTIVE', code: 'BOQ_ITEM_INACTIVE', message: 'Linked BOQ item is archived (isActive=false)' });
+      }
+      // projectName may have been set in this same PUT — check the
+      // in-flight value first, then fall back to the stored row.
+      const targetProjectName = (typeof fields.projectName === 'string' && fields.projectName.trim())
+        ? fields.projectName.trim()
+        : existing.projectName;
+      if (boq.projectName.trim() !== targetProjectName) {
+        return res.status(400).json({ error: 'BOQ_PROJECT_MISMATCH', code: 'BOQ_PROJECT_MISMATCH', message: 'Linked BOQ item belongs to a different projectName' });
+      }
+    }
   }
 
   // Only owner can update
@@ -1194,6 +1268,8 @@ router.put('/:id', async (req, res) => {
         photos: true,
         submittedBy: { select: { id: true, name: true, email: true } },
         inspections: { select: { id: true, inspectionType: true, status: true, severity: true } },
+        // N7 (round-28): BOQ summary on PUT response, mirror of POST.
+        boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
       },
     });
 
