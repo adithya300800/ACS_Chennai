@@ -45,6 +45,12 @@ const { fanOutEmail } = require('../lib/notify');
 // non-OPEN statuses (e.g. ACKNOWLEDGED) are not the "first signal" admins
 // need an email for.
 const { fanOutToAdmins } = require('../lib/notify');
+// hashIdentifier is used in error-log contexts (employeeHash field) below.
+// The route previously used it without an import — caught by DR-005 tests
+// failing in the inspectionHandleTransitionError path. Pinning the import
+// here makes the late-running catch-all handler safe even when the route
+// hits a non-_status error (e.g. unexpected throw from a tx callback).
+const { hashIdentifier } = require('../lib/pii');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -97,8 +103,14 @@ function labelizeInspectionType(t) {
   return INSPECTION_TYPE_LABELS[t] || String(t || '').replace(/_/g, ' ');
 }
 
+// SOL DR-005: add DRAFT so the frontend's "Save as Draft" button has a
+// real target state. DRAFT is owner-only (an admin cannot create on behalf
+// of a workflow in DRAFT — that would skip the legitimate notify path).
+// DRAFT records do NOT trigger admin fan-out, do NOT appear in admin
+// queues, and CAN be promoted to OPEN through the explicit
+// POST /:id/submit transition (which DOES trigger the fan-out).
 const ALLOWED_STATUSES = new Set([
-  'OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION', 'CLOSED', 'REJECTED',
+  'DRAFT', 'OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION', 'CLOSED', 'REJECTED',
 ]);
 
 const ALLOWED_SEVERITIES = new Set(['MINOR', 'MAJOR', 'CRITICAL', null]);
@@ -215,7 +227,13 @@ router.post('/', async (req, res) => {
       code: 'STATUS_INVALID',
     });
   }
-  if (requestedStatus !== 'OPEN') {
+  // SOL DR-005: DRAFT is owner-allowed without an admin re-read. The
+  // rationale is the inverse of the S3-9 admin gate — DRAFT is the
+  // "I am not ready to publish" state, which is the OPPOSITE of what an
+  // admin trying to skip the queue would request. Admins still cannot
+  // create a DRAFT on an employee's behalf because that would hide work
+  // from the queue, but the cheaper no-DB-read path is safe here.
+  if (requestedStatus !== 'OPEN' && requestedStatus !== 'DRAFT') {
     // S3-9 (round-27): do NOT trust req.isAdmin from the JWT. A user demoted
     // from admin via the team page keeps a valid token for up to
     // JWT_TTL_MINUTES; trusting the cached claim would let them POST a
@@ -360,7 +378,10 @@ router.post('/', async (req, res) => {
     // Round-26: fire admin-targeted fan-out for newly-OPENED inspections.
     // Guard on `record.status === 'OPEN'` — admin-set non-OPEN statuses
     // (e.g. ACKNOWLEDGED) are not the "first signal" admins need an email
-    // for. Best-effort: any error is swallowed inside the helper.
+    // for. SOL DR-005: DRAFT is the explicit "do not notify yet" state,
+    // so the fan-out stays silent. The owner promotes DRAFT → OPEN through
+    // POST /:id/submit (separate transition) — that path fires the fan-out.
+    // Best-effort: any error is swallowed inside the helper.
     if (record.status === 'OPEN') {
       try {
         await fanOutToAdmins(
@@ -887,10 +908,11 @@ router.put('/:id', async (req, res) => {
   if (existing.submittedById !== req.employeeId) {
     return res.status(403).json({ error: 'FORBIDDEN', message: 'Only owner can update' });
   }
-  // Lock once the record leaves OPEN — status transitions need a dedicated
-  // endpoint (out of scope for round-12 per the PMC expert's state-machine
-  // recommendation deferred).
-  if (existing.status !== 'OPEN') {
+  // SOL DR-005: DRAFT is also editable by the owner — that's the whole
+  // point of "Save as Draft". Once the record transitions to OPEN (and
+  // beyond) the state machine takes over and only the dedicated
+  // /acknowledge, /close, /reject endpoints can move it forward.
+  if (existing.status !== 'OPEN' && existing.status !== 'DRAFT') {
     return res.status(409).json({
       error: 'INSPECTION_LOCKED',
       code: 'INSPECTION_LOCKED',
@@ -899,13 +921,16 @@ router.put('/:id', async (req, res) => {
   }
 
   try {
-    // LPR-008: pin `status: 'OPEN'` on the WHERE so a concurrent admin
-    // ack/close/reject between our read and our update cannot be
-    // silently overwritten. If Prisma rejects with P2025, the catch
-    // below maps it to 409 INSPECTION_LOCKED (same wire shape as the
-    // read-time check) so clients only see one error code.
+    // LPR-008: pin `status` on the WHERE so a concurrent admin
+    // ack/close/reject (or owner /submit promotion) between our read and
+    // our update cannot be silently overwritten. We accept both OPEN
+    // (the published-state edit) and DRAFT (the SOL DR-005 owner-edit
+    // path) — same conditional shape, broader input. If Prisma rejects
+    // with P2025, the catch below maps it to 409 INSPECTION_LOCKED
+    // (same wire shape as the read-time check) so clients only see one
+    // error code.
     const updated = await prisma.inspectionRecord.update({
-      where: { id, status: 'OPEN' },
+      where: { id, status: existing.status },
       data: {
         ...fields,
         updatedAt: new Date(),
@@ -967,6 +992,11 @@ router.put('/:id', async (req, res) => {
 const ACK_FROM = new Set(['OPEN']);
 const CLOSE_FROM = new Set(['ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
 const REJECT_FROM = new Set(['OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
+// SOL DR-005: SUBMIT promotes DRAFT → OPEN. Only the OWNER can submit —
+// an admin promoting someone else's draft would (a) bypass the owner's
+// review of their own work and (b) trigger admin fan-out to themselves.
+// The route guards owner-check below.
+const SUBMIT_FROM = new Set(['DRAFT']);
 
 const INSPECTION_INCLUDE = {
   photos: true,
@@ -999,6 +1029,7 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
     action === 'ACKNOWLEDGE' ? ACK_FROM
     : action === 'CLOSE' ? CLOSE_FROM
     : action === 'REJECT' ? REJECT_FROM
+    : action === 'SUBMIT' ? SUBMIT_FROM
     : null;
   if (!allowedFrom) {
     throw Object.assign(new Error(`Unknown action ${action}`), { _code: 'UNKNOWN_ACTION', _status: 400 });
@@ -1008,6 +1039,7 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
   let notifType;
   if (action === 'ACKNOWLEDGE') { nextStatus = 'ACKNOWLEDGED'; notifType = 'INSPECTION_ACKNOWLEDGED'; }
   else if (action === 'CLOSE') { nextStatus = 'CLOSED'; notifType = 'INSPECTION_CLOSED'; }
+  else if (action === 'SUBMIT') { nextStatus = 'OPEN'; notifType = null; } // SOL DR-005: no per-record notif — fan-out fires post-tx
   else { nextStatus = 'REJECTED'; notifType = 'INSPECTION_REJECTED'; }
 
   return prisma.$transaction(async (tx) => {
@@ -1023,6 +1055,20 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
       throw Object.assign(
         new Error(`Cannot move inspection from ${record.status} to ${nextStatus}`),
         { _code: 'INVALID_TRANSITION', _status: 409 }
+      );
+    }
+
+    // SOL DR-005: SUBMIT is owner-only. Even an admin token cannot promote
+    // someone else's draft — that would (a) silently bypass the owner's
+    // review of their own work and (b) trigger admin fan-out to the admin
+    // themselves, which is the queue-bypass vector the original audit
+    // flagged. We let the admin transition helpers (CLOSE/REJECT) take
+    // over from the resulting OPEN state through their own admin-gated
+    // routes.
+    if (action === 'SUBMIT' && record.submittedById !== actorEmployeeId) {
+      throw Object.assign(
+        new Error('Only the owner can submit a draft'),
+        { _code: 'NOT_OWNER', _status: 403 }
       );
     }
 
@@ -1199,6 +1245,58 @@ router.post('/:id/reject', requireFreshAdmin, async (req, res) => {
     res.json(updated);
   } catch (err) {
     return inspectionHandleTransitionError(req, res, err, 'reject');
+  }
+});
+
+// ─── POST /api/inspection/:id/submit ─────────────────────────────────────────
+// SOL DR-005: DRAFT → OPEN transition owned by the OWNER. This is the
+// single intentional path a draft takes into the admin review queue.
+// Any other way of getting a draft onto the queue would have to come
+// from an admin mutation on an already-OPEN record (CLOSE / REJECT
+// chains), so the fan-out fires exactly once per draft submission.
+//
+// We do NOT require requireFreshAdmin here — submission is an owner
+// action, and the admin-claim check is for admin-only endpoints.
+router.post('/:id/submit', async (req, res) => {
+  const prisma = getPrisma(req);
+  const { id } = req.params;
+
+  try {
+    const updated = await transitionInspectionRecord(
+      prisma,
+      id,
+      'SUBMIT',
+      {},
+      req.employeeId,
+      { allowAdminOverride: false } // owner-only; no future-date override path
+    );
+
+    // Fan-out fires AFTER the tx commits. Same shape as the create path —
+    // admins get one email per submission, best-effort.
+    try {
+      await fanOutToAdmins(
+        {
+          type: 'ADMIN_INSPECTION_OPENED',
+          message: `New inspection opened by ${updated.submittedBy?.name || 'an employee'}: ${updated.inspectionType || 'inspection'}`,
+          meta: {
+            employeeName: updated.submittedBy?.name || 'an employee',
+            recordTitle: updated.projectName || updated.inspectionType || 'an inspection',
+            inspectionType: updated.inspectionType || '',
+            inspectionId: updated.id,
+          },
+        },
+        prisma,
+      );
+    } catch (adminErr) {
+      console.error('Inspection submit fan-out error', {
+        inspectionId: updated.id,
+        message: adminErr?.message?.split('\n')[0],
+      });
+    }
+
+    res.json(updated);
+  } catch (err) {
+    return inspectionHandleTransitionError(req, res, err, 'submit');
   }
 });
 

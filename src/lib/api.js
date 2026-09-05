@@ -371,6 +371,9 @@ export const api = {
   // no-op so any caller still passing it doesn't crash.
   updateInspection: (id, data, _deprecatedVersion, token) =>
     api.put(`/inspection/${id}`, data, token),
+  // SOL DR-005: DRAFT → OPEN transition. Owner-only; backend fires the
+  // admin fan-out on success. Symmetric to the dpr `/review` chain.
+  submitInspection: (id, token) => api.post(`/inspection/${id}/submit`, {}, token),
 
   // Round-17 B-06: bulk fan-out for the admin inspection queue. Mirrors the
   // DPR bulkReviewDprs shape — backend returns

@@ -425,10 +425,13 @@ export default function InspectionSubmit() {
           dprId: queryDprId || null,
           inspectionType: workEntry.workType,
           data: workEntry.data,
-          // Round-17 C-08: both ternary branches returned 'OPEN' — dead code,
-          // collapsed to a literal. Inspection rows always start OPEN; the
-          // backend enforces the DRAFT semantics via a separate `isDraft` flag.
-          status: 'OPEN',
+          // SOL DR-005: the two buttons finally diverge. "Save as Draft"
+          // stores an owner-visible DRAFT row that does NOT trigger admin
+          // fan-out (backend/src/routes/inspection.js ALLOWED_STATUSES).
+          // "Submit Record" creates an OPEN row as before. Previously
+          // both routes sent 'OPEN', so "Save as Draft" silently
+          // published into the admin review queue.
+          status: submitStatus === 'DRAFT' ? 'DRAFT' : 'OPEN',
           // Round-12 MVP: severity is not asked at submit time. The
           // Inspection page surfaces it on the detail view for NCR / safety
           // sub-types where the structured data already implies severity
