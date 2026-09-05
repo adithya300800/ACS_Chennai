@@ -65,6 +65,14 @@ const { fanOutToAdmins } = require('../lib/notify');
 // here makes the late-running catch-all handler safe even when the route
 // hits a non-_status error (e.g. unexpected throw from a tx callback).
 const { hashIdentifier } = require('../lib/pii');
+// [N1] Phase A: import resolveProject from the projects router so the
+// POST/PATCH handlers can resolve either a projectId (preferred — fast
+// PK lookup) or a projectName (free-text, looked up case-insensitively
+// against the Project table). projects.js doesn't import inspection.js,
+// so this is a one-way import (no require cycle). See dpr.js for the
+// matching import + inline helper if a future refactor ever inverts
+// the relationship.
+const { resolveProject } = require('./projects');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -203,6 +211,10 @@ router.post('/', async (req, res) => {
     // N7 (round-28): optional BOQ link. Validated below so a foreign
     // or inactive item can never slip past the FK.
     boqItemId,
+    // [N1] Phase A: nullable projectId FK. Accept EITHER projectId OR
+    // projectName (preferring projectId when both supplied). Same shape
+    // as the DPR POST handler — see dpr.js for the full rationale.
+    projectId,
   } = req.body || {};
 
   // N-4: compute requested status BEFORE the type-allowlist gate so the
@@ -212,10 +224,15 @@ router.post('/', async (req, res) => {
   const requestedStatus = status === undefined ? 'OPEN' : status;
 
   // typeof guards (mirror dpr.js P1-2 — reject non-string types before Prisma).
-  // DRAFT only requires projectName to be a non-empty string; the rest
-  // can be filled in on resume.
-  if (typeof projectName !== 'string' || !projectName.trim()) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'projectName required' });
+  // DRAFT only requires projectName (or projectId) to be a non-empty
+  // string; the rest can be filled in on resume.
+  if ((typeof projectName !== 'string' || !projectName.trim()) &&
+      (typeof projectId !== 'string' || !projectId.trim())) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      code: 'PROJECT_REQUIRED',
+      message: 'Either projectId or projectName is required',
+    });
   }
   if (requestedStatus !== 'DRAFT') {
     if (typeof location !== 'string' || !location.trim() ||
@@ -223,6 +240,35 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'projectName, location, reportDate required' });
     }
   }
+
+  // [N1] Resolve the project to a real Project row (FK + canonical name).
+  // Same resolution block as the DPR POST handler — projectId is
+  // preferred (fast PK lookup), projectName falls back through
+  // resolveProject() (UUID-or-name + case-insensitive). Discovered rows
+  // (no curated Project row) are accepted: projectId stays NULL and
+  // projectName gets the typed value, matching the legacy contract.
+  let resolvedProject = null;
+  if (typeof projectId === 'string' && projectId.trim()) {
+    const p = await prisma.project.findUnique({ where: { id: projectId.trim() } });
+    if (!p || !p.isActive) {
+      return res.status(400).json({ error: 'PROJECT_NOT_FOUND', code: 'PROJECT_NOT_FOUND', message: 'Linked project does not exist or is inactive' });
+    }
+    resolvedProject = p;
+  } else if (typeof projectName === 'string' && projectName.trim()) {
+    const result = await resolveProject(prisma, projectName.trim());
+    if (result.kind === 'missing') {
+      return res.status(400).json({ error: 'PROJECT_NOT_FOUND', code: 'PROJECT_NOT_FOUND', message: 'No project matches that name' });
+    }
+    if (result.kind === 'project') {
+      if (!result.project.isActive) {
+        return res.status(400).json({ error: 'PROJECT_INACTIVE', code: 'PROJECT_INACTIVE', message: 'Project is archived (isActive=false)' });
+      }
+      resolvedProject = result.project;
+    }
+    // kind === 'discovered' → resolvedProject stays null.
+  }
+  const canonicalProjectName = resolvedProject ? resolvedProject.name : (typeof projectName === 'string' ? projectName.trim() : '');
+  const resolvedProjectId = resolvedProject ? resolvedProject.id : null;
 
   // Length caps (mirror dpr.js MAX map).
   const MAX = { projectName: 200, location: 200, weather: 80, contractor: 200 };
@@ -383,7 +429,7 @@ router.post('/', async (req, res) => {
     if (!boq.isActive) {
       return res.status(400).json({ error: 'BOQ_ITEM_INACTIVE', code: 'BOQ_ITEM_INACTIVE', message: 'Linked BOQ item is archived (isActive=false)' });
     }
-    if (boq.projectName.trim() !== projectName.trim()) {
+    if (boq.projectName.trim() !== canonicalProjectName) {
       return res.status(400).json({ error: 'BOQ_PROJECT_MISMATCH', code: 'BOQ_PROJECT_MISMATCH', message: 'Linked BOQ item belongs to a different projectName' });
     }
     normalisedBoqItemId = boqItemId;
@@ -440,7 +486,12 @@ router.post('/', async (req, res) => {
 
       const created = await db.inspectionRecord.create({
         data: {
-          projectName: projectName.trim(),
+          // [N1] projectId FK + denormalized projectName — mirror of the
+          // DPR POST handler. canonicalProjectName is the Project row's
+          // name when curated, or the typed name when discovered;
+          // projectId is NULL in the discovered case.
+          projectId: resolvedProjectId,
+          projectName: canonicalProjectName,
           location: location.trim(),
           reportDate: dateUTC,
           weather: weather || null,
@@ -473,6 +524,8 @@ router.post('/', async (req, res) => {
           dpr: { select: { id: true, reportDate: true, projectName: true } },
           // N7 (round-28): BOQ summary on the create response.
           boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
+          // [N1] Project summary on the create response, mirror of DPR POST.
+          project: { select: { id: true, name: true, code: true } },
         },
       });
 
@@ -518,7 +571,7 @@ router.post('/', async (req, res) => {
             message: `New inspection opened by ${record.submittedBy?.name || 'an employee'}: ${record.inspectionType || 'inspection'}`,
             meta: {
               employeeName: record.submittedBy?.name || 'an employee',
-              recordTitle: record.projectName || record.inspectionType || 'an inspection',
+              recordTitle: canonicalProjectName || record.inspectionType || 'an inspection',
               inspectionType: record.inspectionType || '',
               inspectionId: record.id,
             },
@@ -581,7 +634,7 @@ router.post('/', async (req, res) => {
 // gets that record and nothing else.
 router.get('/', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
-  const { cursor, limit = '20', dprId, reportDate, from, to, inspectionType, status, severity, my, month } = req.query;
+  const { cursor, limit = '20', dprId, reportDate, from, to, inspectionType, status, severity, my, month, projectId, projectName: projectNameFilter } = req.query;
 
   const take = Math.min(parseInt(limit) || 20, 100);
 
@@ -735,6 +788,12 @@ router.get('/', asyncHandler(async (req, res) => {
       ...(status ? { status } : {}),
       ...(severity ? { severity } : {}),
       ...(reportDateWhere ? { reportDate: reportDateWhere } : {}),
+      // [N1] projectId FK filter on the list endpoint — mirror of the
+      // DPR list. projectName (free-text) is left out by default; the
+      // KPI endpoint still groups on the denormalized column. If a
+      // caller really needs a name filter, they can resolve via the
+      // projects router first.
+      ...(projectId ? { projectId } : {}),
       ...(cursor ? cursorWhere : {}),
     };
 
@@ -748,6 +807,9 @@ router.get('/', asyncHandler(async (req, res) => {
         // queue cards can render the linked item code without a
         // per-row roundtrip.
         boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
+        // [N1] Project summary on the list endpoint — admin queue cards
+        // can render the FK target without a per-row roundtrip.
+        project: { select: { id: true, name: true, code: true } },
       },
       orderBy: [{ reportDate: 'desc' }, { id: 'desc' }],
       take: take + 1,
@@ -915,6 +977,8 @@ router.get('/:id', async (req, res) => {
         // N7 (round-28): BOQ summary on detail. Same select shape as
         // the list endpoint.
         boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
+        // [N1] Project summary on detail. Same shape as the list endpoint.
+        project: { select: { id: true, name: true, code: true } },
       },
     });
 
@@ -998,7 +1062,10 @@ router.put('/:id', async (req, res) => {
   }
 
   const ALLOWED_UPDATE_FIELDS = [
-    'projectName', 'location', 'reportDate', 'weather', 'contractor',
+    // [N1] projectId + projectName are both on the allowlist. Same
+    // resolution contract as the DPR PUT handler below — see dpr.js
+    // for the full rationale and the resolveTargetProjectName helper.
+    'projectName', 'projectId', 'location', 'reportDate', 'weather', 'contractor',
     'inspectionType', 'data', 'severity', 'dprId',
     // N7 (round-28): BOQ link — same allowlist extension as DPR PUT.
     'boqItemId',
@@ -1043,13 +1110,51 @@ router.put('/:id', async (req, res) => {
       if (!boq.isActive) {
         return res.status(400).json({ error: 'BOQ_ITEM_INACTIVE', code: 'BOQ_ITEM_INACTIVE', message: 'Linked BOQ item is archived (isActive=false)' });
       }
-      const targetProjectName = (typeof fields.projectName === 'string' && fields.projectName.trim())
-        ? fields.projectName.trim()
-        : existing.projectName;
+      // [N1] Compare against the canonical target project name. If the
+      // owner PUT set projectId, use the Project row's name; if they
+      // set projectName, use that; otherwise fall back to the stored
+      // row. Mirrors the dpr.js helper — see resolveTargetProjectName
+      // there for the rationale.
+      const targetProjectName = (typeof fields.projectId === 'string' && fields.projectId)
+        ? ((await prisma.project.findUnique({ where: { id: fields.projectId }, select: { name: true } }))?.name || fields.projectId)
+        : ((typeof fields.projectName === 'string' && fields.projectName.trim())
+          ? fields.projectName.trim()
+          : existing.projectName);
       if (boq.projectName.trim() !== targetProjectName) {
         return res.status(400).json({ error: 'BOQ_PROJECT_MISMATCH', code: 'BOQ_PROJECT_MISMATCH', message: 'Linked BOQ item belongs to a different projectName' });
       }
     }
+  }
+
+  // [N1] PUT projectId resolution. When the owner PUTs a projectId, we
+  // validate it (must exist + be active) AND derive the canonical
+  // projectName from the resolved Project row — so the denormalized
+  // projectName column stays in sync with the FK. Symmetric with the
+  // POST resolution block above.
+  if (fields.projectId !== undefined && fields.projectId !== null) {
+    if (typeof fields.projectId !== 'string' || !fields.projectId) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'VALIDATION_ERROR', message: 'projectId must be a string or null' });
+    }
+    const p = await prisma.project.findUnique({ where: { id: fields.projectId } });
+    if (!p || !p.isActive) {
+      return res.status(400).json({ error: 'PROJECT_NOT_FOUND', code: 'PROJECT_NOT_FOUND', message: 'Linked project does not exist or is inactive' });
+    }
+    fields.projectId = p.id;
+    fields.projectName = p.name;
+  } else if (fields.projectName !== undefined && typeof fields.projectName === 'string' && fields.projectName.trim()) {
+    // Free-text projectName PUT with no projectId: try to resolve to a
+    // curated Project row. If found, take its id + name (side-effect
+    // promotion of the FK). If not found, leave the typed projectName
+    // and projectId unset — the existing row keeps its FK state.
+    const result = await resolveProject(prisma, fields.projectName.trim());
+    if (result.kind === 'project') {
+      if (!result.project.isActive) {
+        return res.status(400).json({ error: 'PROJECT_INACTIVE', code: 'PROJECT_INACTIVE', message: 'Project is archived (isActive=false)' });
+      }
+      fields.projectId = result.project.id;
+      fields.projectName = result.project.name;
+    }
+    // kind === 'discovered' / 'missing' → keep typed projectName; FK stays NULL.
   }
 
   if (fields.inspectionType !== undefined && !ALLOWED_INSPECTION_TYPES.has(fields.inspectionType)) {
@@ -1113,6 +1218,8 @@ router.put('/:id', async (req, res) => {
         dpr: { select: { id: true, reportDate: true, projectName: true } },
         // N7 (round-28): BOQ summary on PUT response, mirror of POST.
         boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
+        // [N1] Project summary on PUT response, mirror of POST.
+        project: { select: { id: true, name: true, code: true } },
       },
     });
 

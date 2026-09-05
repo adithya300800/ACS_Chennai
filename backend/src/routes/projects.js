@@ -13,6 +13,7 @@
 //   PATCH  /api/projects/:id              update (admin)
 //   DELETE /api/projects/:id              soft-delete via isActive=false (admin)
 //   GET    /api/projects/:idOrName/kpis   aggregated counts for the dashboard
+//   GET    /api/projects/:idOrName/parties  (N1) project-anchor sidebar payload
 //
 // Auth model: same as DPR / Inspection — requireAuth on every route, with
 // `requireFreshAdmin` on the mutations (admin-claim TTL is 15m, so a
@@ -47,12 +48,53 @@ function getPrisma(req) { return req.app.get('prisma'); }
 // at once. The frontend renders project metadata in admin tables, so
 // 200 chars is the same cap DPR.projectName / InspectionRecord.projectName
 // use — large enough for "T-Nagar Residential Complex — Phase II".
+//
+// N1 widening: `description` gets a 4000-char cap (long-form narrative
+// the project-anchor page renders as a paragraph block); the other
+// columns are unchanged from the original N17 set.
 const FIELD_MAX = {
   name: 200,
   code: 60,
   client: 200,
   location: 200,
+  description: 4000,
 };
+
+// ─── JSON helpers (N1 widening) ──────────────────────────────────────────────
+// `parties` and `sites` are JSONB columns — the client sends them as either
+// already-parsed JSON objects or as JSON-encoded strings (the frontend
+// historically stringified before fetch). `validateJsonField` normalises
+// both shapes to a plain JS value or rejects with 400 if the field is
+// neither. The caps on parties / sites are intentionally loose (a party
+// record is a small object; sites is an array of small objects) — the
+// per-field length cap is the abuse-prevention layer, not a contract.
+function validateJsonField(raw, fieldName) {
+  if (raw == null) return { ok: true, value: null };
+  if (typeof raw === 'object') return { ok: true, value: raw };
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return { ok: true, value: parsed };
+    } catch (e) {
+      return { ok: false, error: `${fieldName} must be valid JSON` };
+    }
+  }
+  return { ok: false, error: `${fieldName} must be an object/array or a JSON string` };
+}
+
+function validateContractValue(raw) {
+  if (raw == null || raw === '') return { ok: true, value: null };
+  // Accept number, numeric string, or stringified Decimal. Reject NaN /
+  // Infinity / negatives — contract value is always non-negative, and
+  // capping at 999_999_999_999.99 mirrors the column's NUMERIC(15,2)
+  // ceiling so a typo'd 14-digit value fails fast instead of silently
+  // saturating the column.
+  const n = typeof raw === 'string' ? Number(raw) : raw;
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > 999999999999.99) {
+    return { ok: false, error: 'contractValue must be a non-negative number ≤ 999999999999.99' };
+  }
+  return { ok: true, value: n };
+}
 
 function validateProjectPayload(body, { partial = false } = {}) {
   const out = {};
@@ -104,6 +146,34 @@ function validateProjectPayload(body, { partial = false } = {}) {
   // Cross-field guard: expectedEndDate must be >= startDate when both set.
   if (out.startDate && out.expectedEndDate && out.expectedEndDate < out.startDate) {
     return { ok: false, error: 'expectedEndDate must be on or after startDate' };
+  }
+  // [N1] parties + sites + contractValue + description widen the project
+  // payload. All four are nullable; the validators above return 400 on
+  // invalid shapes. Prisma accepts the parsed value as-is for JSONB
+  // columns (it stringifies internally) and the Number we coerce
+  // contractValue into matches the column's NUMERIC(15,2) ceiling.
+  if (!partial || body.parties !== undefined) {
+    const v = validateJsonField(body.parties, 'parties');
+    if (!v.ok) return { ok: false, error: v.error };
+    out.parties = v.value;
+  }
+  if (!partial || body.sites !== undefined) {
+    const v = validateJsonField(body.sites, 'sites');
+    if (!v.ok) return { ok: false, error: v.error };
+    out.sites = v.value;
+  }
+  if (!partial || body.contractValue !== undefined) {
+    const v = validateContractValue(body.contractValue);
+    if (!v.ok) return { ok: false, error: v.error };
+    out.contractValue = v.value;
+  }
+  if (!partial || body.description !== undefined) {
+    out.description = body.description == null
+      ? null
+      : (typeof body.description === 'string' ? body.description : null);
+    if (body.description != null && typeof body.description !== 'string') {
+      return { ok: false, error: 'description must be a string or null' };
+    }
   }
   // Length caps
   for (const [k, cap] of Object.entries(FIELD_MAX)) {
@@ -158,12 +228,28 @@ async function resolveProject(prisma, idOrName) {
 
 function serializeProject(row) {
   if (!row) return null;
+  // Decimal columns serialize via .toString() (Prisma default for Decimal).
+  // That preserves precision and round-trips cleanly through JSON; the
+  // frontend parses with `new Decimal(...)` or coerces to Number for
+  // display. We do NOT coerce to Number here — a 15-digit contract value
+  // would silently lose precision through `Number()`.
+  const contractValueRaw = row.contractValue;
+  const contractValue = contractValueRaw == null
+    ? null
+    : (typeof contractValueRaw === 'string' || typeof contractValueRaw === 'number')
+      ? contractValueRaw
+      : (typeof contractValueRaw.toString === 'function' ? contractValueRaw.toString() : contractValueRaw);
   return {
     id: row.id,
     name: row.name,
     code: row.code,
     client: row.client,
     location: row.location,
+    // [N1] widening — see validateProjectPayload above for the input shape.
+    parties: row.parties ?? null,
+    contractValue,
+    sites: row.sites ?? null,
+    description: row.description ?? null,
     isActive: row.isActive,
     startDate: row.startDate instanceof Date ? row.startDate.toISOString().slice(0, 10) : row.startDate,
     expectedEndDate: row.expectedEndDate instanceof Date ? row.expectedEndDate.toISOString().slice(0, 10) : row.expectedEndDate,
@@ -196,6 +282,10 @@ router.get('/', asyncHandler(async (req, res) => {
         orderBy: [{ name: 'asc' }],
         select: {
           id: true, name: true, code: true, client: true, location: true,
+          // [N1] widening — list endpoint surfaces the new metadata
+          // columns so the frontend's project picker can render
+          // client/location chips without a per-row detail round-trip.
+          parties: true, contractValue: true, sites: true, description: true,
           isActive: true, startDate: true, expectedEndDate: true,
           createdById: true, createdAt: true, updatedAt: true,
         },
@@ -292,7 +382,69 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
 // `GET /api/projects/<uuid>/kpis` would parse as :idOrName='<uuid>/kpis'
 // (which decodes fine but never matches the UUID regex, so it falls
 // through to the name match and 404s on the literal string '<uuid>/kpis').
+// /:idOrName/parties follows the same ordering rule (added in N1 Phase A).
 router.get('/:idOrName/kpis', asyncHandler(kpiHandler));
+// ─── GET /api/projects/:idOrName/parties (N1) ───────────────────────────────
+//
+// Project-anchor sidebar payload. The frontend renders four pieces of
+// metadata on the right rail of the project detail page: parties
+// (client / contractor / consultant etc.), contract value (the
+// total-contract amount for variance reports), sites (an array of
+// site locations under this project), and description (long-form
+// narrative). All four live on the Project row as N1 widening
+// columns — this endpoint is the canonical read surface so the
+// sidebar can render in a single round-trip.
+//
+// Auth: any authenticated employee. The KPI endpoint above is also
+// any-auth; the metadata fields are not admin-only because they
+// describe the project (public to anyone who can see the project
+// row in the picker).
+//
+// Resolves by UUID or by name via the same resolveProject() helper
+// the detail + KPI endpoints use. A discovered project (name with
+// no Project row) returns an empty payload with a 200 + isRegistered
+// flag so the frontend can show "no metadata yet" instead of 404.
+router.get('/:idOrName/parties', asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  const result = await resolveProject(prisma, req.params.idOrName);
+  if (result.kind === 'missing') {
+    return res.status(404).json({ error: 'PROJECT_NOT_FOUND', code: 'PROJECT_NOT_FOUND', message: 'No project matches that id or name' });
+  }
+  if (result.kind === 'discovered') {
+    // No curated row — return an empty payload so the sidebar renders
+    // the "not registered yet" state without 404ing.
+    return res.json({
+      isRegistered: false,
+      name: result.name,
+      parties: null,
+      contractValue: null,
+      sites: null,
+      description: null,
+    });
+  }
+  // Registered project — return the four metadata fields. Prisma
+  // returns the JSONB columns as already-parsed objects/arrays; the
+  // contractValue Decimal serializes through .toString() per the
+  // serializeProject contract (precision-preserving).
+  const p = result.project;
+  const contractValue = p.contractValue == null
+    ? null
+    : (typeof p.contractValue === 'string' || typeof p.contractValue === 'number')
+      ? p.contractValue
+      : (typeof p.contractValue.toString === 'function' ? p.contractValue.toString() : p.contractValue);
+  res.json({
+    isRegistered: true,
+    name: p.name,
+    parties: p.parties ?? null,
+    contractValue,
+    sites: p.sites ?? null,
+    description: p.description ?? null,
+  });
+}));
 router.get('/:idOrName', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma) {
@@ -307,13 +459,19 @@ router.get('/:idOrName', asyncHandler(async (req, res) => {
     return res.json(serializeProject(result.project));
   }
   // Discovered (name with no Project row): return a stub so the frontend
-  // can render the empty-state with the project name.
+  // can render the empty-state with the project name. The N1 widening
+  // adds the new metadata columns as nulls — discovered projects have no
+  // curated metadata yet (the admin hasn't created the Project row).
   return res.json({
     name: result.name,
     isRegistered: false,
     isActive: true,
     client: null,
     location: null,
+    parties: null,
+    contractValue: null,
+    sites: null,
+    description: null,
     code: null,
     startDate: null,
     expectedEndDate: null,
@@ -336,7 +494,14 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Project id must be a UUID' });
   }
 
-  const ALLOWED_UPDATE_FIELDS = ['name', 'code', 'client', 'location', 'startDate', 'expectedEndDate'];
+  const ALLOWED_UPDATE_FIELDS = [
+    'name', 'code', 'client', 'location', 'startDate', 'expectedEndDate',
+    // [N1] widening — admin can now update the project metadata via PATCH
+    // (parties, sites, contractValue, description). The validation in
+    // validateProjectPayload handles each field's shape / cap / parse
+    // rules — same code path as POST, so a PATCH and a POST cannot drift.
+    'parties', 'sites', 'contractValue', 'description',
+  ];
   const fields = req.body || {};
   const unknown = Object.keys(fields).filter((k) => !ALLOWED_UPDATE_FIELDS.includes(k) && k !== 'isActive');
   if (unknown.length) {
@@ -721,4 +886,12 @@ async function kpiHandler(req, res) {
   });
 }
 
+// [N1] Phase A: export resolveProject so dpr.js and inspection.js can
+// reuse the same idOrName → Project row resolution on POST/PATCH without
+// duplicating the UUID regex + name-fallback logic. projects.js itself
+// doesn't import either of those routes, so this is a one-way import
+// (no require cycle). Same exposure contract as the route handlers below
+// — anything that imports resolveProject gets the same semantics the
+// /:idOrName endpoints honour.
 module.exports = router;
+module.exports.resolveProject = resolveProject;

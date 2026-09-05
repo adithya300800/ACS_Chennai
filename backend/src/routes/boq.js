@@ -54,6 +54,13 @@ const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
 const { mapPrismaError } = require('../lib/errors');
+// [N1] Phase A: import resolveProject from the projects router so the
+// BOQ POST/PATCH handlers can promote a typed projectName to a
+// curated projectId when one exists. Back-compat: projectName is
+// still accepted as the primary input — the legacy /variance endpoint
+// passes it as a query param, and many legacy clients don't know
+// about the FK yet.
+const { resolveProject } = require('./projects');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -165,7 +172,7 @@ router.get('/variance', asyncHandler(async (req, res) => {
 // ─── List ────────────────────────────────────────────────────────────────────
 router.get('/', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
-  const { projectName, isActive, limit = '50' } = req.query;
+  const { projectName, projectId, isActive, limit = '50' } = req.query;
 
   const take = Math.min(parseInt(limit) || 50, LIST_MAX);
 
@@ -175,6 +182,16 @@ router.get('/', asyncHandler(async (req, res) => {
       return res.status(400).json({ error: 'projectName must be a string' });
     }
     where.projectName = projectName.trim();
+  }
+  // [N1] Optional projectId FK filter. Canonical filter once every BOQ
+  // row is curated; the projectName filter is kept for back-compat with
+  // legacy callers (e.g. the existing /variance endpoint passes
+  // projectName as a query param — that's untouched here).
+  if (projectId) {
+    if (typeof projectId !== 'string') {
+      return res.status(400).json({ error: 'projectId must be a string' });
+    }
+    where.projectId = projectId;
   }
   if (isActive !== undefined) {
     if (isActive !== 'true' && isActive !== 'false') {
@@ -190,6 +207,9 @@ router.get('/', asyncHandler(async (req, res) => {
       take,
       include: {
         createdBy: { select: { id: true, name: true, email: true } },
+        // [N1] Project summary on the list endpoint so admin tables can
+        // render the FK target without a per-row roundtrip.
+        project: { select: { id: true, name: true, code: true } },
       },
     });
     res.json({ items });
@@ -210,13 +230,20 @@ router.post('/', asyncHandler(async (req, res) => {
   const {
     projectName, itemCode, description, unit, quantity, rate,
     category,
+    // [N1] Phase A: nullable projectId FK. Accept EITHER projectId OR
+    // projectName (projectId preferred when both supplied). The
+    // free-text projectName column stays the input contract — a
+    // typed name that's not yet curated still writes the BOQ row.
+    projectId,
   } = req.body || {};
 
   // Type guards — reject before Prisma so a non-string `projectName`
   // becomes a clean 400 instead of an opaque 500 (mirror of dpr.js
-  // P1-2 / inspection.js).
-  if (typeof projectName !== 'string' || !projectName.trim()) {
-    return res.status(400).json({ error: 'projectName is required' });
+  // P1-2 / inspection.js). Either projectId or projectName is
+  // required.
+  if ((typeof projectName !== 'string' || !projectName.trim()) &&
+      (typeof projectId !== 'string' || !projectId.trim())) {
+    return res.status(400).json({ error: 'projectName or projectId is required' });
   }
   if (typeof itemCode !== 'string' || !itemCode.trim()) {
     return res.status(400).json({ error: 'itemCode is required' });
@@ -237,9 +264,47 @@ router.post('/', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'category must be a string or null' });
   }
 
+  // [N1] Resolve project FK + cross-check against typed projectName.
+  // - projectId supplied → PK lookup; 400 if not found / inactive.
+  // - projectName supplied → resolveProject() handles UUID-or-name +
+  //   case-insensitive fallback. If a curated row exists, use its id +
+  //   canonical name; if discovered, projectId stays NULL.
+  // - Cross-check: if BOTH are supplied and they don't agree (the typed
+  //   name doesn't resolve to the supplied id), reject with 400. This
+  //   catches a client mistake where the picker returned one id but
+  //   the form's name field held a stale typed value.
+  let resolvedProject = null;
+  let resolvedProjectId = null;
+  if (typeof projectId === 'string' && projectId.trim()) {
+    const p = await prisma.project.findUnique({ where: { id: projectId.trim() } });
+    if (!p || !p.isActive) {
+      return res.status(400).json({ error: 'PROJECT_NOT_FOUND', code: 'PROJECT_NOT_FOUND', message: 'Linked project does not exist or is inactive' });
+    }
+    resolvedProject = p;
+    resolvedProjectId = p.id;
+    if (typeof projectName === 'string' && projectName.trim() && projectName.trim() !== p.name) {
+      return res.status(400).json({
+        error: 'PROJECT_NAME_MISMATCH',
+        code: 'PROJECT_NAME_MISMATCH',
+        message: `projectName (${projectName.trim()}) does not match the projectId's project (${p.name})`,
+      });
+    }
+  } else if (typeof projectName === 'string' && projectName.trim()) {
+    const result = await resolveProject(prisma, projectName.trim());
+    if (result.kind === 'project') {
+      resolvedProject = result.project;
+      resolvedProjectId = result.project.id;
+      if (!result.project.isActive) {
+        return res.status(400).json({ error: 'PROJECT_INACTIVE', code: 'PROJECT_INACTIVE', message: 'Project is archived (isActive=false)' });
+      }
+    }
+    // discovered / missing → resolvedProjectId stays null.
+  }
+  const canonicalProjectName = resolvedProject ? resolvedProject.name : (typeof projectName === 'string' ? projectName.trim() : '');
+
   // Length caps. Apply BEFORE the existence check so a malicious client
   // can't probe valid itemCodes by sending a 60 KB string.
-  const values = { projectName, itemCode, description, unit };
+  const values = { projectName: canonicalProjectName, itemCode, description, unit };
   if (category !== undefined) values.category = category;
   for (const [k, cap] of Object.entries(MAX)) {
     if (values[k] != null && typeof values[k] === 'string' && values[k].length > cap) {
@@ -255,7 +320,12 @@ router.post('/', asyncHandler(async (req, res) => {
   try {
     const created = await prisma.boqItem.create({
       data: {
-        projectName: projectName.trim(),
+        projectName: canonicalProjectName,
+        // [N1] Nullable FK. NULL when the typed projectName doesn't
+        // resolve to a curated Project row (the "discovered" case).
+        // The (projectId, itemCode) unique allows multiple NULLs
+        // (Postgres NULLS DISTINCT), so legacy behaviour is preserved.
+        projectId: resolvedProjectId,
         itemCode: itemCode.trim(),
         description: description.trim(),
         unit: unit.trim(),
@@ -267,6 +337,8 @@ router.post('/', asyncHandler(async (req, res) => {
       },
       include: {
         createdBy: { select: { id: true, name: true, email: true } },
+        // [N1] Project summary on the create response.
+        project: { select: { id: true, name: true, code: true } },
       },
     });
     res.status(201).json(created);
@@ -309,6 +381,8 @@ router.get('/:id', asyncHandler(async (req, res) => {
         _count: {
           select: { dprs: true, inspections: true },
         },
+        // [N1] Project summary on the detail endpoint, mirror of POST/PATCH.
+        project: { select: { id: true, name: true, code: true } },
       },
     });
     if (!item) {
@@ -331,7 +405,12 @@ router.get('/:id', asyncHandler(async (req, res) => {
 // able to mutate createdById (transfer ownership), isActive (soft-delete
 // only via DELETE), or the audit timestamps.
 const ALLOWED_UPDATE_FIELDS = [
-  'projectName', 'itemCode', 'description', 'unit',
+  // [N1] projectId + projectName are both on the allowlist. Mirror of
+  // the DPR / Inspection PUT handlers — owner can re-point a BOQ item
+  // to a curated Project via projectId, or rename via projectName
+  // (and resolveProject() promotes the typed name to a curated FK when
+  // one exists).
+  'projectName', 'projectId', 'itemCode', 'description', 'unit',
   'quantity', 'rate', 'category',
 ];
 
@@ -384,6 +463,40 @@ router.patch('/:id', asyncHandler(async (req, res) => {
       return res.status(403).json({ error: 'FORBIDDEN', message: 'Only the creator or an admin can update a BOQ item' });
     }
 
+    // [N1] PATCH projectId resolution. Symmetric with the POST handler:
+    //   - projectId supplied → PK lookup; 400 if not found / inactive.
+    //   - projectName supplied → resolveProject() promotes typed name to
+    //     a curated FK when one exists (legacy back-compat path).
+    //   - Cross-check: if BOTH supplied and they disagree, reject.
+    if (fields.projectId !== undefined && fields.projectId !== null) {
+      if (typeof fields.projectId !== 'string' || !fields.projectId) {
+        return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'VALIDATION_ERROR', message: 'projectId must be a string or null' });
+      }
+      const p = await prisma.project.findUnique({ where: { id: fields.projectId } });
+      if (!p || !p.isActive) {
+        return res.status(400).json({ error: 'PROJECT_NOT_FOUND', code: 'PROJECT_NOT_FOUND', message: 'Linked project does not exist or is inactive' });
+      }
+      fields.projectId = p.id;
+      if (fields.projectName !== undefined && typeof fields.projectName === 'string' && fields.projectName.trim() && fields.projectName.trim() !== p.name) {
+        return res.status(400).json({
+          error: 'PROJECT_NAME_MISMATCH',
+          code: 'PROJECT_NAME_MISMATCH',
+          message: `projectName (${fields.projectName.trim()}) does not match the projectId's project (${p.name})`,
+        });
+      }
+      fields.projectName = p.name;
+    } else if (fields.projectName !== undefined && typeof fields.projectName === 'string' && fields.projectName.trim()) {
+      const result = await resolveProject(prisma, fields.projectName.trim());
+      if (result.kind === 'project') {
+        if (!result.project.isActive) {
+          return res.status(400).json({ error: 'PROJECT_INACTIVE', code: 'PROJECT_INACTIVE', message: 'Project is archived (isActive=false)' });
+        }
+        fields.projectId = result.project.id;
+        fields.projectName = result.project.name;
+      }
+      // kind === 'discovered' / 'missing' → keep typed projectName; projectId stays NULL.
+    }
+
     // Server recomputes amount on every write — see the create route's
     // rationale. We need both quantity and rate to compute it; if only
     // one is being patched, fall back to the existing value.
@@ -401,6 +514,8 @@ router.patch('/:id', asyncHandler(async (req, res) => {
       },
       include: {
         createdBy: { select: { id: true, name: true, email: true } },
+        // [N1] Project summary on PATCH response, mirror of POST.
+        project: { select: { id: true, name: true, code: true } },
       },
     });
     res.json(updated);
@@ -461,6 +576,8 @@ router.delete('/:id', asyncHandler(async (req, res) => {
       data: { isActive: false },
       include: {
         createdBy: { select: { id: true, name: true, email: true } },
+        // [N1] Project summary on the delete response, mirror of POST/PATCH.
+        project: { select: { id: true, name: true, code: true } },
       },
     });
     res.json({ ...updated, deleted: true });

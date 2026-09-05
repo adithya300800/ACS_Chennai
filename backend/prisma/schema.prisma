@@ -76,12 +76,12 @@ model Employee {
   uploadIntents          UploadIntent[]
   // N5 cube-test integration: back-relation to CubeTest.submittedById so
   // the Prisma validator accepts the relation on CubeTest.
-  cubeTestsSubmitted     CubeTest[]            @relation("CubeTestSubmitter")
+  cubeTestsSubmitted     CubeTest[]              @relation("CubeTestSubmitter")
   // N7 (round-28): back-relation for BOQ items this employee created.
   // boqsCreated is for audit ("who added item 2.3.1?") — the create-time
   // audit trail. Mirror with the inspect/dpr back-relations above so the
   // prisma client offers the navigation in both directions.
-  boqsCreated            BoqItem[]       @relation("BoqCreator")
+  boqsCreated            BoqItem[]               @relation("BoqCreator")
 
   @@map("employees")
 }
@@ -247,10 +247,20 @@ model DPR {
   // historic DPR rows that referenced it (the audit trail survives).
   boqItemId     String?            @map("boq_item_id")
   boqItem       BoqItem?           @relation(fields: [boqItemId], references: [id], onDelete: SetNull)
+  // [N1] Project FK. Nullable so legacy rows from the free-text era stay
+  // valid (the migration backfills by case-insensitive name match; rows
+  // with no curated match keep projectId=NULL and continue to resolve
+  // via projectName). The free-text `projectName` column is kept
+  // denormalized (the create payload writes both columns from the same
+  // resolved row) so admin KPI roll-ups that still group by name keep
+  // working without a parallel migration.
+  projectId     String?            @map("project_id")
+  project       Project?           @relation(fields: [projectId], references: [id], onDelete: SetNull)
 
   @@unique([submittedById, reportDate])
   @@index([reportDate, id])
   @@index([boqItemId])
+  @@index([projectId])
   @@map("dpr")
 }
 
@@ -339,6 +349,12 @@ model InspectionRecord {
   // so archiving a BOQ item doesn't cascade-delete historic inspections.
   boqItemId   String?           @map("boq_item_id")
   boqItem     BoqItem?          @relation(fields: [boqItemId], references: [id], onDelete: SetNull)
+  // [N1] Project FK. Same shape + rationale as DPR.projectId — nullable
+  // for legacy rows that never had a curated Project match, the free-text
+  // `projectName` column is kept denormalized so admin KPI roll-ups keep
+  // working without a parallel migration.
+  projectId   String?           @map("project_id")
+  project     Project?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
 
   // Indexes mirror DPR's pattern: owner + date for "my inspections this week",
   // dprId for "show me inspections on this DPR", and (date,id) for cursor
@@ -348,6 +364,7 @@ model InspectionRecord {
   @@index([reportDate, id])
   @@index([inspectionType])
   @@index([boqItemId])
+  @@index([projectId])
   @@map("inspection_record")
 }
 
@@ -420,15 +437,23 @@ model BoqItem {
   // amount / category) happen to be word-identical in camelCase and
   // snake_case, so they don't need @map, but adding for consistency.
   projectName String   @map("project_name")
-  itemCode    String   @db.VarChar(60) @map("item_code")
+  itemCode    String   @map("item_code") @db.VarChar(60)
   description String   @map("description")
-  unit        String   @db.VarChar(20) @map("unit")
+  unit        String   @map("unit") @db.VarChar(20)
   quantity    Float    @map("quantity")
   rate        Float    @map("rate")
   // computed (quantity × rate) — convenience, not source of truth
   amount      Float    @map("amount")
-  category    String?  @db.VarChar(60) @map("category")
+  category    String?  @map("category") @db.VarChar(60)
   isActive    Boolean  @default(true) @map("is_active")
+  // [N1] Project FK. Nullable so legacy rows that never had a curated
+  // Project match stay valid; the free-text projectName column is kept
+  // denormalized so the variance report keeps working without a parallel
+  // migration. The unique constraint is rebuilt on (projectId, itemCode)
+  // — NULLS DISTINCT so multiple legacy rows with projectId=NULL + same
+  // itemCode do not collide. Note the old unique was (projectName,
+  // itemCode); the migration drops it explicitly.
+  projectId   String?  @map("project_id")
   createdById String   @map("created_by_id")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
@@ -436,10 +461,12 @@ model BoqItem {
   createdBy   Employee           @relation("BoqCreator", fields: [createdById], references: [id], onDelete: Restrict)
   dprs        DPR[]
   inspections InspectionRecord[]
+  project     Project?           @relation(fields: [projectId], references: [id], onDelete: SetNull)
 
-  @@unique([projectName, itemCode])
+  @@unique([projectId, itemCode])
   @@index([projectName])
   @@index([isActive])
+  @@index([projectId])
   @@map("boq_item")
 }
 
@@ -943,53 +970,53 @@ model UploadIntent {
 // at this granularity (a cube "set" is averaged for v1).
 // ─────────────────────────────────────────────────────────────────────────────
 model CubeTest {
-  id                    String    @id @default(uuid())
+  id                     String    @id @default(uuid())
   // FK to the cube_casting InspectionRecord (the CAST event). Nullable so
   // a standalone filing (no inspection yet) is allowed. SetNull on delete:
   // deleting the inspection should not destroy the cube-test history — the
   // test results are a compliance record that may be referenced by external
   // billing / acceptance paperwork long after the inspection is purged.
-  castingRecordId       String?   @map("casting_record_id")
+  castingRecordId        String?   @map("casting_record_id")
   // FK to the parent DPR (the concrete pour). Nullable for standalone
   // filings. SetNull on delete — same reasoning as above.
-  dprId                 String?   @map("dpr_id")
+  dprId                  String?   @map("dpr_id")
   // Free-text location label (e.g. "Grid A3-B4, Slab Level 2"). Capped at
   // 200 chars by the route handler; column is plain TEXT for forward
   // compatibility with longer multi-line locations.
-  pourLocation          String    @map("pour_location")
+  pourLocation           String    @map("pour_location")
   // Mix-design grade label (e.g. "M30"). Capped at 40 chars; not normalized
   // because the value-set is small enough to spot-check in code rather than
   // a lookup table.
-  concreteGrade         String    @map("concrete_grade")
+  concreteGrade          String    @map("concrete_grade")
   // The day the cubes were cast (date only, IST business day).
-  castDate              DateTime  @db.Date @map("cast_date")
+  castDate               DateTime  @map("cast_date") @db.Date
   // castDate + 7 days, computed on write. Indexed for the 7-day admin
   // dashboard tile.
-  sevenDayDueDate       DateTime  @db.Date @map("seven_day_due_date")
+  sevenDayDueDate        DateTime  @map("seven_day_due_date") @db.Date
   // castDate + 28 days, computed on write. Indexed for the 28-day admin
   // dashboard tile and the /api/cube-tests/due-soon endpoint.
-  twentyEightDayDueDate DateTime  @db.Date @map("twenty_eight_day_due_date")
+  twentyEightDayDueDate  DateTime  @map("twenty_eight_day_due_date") @db.Date
   // N/mm² at 7d. Null until the lab reports the result. Capped at 200 to
   // reject typos like 3000 N/mm² that a misread decimal could cause.
-  sevenDayResult        Float?    @map("seven_day_result")
+  sevenDayResult         Float?    @map("seven_day_result")
   // When the 7d test was run. Null until sevenDayResult is set.
-  sevenDayTestedAt      DateTime? @map("seven_day_tested_at")
+  sevenDayTestedAt       DateTime? @map("seven_day_tested_at")
   // N/mm² at 28d. Null until the lab reports the result.
-  twentyEightDayResult  Float?    @map("twenty_eight_day_result")
+  twentyEightDayResult   Float?    @map("twenty_eight_day_result")
   // When the 28d test was run. Null until twentyEightDayResult is set.
   twentyEightDayTestedAt DateTime? @map("twenty_eight_day_tested_at")
   // Target characteristic strength (e.g. 30.0 for M30). Stored on the row
   // (rather than derived from concreteGrade) so a strength override on a
   // particular pour does not require a code change.
-  expectedStrength      Float     @map("expected_strength")
+  expectedStrength       Float     @map("expected_strength")
   // Lifecycle state. See the header comment for the value set. Default is
   // PENDING (cast but no tests reported).
-  status                String    @default("PENDING")
+  status                 String    @default("PENDING")
   // FK to the employee who filed the cube-test row.
-  submittedById         String    @map("submitted_by_id")
-  notes                 String?
-  createdAt             DateTime  @default(now()) @map("created_at")
-  updatedAt             DateTime  @updatedAt @map("updated_at")
+  submittedById          String    @map("submitted_by_id")
+  notes                  String?
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
 
   castingRecord InspectionRecord? @relation(fields: [castingRecordId], references: [id], onDelete: SetNull)
   dpr           DPR?              @relation(fields: [dprId], references: [id], onDelete: SetNull)
@@ -1049,14 +1076,34 @@ model Project {
   code            String?   @unique
   client          String?
   location        String?
+  // [N1] Phase-A widening. Project now carries the structured metadata
+  // the project-anchor page renders (parties, contract value, sites,
+  // free-text description). parties and sites are JSONB so the schema
+  // doesn't lock the row shape for new party/site fields the PM might
+  // add later. contractValue is Decimal(15,2) — same precision the
+  // BoqItem.amount column uses so the variance report can compare
+  // contract vs executed without a unit-conversion artifact.
+  parties         Json?     @map("parties")
+  contractValue   Decimal?  @map("contract_value") @db.Decimal(15, 2)
+  sites           Json?     @map("sites")
+  description     String?   @map("description")
   isActive        Boolean   @default(true) @map("is_active")
-  startDate       DateTime? @db.Date @map("start_date")
-  expectedEndDate DateTime? @db.Date @map("expected_end_date")
+  startDate       DateTime? @map("start_date") @db.Date
+  expectedEndDate DateTime? @map("expected_end_date") @db.Date
   createdById     String?   @map("created_by_id")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
-  createdBy Employee? @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdBy   Employee?          @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  // [N1] Back-relations for the FK swap on DPR / InspectionRecord /
+  // BoqItem. The migration creates nullable `project_id` columns on each
+  // child with ON DELETE SET NULL, so archiving a Project row preserves
+  // historical DPRs / inspections / BOQ lines (their free-text projectName
+  // column still resolves the lookup, the FK just stops pointing at a
+  // soft-deleted row).
+  dprs        DPR[]
+  inspections InspectionRecord[]
+  boqItems    BoqItem[]
 
   // Hot read: the KPI list endpoint filters by `isActive = true` so the
   // active-projects dropdown doesn't surface soft-deleted rows. Index is
