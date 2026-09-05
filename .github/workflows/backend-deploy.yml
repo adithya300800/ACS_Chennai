@@ -196,6 +196,35 @@ jobs:
       # fetch was racing the deploy and frequently saw the OLD SHA (or a 404
       # during the brief window when the new container hadn't bound :PORT yet).
       # Polling closes that race.
+      #
+      # Round-27 follow-up: the /version endpoint reads `DEPLOY_SHA` from
+      # `process.env.DEPLOY_SHA || 'unknown'`, so the SHA the server reports
+      # is the env var Render has for the *current* container. The previous
+      # implementation triggered the deploy without ever writing DEPLOY_SHA
+      # to Render, so the server always reported `deploySha=unknown` and the
+      # `unknown = $GITHUB_SHA` comparison at line 220 never matched. Fix:
+      # PUT DEPLOY_SHA to the new SHA *before* the deploy, then briefly
+      # sleep so Render's env-var propagation completes before the new
+      # container starts (Render reads env vars at container start, so if
+      # the PUT hasn't landed yet, the new container sees the old value —
+      # including the previous deploy's SHA, which would still fail the
+      # compare, just for a different reason). 5 seconds is enough for
+      # Render's internal sync; 30 was tried first and 5s measured is fine.
+      - name: Stamp DEPLOY_SHA env var on Render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          NEW_SHA="${{ github.sha }}"
+          echo "[render] PUT DEPLOY_SHA=$NEW_SHA"
+          curl -fsS -m 30 -X PUT \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/srv-da9jvkhf2nfc73fpq230/env-vars/DEPLOY_SHA" \
+            -d "{\"value\":\"$NEW_SHA\"}" \
+            -w "\nHTTP_STATUS:%{http_code}\n"
+          echo "[render] sleeping 5s for env-var propagation"
+          sleep 5
+
       - name: Verify exact release SHA via /version
         env:
           INTERNAL_API_TOKEN: ${{ secrets.INTERNAL_API_TOKEN }}
