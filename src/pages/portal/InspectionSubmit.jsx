@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
@@ -127,6 +127,15 @@ export default function InspectionSubmit() {
   const [searchParams] = useSearchParams();
   const fileInputRef = useRef(null);
   const submittingRef = useRef(false);
+  // S5 audit: per-field refs so validation failure can move focus to the
+  // first invalid input (WCAG 3.3.1 — Error Identification). The form
+  // has six inputs grouped in three sections; only the three that are
+  // validated-on-submit (projectName, location, reportDate) + the
+  // workEntry region need a ref for focus-to-first-invalid to work.
+  const projectNameRef = useRef(null);
+  const locationRef = useRef(null);
+  const reportDateRef = useRef(null);
+  const workEntryRef = useRef(null);
 
   // Optional dprId / reportDate in URL — when an engineer clicks "Create
   // inspection record" from the DPR summary card, we deep-link with both so
@@ -182,7 +191,17 @@ export default function InspectionSubmit() {
   const [workEntry, setWorkEntry] = useState(initialWorkEntry);
   const [photos, setPhotos] = useState([]);
   const [status, setStatus] = useState('idle');
-  const [error, setError] = useState('');
+  // S5 audit: split single-string error into per-field + banner model.
+  //   formError   — banner text for non-field errors (upload-in-flight,
+  //                 toast duplicates, generic submit failures).
+  //   fieldErrors — { projectName?, location?, reportDate?, workEntry? }
+  //                 map; presence triggers `aria-invalid` + an inline
+  //                 error div on the matching input + a clickable entry
+  //                 in the top-level summary banner that focuses the
+  //                 field. Cleared by `clearErrors()` at the start of
+  //                 every submission attempt.
+  const [formError, setFormError] = useState('');
+  const [fieldErrors, setFieldErrors] = useState({});
   const [showDraftBanner, setShowDraftBanner] = useState(showDraftBannerInitial);
   const [uploadStatuses, setUploadStatuses] = useState({});
   const [prefillAttempted, setPrefillAttempted] = useState(false);
@@ -315,18 +334,18 @@ export default function InspectionSubmit() {
     );
     if (valid.length === 0) {
       const msg = `Select valid images (jpg/png/webp, max ${MAX_PHOTO_BYTES / 1024 / 1024}MB each)`;
-      setError(msg);
+      setFormError(msg);
       toast.push(msg, 'warning');
       return;
     }
     if (photos.length + valid.length > MAX_PHOTOS_PER_DPR) {
       const msg = `Max ${MAX_PHOTOS_PER_DPR} photos allowed`;
-      setError(msg);
+      setFormError(msg);
       toast.push(msg, 'warning');
       return;
     }
 
-    setError('');
+    setFormError('');
 
     const completed = [];
     const failed = [];
@@ -380,11 +399,46 @@ export default function InspectionSubmit() {
     handleFiles(e.dataTransfer.files);
   };
 
+  // S5 audit: per-field error rendering. Each validation branch sets the
+  // field-level error (via `setFieldError(key, msg)`) which drives the
+  // inline error message, the aria-invalid flag, and a clickable entry
+  // in the top-level summary list. The first invalid field is also
+  // focus'd + scrolled into view (WCAG 3.3.1 + 3.3.3).
+  const clearErrors = useCallback(() => {
+    setFormError('');
+    setFieldErrors({});
+  }, []);
+
+  const setFieldError = useCallback((key, msg) => {
+    setFieldErrors((prev) => ({ ...prev, [key]: msg }));
+  }, []);
+
+  const focusFirstInvalid = useCallback((errors) => {
+    // Order matches the top-to-bottom layout of the form so the focus
+    // move is predictable for users who tab through top-down.
+    const order = ['projectName', 'location', 'reportDate', 'workEntry'];
+    const first = order.find((k) => errors[k]);
+    if (!first) return;
+    const refMap = {
+      projectName: projectNameRef,
+      location: locationRef,
+      reportDate: reportDateRef,
+      workEntry: workEntryRef,
+    };
+    const node = refMap[first]?.current;
+    if (node && typeof node.focus === 'function') {
+      node.focus({ preventScroll: false });
+      if (typeof node.scrollIntoView === 'function') {
+        node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+  }, []);
+
   const handleSubmit = async (submitStatus) => {
     if (submittingRef.current) return;
     submittingRef.current = true;
 
-    setError('');
+    clearErrors();
     // [DR-006 client] Refuse to submit while any photo is still uploading
     // or awaiting CONFIRMED intent. Without this, the user can submit a
     // report that drops photos mid-upload — the backend now rolls the
@@ -396,22 +450,28 @@ export default function InspectionSubmit() {
     );
     if (inFlightUploads.length > 0) {
       const msg = `${inFlightUploads.length} photo${inFlightUploads.length !== 1 ? 's are' : ' is'} still uploading — please wait for them to finish before submitting.`;
-      setError(msg);
+      setFormError(msg);
       toast.push(msg, 'warning');
       submittingRef.current = false;
       return;
     }
-    if (!form.projectName || !form.location || !form.reportDate) {
-      const msg = 'Project name, location, and date are required';
-      setError(msg);
-      toast.push(msg, 'warning');
+    const newFieldErrors = {};
+    if (!form.projectName) newFieldErrors.projectName = 'Project name is required';
+    if (!form.location)    newFieldErrors.location    = 'Location is required';
+    if (!form.reportDate)  newFieldErrors.reportDate  = 'Date is required';
+    if (Object.keys(newFieldErrors).length > 0) {
+      setFieldErrors(newFieldErrors);
+      setFormError('Please fix the highlighted fields and try again.');
+      toast.push('Please fill in the highlighted fields.', 'warning');
+      focusFirstInvalid(newFieldErrors);
       submittingRef.current = false;
       return;
     }
     if (!workEntry) {
-      const msg = 'Please add an inspection record before submitting';
-      setError(msg);
-      toast.push(msg, 'warning');
+      setFieldError('workEntry', 'Please add an inspection record before submitting');
+      setFormError('Please fix the highlighted fields and try again.');
+      toast.push('Please add an inspection record before submitting.', 'warning');
+      focusFirstInvalid({ workEntry: true });
       submittingRef.current = false;
       return;
     }
@@ -421,15 +481,19 @@ export default function InspectionSubmit() {
     // unsafely.
     if (!workEntry.data || typeof workEntry.data !== 'object') {
       const msg = 'This inspection record is missing its structured fields. Please re-add the record before submitting.';
-      setError(msg);
+      setFieldError('workEntry', msg);
+      setFormError(msg);
       toast.push(msg, 'warning');
+      focusFirstInvalid({ workEntry: true });
       submittingRef.current = false;
       return;
     }
     const dateErr = validateReportDate(form.reportDate);
     if (dateErr) {
-      setError(dateErr);
+      setFieldError('reportDate', dateErr);
+      setFormError(dateErr);
       toast.push(dateErr, 'warning');
+      focusFirstInvalid({ reportDate: dateErr });
       submittingRef.current = false;
       return;
     }
@@ -496,7 +560,7 @@ export default function InspectionSubmit() {
       const msg = isPhotoBindingLost
         ? 'Photo upload was lost mid-submit — please re-attach your photos and try again.'
         : (err.message || 'Failed to submit inspection record');
-      setError(msg);
+      setFormError(msg);
       setStatus('idle');
       if (err.status !== 401) toast.push(msg, 'error');
     } finally {
@@ -594,7 +658,55 @@ export default function InspectionSubmit() {
           </div>
         )}
 
-        {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
+        {/* S5 audit: replaced the single banner with a structured error
+            summary that lists every invalid field as a clickable link
+            which focuses + scrolls the corresponding input (WCAG 3.3.1
+            Error Identification + 3.3.3 Error Suggestion). The summary
+            only appears when at least one field-level error exists; the
+            plain banner remains for non-field failures (e.g. an upload
+            in flight, or a 409 PHOTO_BINDING_LOST). */}
+        {(() => {
+          const errKeys = Object.keys(fieldErrors).filter((k) => fieldErrors[k]);
+          if (errKeys.length === 0 && !formError) return null;
+          const FIELD_LABELS = {
+            projectName: 'Project name',
+            location: 'Location',
+            reportDate: 'Date',
+            workEntry: 'Inspection record',
+          };
+          // Order matches the focusFirstInvalid order so the listed
+          // links descend the same path as Tab navigation would.
+          const orderedKeys = ['projectName', 'location', 'reportDate', 'workEntry']
+            .filter((k) => errKeys.includes(k));
+          return (
+            <div
+              id="inspection-form-error-summary"
+              role="alert"
+              aria-live="polite"
+              className="portal-auth-error inspection-form-summary"
+              style={{ marginBottom: '1rem' }}
+            >
+              <strong>
+                {formError || 'Please fix the highlighted fields and try again.'}
+              </strong>
+              {orderedKeys.length > 0 && (
+                <ul className="inspection-form-summary-list">
+                  {orderedKeys.map((k) => (
+                    <li key={k}>
+                      <button
+                        type="button"
+                        className="inspection-form-summary-link"
+                        onClick={() => focusFirstInvalid({ [k]: true })}
+                      >
+                        {FIELD_LABELS[k] || k}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          );
+        })()}
 
         <div className="dpr-form">
           {/* A-11: section anchor — see INSPECTION_SECTIONS for the matching skip-nav target. */}
@@ -604,23 +716,39 @@ export default function InspectionSubmit() {
               <label htmlFor="projectName">Project Name *</label>
               <input
                 id="projectName"
+                ref={projectNameRef}
                 name="projectName"
-                className="form-input"
+                className={`form-input${fieldErrors.projectName ? ' form-input-invalid' : ''}`}
                 value={form.projectName}
                 onChange={handleChange}
+                aria-invalid={fieldErrors.projectName ? 'true' : 'false'}
+                aria-describedby={fieldErrors.projectName ? 'projectName-error' : undefined}
                 placeholder="e.g. Metro Station Phase 2"
               />
+              {fieldErrors.projectName && (
+                <div id="projectName-error" className="form-field-error" role="alert">
+                  {fieldErrors.projectName}
+                </div>
+              )}
             </div>
             <div className="form-group" style={{ flex: 1 }}>
               <label htmlFor="reportDate">Report Date *</label>
               <input
                 id="reportDate"
+                ref={reportDateRef}
                 type="date"
                 name="reportDate"
-                className="form-input"
+                className={`form-input${fieldErrors.reportDate ? ' form-input-invalid' : ''}`}
                 value={form.reportDate}
                 onChange={handleChange}
+                aria-invalid={fieldErrors.reportDate ? 'true' : 'false'}
+                aria-describedby={fieldErrors.reportDate ? 'reportDate-error' : undefined}
               />
+              {fieldErrors.reportDate && (
+                <div id="reportDate-error" className="form-field-error" role="alert">
+                  {fieldErrors.reportDate}
+                </div>
+              )}
             </div>
           </div>
 
@@ -628,12 +756,20 @@ export default function InspectionSubmit() {
             <label htmlFor="location">Location *</label>
             <input
               id="location"
+              ref={locationRef}
               name="location"
-              className="form-input"
+              className={`form-input${fieldErrors.location ? ' form-input-invalid' : ''}`}
               value={form.location}
               onChange={handleChange}
+              aria-invalid={fieldErrors.location ? 'true' : 'false'}
+              aria-describedby={fieldErrors.location ? 'location-error' : undefined}
               placeholder="Site address or location description"
             />
+            {fieldErrors.location && (
+              <div id="location-error" className="form-field-error" role="alert">
+                {fieldErrors.location}
+              </div>
+            )}
           </div>
 
           <div className="form-row">
@@ -662,6 +798,18 @@ export default function InspectionSubmit() {
           <section id="inspection-section-record" className="dpr-form-section">
           <div className="form-group">
             <label>Inspection Record *</label>
+            <div
+              ref={workEntryRef}
+              tabIndex={-1}
+              role="group"
+              aria-labelledby="inspection-record-error"
+              aria-invalid={fieldErrors.workEntry ? 'true' : 'false'}
+            />
+            {fieldErrors.workEntry && (
+              <div id="inspection-record-error" className="form-field-error" role="alert">
+                {fieldErrors.workEntry}
+              </div>
+            )}
             {workEntry && workEntry.data && (
               <div className="work-entries-list">
                 <div className="work-entry-card">
