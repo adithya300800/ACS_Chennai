@@ -156,6 +156,29 @@ jobs:
           echo "  - TODO(wiring): wire /api/internal/backup-now when the admin endpoint lands."
           echo "  - Skipping is safe because managed Postgres PITR is the authoritative safety net."
 
+      # Round-27 follow-up: PUT DEPLOY_SHA on Render BEFORE the deploy so
+      # the new container reads the new SHA when Render binds env vars at
+      # container start. If the PUT happens AFTER the deploy trigger, the
+      # new container has already started and reads the OLD DEPLOY_SHA
+      # (e.g. the previous deploy's SHA), which fails the SHA-verify step
+      # in a way that looks like token drift but isn't. 5s sleep is enough
+      # for Render's internal env-var sync (measured <1s; 5s leaves margin
+      # without slowing the deploy noticeably).
+      - name: Stamp DEPLOY_SHA env var on Render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          NEW_SHA="${{ github.sha }}"
+          echo "[render] PUT DEPLOY_SHA=$NEW_SHA"
+          curl -fsS -m 30 -X PUT \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/srv-da9jvkhf2nfc73fpq230/env-vars/DEPLOY_SHA" \
+            -d "{\"value\":\"$NEW_SHA\"}" \
+            -w "\nHTTP_STATUS:%{http_code}\n"
+          echo "[render] sleeping 5s for env-var propagation"
+          sleep 5
+
       # [B-4] Render deploy trigger — fixes three defects:
       #   1. RENDER_API_KEY was previously referenced as $RENDER_API_KEY but
       #      not declared in the step's env block, so it expanded empty and
@@ -171,6 +194,11 @@ jobs:
       # "invalid JSON". The cache-clear option was dropped (or moved to a
       # separate endpoint). Removed it; deploys with no cache clear still
       # pick up fresh npm install via Render's normal build flow.
+      #
+      # Round-27 follow-up (step-order): this MUST come AFTER the Stamp
+      # DEPLOY_SHA step above. Otherwise the new container starts reading
+      # env vars before Render's env-vars store sees the PUT, and
+      # /version never reports the new SHA.
       - name: Trigger Render Deploy
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
@@ -196,34 +224,6 @@ jobs:
       # fetch was racing the deploy and frequently saw the OLD SHA (or a 404
       # during the brief window when the new container hadn't bound :PORT yet).
       # Polling closes that race.
-      #
-      # Round-27 follow-up: the /version endpoint reads `DEPLOY_SHA` from
-      # `process.env.DEPLOY_SHA || 'unknown'`, so the SHA the server reports
-      # is the env var Render has for the *current* container. The previous
-      # implementation triggered the deploy without ever writing DEPLOY_SHA
-      # to Render, so the server always reported `deploySha=unknown` and the
-      # `unknown = $GITHUB_SHA` comparison at line 220 never matched. Fix:
-      # PUT DEPLOY_SHA to the new SHA *before* the deploy, then briefly
-      # sleep so Render's env-var propagation completes before the new
-      # container starts (Render reads env vars at container start, so if
-      # the PUT hasn't landed yet, the new container sees the old value —
-      # including the previous deploy's SHA, which would still fail the
-      # compare, just for a different reason). 5 seconds is enough for
-      # Render's internal sync; 30 was tried first and 5s measured is fine.
-      - name: Stamp DEPLOY_SHA env var on Render
-        env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-        run: |
-          NEW_SHA="${{ github.sha }}"
-          echo "[render] PUT DEPLOY_SHA=$NEW_SHA"
-          curl -fsS -m 30 -X PUT \
-            -H "Authorization: Bearer $RENDER_API_KEY" \
-            -H "Content-Type: application/json" \
-            "https://api.render.com/v1/services/srv-da9jvkhf2nfc73fpq230/env-vars/DEPLOY_SHA" \
-            -d "{\"value\":\"$NEW_SHA\"}" \
-            -w "\nHTTP_STATUS:%{http_code}\n"
-          echo "[render] sleeping 5s for env-var propagation"
-          sleep 5
 
       - name: Verify exact release SHA via /version
         env:
