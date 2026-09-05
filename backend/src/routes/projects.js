@@ -652,12 +652,18 @@ async function kpiHandler(req, res) {
       variancePercent,
     };
   } catch (err) {
+    // [Phase-4 #2 diagnostic] surface the full Prisma error so we can
+    // identify the missing column. P2022 normally carries
+    // `err.meta = { column: '...' }`; some Prisma clients swallow the
+    // first line of `err.message` and put the useful detail in `meta`.
     console.warn('Projects KPI — BOQ roll-up failed (tolerated)', {
       projectName,
       prismaCode: err.code,
-      message: err.message?.split('\n')[0],
+      message: err.message?.split('\n').slice(0, 6).join('\n'), // first few lines, ANSI-safe
+      meta: err.meta,
+      fullMessage: err.message,
     });
-    warnings.push('boqVariance: ' + (err.message?.split('\n')[0] || 'unknown error'));
+    warnings.push('boqVariance: ' + (err.meta?.column ? `missing column ${err.meta.column}` : (err.message?.split('\n')[0] || 'unknown error')));
   }
 
   // ─── People roll-up ──────────────────────────────────────────────────────
