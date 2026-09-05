@@ -6,6 +6,7 @@ import { api } from '../../lib/api.js';
 import { formatDateOnly, formatDateTime, formatTimeOnly } from '../../lib/format.js';
 import VideoPlayer from '../../components/VideoPlayer.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
+import BackButton from '../../components/BackButton.jsx';
 import {
   TRAINING_PROGRESS_PING_MS,
   TRAINING_PROVIDER_LABELS,
@@ -207,14 +208,7 @@ export default function TrainingDetail() {
   if (error || !enrollment) {
     return (
       <div className="training-page">
-        <button
-          type="button"
-          className="training-btn training-btn-ghost"
-          onClick={() => navigate('/portal/training')}
-          style={{ marginBottom: 12 }}
-        >
-          ← Back to My Training
-        </button>
+        <BackButton to="/portal/training" label="My Training" className="training-btn training-btn-ghost" style={{ marginBottom: 12 }} />
         <div className="training-list-error" role="alert">
           {error || 'Course not found.'}
         </div>
@@ -229,13 +223,7 @@ export default function TrainingDetail() {
   return (
     <div className="training-page training-detail-page">
       <div className="training-detail-header">
-        <Link to="/portal/training" className="training-btn training-btn-ghost training-btn-back">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <line x1="19" y1="12" x2="5" y2="12" />
-            <polyline points="12 19 5 12 12 5" />
-          </svg>
-          Back to My Training
-        </Link>
+        <BackButton to="/portal/training" label="My Training" className="training-btn training-btn-ghost training-btn-back" />
       </div>
 
       {/* Round-17 B-03: breadcrumb above the H1. Last item is current page (no `to`). */}

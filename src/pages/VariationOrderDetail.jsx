@@ -6,6 +6,7 @@ import { api } from '../lib/api.js';
 import { formatDateTime } from '../lib/format.js';
 import StatusBadge from '../components/StatusBadge.jsx';
 import Breadcrumb from '../components/Breadcrumb.jsx';
+import BackButton from '../components/BackButton.jsx';
 import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
 import { BuildingIcon, DocIcon, ClockIcon, UserIcon } from '../components/Icons.jsx';
 import VariationFormModal from '../components/VariationFormModal.jsx';
@@ -143,9 +144,7 @@ export default function VariationOrderDetail() {
         <div className="dpr-card" style={{ textAlign: 'center', padding: '3rem' }}>
           <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>⚠️</div>
           <h2 style={{ color: 'var(--navy)', marginBottom: '0.5rem' }}>{error || 'Variation not found'}</h2>
-          <Link to="/portal/admin/variations" className="btn btn-secondary btn-sm" style={{ marginTop: '1rem' }}>
-            ← Back to list
-          </Link>
+          <BackButton to="/portal/admin/variations" label="Variation Orders" className="btn btn-secondary btn-sm" style={{ marginTop: '1rem' }} />
         </div>
       </div>
     );
@@ -358,9 +357,7 @@ export default function VariationOrderDetail() {
         )}
 
         <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '1rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-          <Link to="/portal/admin/variations" className="btn btn-secondary btn-sm">
-            ← Back to list
-          </Link>
+          <BackButton to="/portal/admin/variations" label="Variation Orders" className="btn btn-secondary btn-sm" />
           {canEdit && (
             <button
               type="button"

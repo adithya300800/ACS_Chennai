@@ -17,6 +17,39 @@ import {
 } from '../../lib/ownerScopedDraft.js';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
+// SOL-P2 #11: structured workforce row builder. The Manpower field used
+// to be a free-text textarea where engineers typed things like
+// "Mason — 6 nos — 8 hrs | Helper — 4 nos — 8 hrs". That's fragile to
+// aggregate in reports. The new UI gives each trade its own row, but
+// keeps the same pipe-separated on-the-wire format so no DB migration
+// is needed. `parseManpowerSummary` splits a stored value into rows;
+// `serializeManpowerRows` is the inverse for submit and draft save.
+//
+// Format on the wire: "Trade — Count — Hours" joined by " | ". Each
+// row segment uses an em dash (U+2014) which is what the previous
+// placeholder guidance already used, so legacy values parse cleanly.
+const MAX_MANPOWER_ROWS = 10;
+const parseManpowerSummary = (str) => {
+  if (!str || typeof str !== 'string') return [{ trade: '', count: '', hours: '' }];
+  return str
+    .split('|')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((segment) => {
+      const parts = segment.split('—').map((p) => p.trim());
+      if (parts.length >= 3) {
+        return { trade: parts[0], count: parts[1], hours: parts[2] };
+      }
+      // Fallback: legacy free-text — keep the whole string as the trade
+      // field so the engineer can see + edit what was originally typed.
+      return { trade: segment, count: '', hours: '' };
+    });
+};
+const serializeManpowerRows = (rows) =>
+  rows
+    .filter((r) => r && r.trade && String(r.trade).trim().length > 0)
+    .map((r) => `${String(r.trade).trim()} — ${r.count || ''} — ${r.hours || ''}`)
+    .join(' | ');
 // SOL DR-003 — owner-scoped keys. The previous unscoped `dpr_draft_v1` kept
 // the previous account's draft on a shared computer. See ownerScopedDraft.js
 // for the migration / clearing contract.
@@ -209,6 +242,22 @@ export default function DprSubmit() {
     risksHindrances: '',
     materialsReceivedSummary: '',
   });
+  // SOL-P2 #11: structured workforce rows, derived from the existing
+  // pipe-separated manpowerSummary string. The textarea is gone — see
+  // the row-builder UI below. We keep `manpowerSummary` on `dailyFields`
+  // for backend compatibility (it gets re-serialized on submit/draft).
+  const [manpowerRows, setManpowerRows] = useState(() =>
+    parseManpowerSummary(dailyFields.manpowerSummary)
+  );
+  // SOL-P2 #11: keep the legacy `dailyFields.manpowerSummary` string in
+  // sync with the structured rows so every downstream consumer (draft
+  // save, validity check, draft-restore banner, edit-mode bootstrap)
+  // sees the latest value without each call site having to know about
+  // the row shape.
+  useEffect(() => {
+    const serialized = serializeManpowerRows(manpowerRows);
+    setDailyFields((f) => (f.manpowerSummary === serialized ? f : { ...f, manpowerSummary: serialized }));
+  }, [manpowerRows]);
   const [customSections, setCustomSections] = useState(initialDraft?.customSections || []);
   const [photos, setPhotos] = useState([]);
   const [notes, setNotes] = useState(initialDraft?.notes || '');
@@ -291,6 +340,11 @@ export default function DprSubmit() {
         });
         setCustomSections(Array.isArray(d.customSections) ? d.customSections : []);
         setNotes(d.notes || '');
+        // SOL-P2 #11: reparse the structured workforce rows from the
+        // just-loaded `manpowerSummary` string. The useState initializer
+        // already ran with the *empty* initial value, so this effect
+        // runs the parser again now that the real data is here.
+        setManpowerRows(parseManpowerSummary(d.manpowerSummary || ''));
         // Photo ULIDs from the server are preserved as references — no preview
         // blobs possible from the readUrls (they're SAS URLs we can't re-upload
         // through). User can re-add photos in the editor if needed.
@@ -673,6 +727,12 @@ export default function DprSubmit() {
       submittingRef.current = false;
       return;
     }
+    // SOL-P2 #11: derive the on-the-wire manpowerSummary string from the
+    // structured rows at the very last moment so the submit payloads
+    // (PUT + POST) carry the same value the rest of the form would have
+    // produced, regardless of whether the engineer used the row builder
+    // or pasted legacy text into a single row.
+    const serializedManpower = serializeManpowerRows(manpowerRows);
 
     // SOL-P1#11: require at least one piece of meaningful content before
     // final submission. The audit caught that project+location+date was
@@ -737,7 +797,7 @@ export default function DprSubmit() {
             // Round-12: 5 daily-narrative fields.
             workExecutedToday: dailyFields.workExecutedToday || null,
             workLocation: dailyFields.workLocation || null,
-            manpowerSummary: dailyFields.manpowerSummary || null,
+            manpowerSummary: serializedManpower || null,
             risksHindrances: dailyFields.risksHindrances || null,
             materialsReceivedSummary: dailyFields.materialsReceivedSummary || null,
             // User-added ad-hoc text + table sections.
@@ -788,7 +848,7 @@ export default function DprSubmit() {
             // Round-12: 5 daily-narrative fields.
             workExecutedToday: dailyFields.workExecutedToday || null,
             workLocation: dailyFields.workLocation || null,
-            manpowerSummary: dailyFields.manpowerSummary || null,
+            manpowerSummary: serializedManpower || null,
             risksHindrances: dailyFields.risksHindrances || null,
             materialsReceivedSummary: dailyFields.materialsReceivedSummary || null,
             // User-added ad-hoc text + table sections.
@@ -849,6 +909,8 @@ export default function DprSubmit() {
       risksHindrances: '',
       materialsReceivedSummary: '',
     });
+    // SOL-P2 #11: also reset the structured workforce rows.
+    setManpowerRows([{ trade: '', count: '', hours: '' }]);
     setCustomSections([]);
     setNotes('');
     setShowDraftBanner(false);
@@ -1200,22 +1262,90 @@ export default function DprSubmit() {
               </span>
             </div>
 
+            {/* SOL-P2 #11: workforce row builder. Each row is a Trade ×
+                Count × Hours triple. We serialize back to a pipe-separated
+                "Trade — Count — Hours" string at submit time so the
+                existing `manpowerSummary` column keeps working unchanged.
+                The `dailyFields.manpowerSummary` value stays in sync via
+                a derived memo so handleSubmit doesn't have to know about
+                the row shape. */}
             <div className="form-group">
-              <label htmlFor="manpowerSummary">
+              <label>
                 Manpower
                 <span style={{ fontWeight: 400, color: 'var(--steel)' }}> (optional)</span>
               </label>
-              <textarea
-                id="manpowerSummary"
-                name="manpowerSummary"
-                className="form-input"
-                rows={2}
-                value={dailyFields.manpowerSummary}
-                onChange={handleDailyChange}
-                placeholder="Mason — 6 nos — 8 hrs | Helper — 4 nos — 8 hrs | Electrician — 1 no — 4 hrs"
-              />
+              <div className="dpr-manpower-rows" role="group" aria-label="Workforce by trade">
+                {manpowerRows.map((row, idx) => (
+                  <div key={idx} className="dpr-manpower-row">
+                    <input
+                      type="text"
+                      aria-label={`Trade ${idx + 1}`}
+                      placeholder="Trade (e.g. Mason)"
+                      value={row.trade}
+                      onChange={(e) => {
+                        const next = [...manpowerRows];
+                        next[idx] = { ...next[idx], trade: e.target.value };
+                        setManpowerRows(next);
+                      }}
+                    />
+                    <input
+                      type="number"
+                      min="0"
+                      aria-label={`Count for trade ${idx + 1}`}
+                      placeholder="Count"
+                      value={row.count}
+                      onChange={(e) => {
+                        const next = [...manpowerRows];
+                        next[idx] = { ...next[idx], count: e.target.value };
+                        setManpowerRows(next);
+                      }}
+                    />
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      aria-label={`Hours for trade ${idx + 1}`}
+                      placeholder="Hours"
+                      value={row.hours}
+                      onChange={(e) => {
+                        const next = [...manpowerRows];
+                        next[idx] = { ...next[idx], hours: e.target.value };
+                        setManpowerRows(next);
+                      }}
+                    />
+                    {manpowerRows.length > 1 && (
+                      <button
+                        type="button"
+                        className="dpr-manpower-row-remove"
+                        aria-label={`Remove trade ${idx + 1}`}
+                        onClick={() => {
+                          const next = manpowerRows.filter((_, i) => i !== idx);
+                          setManpowerRows(next.length ? next : [{ trade: '', count: '', hours: '' }]);
+                        }}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {manpowerRows.length < MAX_MANPOWER_ROWS && (
+                <button
+                  type="button"
+                  className="dpr-manpower-add"
+                  onClick={() =>
+                    setManpowerRows([...manpowerRows, { trade: '', count: '', hours: '' }])
+                  }
+                >
+                  + Add trade
+                </button>
+              )}
+              <div className="dpr-manpower-summary" aria-live="polite">
+                {serializeManpowerRows(manpowerRows) || 'No trades added yet.'}
+              </div>
               <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
-                One trade per line: Trade — count — hours. Pipe-separate multiple trades.
+                One trade per row. Trade name + count of workers + hours worked.
+                Saved as &quot;Trade — Count — Hours&quot; (pipe-separated).
               </span>
             </div>
 

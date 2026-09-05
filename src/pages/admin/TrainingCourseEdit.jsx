@@ -8,6 +8,7 @@ import {
 } from '../../lib/constants.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
+import BackButton from '../../components/BackButton.jsx';
 
 // Round-24: edit existing course. Pre-fills the form fields from
 // GET /api/training/courses/:id, saves via PUT. NO employee picker (you
@@ -172,9 +173,7 @@ export default function TrainingCourseEdit() {
         <div className="training-card" style={{ textAlign: 'center', padding: '3rem' }}>
           <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>⚠️</div>
           <h2 style={{ color: 'var(--navy)', marginBottom: '0.5rem' }}>{loadError}</h2>
-          <Link to="/portal/admin/training" className="btn btn-secondary btn-sm" style={{ marginTop: '1rem' }}>
-            ← Back to Training Library
-          </Link>
+          <BackButton to="/portal/admin/training" label="Training Library" className="btn btn-secondary btn-sm" style={{ marginTop: '1rem' }} />
         </div>
       </div>
     );

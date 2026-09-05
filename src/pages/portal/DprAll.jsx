@@ -16,6 +16,8 @@ import {
   scopeBadge as scopeBadgeFor,
 } from '../../lib/scopeCopy.js';
 import Modal from '../../components/Modal.jsx';
+import Breadcrumb from '../../components/Breadcrumb.jsx';
+import BackButton from '../../components/BackButton.jsx';
 // Round-28 #6: pull-to-refresh on mobile list views.
 import usePullToRefresh from '../../hooks/usePullToRefresh.js';
 import PullToRefreshIndicator from '../../components/PullToRefreshIndicator.jsx';
@@ -134,6 +136,18 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
       ariaLabel={`DPR ${dpr?.project?.name || dpr?.projectName || ''} details`}
       returnFocusRef={returnFocusRef}
     >
+      {/* SOL-P2 #8: breadcrumb + persistent back-to-list anchor. The
+          modal previously had no trail at all — reviewers coming in
+          from a deep link or after scrolling through 20 cards had to
+          click "×" and re-find their row. The breadcrumb + BackButton
+          give them an explicit escape hatch that matches the employee
+          `DprList` modal and the rest of the portal's detail pages. */}
+      <Breadcrumb
+        items={[
+          { label: 'All Daily Reports', to: '/portal/dpr/all' },
+          { label: dpr?.project?.name || dpr?.projectName || 'Detail' },
+        ]}
+      />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem', gap: '1rem' }}>
         <div>
           <h2 style={{ margin: 0, color: 'var(--navy)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
@@ -177,7 +191,10 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
             </div>
           )}
         </div>
-        <button type="button" onClick={onClose} className="btn btn-ghost btn-sm" aria-label="Close details">✕</button>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexShrink: 0 }}>
+          <BackButton to="/portal/dpr/all" label="Back to all reports" />
+          <button type="button" onClick={onClose} className="btn btn-ghost btn-sm" aria-label="Close details">✕</button>
+        </div>
       </div>
 
       {loading ? (

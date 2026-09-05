@@ -33,6 +33,7 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
+import BackButton from '../../components/BackButton.jsx';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import DrawingFormModal from '../../components/DrawingFormModal.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
@@ -193,7 +194,7 @@ export default function DrawingDetail() {
           />
           <h1 className="dpr-page-title">Drawing not found</h1>
           <p style={{ color: 'var(--steel)' }}>{error || 'The drawing may have been deleted.'}</p>
-          <Link to="/portal/admin/drawings" className="btn btn-secondary">← Back to register</Link>
+          <BackButton to="/portal/admin/drawings" label="Drawing Register" className="btn btn-secondary" />
         </div>
       </div>
     );

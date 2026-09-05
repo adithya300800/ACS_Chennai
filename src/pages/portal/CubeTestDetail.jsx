@@ -5,6 +5,7 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatShortDate, formatDateTime } from '../../lib/format.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
+import BackButton from '../../components/BackButton.jsx';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
@@ -113,9 +114,7 @@ export default function CubeTestDetail() {
         <div className="dpr-card" style={{ textAlign: 'center', padding: '3rem' }}>
           <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>⚠️</div>
           <h2 style={{ color: 'var(--navy)', marginBottom: '0.5rem' }}>{error}</h2>
-          <Link to="/portal/cube-tests" className="btn btn-secondary btn-sm" style={{ marginTop: '1rem' }}>
-            ← Back to cube tests
-          </Link>
+          <BackButton to="/portal/cube-tests" label="Cube Tests" className="btn btn-secondary btn-sm" style={{ marginTop: '1rem' }} />
         </div>
       </div>
     );
@@ -231,9 +230,7 @@ export default function CubeTestDetail() {
         )}
 
         <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '1rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-          <Link to="/portal/cube-tests" className="btn btn-secondary btn-sm">
-            ← Back to cube tests
-          </Link>
+          <BackButton to="/portal/cube-tests" label="Cube Tests" className="btn btn-secondary btn-sm" />
           {isOwnerOrAdmin && (
             <>
               <button

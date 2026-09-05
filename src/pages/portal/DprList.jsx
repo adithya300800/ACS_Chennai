@@ -6,6 +6,7 @@ import { api } from '../../lib/api.js';
 import { formatDateOnly, formatMonthLabel, getCurrentIstMonth, shiftMonth } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
+import BackButton from '../../components/BackButton.jsx';
 import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
 import MonthStepper from '../../components/MonthStepper.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
@@ -736,14 +737,22 @@ export default function DprList() {
                   {' · '}{expandedDpr.location}
                 </div>
               </div>
-              <button
-                onClick={handleCloseModal}
-                aria-label="Close DPR details"
-                className="btn btn-ghost btn-sm"
-                style={{ fontSize: '1.25rem', lineHeight: 1 }}
-              >
-                ×
-              </button>
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexShrink: 0 }}>
+                {/* SOL-P2 #8: persistent back-to-list anchor next to the
+                    modal close button. The breadcrumb above also links
+                    to /portal/dpr/my, but the BackButton gives a visible
+                    labelled affordance that matches the admin `DprAll`
+                    modal and the rest of the portal's detail pages. */}
+                <BackButton to="/portal/dpr/my" label="My Daily Reports" />
+                <button
+                  onClick={handleCloseModal}
+                  aria-label="Close DPR details"
+                  className="btn btn-ghost btn-sm"
+                  style={{ fontSize: '1.25rem', lineHeight: 1 }}
+                >
+                  ×
+                </button>
+              </div>
             </div>
 
             <div style={{ padding: '1.25rem 1.5rem' }}>
