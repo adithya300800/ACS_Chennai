@@ -178,6 +178,40 @@ jobs:
         continue-on-error: true
         run: |
           set +e
+          # The broken `20260905020000_n17_projects` migration directory has
+          # been removed from the tree (its FK referenced the wrong table
+          # name). What's left in the DB may be:
+          #   (a) one or more rows in _prisma_migrations with status=failed
+          #       (from prior Render deploy attempts — the api-triggered
+          #       one in particular left a fresh failed row that the
+          #       `migrate resolve` CLI call alone wouldn't clear, because
+          #       resolve only handles the FIRST failed row by name)
+          #   (b) no row at all (resolve already ran on a prior deploy)
+          #
+          # We belt-and-suspenders by deleting any non-applied rows via
+          # raw SQL through Prisma BEFORE the resolve call, so the
+          # deploy's `prisma migrate deploy` sees a clean table.
+          echo "[lpr-029] deleting any non-applied rows for 20260905020000_n17_projects…"
+          node -e "
+            const { PrismaClient } = require('@prisma/client');
+            const p = new PrismaClient();
+            (async () => {
+              try {
+                const res = await p.\$executeRawUnsafe(\"DELETE FROM \\\"_prisma_migrations\\\" WHERE migration_name = '20260905020000_n17_projects' AND status <> 'applied'\");
+                console.log('[lpr-029] deleted', res, 'failed/rolled_back rows');
+              } catch (e) {
+                console.log('[lpr-029] raw DELETE failed (continuing):', e.message);
+              } finally {
+                await p.\$disconnect();
+              }
+            })();
+          " 2>&1 || echo "[lpr-029] raw DELETE step exited non-zero (continuing)"
+
+          # Then the idempotent `migrate resolve --rolled-back` call —
+          # this is the official path Prisma documents and what `migrate
+          # status` reads. Safe to call even when the row is already
+          # absent; `set +e` + the final `exit 0` swallow the "no row
+          # found" error so the step doesn't block on a no-op.
           npx prisma migrate resolve --rolled-back 20260905020000_n17_projects 2>&1
           RC=$?
           if [ "$RC" -eq 0 ]; then
