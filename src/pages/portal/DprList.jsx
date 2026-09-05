@@ -13,6 +13,8 @@ import { ClipboardIcon } from '../../components/Icons.jsx';
 // Round-28 #6: pull-to-refresh on mobile list views.
 import usePullToRefresh from '../../hooks/usePullToRefresh.js';
 import PullToRefreshIndicator from '../../components/PullToRefreshIndicator.jsx';
+// Round-28 #7: photo lightbox for the in-place detail modal too.
+import PhotoLightbox from '../../components/PhotoLightbox.jsx';
 
 const STATUS_FILTERS = [
   { value: '', label: 'All Statuses' },
@@ -151,6 +153,8 @@ export default function DprList() {
   // we just hide the section rather than gating the rest of the modal.
   const [pourSummary, setPourSummary] = useState(null);
   const [pourSummaryLoading, setPourSummaryLoading] = useState(false);
+  // Round-28 #7: lightbox state for the in-place detail modal.
+  const [lightboxIndex, setLightboxIndex] = useState(null);
 
   const fetchDprs = useCallback(async (cursor = null) => {
     try {
@@ -876,18 +880,34 @@ export default function DprList() {
                     <div style={{ marginTop: '1rem' }}>
                       <strong style={{ fontSize: '0.9rem' }}>Photos ({expandedDpr.photos.length})</strong>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '0.5rem', marginTop: '0.5rem' }}>
-                        {expandedDpr.photos.map((p) => (
-                          <a key={p.id} href={p.readUrl} target="_blank" rel="noopener noreferrer" title={p.filename} style={{ position: 'relative', display: 'block' }}>
+                        {expandedDpr.photos.map((p, i) => (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onClick={() => setLightboxIndex(i)}
+                            style={{
+                              position: 'relative',
+                              display: 'block',
+                              aspectRatio: '1',
+                              borderRadius: 6,
+                              overflow: 'hidden',
+                              background: '#f1f5f9',
+                              padding: 0,
+                              border: 'none',
+                              cursor: 'pointer',
+                            }}
+                            aria-label={`Open photo ${i + 1} of ${expandedDpr.photos.length}`}
+                            title={p.caption || p.filename}
+                          >
                             <img
                               src={p.readUrl}
                               alt={p.caption || p.filename}
-                              style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 6 }}
+                              loading="lazy"
+                              style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
                             />
-                            {/* R22.5: per-image download affordance — opens
-                                the signed R2 URL in a new tab so the user
-                                can right-click → Save As. */}
+                            {/* R22.5: per-image download affordance. */}
                             <PhotoDownloadButton photo={p} />
-                          </a>
+                          </button>
                         ))}
                       </div>
                     </div>
@@ -944,6 +964,15 @@ export default function DprList() {
           </div>
         </div>
       )}
+      {/* Round-28 #7: full-screen photo lightbox with keyboard + swipe
+          nav. Portalled to <body> at z-index 2000 so it sits above this
+          modal (z 100) without any stacking-context gymnastics here. */}
+      <PhotoLightbox
+        photos={expandedDpr?.photos || []}
+        startIndex={lightboxIndex ?? 0}
+        open={lightboxIndex !== null}
+        onClose={() => setLightboxIndex(null)}
+      />
     </div>
   );
 }
