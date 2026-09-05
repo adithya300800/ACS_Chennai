@@ -3,9 +3,10 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatShortDate } from '../../lib/format.js';
+import { formatShortDate, getCurrentIstMonth } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import SeverityBadge from '../../components/SeverityBadge.jsx';
+import MonthStepper from '../../components/MonthStepper.jsx';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { CalendarIcon, MapPinIcon, CameraIcon, ClipboardIcon, PaperclipIcon } from '../../components/Icons.jsx';
@@ -37,6 +38,13 @@ export default function InspectionList() {
   const [error, setError] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  // R7b: month stepper on My Inspection mirrors DprAll / DprList /
+  // InspectionAll — current IST month on mount, walked one month at a
+  // time via the header chip. '' (all-time) is reachable by clicking
+  // the stepper far enough back and then past the earliest recorded
+  // inspection, but the UI doesn't surface it explicitly because
+  // employees almost never want unbounded history.
+  const [month, setMonth] = useState(getCurrentIstMonth());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -51,6 +59,7 @@ export default function InspectionList() {
       const params = { limit: '50', my: 'true' };
       if (typeFilter) params.inspectionType = typeFilter;
       if (statusFilter) params.status = statusFilter;
+      if (month) params.month = month;
       const data = await api.getInspections(params, accessToken);
       setInspections(data.inspections || []);
     } catch (err) {
@@ -61,7 +70,7 @@ export default function InspectionList() {
     } finally {
       setLoading(false);
     }
-  }, [accessToken, typeFilter, statusFilter, toast]);
+  }, [accessToken, typeFilter, statusFilter, month, toast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -69,7 +78,14 @@ export default function InspectionList() {
     <div className="dpr-page">
       <div className="dpr-page-header">
         <h1 className="dpr-page-title">My Inspection Records</h1>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          {/* R7b: month stepper mirrors DprList / DprAll / InspectionAll
+              — always visible so the user doesn't have to open a
+              filter panel to scope the page by month. */}
+          <MonthStepper
+            value={month}
+            onChange={setMonth}
+          />
           <Link to="/portal/inspection/submit" className="btn btn-primary btn-sm">
             + New Record
           </Link>

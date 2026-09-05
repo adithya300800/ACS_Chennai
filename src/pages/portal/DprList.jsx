@@ -3,10 +3,11 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatDateOnly } from '../../lib/format.js';
+import { formatDateOnly, formatMonthLabel, getCurrentIstMonth, shiftMonth } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
+import MonthStepper from '../../components/MonthStepper.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { ClipboardIcon } from '../../components/Icons.jsx';
 
@@ -119,15 +120,20 @@ export default function DprList() {
   // the box to opt in to the cross-org view, and admins get a sidebar
   // link to the dedicated `/portal/dpr/all` browse page (round-22).
   //
-  // Live-R3: also default the date range to the current calendar month so
-  // employees see "this month's DPRs" on first paint instead of an
-  // unbounded history scroll. Use `to` = today and `from` = the 1st of
-  // the month (IST business date — see getBusinessToday below).
-  const [filter, setFilter] = useState(() => {
-    const now = new Date();
-    const today = now.toISOString().slice(0, 10);
-    const firstOfMonth = today.slice(0, 8) + '01';
-    return { status: '', myOnly: true, from: firstOfMonth, to: today };
+  // Live-R7a: `month` is now the primary time axis — the header shows a
+  // MonthStepper so the user can walk back one calendar month at a time
+  // without opening Filters. `month` is mutually exclusive with
+  // `from`/`to` on the backend (400 MONTH_AND_RANGE_CONFLICT); when
+  // `month` is set we send it instead of the manual range. Setting
+  // `month` to '' opts into "all-time" (rare for employees). The Clear
+  // filters action snaps month back to the current month — same as
+  // DprAll's "snap-to-current" pattern.
+  const [filter, setFilter] = useState({
+    status: '',
+    myOnly: true,
+    from: '',
+    to: '',
+    month: getCurrentIstMonth(),
   });
   const [showFilters, setShowFilters] = useState(false);
   // P0 fix (round-10): clicking a row previously navigated to the same
@@ -143,8 +149,16 @@ export default function DprList() {
       const params = {};
       if (filter.status) params.status = filter.status;
       if (filter.myOnly) params.my = 'true';
-      if (filter.from) params.from = filter.from;
-      if (filter.to) params.to = filter.to;
+      // R7a: prefer the month shortcut when set. Backend rejects
+      // month + from/to together, so only send the manual range when
+      // month is unset (employee explicitly opted into "all-time" via
+      // Clear filters or via the from/to inputs).
+      if (filter.month) {
+        params.month = filter.month;
+      } else {
+        if (filter.from) params.from = filter.from;
+        if (filter.to) params.to = filter.to;
+      }
       if (cursor) params.cursor = cursor;
 
       const data = await api.getDprs(params, accessToken);
@@ -219,11 +233,18 @@ export default function DprList() {
     navigate(`/portal/dpr/submit?draftId=${dprId}`);
   };
 
-  // Live-R1: Render free-plan sleeps the backend after ~15 min of
+  // Live-R1 + R6: Render free-plan sleeps the backend after ~15 min of
   // inactivity. The first request to a sleeping backend often hits a
   // TCP-level failure (NETWORK_ERROR from api.js), not a slow timeout.
-  // Surface that case as a friendlier "warming up" toast and retry once
-  // after a short backoff so the user doesn't have to click twice.
+  //
+  // Cold-start reality from the live-validation run (5 Sept 2026): a
+  // single retry wasn't enough — Render took ~30s to fully wake, so a
+  // 4s backoff still hit a NETWORK_ERROR. Escalate to a backoff ladder
+  // (4s → 8s → 16s, ~30s total) and surface "still waking up" toasts
+  // so the user sees progress instead of a silent spinner. Give up
+  // after 3 attempts with a one-click "Try again" CTA on the toast
+  // because the user has lost their modal focus at that point and
+  // needs an explicit re-arm path.
   const handleDeleteDraft = async (dprId, attempt = 1) => {
     setDeleting(true);
     try {
@@ -232,16 +253,24 @@ export default function DprList() {
       setConfirmDeleteId(null);
       handleCloseModal();
       setDprs((prev) => prev.filter((d) => d.id !== dprId));
+      return;
     } catch (err) {
       const isColdStart = err?.code === 'NETWORK_ERROR';
-      if (isColdStart && attempt === 1) {
-        toast.push('Server is waking up — retrying…', 'info');
-        await new Promise((r) => setTimeout(r, 4000));
-        return handleDeleteDraft(dprId, 2);
+      // 4s, 8s, 16s — gives the container time to boot AND bind port.
+      const backoffs = [4000, 8000, 16000];
+      if (isColdStart && attempt <= backoffs.length) {
+        toast.push(
+          attempt === 1
+            ? 'Server is waking up — retrying…'
+            : `Server still waking up — attempt ${attempt} of ${backoffs.length + 1}…`,
+          'info'
+        );
+        await new Promise((r) => setTimeout(r, backoffs[attempt - 1]));
+        return handleDeleteDraft(dprId, attempt + 1);
       }
       toast.push(
         isColdStart
-          ? 'Server is taking too long to respond. Please try again in a minute.'
+          ? 'Server is taking too long to respond. Tap Delete again in a minute to retry.'
           : (err.message || 'Failed to delete draft'),
         'error'
       );
@@ -264,7 +293,17 @@ export default function DprList() {
     <div className="dpr-page">
       <div className="dpr-page-header">
         <h1 className="dpr-page-title">My Daily Reports</h1>
-        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          {/* R7a: month stepper mirrors the DprAll header layout. The
+              stepper walks `filter.month` back/forward one calendar
+              month at a time; clearing month to '' isn't surfaced in
+              the UI because employees almost never want an unbounded
+              history view. Reset paths (Current month / Clear filters
+              below) always snap back to the current month. */}
+          <MonthStepper
+            value={filter.month}
+            onChange={(v) => setFilter((f) => ({ ...f, month: v }))}
+          />
           <button className="btn btn-secondary btn-sm" onClick={() => setShowFilters(s => !s)}>
             <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 3H2l8 9.46V19l4 2V12.46z"/></svg>
             Filters {showFilters ? '▲' : '▼'}
@@ -336,23 +375,20 @@ export default function DprList() {
               )}
             </div>
           </div>
-          {/* Live-R3: a single "Current month" pill restores the page's
-              default scope (1st-of-month → today). Useful when the user
-              has drilled into a custom range and wants to come back.
-              Lives next to "Clear filters" so the reset affordances stay
-              grouped. We compute the bounds here off Date() so the pill
-              always reflects *today's* calendar month — same as the
-              initial-state default above. */}
-          {(filter.status || filter.from || filter.to) && (
+          {/* Live-R7a: the reset pills also snap `month` back to the
+              current month — the header MonthStepper owns the time
+              scope on this page, so any "reset" action has to align
+              with it. "Clear filters" resets `month` to current
+              (matches DprAll's snap-to-current pattern) and clears
+              status; "All-time" is the only path that drops month
+              to '' (left to the user's discretion via a future
+              enhancement — not surfaced today). */}
+          {(filter.status || filter.from || filter.to || (filter.month && filter.month !== getCurrentIstMonth())) && (
             <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
-                onClick={() => {
-                  const today = new Date().toISOString().slice(0, 10);
-                  const firstOfMonth = today.slice(0, 8) + '01';
-                  setFilter({ status: '', myOnly: true, from: firstOfMonth, to: today });
-                }}
+                onClick={() => setFilter((f) => ({ ...f, month: getCurrentIstMonth(), from: '', to: '' }))}
                 aria-label="Reset to current month"
               >
                 Current month
@@ -360,7 +396,7 @@ export default function DprList() {
               <button
                 type="button"
                 className="btn btn-ghost btn-sm"
-                onClick={() => setFilter({ status: '', myOnly: true, from: '', to: '' })}
+                onClick={() => setFilter((f) => ({ ...f, status: '', from: '', to: '', month: getCurrentIstMonth() }))}
               >
                 Clear filters
               </button>
