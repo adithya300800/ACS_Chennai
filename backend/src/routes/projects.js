@@ -372,6 +372,90 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
   }
 }));
 
+// ─── POST /api/projects/resolve ─────────────────────────────────────────────
+// Ensures a Project row exists for the supplied free-text `name`, returning
+// the canonical UUID + name. The picker on DPR/Inspection submit surfaces
+// auto-discovered projects as name-only (the `discovered` array on
+// GET /api/projects); without a UUID the downstream DrawingPicker cannot
+// filter drawings and the DPR POST payload would carry an invalid
+// projectId. This endpoint closes the gap by promoting the name to a real
+// row BEFORE submission, so DrawingPicker fires with a valid FK.
+//
+// Behaviour:
+//   - name already registered → return the curated row, isRegistered=true.
+//   - name not registered, active=true → create with minimal defaults
+//     (name + createdById = caller; admin can curate later via PATCH).
+//   - name not registered, matched an inactive row → 409 (the admin
+//     archived it; reuse-after-archive is a deliberate manual step).
+//
+// Auth: any authenticated employee (mirrors POST /api/dpr which already
+// auto-creates a discovered row server-side; we're just hoisting that
+// step earlier so DrawingPicker can fire).
+router.post('/resolve', asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  const rawName = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  if (!rawName) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'name is required' });
+  }
+  if (rawName.length > 200) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'name must be 200 characters or fewer' });
+  }
+
+  try {
+    // Case-insensitive lookup first — same precedence as resolveProject()
+    // so a user who typed "t-nagar" gets the existing "T-Nagar" row
+    // instead of spawning a duplicate.
+    const existing = await prisma.project.findFirst({
+      where: { name: { equals: rawName, mode: 'insensitive' } },
+    });
+    if (existing) {
+      if (!existing.isActive) {
+        return res.status(409).json({
+          error: 'PROJECT_INACTIVE',
+          code: 'PROJECT_INACTIVE',
+          message: 'Project with this name is archived; ask an admin to re-activate or rename',
+        });
+      }
+      return res.json({ ...serializeProject(existing), isRegistered: true });
+    }
+
+    // No row yet — create a minimal Project. `code` is intentionally left
+    // null (admin can curate later via PATCH /api/projects/:id); we
+    // default isActive=true so the user can immediately submit a DPR
+    // referencing it.
+    const created = await prisma.project.create({
+      data: {
+        name: rawName,
+        createdById: req.employeeId,
+        isActive: true,
+      },
+    });
+    return res.status(201).json({ ...serializeProject(created), isRegistered: true });
+  } catch (err) {
+    // P2002 = unique violation on Project.name — a concurrent resolve
+    // request just won the race. Re-read the canonical row so we still
+    // return a valid UUID instead of a 500.
+    if (err?.code === 'P2002') {
+      const race = await prisma.project.findFirst({
+        where: { name: { equals: rawName, mode: 'insensitive' } },
+      });
+      if (race) return res.json({ ...serializeProject(race), isRegistered: true });
+    }
+    console.error('Projects resolve error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err?.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    return res.status(500).json({ error: 'Failed to resolve project' });
+  }
+}));
+
 // ─── GET /api/projects/:idOrName ────────────────────────────────────────────
 // Resolves by UUID or by name (case-insensitive). Returns the curated row
 // if registered; otherwise returns 404 — the caller should treat the

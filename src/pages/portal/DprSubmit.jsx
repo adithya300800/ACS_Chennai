@@ -187,6 +187,11 @@ export default function DprSubmit() {
   // `projectName` to the backend.
   const [projects, setProjects] = useState([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
+  // [Bug fix] True while POST /api/projects/resolve is in flight after
+  // the user picks a discovered (name-only) project row. Disables the
+  // picker + shows a "Registering…" hint so the user can't double-click
+  // into a second resolve or stale-state race.
+  const [resolvingProject, setResolvingProject] = useState(false);
   // N7: BOQ items for the current projectName, loaded when the project
   // is named. We don't fetch on every keystroke — only when the user
   // has finished typing a project name and either blurred the field
@@ -455,17 +460,21 @@ export default function DprSubmit() {
     setForm((f) => ({ ...f, [name]: value }));
   };
 
-  // [N1 Phase B] Project picker change handler. The dropdown's value
-  // is either a UUID (registered project) or a name (discovered
-  // project with no Project row yet) — we look it up in the cached
-  // `projects` list to pull the canonical name. This is the ONLY
-  // sanctioned way to set both projectId + projectName in lockstep;
-  // any other path (typing into a free-text input, etc.) is a code
-  // smell we should catch in review.
-  const handleProjectChange = (e) => {
+  // [N1 Phase B + bug fix] Project picker change handler. The dropdown's
+  // value is either a UUID (registered project) or a name (discovered
+  // project with no Project row yet). For discovered rows we call
+  // POST /api/projects/resolve to promote the name to a real Project
+  // and get a UUID BEFORE downstream pickers (DrawingPicker, BOQ
+  // refetch keyed on projectId) fire — the alternative leaves
+  // form.projectId as the literal name, which makes DrawingPicker
+  // 400 on the projectId UUID validator and causes the DPR POST to
+  // fail. See backend/src/routes/projects.js POST /resolve for the
+  // server side. Registered rows still take the synchronous fast path
+  // so a known-project pick feels instant.
+  const handleProjectChange = async (e) => {
     const value = e.target.value;
     if (!value) {
-      setForm((f) => ({ ...f, projectId: '', projectName: '', boqItemId: '' }));
+      setForm((f) => ({ ...f, projectId: '', projectName: '', boqItemId: '', drawingId: '', drawingRev: '' }));
       return;
     }
     const match = projects.find((p) => (p.id || p.name) === value);
@@ -475,19 +484,54 @@ export default function DprSubmit() {
       // data on a stale onChange.
       return;
     }
+
+    // Fast path: registered row already has a UUID. Set both fields
+    // synchronously so DrawingPicker fires with a valid FK.
+    if (match.id) {
+      setForm((f) => ({
+        ...f,
+        projectId: match.id,
+        projectName: match.name,
+        boqItemId: '',
+        drawingId: '',
+        drawingRev: '',
+      }));
+      return;
+    }
+
+    // Discovered row: promote to a real Project. Optimistically set
+    // projectName so the UI feels instant, then swap in the UUID once
+    // the resolve resolves. If the call fails the DPR backend's
+    // resolveProject() fallback still accepts the bare name at submit
+    // time — we just lose the drawing picker for this submission.
     setForm((f) => ({
       ...f,
-      projectId: match.id || '',     // empty string for discovered rows
+      projectId: '',
       projectName: match.name,
-      // Reset BOQ link — it belonged to the old project, and the BOQ
-      // items effect re-fetches when projectName changes anyway.
       boqItemId: '',
-      // Reset drawing stamp — drawings are scoped to one project so
-      // the previous pick becomes invalid the moment the project
-      // changes. DrawingPicker will refetch on form.projectId change.
       drawingId: '',
       drawingRev: '',
     }));
+    setResolvingProject(true);
+    try {
+      const resolved = await api.resolveProject(match.name, accessToken);
+      const uuid = resolved?.id || '';
+      if (!uuid) {
+        toast.push('Could not register that project — try again', 'warning');
+        return;
+      }
+      // Update the cached projects list so the option now carries the
+      // UUID — future picks (and re-renders) use the registered path.
+      setProjects((prev) => prev.map((p) => (
+        p.name === match.name ? { ...p, id: uuid, isRegistered: true } : p
+      )));
+      setForm((f) => ({ ...f, projectId: uuid }));
+    } catch (err) {
+      console.warn('Project resolve failed', { message: err?.message?.split('\n')[0] });
+      toast.push('Could not register project name; submit will retry', 'warning');
+    } finally {
+      setResolvingProject(false);
+    }
   };
 
   const handleDailyChange = (e) => {
@@ -899,6 +943,11 @@ export default function DprSubmit() {
                   id="projectId"
                   name="projectId"
                   className="form-input"
+                  // [Bug fix] Disable while POST /api/projects/resolve is
+                  // in flight so the user can't pick a different row
+                  // mid-call (which would race against the optimistic
+                  // setProjects swap above).
+                  disabled={resolvingProject}
                   // Value is the projectId (UUID) for registered rows
                   // or the name for discovered rows; an empty string
                   // represents "no pick yet". We resolve the current
@@ -923,10 +972,18 @@ export default function DprSubmit() {
                   ))}
                 </select>
               )}
+              {/* [Bug fix] Distinguish the in-flight resolve from the
+                  not-yet-started state so the user understands why the
+                  picker is briefly disabled after picking a discovered
+                  row. */}
               {form.projectName ? (
                 <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
                   Picked: <strong>{form.projectName}</strong>
-                  {form.projectId ? '' : ' · not yet registered'}
+                  {(() => {
+                    if (resolvingProject) return ' · registering project…';
+                    if (!form.projectId) return ' · not yet registered';
+                    return '';
+                  })()}
                 </span>
               ) : null}
             </div>

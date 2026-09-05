@@ -639,6 +639,14 @@ export const api = {
     return api.get('/projects', typeof params === 'string' ? params : token);
   },
   createProject: (data, token) => api.post('/projects', data, token),
+  // [Bug fix] Resolves a free-text project name to a real Project row,
+  // creating one on the fly if the name is "discovered" (exists as a
+  // DPR.projectName but has no Project row yet). Returns the canonical
+  // { id, name, ... } payload — the caller should overwrite its local
+  // projectId state with the returned id so downstream pickers
+  // (DrawingPicker, etc.) can fire with a valid UUID FK.
+  // Backend: backend/src/routes/projects.js POST /api/projects/resolve.
+  resolveProject: (name, token) => api.post('/projects/resolve', { name }, token),
   // getProject accepts either a UUID or a free-text name. We URL-encode
   // the value so a name like "T-Nagar / Phase II" survives the trip —
   // Express decodes it before the resolver runs.

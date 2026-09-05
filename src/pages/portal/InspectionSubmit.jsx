@@ -231,6 +231,10 @@ export default function InspectionSubmit() {
   // see handleProjectChange for the lockstep projectId+projectName set.
   const [projects, setProjects] = useState([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
+  // [Bug fix] True while POST /api/projects/resolve is in flight after
+  // the user picks a discovered (name-only) project row. Mirrors the
+  // DprSubmit.jsx flag — see the comment there for the full rationale.
+  const [resolvingProject, setResolvingProject] = useState(false);
   const photoObjectUrlsRef = useRef(new Set());
 
   // [DR-006 client] Live count of photos still going through the SAS / PUT
@@ -405,11 +409,14 @@ export default function InspectionSubmit() {
     setForm((f) => ({ ...f, [name]: value }));
   };
 
-  // [N1 Phase B] Project picker change handler. Mirrors the
-  // DprSubmit.jsx version — the dropdown's value is the projectId
-  // (UUID) for registered rows or the literal name for discovered
-  // rows. We set both fields atomically so they never drift.
-  const handleProjectChange = (e) => {
+  // [N1 Phase B + bug fix] Project picker change handler. Mirrors the
+  // DprSubmit.jsx version — for discovered rows we call POST
+  // /api/projects/resolve to promote the name to a real Project and
+  // get a UUID BEFORE downstream pickers (DrawingPicker, BOQ refetch
+  // keyed on projectId) fire. Registered rows take the synchronous
+  // fast path. See backend/src/routes/projects.js POST /resolve for
+  // the server side.
+  const handleProjectChange = async (e) => {
     const value = e.target.value;
     if (!value) {
       setForm((f) => ({ ...f, projectId: '', projectName: '', boqItemId: '', drawingId: '', drawingRev: '' }));
@@ -417,16 +424,49 @@ export default function InspectionSubmit() {
     }
     const match = projects.find((p) => (p.id || p.name) === value);
     if (!match) return; // defensive: stale option
+
+    // Fast path: registered row already has a UUID.
+    if (match.id) {
+      setForm((f) => ({
+        ...f,
+        projectId: match.id,
+        projectName: match.name,
+        boqItemId: '',
+        // N3 (Phase F): clear the drawing stamp when the project changes
+        // so we never carry a stale drawingId/rev across sites.
+        drawingId: '',
+        drawingRev: '',
+      }));
+      return;
+    }
+
+    // Discovered row: promote to a real Project.
     setForm((f) => ({
       ...f,
-      projectId: match.id || '',
+      projectId: '',
       projectName: match.name,
       boqItemId: '',
-      // N3 (Phase F): clear the drawing stamp when the project changes
-      // so we never carry a stale drawingId/rev across sites.
       drawingId: '',
       drawingRev: '',
     }));
+    setResolvingProject(true);
+    try {
+      const resolved = await api.resolveProject(match.name, accessToken);
+      const uuid = resolved?.id || '';
+      if (!uuid) {
+        toast.push('Could not register that project — try again', 'warning');
+        return;
+      }
+      setProjects((prev) => prev.map((p) => (
+        p.name === match.name ? { ...p, id: uuid, isRegistered: true } : p
+      )));
+      setForm((f) => ({ ...f, projectId: uuid }));
+    } catch (err) {
+      console.warn('Project resolve failed', { message: err?.message?.split('\n')[0] });
+      toast.push('Could not register project name; submit will retry', 'warning');
+    } finally {
+      setResolvingProject(false);
+    }
   };
 
   const removePhoto = (idx) => {
@@ -892,6 +932,10 @@ export default function InspectionSubmit() {
                   name="projectId"
                   ref={projectNameRef}
                   className={`form-input${fieldErrors.projectName ? ' form-input-invalid' : ''}`}
+                  // [Bug fix] Disable while POST /api/projects/resolve
+                  // is in flight so a second click can't race against
+                  // the optimistic setProjects swap.
+                  disabled={resolvingProject}
                   value={(() => {
                     if (form.projectId) return form.projectId;
                     if (form.projectName) {
