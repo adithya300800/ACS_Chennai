@@ -274,7 +274,7 @@ export default function ProjectDashboard() {
     } catch (err) {
       if (!mountedRef.current) return;
       const msg = err?.message || 'Failed to load projects';
-      toast.pushToast({ message: msg, tone: 'error' });
+      toast.push(msg, 'error');
     } finally {
       if (mountedRef.current) setLoadingProjects(false);
     }
@@ -298,16 +298,16 @@ export default function ProjectDashboard() {
       // still renders — the missing bucket just shows zeros + an empty
       // state sub-line.
       if (Array.isArray(data.warnings) && data.warnings.length > 0) {
-        toast.pushToast({
-          message: `Some KPIs could not be loaded: ${data.warnings[0]}`,
-          tone: 'warning',
-        });
+        toast.push(
+          `Some KPIs could not be loaded: ${data.warnings[0]}`,
+          'warning',
+        );
       }
     } catch (err) {
       if (!mountedRef.current) return;
       const msg = err?.message || 'Failed to load KPIs';
       setKpisError(msg);
-      toast.pushToast({ message: msg, tone: 'error' });
+      toast.push(msg, 'error');
     } finally {
       if (mountedRef.current) setLoadingKpis(false);
     }

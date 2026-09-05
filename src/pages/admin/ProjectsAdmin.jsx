@@ -91,18 +91,18 @@ export default function ProjectsAdmin() {
     try {
       await api.softDeleteProject(pendingDelete.id, accessToken);
       if (!mountedRef.current) return;
-      toast.pushToast({
-        message: `Project "${pendingDelete.name}" archived`,
-        tone: 'success',
-      });
+      toast.push(
+        `Project "${pendingDelete.name}" archived`,
+        'success',
+      );
       setPendingDelete(null);
       load();
     } catch (err) {
       if (!mountedRef.current) return;
-      toast.pushToast({
-        message: err?.message || 'Failed to archive project',
-        tone: 'error',
-      });
+      toast.push(
+        err?.message || 'Failed to archive project',
+        'error',
+      );
     } finally {
       if (mountedRef.current) setDeleting(false);
     }

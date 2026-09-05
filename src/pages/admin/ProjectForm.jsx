@@ -138,11 +138,11 @@ export default function ProjectForm() {
       if (isEdit) {
         await api.updateProject(editId, payload, accessToken);
         if (!mountedRef.current) return;
-        toast.pushToast({ message: `Project "${payload.name}" updated`, tone: 'success' });
+        toast.push(`Project "${payload.name}" updated`, 'success');
       } else {
         const created = await api.createProject(payload, accessToken);
         if (!mountedRef.current) return;
-        toast.pushToast({ message: `Project "${created.name}" registered`, tone: 'success' });
+        toast.push(`Project "${created.name}" registered`, 'success');
       }
       navigate('/portal/admin/projects');
     } catch (err) {
