@@ -408,15 +408,26 @@ model InspectionPhoto {
 // if needed (out of scope for this round).
 model BoqItem {
   id          String   @id @default(uuid())
-  projectName String
-  itemCode    String   @db.VarChar(60)
-  description String
-  unit        String   @db.VarChar(20)
-  quantity    Float
-  rate        Float
+  // [Phase-4 #2 hot-fix] added @map for snake_case columns. Pre-fix
+  // Prisma queried `"projectName"` / `"itemCode"` (camelCase — the field
+  // name) and the live DB rejects those queries with P2022 "column does
+  // not exist", because the migration in 20260905020000_n7_boq_items
+  // intentionally created the columns as `project_name` / `item_code`
+  // to match the model convention used by DPR / InspectionRecord. DB
+  // schema is unchanged — these annotations are client-side only — so no
+  // migration is needed. `prisma migrate status` will continue to see
+  // 0 pending. The other columns (description / unit / quantity / rate /
+  // amount / category) happen to be word-identical in camelCase and
+  // snake_case, so they don't need @map, but adding for consistency.
+  projectName String   @map("project_name")
+  itemCode    String   @db.VarChar(60) @map("item_code")
+  description String   @map("description")
+  unit        String   @db.VarChar(20) @map("unit")
+  quantity    Float    @map("quantity")
+  rate        Float    @map("rate")
   // computed (quantity × rate) — convenience, not source of truth
-  amount      Float
-  category    String?  @db.VarChar(60)
+  amount      Float    @map("amount")
+  category    String?  @db.VarChar(60) @map("category")
   isActive    Boolean  @default(true) @map("is_active")
   createdById String   @map("created_by_id")
   createdAt   DateTime @default(now()) @map("created_at")
