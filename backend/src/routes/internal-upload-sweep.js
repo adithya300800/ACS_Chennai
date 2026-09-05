@@ -307,15 +307,35 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
         // a concurrent DPR/Inspection bind sets bound_at, this update
         // matches 0 rows, and we leave the blob alone.
         //
-        // `boundAt` is stamped at the same moment so pass 3 (EXPIRED verify)
-        // doesn't re-process rows we already deleted. Without this, a 25h-
-        // old seed row passes 1, gets flipped to EXPIRED, and on the SAME
-        // fire pass 3 sees an EXPIRED + boundAt=null + 25h-old row and
-        // deletes the (already-gone) blob twice — counting as
-        // blobsCleaned=2 for what was really one sweep.
+        // DR-018: stamp ONLY status here, not boundAt. The previous code
+        // stamped boundAt at flip time AND left it null on failed delete,
+        // so a row whose R2 delete failed (e.g. transient 5xx) ended up
+        // status=EXPIRED + boundAt=set + boundType=null — invisible to
+        // pass 3 (which filters on boundAt=null). The blob was orphaned
+        // forever with no record of the sweep ever having tried.
+        //
+        // New contract: the row goes through three named states, each
+        // pinned by the storage layer:
+        //   1. OWNED        — original row, PENDING or CONFIRMED + boundAt
+        //                     may be set by a binder. Not our concern yet.
+        //   2. CLAIMED      — status flipped to EXPIRED + boundAt still
+        //                     null. Means the sweep intends to delete the
+        //                     blob but has not yet verified it is gone.
+        //                     Pass 3 will revisit this row if it stays
+        //                     here past the verify window.
+        //   3. SWEPT        — status=EXPIRED, boundAt=set,
+        //                     boundType='swept'. The R2 delete has been
+        //                     verified (either by this pass's success or
+        //                     by pass 3's retry success). Terminal: pass
+        //                     3 ignores rows with boundType='swept'.
+        //
+        // The atomic guard's `where` clause still pins the source state
+        // so a concurrent binder that flips PENDING → CONFIRMED between
+        // our findMany and our update matches 0 rows and we leave the
+        // row alone.
         const updated = await prisma.uploadIntent.updateMany({
           where: { id: intent.id, ...guardWhere() },
-          data: { status: 'EXPIRED', boundAt: new Date() },
+          data: { status: 'EXPIRED' },
         });
         if (!updated || updated.count === 0) {
           skipped += 1;
@@ -326,8 +346,26 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
         sweptRows += 1;
 
         const result = await tryDeleteBlob(intent);
-        if (result.cleaned) blobsCleaned += 1;
-        else blobsStillOrphan += 1;
+        if (!result.cleaned) {
+          // Delete failed. Leave the row in the CLAIMED state (status=
+          // EXPIRED, boundAt still null). Pass 3 will retry once the
+          // row ages past EXPIRED_VERIFY_AFTER_MS; we must NOT stamp
+          // boundType='swept' here, that would mark a successful delete
+          // we never achieved.
+          blobsStillOrphan += 1;
+          continue;
+        }
+
+        // Delete succeeded — promote CLAIMED → SWEPT. boundType='swept'
+        // is the terminal sentinel that tells pass 3 "do not revisit".
+        // We still guard on status: { in: ['EXPIRED'] } so a concurrent
+        // edit (none today, but defensively) cannot accidentally turn
+        // the row back into a live one.
+        await prisma.uploadIntent.updateMany({
+          where: { id: intent.id, status: { in: ['EXPIRED'] }, boundType: { not: 'swept' } },
+          data: { boundType: 'swept', boundAt: new Date() },
+        });
+        blobsCleaned += 1;
       }
 
       // Partial batch means the predicate is drained — no point re-querying.
