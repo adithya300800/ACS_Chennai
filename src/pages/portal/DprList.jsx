@@ -193,6 +193,26 @@ export default function DprList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter, accessToken]);
 
+  // R8 fix: refetch when the tab regains focus so the row's status +
+  // Resume/Delete affordances always reflect backend truth. Without
+  // this, a draft that was approved by an admin in another tab (or
+  // from the admin phone) stays in the local React state as DRAFT, the
+  // user clicks Delete, and the backend correctly returns 409
+  // INVALID_TRANSITION — the user then reads the error toast as
+  // "delete is broken". One focus event + an idempotent re-load is
+  // cheaper than a SWR-style stale-on-mount dance and matches the
+  // pattern already used in DprAll / InspectionAll.
+  useEffect(() => {
+    const onFocus = () => load();
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter, accessToken]);
+
   const handleFilterChange = (key, value) => {
     setFilter(f => ({ ...f, [key]: value }));
   };
@@ -233,18 +253,31 @@ export default function DprList() {
     navigate(`/portal/dpr/submit?draftId=${dprId}`);
   };
 
-  // Live-R1 + R6: Render free-plan sleeps the backend after ~15 min of
-  // inactivity. The first request to a sleeping backend often hits a
+  // Live-R1 + R6 + R8: Render free-plan sleeps the backend after ~15 min
+  // of inactivity. The first request to a sleeping backend often hits a
   // TCP-level failure (NETWORK_ERROR from api.js), not a slow timeout.
   //
   // Cold-start reality from the live-validation run (5 Sept 2026): a
   // single retry wasn't enough — Render took ~30s to fully wake, so a
   // 4s backoff still hit a NETWORK_ERROR. Escalate to a backoff ladder
   // (4s → 8s → 16s, ~30s total) and surface "still waking up" toasts
-  // so the user sees progress instead of a silent spinner. Give up
-  // after 3 attempts with a one-click "Try again" CTA on the toast
-  // because the user has lost their modal focus at that point and
-  // needs an explicit re-arm path.
+  // so the user sees progress instead of a silent spinner.
+  //
+  // R8 (5 Sept 2026): the previous ladder ONLY handled NETWORK_ERROR.
+  // The actual "still failing" report turned out to be the 409
+  // INVALID_TRANSITION response — a draft that an admin had just
+  // approved (from the admin phone / another tab) was still showing in
+  // the local React state as DRAFT, the user clicked Delete, and the
+  // backend's perfectly-correct 409 surfaced as the bare string
+  // "Only DRAFT DPRs can be deleted (current status: SUBMITTED)" which
+  // read as "delete is broken". Two fixes:
+  //   1) The page now refetches on `focus` + `visibilitychange`
+  //      (effect above) so the row's status is always current BEFORE
+  //      the click — most 409s disappear at the source.
+  //   2) The catch block below now maps the remaining 409 / 404 / 403
+  //      codes to friendly messages AND refreshes the list, so the
+  //      stale row disappears and the modal closes — the user sees
+  //      "This DPR is no longer a draft" instead of a Prisma error.
   const handleDeleteDraft = async (dprId, attempt = 1) => {
     setDeleting(true);
     try {
@@ -268,12 +301,36 @@ export default function DprList() {
         await new Promise((r) => setTimeout(r, backoffs[attempt - 1]));
         return handleDeleteDraft(dprId, attempt + 1);
       }
-      toast.push(
-        isColdStart
-          ? 'Server is taking too long to respond. Tap Delete again in a minute to retry.'
-          : (err.message || 'Failed to delete draft'),
-        'error'
-      );
+      // R8: structured backend errors → friendly text. 404 means the
+      // draft was already deleted (likely from another tab / device);
+      // 409 means the status moved off DRAFT; 403 means it's no longer
+      // theirs. In all three, the local row is stale — close the modal
+      // and re-load so the UI matches reality.
+      const code = err?.code || err?.error;
+      let friendly = null;
+      let shouldReload = false;
+      if (err?.status === 404 || code === 'NOT_FOUND') {
+        friendly = 'This DPR no longer exists — it may have already been deleted.';
+        shouldReload = true;
+      } else if (err?.status === 409 || code === 'INVALID_TRANSITION') {
+        friendly = 'This DPR is no longer a draft and cannot be deleted. Refreshing the list.';
+        shouldReload = true;
+      } else if (err?.status === 403 || code === 'FORBIDDEN') {
+        friendly = 'You can only delete your own drafts.';
+      }
+      if (shouldReload) {
+        toast.push(friendly, 'info');
+        setConfirmDeleteId(null);
+        handleCloseModal();
+        load();
+      } else {
+        toast.push(
+          isColdStart
+            ? 'Server is taking too long to respond. Tap Delete again in a minute to retry.'
+            : (friendly || err.message || 'Failed to delete draft'),
+          'error'
+        );
+      }
     } finally {
       setDeleting(false);
     }

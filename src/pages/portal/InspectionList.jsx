@@ -74,6 +74,23 @@ export default function InspectionList() {
 
   useEffect(() => { load(); }, [load]);
 
+  // R8 fix (5 Sept 2026, parity with DprList): refetch on tab focus so
+  // each row's status + click affordances always reflect backend truth.
+  // Without this, a record whose status moved off OPEN in another tab
+  // stays clickable here and the user sees the raw backend error
+  // string on click — which they read as "the button is broken". Idempotent
+  // list-load is cheap and matches the DprAll / InspectionAll pattern.
+  useEffect(() => {
+    const onFocus = () => load();
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [typeFilter, statusFilter, month, accessToken]);
+
   return (
     <div className="dpr-page">
       <div className="dpr-page-header">
