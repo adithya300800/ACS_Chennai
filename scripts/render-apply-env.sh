@@ -64,6 +64,32 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# ─── Operator-hazard guard (DR-018e) ─────────────────────────────────────────
+# The audit flagged this script as a real operator hazard: it bulk-
+# replaces ALL service env vars via PUT /services/:id/env-vars. Anything
+# added through the Render dashboard or another channel between
+# snapshots is silently dropped. The pre-fix header also printed the
+# database password in the pre-flight log, and the env-var name was
+# stale (`DIRECT_URL` instead of Prisma's `DIRECT_DATABASE_URL`).
+#
+# Until a per-key POST/PATCH path replaces this bulk-PUT, the script
+# must NOT run by accident. The operator has to opt in explicitly.
+if [ "${ALLOW_BULK_ENV_APPLY:-0}" != "1" ]; then
+  echo "${RED}REFUSED: scripts/render-apply-env.sh bulk-replaces ALL env vars.${NC}" >&2
+  echo "  This script is intentionally gated after DR-018e because the" >&2
+  echo "  audit caught it as an operator hazard: it can drop env vars" >&2
+  echo "  added through other channels, and its old header printed the" >&2
+  echo "  database password to the pre-flight log." >&2
+  echo "" >&2
+  echo "  If you understand the risk and need to run it anyway, set" >&2
+  echo "  ALLOW_BULK_ENV_APPLY=1 in the environment:" >&2
+  echo "    ALLOW_BULK_ENV_APPLY=1 scripts/render-apply-env.sh -n   # dry-run" >&2
+  echo "    ALLOW_BULK_ENV_APPLY=1 scripts/render-apply-env.sh      # apply" >&2
+  echo "" >&2
+  echo "  Prefer the Render dashboard for individual key updates." >&2
+  exit 5
+fi
+
 # ─── Secret loader ───────────────────────────────────────────────────────────
 # Usage: load_secret <handle> [--required]
 # Prints the secret value to stdout (used inline with `$(load_secret …)`),
@@ -186,7 +212,7 @@ DATABASE_DIRECT_URL="postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.${PROJECT_
 # ─── Expected env-var payload (full key/value list to enforce) ───────────────
 declare -A EXPECTED=(
   [DATABASE_URL]="${DATABASE_URL}"
-  [DIRECT_URL]="${DATABASE_DIRECT_URL}"
+  [DIRECT_DATABASE_URL]="${DATABASE_DIRECT_URL}"
   [JWT_SECRET]="${JWT_SECRET}"
   [JWT_REFRESH_SECRET]="${JWT_REFRESH_SECRET}"
   [PII_LOG_SALT]="${PII_LOG_SALT}"
@@ -213,7 +239,17 @@ declare -A EXPECTED=(
 )
 
 # ─── Pre-flight: prove the pooler URL is reachable ──────────────────────────
-echo "${YEL}→ Pre-flight: probing ${DATABASE_URL%%@*}@…${NC}" >&2
+# DR-018e (audit): the previous line printed
+#   ${DATABASE_URL%%@*}@…
+# which expands to `postgresql://postgres.PROJECT_REF:SUPABASE_DB_PASSWORD@…`
+# — i.e. it leaked the database password. Strip the userinfo password
+# and the query string so the operator sees only the host.
+_USERINFO="${DATABASE_URL%%@*}"
+_REST="${DATABASE_URL#*@}"
+_USERINFO_REDACTED="${_USERINFO%:*}"        # drop everything after the last `:`
+_HOST="${_REST%%/*}"                         # drop the path and query string
+echo "${YEL}→ Pre-flight: probing ${_USERINFO_REDACTED}@${_HOST}/…${NC}" >&2
+unset _USERINFO _REST _USERINFO_REDACTED _HOST
 if command -v psql >/dev/null 2>&1; then
   if ! PGPASSWORD="${SUPABASE_DB_PASSWORD}" psql "${DATABASE_URL}" -c '\q' >/dev/null 2>&1; then
     echo "${RED}✗ Pre-flight failed: cannot connect to Supabase pooler.${NC}" >&2
