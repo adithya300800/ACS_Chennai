@@ -309,7 +309,10 @@ router.post('/', async (req, res) => {
   // dprId — optional, but if provided must be a valid UUID that exists.
   // The DPR doesn't have to belong to the submitter — site engineers may file
   // an inspection against another engineer's DPR (e.g. NCR during weekend).
-  let dprConnect = undefined;
+  // DR-018/S4-B (audit): previously we also built a `dprConnect = { connect: … }`
+  // object for a Prisma nested-write path, but the actual create (further down)
+  // persists the FK via the scalar `dprId: dprId || null` field. The connect
+  // object was dead — removed to keep the validation and the write aligned.
   if (dprId !== undefined && dprId !== null && dprId !== '') {
     if (typeof dprId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dprId)) {
       return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'dprId must be a UUID' });
@@ -318,7 +321,6 @@ router.post('/', async (req, res) => {
     if (!exists) {
       return res.status(404).json({ error: 'DPR_NOT_FOUND', message: 'Linked DPR does not exist' });
     }
-    dprConnect = { connect: { id: dprId } };
   }
 
   // photos — same shape as DPR photos but container must be 'inspection-photos'.

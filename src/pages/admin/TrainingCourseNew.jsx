@@ -53,10 +53,15 @@ const addDaysInputValue = (n) => {
  *   1. Course details — title, description, URL, category
  *   2. Bulk-assign — search + multi-select employees, due date, priority
  *
- * The two are submitted as ONE POST to /api/training/enrollments, so the
- * course row and the enrollment rows land atomically from the user's
- * perspective. Backend returns { created: [...], skipped: [...], invalidIds: [...] }
- * — we surface a clear toast with all three counts.
+ * S4-B (audit): the previous header described this as a single atomic
+ * POST, but the implementation is two sequential awaited calls —
+ * `api.createTrainingCourse(...)` followed by `api.assignTraining(...)`.
+ * Both halves are recoverable: if the course is created but assignment
+ * fails, we surface a clear error and navigate to the dashboard so the
+ * admin can retry assignment from there. The partial-success toast
+ * (e.g. '5 assigned, 2 already assigned, 1 id not recognised') is the
+ * operator's signal that this is NOT one atomic write — preserving the
+ * useful messaging here, not collapsing it into a single success line.
  */
 export default function TrainingCourseNew() {
   useDocumentTitle('New Training Course');

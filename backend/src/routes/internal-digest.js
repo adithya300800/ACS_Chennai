@@ -180,35 +180,6 @@ function requireInternalToken(req, res, next) {
   next();
 }
 
-// ─── Per-notification link builder ───────────────────────────────────────
-// Returns the portal path (without origin) for a notification, or null if
-// the FK is missing. Origin comes from the template's portalUrl.
-function portalPathFor(notification) {
-  switch (notification.type) {
-    case 'DPR_REVIEWED':
-    case 'DPR_APPROVED':
-    case 'DPR_REJECTED':
-      return notification.dprId ? `/portal/dpr/${notification.dprId}` : null;
-    case 'INSPECTION_ACKNOWLEDGED':
-    case 'INSPECTION_CLOSED':
-    case 'INSPECTION_REJECTED':
-      // Inspection notifications don't carry a recordId in the row — link
-      // to the inspection list where the user can find the relevant one.
-      return '/portal/inspection';
-    case 'LEAVE_DECIDED':
-      return notification.leaveRequestId ? `/portal/leave` : '/portal/leave';
-    case 'TRAINING_ASSIGNED':
-    case 'TRAINING_CANCELLED':
-    case 'TRAINING_IN_PROGRESS':
-    case 'TRAINING_COMPLETED':
-      return notification.trainingEnrollmentId
-        ? `/portal/training/${notification.trainingEnrollmentId}`
-        : '/portal/training';
-    default:
-      return '/portal/notifications';
-  }
-}
-
 // ─── Digest row builder ──────────────────────────────────────────────────
 // Turns a flat list of notifications into the grouped shape the digest
 // template expects. The handler is responsible for both the grouping and

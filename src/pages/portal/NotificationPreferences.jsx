@@ -75,6 +75,18 @@ export default function NotificationPreferences() {
     digestHourLocal: 8,
     typeMutes: {},
   });
+  // S4-B (audit): the previous code had `anyDirty = true` as a placeholder
+  // and the Save button stayed always-enabled. Track real dirty state by
+  // snapshotting the loaded value (and every value the server confirms
+  // after a successful PUT) into a ref, then comparing current `prefs`
+  // against the snapshot. JSON.stringify is fine here — prefs is shallow
+  // (4 fields, one nested map) and the page is short-lived.
+  const baselineRef = React.useRef(JSON.stringify({
+    emailEnabled: true,
+    digestEnabled: true,
+    digestHourLocal: 8,
+    typeMutes: {},
+  }));
   const [types, setTypes] = useState([]);
 
   // Load on mount. The GET returns { preferences, types[] }; we only re-fetch
@@ -85,12 +97,17 @@ export default function NotificationPreferences() {
       try {
         const res = await api.getNotificationPreferences(token);
         if (cancelled) return;
-        setPrefs({
+        const loaded = {
           emailEnabled: res.preferences.emailEnabled,
           digestEnabled: res.preferences.digestEnabled,
           digestHourLocal: res.preferences.digestHourLocal,
           typeMutes: res.preferences.typeMutes || {},
-        });
+        };
+        setPrefs(loaded);
+        // S4-B: snapshot what the server just confirmed so the dirty check
+        // has a real baseline. Without this, every pref starts out as
+        // 'dirty' on first mount.
+        baselineRef.current = JSON.stringify(loaded);
         setTypes(res.types || []);
       } catch (err) {
         if (cancelled) return;
@@ -125,12 +142,17 @@ export default function NotificationPreferences() {
     setSaving(true);
     try {
       const res = await api.updateNotificationPreferences(prefs, token);
-      setPrefs({
+      const confirmed = {
         emailEnabled: res.preferences.emailEnabled,
         digestEnabled: res.preferences.digestEnabled,
         digestHourLocal: res.preferences.digestHourLocal,
         typeMutes: res.preferences.typeMutes || {},
-      });
+      };
+      setPrefs(confirmed);
+      // S4-B: refresh the baseline so the dirty check flips back to false
+      // after a successful save. Without this, the button stays enabled
+      // and the user can keep clicking Save on identical data.
+      baselineRef.current = JSON.stringify(confirmed);
       push('Preferences saved', 'success');
     } catch (err) {
       push(err.message || 'Failed to save preferences', 'error');
@@ -170,7 +192,10 @@ export default function NotificationPreferences() {
   const dailyTypes = sorted.filter((t) => t.channel === 'DAILY');
 
   const emailOff = !prefs.emailEnabled;
-  const anyDirty = true; // TODO: dirty tracking — current behavior auto-saves, fine for round 25
+  // S4-B (audit): compare current prefs against the last server-confirmed
+  // snapshot. JSON.stringify is fine for this — prefs is a shallow object
+  // with one nested typeMutes map and the page is short-lived.
+  const anyDirty = JSON.stringify(prefs) !== baselineRef.current;
 
   return (
     <div className="notification-pref-page">
