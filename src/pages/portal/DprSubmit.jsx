@@ -181,6 +181,18 @@ export default function DprSubmit() {
   const [todayInspectionsLoaded, setTodayInspectionsLoaded] = useState(false);
   const photoObjectUrlsRef = useRef(new Set());
 
+  // [DR-006 client] Live count of photos still going through the SAS / PUT
+  // / confirm-upload pipeline. Submit is blocked while this is > 0 so a
+  // report can never be created referencing an upload that hasn't reached
+  // CONFIRMED yet. Re-evaluated on every render — cheap because uploadStatuses
+  // is small and most entries settle to 'complete' / 'error' quickly.
+  const hasInFlightUploads = useMemo(
+    () => Object.values(uploadStatuses).some(
+      (s) => s && (s.status === 'requesting-sas' || s.status === 'uploading' || s.status === 'confirming'),
+    ),
+    [uploadStatuses],
+  );
+
   // SOL-P0#4: when arriving via ?draftId=…, load the server-side draft and
   // pre-populate the form. The submit handler switches to PUT /:id instead
   // of POST / when editingId is set. The local-autosave banner is suppressed
@@ -420,6 +432,22 @@ export default function DprSubmit() {
     submittingRef.current = true;
 
     setError('');
+    // [DR-006 client] Refuse to submit while any photo is still uploading
+    // or awaiting CONFIRMED intent. Without this, the user can submit a
+    // report that drops photos mid-upload — the backend now rolls the
+    // record back (409 PHOTO_BINDING_LOST) and the user is left wondering
+    // why their report vanished. Block the submit instead and surface a
+    // concrete reason.
+    const inFlightUploads = Object.values(uploadStatuses).filter(
+      (s) => s && (s.status === 'requesting-sas' || s.status === 'uploading' || s.status === 'confirming'),
+    );
+    if (inFlightUploads.length > 0) {
+      const msg = `${inFlightUploads.length} photo${inFlightUploads.length !== 1 ? 's are' : ' is'} still uploading — please wait for them to finish before submitting.`;
+      setError(msg);
+      toast.push(msg, 'warning');
+      submittingRef.current = false;
+      return;
+    }
     if (!form.projectName || !form.location || !form.reportDate) {
       const msg = 'Project name, location, and date are required';
       setError(msg);
@@ -541,7 +569,16 @@ export default function DprSubmit() {
         navigate('/portal/dpr/my');
       }
     } catch (err) {
-      const msg = err.message || 'Failed to submit DPR';
+      // [DR-006 client] Surface a specific message when the server rolls
+      // back because a photo claim was lost mid-submit. Generic
+      // "Failed to submit…" would leave the user thinking the form was
+      // broken; the real story is "photos were orphaned by the sweep,
+      // re-attach and resubmit".
+      const isPhotoBindingLost = err?.code === 'PHOTO_BINDING_LOST'
+        || (err?.message || '').toLowerCase().includes('photo binding');
+      const msg = isPhotoBindingLost
+        ? 'Photo upload was lost mid-submit — please re-attach your photos and try again.'
+        : (err.message || 'Failed to submit DPR');
       setError(msg);
       setStatus('idle');
       if (err.status !== 401) toast.push(msg, 'error');
@@ -978,11 +1015,11 @@ export default function DprSubmit() {
           )}
 
           <div className="dpr-form-actions dpr-form-actions-sticky" style={{ marginTop: '1.5rem' }}>
-            <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting'}>
+            <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting' || hasInFlightUploads}>
               {status === 'submitting' ? 'Saving...' : 'Save as Draft'}
             </button>
-            <button type="button" className="btn btn-primary" onClick={() => handleSubmit('SUBMITTED')} disabled={status === 'submitting'}>
-              {status === 'submitting' ? 'Submitting...' : 'Submit Report'}
+            <button type="button" className="btn btn-primary" onClick={() => handleSubmit('SUBMITTED')} disabled={status === 'submitting' || hasInFlightUploads}>
+              {status === 'submitting' ? 'Submitting...' : hasInFlightUploads ? 'Waiting for photos…' : 'Submit Report'}
             </button>
           </div>
         </div>
