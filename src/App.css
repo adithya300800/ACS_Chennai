@@ -2208,14 +2208,19 @@ footer {
   .employee-email {
     /* SOL-P2 bug #6: full email must be legible on mobile so admins can
        unambiguously identify the employee they are auditing. The old
-       140px cap relied on truncation with an ellipsis which hid the
-       important middle of the local part (e.g. "irfan.hassan@…" lost the
-       "assan"). Wrap-anywhere lets long addresses break at any character
-       while short ones still display in a single line. */
+       140px cap + the base `white-space:nowrap` rule both relied on
+       truncation with an ellipsis which hid the important middle of the
+       local part (e.g. "irfan.hassan@…" lost the "assan"). Override the
+       base `nowrap` + `overflow:hidden` so long addresses wrap in-place
+       via overflow-wrap:anywhere; short ones keep their natural shape. */
     max-width: 100%;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
     overflow-wrap: anywhere;
     word-break: break-word;
     font-size: 0.78rem;
+    line-height: 1.25;
   }
   .employee-dept {
     display: none !important;
