@@ -47,10 +47,14 @@ services:
     # On a failed migration the startCommand exits non-zero, Render marks
     # the deploy failed, and traffic is not routed to the broken revision.
     #
-    # [N1] start.sh wraps migrate deploy with a recovery block that clears
-    # `_prisma_migrations` failed rows for known-bad migrations BEFORE
-    # migrate deploy runs (otherwise P3009 blocks every subsequent deploy).
-    # The recovery is idempotent and a no-op when no failed rows exist.
+    # [N1] Failed-migration recovery has moved OUT of start.sh into the
+    # npm `postinstall` hook (scripts/clear-failed-migrations.js). Reason:
+    # Render's dashboard startCommand field is authoritative and overrides
+    # render.yaml / Dockerfile CMD / env vars. Since `postinstall` runs
+    # during the build step (`npm install && npx prisma generate`), the
+    # recovery executes BEFORE the locked-in startCommand regardless of
+    # dashboard config. The postinstall is idempotent and skips on non-
+    # Render environments.
     startCommand: sh start.sh
 
     envVars:

@@ -12,7 +12,9 @@
     "test:watch": "jest --watch",
     "test:round13": "node scripts/round13-tests.js",
     "test:no-skipped": "node scripts/no-skipped-tests.js",
-    "pretest": "node scripts/no-skipped-tests.js"
+    "pretest": "node scripts/no-skipped-tests.js",
+    "_comment_postinstall": "[N1] Recovery hook: clears failed rows in _prisma_migrations before migrate deploy can run. Runs during Render's `npm install` build step (postinstall fires inside that step), so it executes BEFORE the locked-in startCommand `npx prisma migrate deploy && node src/index.js`. Idempotent — no-op on healthy DBs.",
+    "postinstall": "node scripts/clear-failed-migrations.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1121.0",
