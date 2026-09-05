@@ -40,11 +40,10 @@ const { PrismaClient } = require('@prisma/client');
 
 const KNOWN_BAD = Object.freeze([
   '20260905020000_n17_projects',     // original n17 referenced wrong FK table
-  // 20260906000000_n1_project_fk    ← deleted from disk (its failed tx
-  //                                    rolled back, no DB state to lose);
-  //                                    the corrective `_fix` migration
-  //                                    absorbs the original intent. Kept
-  //                                    here as a historical note.
+  '20260906000000_n1_project_fk',    // original n1 used wrong column case
+                                     //   (file deleted from disk in d8554a3;
+                                     //    failed DB row may still exist from
+                                     //    earlier deploys — delete here too)
 ]);
 
 (async () => {
