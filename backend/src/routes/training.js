@@ -40,6 +40,7 @@ const {
   canTransition,
   canAutoCompleteFromPlayer,
   isCompleted,
+  isTerminal,
   markComplete,
   httpStatusForCode,
   // LPR-009: canonical terminal-status list — single source of truth for the
@@ -696,10 +697,21 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
   if (!isOwner && !req.isAdmin) {
     return res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
   }
-  if (isCompleted(existing.status)) {
+  if (isTerminal(existing.status)) {
+    // DR-014 fix: refuse CANCELLED rows here too, not just completed.
+    // The pre-fix `isCompleted()` check let a learner (or admin override)
+    // complete a CANCELLED row, overwriting the audit trail of who
+    // pulled the assignment and why. The progress route already gated
+    // CANCELLED+OVERDUE — this route (the OTHER way to reach a
+    // completed-state) didn't, leaving a hole where a CANCELLED row
+    // could be silently revived.
     return res.status(409).json({
-      error: 'Already completed',
-      code: 'ENROLLMENT_LOCKED',
+      error: isCompleted(existing.status)
+        ? 'Already completed'
+        : 'Enrollment is cancelled and cannot be completed',
+      code: isCompleted(existing.status)
+        ? 'ENROLLMENT_LOCKED'
+        : 'ENROLLMENT_CANCELLED',
     });
   }
 
@@ -753,14 +765,19 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
     const updated = await prisma.trainingEnrollment.update({
       where: {
         id,
-        // Locking guard: if someone else already completed between the read
-        // and the write, refuse — the client will re-fetch and observe the
-        // winning state.
+        // Locking guard: if someone else already completed OR cancelled
+        // between the read and the write, refuse — the client will
+        // re-fetch and observe the winning state. CANCELLED is in the
+        // notIn list as a belt-and-suspenders to the route-level
+        // isTerminal() check above: even a concurrent cancel that lands
+        // after our read but before our UPDATE gets a clean P2025 here
+        // instead of a silent overwrite.
         status: { notIn: [
           'SELF_ATTESTED_COMPLETED',
           'PLAYER_OBSERVED_COMPLETED',
           'PROVIDER_VERIFIED_COMPLETED',
           'ADMIN_OVERRIDE_COMPLETED',
+          'CANCELLED',
         ] },
       },
       data: patch,
@@ -841,10 +858,18 @@ router.post('/enrollments/:id/admin-override', trainingWriteLimiter, requireFres
   });
   if (!existing) return res.status(404).json({ error: 'Enrollment not found', code: 'NOT_FOUND' });
 
-  if (isCompleted(existing.status)) {
+  // DR-014 fix: same gate as the manual-complete handler. Admin
+  // override is the OTHER path that can resurrect a CANCELLED row.
+  // Pre-fix, only completed-states were blocked here, so an admin
+  // could "complete" a row they themselves had just cancelled.
+  if (isTerminal(existing.status)) {
     return res.status(409).json({
-      error: 'Already completed',
-      code: 'ENROLLMENT_LOCKED',
+      error: isCompleted(existing.status)
+        ? 'Already completed'
+        : 'Enrollment is cancelled and cannot be completed',
+      code: isCompleted(existing.status)
+        ? 'ENROLLMENT_LOCKED'
+        : 'ENROLLMENT_CANCELLED',
     });
   }
 
@@ -875,8 +900,12 @@ router.post('/enrollments/:id/admin-override', trainingWriteLimiter, requireFres
     const updated = await prisma.trainingEnrollment.update({
       where: {
         id,
-        // LPR-009: canonical terminal list — see TERMINAL_STATUSES export.
-        status: { notIn: TERMINAL_STATUSES },
+        // DR-014 fix: same notIn list as the manual-complete handler —
+        // excludes both completed-states AND CANCELLED. Pre-fix this
+        // only blocked TERMINAL_STATUSES (the 4 completion states), so
+        // a concurrent cancel + complete race would silently overwrite
+        // the cancellation. See isTerminal() in src/lib/trainingRules.
+        status: { notIn: [...TERMINAL_STATUSES, 'CANCELLED'] },
       },
       data: patch,
       include: {

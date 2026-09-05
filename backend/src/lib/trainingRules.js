@@ -77,6 +77,23 @@ function isCompleted(status) {
   return TERMINAL_STATUS_SET.has(status);
 }
 
+// DR-014 fix: a "completed" row is terminal-done; a "CANCELLED" row is
+// terminal-not-done. Both are terminal — once a row is in either state
+// the learner/admin should NOT be able to flip it back through any of
+// the manual-complete routes. Pre-fix, only `isCompleted()` was checked
+// at the manual-complete + admin-override boundaries, so a CANCELLED
+// row could be silently re-completed, overwriting the audit trail of
+// who pulled the assignment and why. canTransition() correctly rejects
+// the transition (CANCELLED → COMPLETED returns false), but the route
+// handler never invoked it — only the optimistic DB UPDATE where-clause
+// `notIn: completed-states` ran, which CANCELLED doesn't match.
+//
+// Use this helper at every boundary that writes a completed-status to
+// gate input before the route gets to the UPDATE.
+function isTerminal(status) {
+  return isCompleted(status) || status === 'CANCELLED';
+}
+
 const ALLOWED_PRIORITIES = new Set([
   'LOW',
   'NORMAL',
@@ -764,6 +781,7 @@ module.exports = {
   canTransition,
   canAutoCompleteFromPlayer,
   isCompleted,
+  isTerminal,
   TERMINAL_STATUSES,
   TERMINAL_STATUS_SET,
   markComplete,
