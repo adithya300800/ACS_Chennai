@@ -265,15 +265,22 @@ jobs:
 
       - name: Smoke test deployed app
         run: |
-          # [B-4] All three probes use `-fsS` so HTTP errors fail the step
-          # rather than being swallowed into a "000" sentinel that the
-          # status-comparison logic could mistakenly accept. `set -e` would
-          # short-circuit before the comparison runs, so we keep the
-          # explicit echo + numeric comparison for forensic visibility.
+          # [B-4] All three probes use `-sS` (NOT `-fsS`) so the HTTP status
+          # code is captured even when it's non-2xx. The probe for
+          # `/api/dpr/sas-url` and `/api/dpr/notifications` expects 401
+          # (auth required, route mounted); using `-f` would make curl exit
+          # non-zero on 401, which triggers the `|| echo "000"` fallback,
+          # producing "401000" — which the status-comparison logic below
+          # would (correctly) reject, but for the wrong reason (script
+          # bug, not actual deploy failure). The `|| echo "000"` fallback
+          # is kept for true connection failures (network down, container
+          # not yet bound). `set -e` would short-circuit before the
+          # comparison runs, so we keep the explicit echo + numeric
+          # comparison for forensic visibility.
           set +e
-          HEALTH=$(curl -fsS -o /dev/null -w "%{http_code}" -m 30 https://acs-chennai.onrender.com/health 2>/dev/null || echo "000")
-          DPR_SAS=$(curl -fsS -o /dev/null -w "%{http_code}" -m 30 -X POST https://acs-chennai.onrender.com/api/dpr/sas-url 2>/dev/null || echo "000")
-          DPR_NOTIF=$(curl -fsS -o /dev/null -w "%{http_code}" -m 30 "https://acs-chennai.onrender.com/api/dpr/notifications" 2>/dev/null || echo "000")
+          HEALTH=$(curl -sS -o /dev/null -w "%{http_code}" -m 30 https://acs-chennai.onrender.com/health 2>/dev/null || echo "000")
+          DPR_SAS=$(curl -sS -o /dev/null -w "%{http_code}" -m 30 -X POST https://acs-chennai.onrender.com/api/dpr/sas-url 2>/dev/null || echo "000")
+          DPR_NOTIF=$(curl -sS -o /dev/null -w "%{http_code}" -m 30 "https://acs-chennai.onrender.com/api/dpr/notifications" 2>/dev/null || echo "000")
           echo "Health=$HEALTH DPR_SAS=$DPR_SAS DPR_NOTIF=$DPR_NOTIF"
           # /health must return 200; dpr routes must return 401 (auth required), NOT 404 (route missing)
           if [ "$HEALTH" != "200" ] || [ "$DPR_SAS" != "401" ] || [ "$DPR_NOTIF" != "401" ]; then
