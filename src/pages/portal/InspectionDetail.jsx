@@ -7,6 +7,8 @@ import { formatShortDate, formatDateTime } from '../../lib/format.js';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
+// Round-28 #7: full-screen photo lightbox with keyboard + swipe nav.
+import PhotoLightbox from '../../components/PhotoLightbox.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 function formatIndianDate(iso) {
@@ -39,6 +41,8 @@ export default function InspectionDetail() {
   const [record, setRecord] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // Round-28 #7: lightbox state. Null = closed. Number = open at index.
+  const [lightboxIndex, setLightboxIndex] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -137,6 +141,38 @@ export default function InspectionDetail() {
           </div>
         </div>
 
+        {/* Round-28 #5: inline rejection reason so the reviewer can see WHY
+            the inspection was sent back without leaving the detail page.
+            Mirror the DPR modal banner — same red-tinted alert pattern so
+            the visual language is consistent across modules. */}
+        {record.status === 'REJECTED' && (record.rejectionReason || record.adminNotes) && (
+          <div
+            role="alert"
+            style={{
+              marginBottom: '1rem',
+              padding: '0.75rem 0.875rem',
+              background: '#fef2f2',
+              border: '1px solid #fecaca',
+              borderLeft: '3px solid var(--danger, #dc2626)',
+              borderRadius: 6,
+              fontSize: '0.85rem',
+              color: '#7f1d1d',
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>Rejected</div>
+            {record.rejectionReason && (
+              <div style={{ marginBottom: record.adminNotes ? '0.5rem' : 0 }}>
+                {record.rejectionReason}
+              </div>
+            )}
+            {record.adminNotes && (
+              <div style={{ fontSize: '0.8rem', color: '#991b1b', fontStyle: 'italic' }}>
+                Admin note: {record.adminNotes}
+              </div>
+            )}
+          </div>
+        )}
+
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', marginBottom: '1.5rem', fontSize: '0.85rem' }}>
           <div><strong>Date:</strong> {formatIndianDate(record.reportDate)}</div>
           {record.weather && <div><strong>Weather:</strong> {record.weather}</div>}
@@ -180,28 +216,49 @@ export default function InspectionDetail() {
               Photos ({record.photos.length})
             </h3>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '0.5rem' }}>
-              {record.photos.map((p) => (
-                <a
+              {record.photos.map((p, i) => (
+                <button
                   key={p.id}
-                  href={p.readUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{ position: 'relative', display: 'block', aspectRatio: '1', borderRadius: 6, overflow: 'hidden', background: '#f1f5f9' }}
+                  type="button"
+                  onClick={() => setLightboxIndex(i)}
+                  style={{
+                    position: 'relative',
+                    display: 'block',
+                    aspectRatio: '1',
+                    borderRadius: 6,
+                    overflow: 'hidden',
+                    background: '#f1f5f9',
+                    padding: 0,
+                    border: 'none',
+                    cursor: 'pointer',
+                  }}
+                  aria-label={`Open photo ${i + 1} of ${record.photos.length}`}
                   title={p.caption || 'Open photo'}
                 >
                   <img
                     src={p.readUrl}
                     alt={p.caption || 'Inspection photo'}
                     loading="lazy"
-                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
                   />
                   {/* R22.5: per-image download affordance. */}
                   <PhotoDownloadButton photo={p} label="Open inspection photo" />
-                </a>
+                </button>
               ))}
             </div>
           </div>
         )}
+
+        {/* Round-28 #7: full-screen lightbox with keyboard + swipe nav.
+            Rendered unconditionally; it's a portal so it lives at <body>
+            level and the dialog role + z-index 2000 puts it above the
+            breadcrumb / page chrome. */}
+        <PhotoLightbox
+          photos={record.photos || []}
+          startIndex={lightboxIndex ?? 0}
+          open={lightboxIndex !== null}
+          onClose={() => setLightboxIndex(null)}
+        />
 
         <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '1rem', display: 'flex', gap: '0.5rem' }}>
           <Link to="/portal/inspection/my" className="btn btn-secondary btn-sm">

@@ -2270,6 +2270,41 @@ footer {
   gap: 1rem;
 }
 
+/* Round-28 #4: filter / tab strips inside .dpr-page-header. On mobile the
+   strip overflows past the viewport (the audit captured "Submi / Under /
+   Appr / Reject / Selec" all clipped mid-word). Make the strip
+   horizontally scrollable with a subtle right-edge fade so the admin
+   knows there's more offscreen without breaking the existing flex
+   layout on desktop (flex-wrap:wrap still allows tab wrapping when
+   there's genuinely not enough room). */
+.dpr-page-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 640px) {
+  .dpr-page-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none; /* Firefox */
+    padding-right: 1.5rem;
+    /* Fade-out gradient on the right edge signals "more offscreen"
+       without breaking the natural scrollbar look. mask-image is the
+       modern CSS approach; browsers without mask-image (e.g. very old
+       Android WebView) just see a flat scrollable strip, which is fine. */
+    mask-image: linear-gradient(to right, black calc(100% - 1.5rem), transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 1.5rem), transparent 100%);
+  }
+  .dpr-page-tabs::-webkit-scrollbar { display: none; }
+  .dpr-page-tabs > * {
+    flex-shrink: 0;
+  }
+}
+
 .dpr-page-title {
   font-family: 'Plus Jakarta Sans', sans-serif;
   font-size: 1.5rem;
@@ -2296,12 +2331,27 @@ footer {
   align-items: flex-start;
   justify-content: space-between;
   margin-bottom: 0.75rem;
+  /* Round-28 #3: give the title-side flex child `min-width: 0` so it can
+     shrink below its intrinsic content width when the sibling badge needs
+     room. Without this the title pushed the badge past the card edge and
+     the badge text was clipped mid-letter ("REJECTE", "SUBMITT"). */
+  gap: 0.5rem;
+}
+
+.dpr-card-header > div:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .dpr-card-title {
   font-weight: 600;
   font-size: 1rem;
   color: var(--navy);
+  /* Round-28 #3: when the title would overflow the card, ellipsize the
+     middle of the text instead of letting it push the badge off-screen.
+     The badge now flex-shrink:0s so the title must give way. */
+  overflow: hidden;
+  text-overflow: ellipsis;
   margin: 0;
 }
 
@@ -2330,6 +2380,13 @@ footer {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.025em;
+  /* Round-28 #3: never truncate the badge text — the audit captured
+     "REJECTE" / "SUBMITT" on 375px viewports because the flex sibling
+     (title) had no min-width and squeezed the badge. Keep the badge
+     full-width; let the title flex-shrink instead. */
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 100%;
 }
 /* SOL-P1#10: badges were 3.32-3.73:1 against their pastel backgrounds.
    Darken text colors to ≥4.5:1 (WCAG AA normal text) and bump font
@@ -3046,7 +3103,10 @@ footer {
   border-radius: 12px;
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
   padding: 0.4rem;
-  z-index: 1000;
+  /* Round-28 #2: bumped from 1000 → 1100 to sit above the mobile sidebar
+     drawer (.portal-sidebar.mobile-open is z-index:1001) and the portal
+     backdrop (1000). Mirror change to .notification-dropdown. */
+  z-index: 1100;
 }
 .user-menu-header {
   padding: 0.85rem 0.85rem 0.75rem;
@@ -3112,6 +3172,23 @@ footer {
   outline: 2px solid var(--blue);
   outline-offset: -2px;
   background: linear-gradient(180deg, #eff6ff 0%, transparent 60%);
+}
+
+/* Round-28 #1: admin review-queue cards are now clickable as a whole.
+   Mirror DprAll.jsx's affordance — pointer cursor + stronger hover ring
+   so the admin knows the whole card opens the detail modal (not just the
+   "Review" button). Keyboard focus ring uses :focus-visible so the
+   outline only appears for keyboard navigation, not mouse clicks. */
+.dpr-card-clickable {
+  cursor: pointer;
+}
+.dpr-card-clickable:hover {
+  box-shadow: 0 6px 16px rgba(0,0,0,0.14);
+  transform: translateY(-1px);
+}
+.dpr-card-clickable:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 
 .dpr-card-checkbox-label {
@@ -3266,7 +3343,13 @@ footer {
   background: white;
   border-radius: 12px;
   box-shadow: 0 10px 40px rgba(0,0,0,0.15);
-  z-index: 1000;
+  /* Round-28 #2: bumped from 1000 → 1100 so the dropdown sits above the
+     mobile sidebar drawer (.portal-sidebar.mobile-open is z-index:1001) AND
+     the portal backdrop (1000). On desktop the sidebar is 100 so 1100 is
+     overkill but harmless. The earlier `z-index: 100 → 1000` bump from
+     round-21 fixed the desktop sidebar; the mobile drawer was added later
+     and out-ranked 1000 without this follow-up. */
+  z-index: 1100;
   border: 1px solid var(--border);
 }
 

@@ -16,6 +16,11 @@ import {
   scopeBadge as scopeBadgeFor,
 } from '../../lib/scopeCopy.js';
 import Modal from '../../components/Modal.jsx';
+// Round-28 #6: pull-to-refresh on mobile list views.
+import usePullToRefresh from '../../hooks/usePullToRefresh.js';
+import PullToRefreshIndicator from '../../components/PullToRefreshIndicator.jsx';
+// Round-28 #7: full-screen photo lightbox with keyboard + swipe nav.
+import PhotoLightbox from '../../components/PhotoLightbox.jsx';
 
 // Round-22: admin cross-org DPR list. The previous "My Daily Reports" page
 // (DprList at /portal/dpr/my) rendered every org DPR for admins because the
@@ -86,6 +91,10 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
   const [dpr, setDpr] = useState(dprSummary);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // Round-28 #7: lightbox state. Click a thumbnail in the modal grid to
+  // open the full-screen lightbox at that index; arrows / swipe / Esc
+  // navigate inside the lightbox.
+  const [lightboxIndex, setLightboxIndex] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -130,6 +139,37 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
               {WORK_TYPE_LABEL[dpr?.workType] || dpr?.workType || '—'}
             </span>
           </div>
+          {/* Round-28 #5: inline rejection reason so the reviewer can see WHY
+              a previously-rejected DPR was sent back without diving into the
+              activity log. Surfaced for any DPR — admins read it during
+              re-review; employees read it before they fix and resubmit. */}
+          {dpr?.status === 'REJECTED' && (dpr?.rejectionReason || dpr?.adminNotes) && (
+            <div
+              role="alert"
+              style={{
+                marginTop: '0.75rem',
+                padding: '0.625rem 0.75rem',
+                background: '#fef2f2',
+                border: '1px solid #fecaca',
+                borderLeft: '3px solid var(--danger, #dc2626)',
+                borderRadius: 6,
+                fontSize: '0.85rem',
+                color: '#7f1d1d',
+              }}
+            >
+              <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>Rejected</div>
+              {dpr.rejectionReason && (
+                <div style={{ marginBottom: dpr.adminNotes ? '0.5rem' : 0 }}>
+                  {dpr.rejectionReason}
+                </div>
+              )}
+              {dpr.adminNotes && (
+                <div style={{ fontSize: '0.8rem', color: '#991b1b', fontStyle: 'italic' }}>
+                  Admin note: {dpr.adminNotes}
+                </div>
+              )}
+            </div>
+          )}
         </div>
         <button type="button" onClick={onClose} className="btn btn-ghost btn-sm" aria-label="Close details">✕</button>
       </div>
@@ -178,19 +218,38 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
                 Photos ({dpr.photos.length})
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '0.5rem' }}>
-                  {dpr.photos.map((p) => (
-                    <div key={p.id || p.ulid} style={{ position: 'relative' }}>
+                  {dpr.photos.map((p, i) => (
+                    <button
+                      key={p.id || p.ulid}
+                      type="button"
+                      onClick={() => setLightboxIndex(i)}
+                      style={{
+                        position: 'relative',
+                        padding: 0,
+                        border: 'none',
+                        background: 'transparent',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                      }}
+                      aria-label={`Open photo ${i + 1} of ${dpr.photos.length}`}
+                    >
                       <PhotoThumb photo={p} />
                       {/* R22.5: per-image download affordance on the modal. */}
                       <PhotoDownloadButton photo={p} />
                       {p.caption && <div style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>{p.caption}</div>}
-                    </div>
+                    </button>
                   ))}
                 </div>
               </div>
             )}
           </>
         ) : null}
+      <PhotoLightbox
+        photos={dpr?.photos || []}
+        startIndex={lightboxIndex ?? 0}
+        open={lightboxIndex !== null}
+        onClose={() => setLightboxIndex(null)}
+      />
     </Modal>
   );
 }
@@ -475,8 +534,16 @@ export default function DprAll() {
     return Array.from(map.entries()).map(([id, name]) => ({ value: id, label: name }));
   })();
 
+  // Round-28 #6: pull-to-refresh on mobile. Re-runs the first-page load
+  // (which also clears the cursor, so the indicator refresh means "from
+  // the top again", matching native iOS/Android behavior).
+  const { pullDistance, isRefreshing } = usePullToRefresh(async () => {
+    await load();
+  });
+
   return (
     <div className="dpr-page">
+      <PullToRefreshIndicator pullDistance={pullDistance} isRefreshing={isRefreshing} />
       <div className="dpr-page-header">
         <div>
           <h1 className="dpr-page-title">All Daily Reports Records</h1>

@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatShortDate } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
+import PhotoLightbox from '../../components/PhotoLightbox.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { CalendarIcon, MapPinIcon, CameraIcon } from '../../components/Icons.jsx';
 
@@ -56,6 +58,7 @@ export default function DprDashboard() {
   useDocumentTitle('Daily Reports Review');
   const { accessToken, employee } = useAuth();
   const toast = useToast();
+  const navigate = useNavigate();
   const [dprs, setDprs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -89,6 +92,12 @@ export default function DprDashboard() {
   // pending action and the IDs it would touch; null = no dialog open.
   const [confirmAction, setConfirmAction] = useState(null); // { kind, dprId?, ids?, action?, reason? }
   const [bulkRejectReason, setBulkRejectReason] = useState('');
+  // Round-28 #7: lightbox state. Holds the active DPR + index when a
+  // queue-card thumbnail is clicked. null = closed. We previously
+  // opened photos in a new tab (`target="_blank"`) but that's friction
+  // during fast triage — the admin alt-tabs back and loses their place.
+  // In-page lightbox + keyboard nav keeps the review queue in focus.
+  const [lightbox, setLightbox] = useState(null); // { photos, index } | null
 
   const selectableDprs = dprs.filter(
     (d) => d.status === 'SUBMITTED' || d.status === 'UNDER_REVIEW'
@@ -363,7 +372,7 @@ export default function DprDashboard() {
     <div className="dpr-page">
       <div className="dpr-page-header">
         <h1 className="dpr-page-title">Daily Reports Review</h1>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <div className="dpr-page-tabs">
           {['SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'].map((s) => (
             <button
               key={s}
@@ -425,15 +434,41 @@ export default function DprDashboard() {
           {dprs.map((dpr) => {
             const isSelectable = dpr.status === 'SUBMITTED' || dpr.status === 'UNDER_REVIEW';
             const isSelected = selectedIds.has(dpr.id);
+            const isReviewing = reviewing === dpr.id;
+            // Improvement #1 (round-28): admin review queue cards are now
+            // clickable as a whole — the click target opens the same detail
+            // modal that /portal/dpr/all uses (DR-015 deep-link pattern).
+            // Mirror DprAll.jsx's role="button" + tabIndex + Enter/Space
+            // keyboard handler so the queue behaves consistently. When
+            // the inline review form is expanded (isReviewing), the card
+            // click is suppressed so typing into the reject-reason textarea
+            // doesn't accidentally navigate away.
+            const handleCardOpen = () => {
+              if (isReviewing) return;
+              navigate(`/portal/dpr/all?id=${encodeURIComponent(dpr.id)}`);
+            };
             return (
             <div
               key={dpr.id}
-              className={`dpr-card${isSelected ? ' dpr-card-selected' : ''}`}
+              role={isReviewing ? undefined : 'button'}
+              tabIndex={isReviewing ? -1 : 0}
+              className={`dpr-card${isSelected ? ' dpr-card-selected' : ''}${!isReviewing ? ' dpr-card-clickable' : ''}`}
+              onClick={handleCardOpen}
+              onKeyDown={(e) => {
+                if (isReviewing) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  handleCardOpen();
+                }
+              }}
+              aria-label={isReviewing ? undefined : `Open ${dpr.projectName || 'DPR'} details`}
             >
               {/* Round-17 B-06: per-card checkbox. Only rendered for reviewable
-                  statuses; APPROVED/REJECTED cards keep their layout untouched. */}
+                  statuses; APPROVED/REJECTED cards keep their layout untouched.
+                  Round-28: stopPropagation prevents the surrounding card from
+                  navigating when the admin toggles the checkbox. */}
               {isSelectable && (
-                <label className="dpr-card-checkbox-label" title={isSelected ? 'Deselect' : 'Select'}>
+                <label className="dpr-card-checkbox-label" title={isSelected ? 'Deselect' : 'Select'} onClick={(e) => e.stopPropagation()}>
                   <input
                     type="checkbox"
                     className="dpr-card-checkbox"
@@ -515,26 +550,38 @@ export default function DprDashboard() {
               {/* Photo thumbnails — show actual images when backend provides URLs */}
               {dpr.photos?.length > 0 && (
                 <div style={{ display: 'flex', gap: '0.375rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
-                  {dpr.photos.slice(0, 4).map((photo) => (
-                    <a
+                  {dpr.photos.slice(0, 4).map((photo, i) => (
+                    <button
                       key={photo.id}
-                      href={photo.readUrl || photo.blobUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{ position: 'relative', width: 56, height: 56, borderRadius: 6, background: '#f1f5f9', overflow: 'hidden', flexShrink: 0, display: 'block' }}
+                      type="button"
+                      // Round-28 #7: open in-page lightbox instead of new
+                      // tab. stopPropagation so the parent card doesn't
+                      // navigate when the admin taps a thumbnail.
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setLightbox({ photos: dpr.photos, index: i });
+                      }}
+                      style={{ position: 'relative', width: 56, height: 56, borderRadius: 6, background: '#f1f5f9', overflow: 'hidden', flexShrink: 0, display: 'block', padding: 0, border: 'none', cursor: 'pointer' }}
                       title={photo.caption || 'Open photo'}
+                      aria-label={`Open photo ${i + 1} of ${dpr.photos.length}`}
                     >
                       <PhotoThumb photo={photo} />
                       {/* R22.5: per-image download affordance on the queue
-                          card thumbnail. Opens the signed R2 URL in a new
-                          tab so the admin can save the photo. */}
+                          card thumbnail. Removing the download button here
+                          would lose a feature engineers use frequently for
+                          evidence; keep it on top of the button. */}
                       <PhotoDownloadButton photo={photo} />
-                    </a>
+                    </button>
                   ))}
                   {dpr.photos.length > 4 && (
-                    <div style={{ width: 56, height: 56, borderRadius: 6, background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', color: 'var(--steel)' }}>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); setLightbox({ photos: dpr.photos, index: 4 }); }}
+                      style={{ width: 56, height: 56, borderRadius: 6, background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', color: 'var(--steel)', border: 'none', cursor: 'pointer' }}
+                      aria-label={`Open all ${dpr.photos.length} photos`}
+                    >
                       +{dpr.photos.length - 4}
-                    </div>
+                    </button>
                   )}
                 </div>
               )}
@@ -592,7 +639,7 @@ export default function DprDashboard() {
                   ) : (
                     <button
                       className="btn btn-primary btn-sm"
-                      onClick={() => setReviewing(dpr.id)}
+                      onClick={(e) => { e.stopPropagation(); setReviewing(dpr.id); }}
                       style={{ flex: 1 }}
                     >
                       Review
@@ -762,6 +809,17 @@ export default function DprDashboard() {
           </div>
         );
       })()}
+
+      {/* Round-28 #7: in-page photo lightbox. Rendered at the page root
+          so it sits outside the card grid; the createPortal inside
+          PhotoLightbox moves it to <body> so it stacks above every
+          z-index in the app, including the approval-confirm modal (110). */}
+      <PhotoLightbox
+        photos={lightbox?.photos || []}
+        startIndex={lightbox?.index || 0}
+        open={lightbox !== null}
+        onClose={() => setLightbox(null)}
+      />
     </div>
   );
 }

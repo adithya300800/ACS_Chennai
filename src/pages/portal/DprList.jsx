@@ -10,6 +10,9 @@ import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
 import MonthStepper from '../../components/MonthStepper.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { ClipboardIcon } from '../../components/Icons.jsx';
+// Round-28 #6: pull-to-refresh on mobile list views.
+import usePullToRefresh from '../../hooks/usePullToRefresh.js';
+import PullToRefreshIndicator from '../../components/PullToRefreshIndicator.jsx';
 
 const STATUS_FILTERS = [
   { value: '', label: 'All Statuses' },
@@ -346,8 +349,17 @@ export default function DprList() {
     return () => document.removeEventListener('keydown', handler);
   }, [expandedDpr]);
 
+  // Round-28 #6: pull-to-refresh on mobile. Re-runs the first-page
+  // load on a downward swipe at scroll-top. The indicator overlay
+  // (rendered just inside the page root) drives its visual state from
+  // the hook's {pullDistance, isRefreshing} return value.
+  const { pullDistance, isRefreshing } = usePullToRefresh(async () => {
+    await load(null);
+  });
+
   return (
     <div className="dpr-page">
+      <PullToRefreshIndicator pullDistance={pullDistance} isRefreshing={isRefreshing} />
       <div className="dpr-page-header">
         <h1 className="dpr-page-title">My Daily Reports</h1>
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>

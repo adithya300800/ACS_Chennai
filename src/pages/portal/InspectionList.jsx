@@ -10,6 +10,9 @@ import MonthStepper from '../../components/MonthStepper.jsx';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { CalendarIcon, MapPinIcon, CameraIcon, ClipboardIcon, PaperclipIcon } from '../../components/Icons.jsx';
+// Round-28 #6: pull-to-refresh on mobile list views.
+import usePullToRefresh from '../../hooks/usePullToRefresh.js';
+import PullToRefreshIndicator from '../../components/PullToRefreshIndicator.jsx';
 
 // C-06: local StatusBadge removed (round-15+). The shared component covers
 // all inspection statuses (OPEN/ACKNOWLEDGED/IN_PROGRESS/PENDING_VERIFICATION/
@@ -91,8 +94,15 @@ export default function InspectionList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [typeFilter, statusFilter, month, accessToken]);
 
+  // Round-28 #6: pull-to-refresh on mobile. The hook takes care of
+  // touch event capture + indicator state; we just feed it `load`.
+  const { pullDistance, isRefreshing } = usePullToRefresh(async () => {
+    await load();
+  });
+
   return (
     <div className="dpr-page">
+      <PullToRefreshIndicator pullDistance={pullDistance} isRefreshing={isRefreshing} />
       <div className="dpr-page-header">
         <h1 className="dpr-page-title">My Inspection Records</h1>
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>

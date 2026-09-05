@@ -9,6 +9,9 @@ import MonthStepper from '../../components/MonthStepper.jsx';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import SeverityBadge from '../../components/SeverityBadge.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+// Round-28 #6: pull-to-refresh on mobile list views.
+import usePullToRefresh from '../../hooks/usePullToRefresh.js';
+import PullToRefreshIndicator from '../../components/PullToRefreshIndicator.jsx';
 import { MapPinIcon, BuildingIcon, ClipboardIcon, CalendarIcon } from '../../components/Icons.jsx';
 import { getCurrentIstMonth, formatMonthLabel, formatShortDate } from '../../lib/format.js';
 import {
@@ -145,8 +148,14 @@ export default function InspectionAll() {
   const monthIsHistorical = !!filter.month && filter.month !== currentMonth;
   const monthIsCurrent = !!filter.month && filter.month === currentMonth;
 
+  // Round-28 #6: pull-to-refresh on mobile.
+  const { pullDistance, isRefreshing } = usePullToRefresh(async () => {
+    await load();
+  });
+
   return (
     <div className="dpr-page">
+      <PullToRefreshIndicator pullDistance={pullDistance} isRefreshing={isRefreshing} />
       <div className="dpr-page-header">
         <div>
           <h1 className="dpr-page-title">All Inspection Records</h1>
