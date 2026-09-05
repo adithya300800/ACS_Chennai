@@ -6,9 +6,11 @@ import { api } from '../../lib/api.js';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import MonthFilter from '../../components/MonthFilter.jsx';
 import MonthStepper from '../../components/MonthStepper.jsx';
+import StatusBadge from '../../components/StatusBadge.jsx';
+import SeverityBadge from '../../components/SeverityBadge.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
-import { MapPinIcon, BuildingIcon, ClipboardIcon } from '../../components/Icons.jsx';
-import { getCurrentIstMonth, formatMonthLabel } from '../../lib/format.js';
+import { MapPinIcon, BuildingIcon, ClipboardIcon, CalendarIcon } from '../../components/Icons.jsx';
+import { getCurrentIstMonth, formatMonthLabel, formatShortDate } from '../../lib/format.js';
 import {
   emptyStateMessage,
   emptyStateActions,
@@ -322,7 +324,18 @@ export default function InspectionAll() {
                         <BuildingIcon size={13} style={{ color: 'var(--steel)' }} />
                         {insp.projectName}
                       </span>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                        <CalendarIcon size={13} style={{ color: 'var(--steel)' }} />
+                        {formatShortDate(insp.reportDate)}
+                      </span>
                     </div>
+                  </div>
+                  {/* S5 audit, item 7: cards must surface the filtered
+                      attributes (status, severity) so an admin scanning a
+                      filtered list sees the value the filter pins. */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', alignItems: 'flex-end' }}>
+                    <StatusBadge status={insp.status} />
+                    <SeverityBadge severity={insp.severity} />
                   </div>
                 </div>
                 <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>

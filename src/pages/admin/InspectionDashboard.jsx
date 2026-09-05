@@ -3,8 +3,9 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatDateOnly } from '../../lib/format.js';
+import { formatShortDate } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
+import SeverityBadge from '../../components/SeverityBadge.jsx';
 import { SUB_WORK_TYPE_OPTIONS } from '../portal/WorkTypes.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { CalendarIcon, MapPinIcon, CameraIcon } from '../../components/Icons.jsx';
@@ -18,29 +19,10 @@ import { CalendarIcon, MapPinIcon, CameraIcon } from '../../components/Icons.jsx
 // C-06 (round-15+): local StatusBadge removed; uses the shared component.
 // Inspection statuses (OPEN/ACKNOWLEDGED/IN_PROGRESS/PENDING_VERIFICATION/
 // CLOSED/REJECTED) are all in the shared DEFAULT_STATUS_MAP.
-
-function SeverityBadge({ severity }) {
-  if (!severity) return null;
-  const color = severity === 'CRITICAL' ? '#dc2626'
-    : severity === 'MAJOR' ? '#f59e0b'
-    : '#64748b';
-  return (
-    <span
-      style={{
-        display: 'inline-block',
-        padding: '2px 8px',
-        borderRadius: 12,
-        fontSize: '0.7rem',
-        fontWeight: 600,
-        background: `${color}1a`,
-        color,
-        border: `1px solid ${color}40`,
-      }}
-    >
-      {severity}
-    </span>
-  );
-}
+// S5 audit, item 7: local SeverityBadge removed in favour of the shared
+// component so palette + border + padding stay consistent with the rest of
+// the portal (previously this one used MAJOR where the data carries HIGH,
+// leading to a divergent label).
 
 function InspectionTypeLabel({ type }) {
   const found = SUB_WORK_TYPE_OPTIONS.find((s) => s.value === type);
@@ -58,10 +40,7 @@ function StatCard({ number, label, color }) {
 
 function formatIndianDate(iso) {
   if (!iso) return '—';
-  // DR-032: component-based parsing so a bare YYYY-MM-DD value doesn't
-  // shift into the previous calendar day in negative-offset timezones.
-  const formatted = formatDateOnly(iso, { day: 'numeric', month: 'short', year: 'numeric' });
-  return formatted || String(iso);
+  return formatShortDate(iso) || String(iso);
 }
 
 function getLocalDate() {

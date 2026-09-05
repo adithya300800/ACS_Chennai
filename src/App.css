@@ -2334,6 +2334,30 @@ footer {
 .dpr-status-approved  { background: #dcfce7; color: #166534; }
 .dpr-status-rejected  { background: #fee2e2; color: #991b1b; }
 
+/* S5 audit, item 7: severity badges must appear on inspection browse
+   cards alongside the StatusBadge so the filtered attributes are
+   visible. Palette matches inspection semantics:
+     LOW      → muted slate  (not actionable)
+     MEDIUM   → amber        (worth attention)
+     HIGH     → orange       (urgent)
+     CRITICAL → red          (act now)
+   Foreground colors chosen for ≥4.5:1 contrast on white pill. */
+.severity-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.3rem 0.85rem;
+  border-radius: 9999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+  border: 1px solid transparent;
+}
+.severity-pill-low      { background: #f1f5f9; color: #334155; border-color: #cbd5e1; }
+.severity-pill-medium   { background: #fef3c7; color: #854d0e; border-color: #fcd34d; }
+.severity-pill-high     { background: #ffedd5; color: #9a3412; border-color: #fb923c; }
+.severity-pill-critical { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
+
 /* ─── DPR Form ─── */
 .dpr-form {
   display: flex;

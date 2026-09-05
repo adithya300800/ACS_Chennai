@@ -3,8 +3,9 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatDateOnly } from '../../lib/format.js';
+import { formatShortDate } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
+import SeverityBadge from '../../components/SeverityBadge.jsx';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { CalendarIcon, MapPinIcon, CameraIcon, ClipboardIcon, PaperclipIcon } from '../../components/Icons.jsx';
@@ -13,29 +14,9 @@ import { CalendarIcon, MapPinIcon, CameraIcon, ClipboardIcon, PaperclipIcon } fr
 // all inspection statuses (OPEN/ACKNOWLEDGED/IN_PROGRESS/PENDING_VERIFICATION/
 // CLOSED/REJECTED) in its DEFAULT_STATUS_MAP — passing `insp.status` works
 // without a per-page override.
-
-function SeverityBadge({ severity }) {
-  if (!severity) return null;
-  const color = severity === 'CRITICAL' ? '#dc2626'
-    : severity === 'MAJOR' ? '#f59e0b'
-    : '#64748b';
-  return (
-    <span
-      style={{
-        display: 'inline-block',
-        padding: '2px 8px',
-        borderRadius: 12,
-        fontSize: '0.7rem',
-        fontWeight: 600,
-        background: `${color}1a`,
-        color,
-        border: `1px solid ${color}40`,
-      }}
-    >
-      {severity}
-    </span>
-  );
-}
+// S5 audit, item 7: local SeverityBadge removed — SeverityBadge.jsx now
+// provides a consistent palette + 1px border across all browse views so
+// the audit's "filtered attributes visible on cards" finding is fixed.
 
 function InspectionTypeLabel({ type }) {
   const found = SUB_WORK_TYPE_OPTIONS.find((s) => s.value === type);
@@ -44,11 +25,7 @@ function InspectionTypeLabel({ type }) {
 
 function formatIndianDate(iso) {
   if (!iso) return '—';
-  // DR-032: `reportDate` arrives as a calendar-date string (YYYY-MM-DD or
-  // Prisma DateTime @ midnight). Use the component-based helper so a bare
-  // ISO date doesn't shift into the previous day in negative-offset timezones.
-  const formatted = formatDateOnly(iso, { day: 'numeric', month: 'short', year: 'numeric' });
-  return formatted || String(iso);
+  return formatShortDate(iso) || String(iso);
 }
 
 export default function InspectionList() {
