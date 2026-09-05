@@ -73,6 +73,9 @@ const { hashIdentifier } = require('../lib/pii');
 // matching import + inline helper if a future refactor ever inverts
 // the relationship.
 const { resolveProject } = require('./projects');
+// [N3] Phase E: shared drawing-link resolver. Same helper backs dpr.js
+// so a cross-route contract drift is impossible.
+const { resolveDrawingForReport } = require('../lib/drawingLink');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -215,6 +218,9 @@ router.post('/', async (req, res) => {
     // projectName (preferring projectId when both supplied). Same shape
     // as the DPR POST handler — see dpr.js for the full rationale.
     projectId,
+    // [N3] Phase E: optional drawing link. drawingRev is denormalized
+    // at submit time so list views render the stamp without JOIN.
+    drawingId, drawingRev,
   } = req.body || {};
 
   // N-4: compute requested status BEFORE the type-allowlist gate so the
@@ -435,6 +441,25 @@ router.post('/', async (req, res) => {
     normalisedBoqItemId = boqItemId;
   }
 
+  // [N3] Phase E: optional drawing link. Same resolution contract as the
+  // DPR POST handler — drawing must exist + belong to the same project;
+  // drawingRev is denormalized to the row's current revision when the
+  // client doesn't override it.
+  const drawingResolution = await resolveDrawingForReport({
+    prisma,
+    drawingId: drawingId === '' ? null : drawingId,
+    drawingRev,
+    resolvedProjectId,
+  });
+  if (drawingResolution.error) {
+    if (typeof drawingResolution.error === 'string') {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'VALIDATION_ERROR', message: drawingResolution.error });
+    }
+    return res.status(drawingResolution.error.status).json(drawingResolution.error.body);
+  }
+  const resolvedDrawingId = drawingResolution.drawingId ?? null;
+  const resolvedDrawingRev = drawingResolution.drawingRev ?? null;
+
   // photos — same shape as DPR photos but container must be 'inspection-photos'.
   if (!Array.isArray(photos) || photos.length > 50) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'photos must be an array (max 50)' });
@@ -505,6 +530,10 @@ router.post('/', async (req, res) => {
           // N7 (round-28): BOQ link — null when omitted so the FK
           // column is NULL (the row stays unlinked).
           boqItemId: normalisedBoqItemId,
+          // [N3] Phase E: drawing link. Null when omitted so the FK
+          // column is NULL. drawingRev is denormalized at submit time.
+          drawingId: resolvedDrawingId,
+          drawingRev: resolvedDrawingRev,
           photos: {
             create: photos.map(p => ({
               ulid: p.ulid,
@@ -526,6 +555,8 @@ router.post('/', async (req, res) => {
           boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
           // [N1] Project summary on the create response, mirror of DPR POST.
           project: { select: { id: true, name: true, code: true } },
+          // [N3] Drawing summary on the create response, mirror of DPR POST.
+          drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
         },
       });
 
@@ -810,6 +841,8 @@ router.get('/', asyncHandler(async (req, res) => {
         // [N1] Project summary on the list endpoint — admin queue cards
         // can render the FK target without a per-row roundtrip.
         project: { select: { id: true, name: true, code: true } },
+        // [N3] Drawing summary on the list endpoint.
+        drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
       },
       orderBy: [{ reportDate: 'desc' }, { id: 'desc' }],
       take: take + 1,
@@ -979,6 +1012,8 @@ router.get('/:id', async (req, res) => {
         boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
         // [N1] Project summary on detail. Same shape as the list endpoint.
         project: { select: { id: true, name: true, code: true } },
+        // [N3] Drawing summary on detail. Same shape as the list endpoint.
+        drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
       },
     });
 
@@ -1069,6 +1104,8 @@ router.put('/:id', async (req, res) => {
     'inspectionType', 'data', 'severity', 'dprId',
     // N7 (round-28): BOQ link — same allowlist extension as DPR PUT.
     'boqItemId',
+    // [N3] Phase E: drawing link — same allowlist extension as DPR PUT.
+    'drawingId', 'drawingRev',
   ];
   const unknown = Object.keys(fields).filter(k => !ALLOWED_UPDATE_FIELDS.includes(k));
   if (unknown.length) {
@@ -1197,6 +1234,29 @@ router.put('/:id', async (req, res) => {
     });
   }
 
+  // [N3] Phase E: drawingId PUT validation. Same shape as POST —
+  // drawing must exist, must belong to the target project (either
+  // newly-set in this PUT, or the existing row's project if projectId
+  // isn't being changed), and drawingRev is denormalized from the row
+  // unless the client overrides.
+  if (fields.drawingId !== undefined) {
+    const targetProjectId = fields.projectId || existing.projectId;
+    const drawingResolution = await resolveDrawingForReport({
+      prisma,
+      drawingId: fields.drawingId === '' ? null : fields.drawingId,
+      drawingRev: fields.drawingRev,
+      resolvedProjectId: targetProjectId,
+    });
+    if (drawingResolution.error) {
+      if (typeof drawingResolution.error === 'string') {
+        return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'VALIDATION_ERROR', message: drawingResolution.error });
+      }
+      return res.status(drawingResolution.error.status).json(drawingResolution.error.body);
+    }
+    fields.drawingId = drawingResolution.drawingId ?? null;
+    fields.drawingRev = drawingResolution.drawingRev ?? null;
+  }
+
   try {
     // LPR-008: pin `status` on the WHERE so a concurrent admin
     // ack/close/reject (or owner /submit promotion) between our read and
@@ -1220,6 +1280,8 @@ router.put('/:id', async (req, res) => {
         boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
         // [N1] Project summary on PUT response, mirror of POST.
         project: { select: { id: true, name: true, code: true } },
+        // [N3] Drawing summary on PUT response, mirror of POST.
+        drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
       },
     });
 

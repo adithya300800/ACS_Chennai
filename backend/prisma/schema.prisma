@@ -61,6 +61,10 @@ model Employee {
   // through the dashboard. SetNull on the FK (see Project model notes),
   // so a deleted admin does not delete the projects they created.
   projectsCreated        Project[]               @relation("ProjectCreator")
+  // [N3] Phase E: drawings issued by this employee. Audit only — the
+  // drawer / PM who issued the revision; SetNull mirrors the FK so the
+  // deletion of an admin does not orphan the drawing register.
+  drawingsIssued         Drawing[]               @relation("DrawingIssuer")
   // Round-25: email notification preferences + audit log + digest runs.
   // NotificationPreference is 1:1 (PK = employeeId); EmailLog / DigestRun
   // are 1:N and outlive notification rows via onDelete: SetNull.
@@ -82,6 +86,16 @@ model Employee {
   // audit trail. Mirror with the inspect/dpr back-relations above so the
   // prisma client offers the navigation in both directions.
   boqsCreated            BoqItem[]               @relation("BoqCreator")
+  // [N2] Phase C: back-relations for RFI + VariationOrder. Mirrors the
+  // existing Raiser / Reviewer / Approver relation pattern: three
+  // back-relations on Rfi (the employee who raised, the target responder
+  // they assigned, the employee who actually answered) and two on
+  // VariationOrder (the raiser, the approver).
+  rfisRaised             Rfi[]                   @relation("RfiRaiser")
+  rfisAsTargetResponder  Rfi[]                   @relation("RfiTargetResponder")
+  rfisAsResponder        Rfi[]                   @relation("RfiResponder")
+  variationsRaised       VariationOrder[]        @relation("VariationRaiser")
+  variationsApproved     VariationOrder[]        @relation("VariationApprover")
 
   @@map("employees")
 }
@@ -256,11 +270,19 @@ model DPR {
   // working without a parallel migration.
   projectId     String?            @map("project_id")
   project       Project?           @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  // [N3] Phase E: optional FK to the drawing this DPR was filed against.
+  // SetNull on delete so un-registering a drawing does not cascade-delete
+  // historic reports. drawingRev is denormalized so list views can render
+  // the revision stamp without joining drawing.
+  drawingId     String?            @map("drawing_id")
+  drawingRev    String?            @map("drawing_rev")
+  drawing       Drawing?           @relation("DPRDrawing", fields: [drawingId], references: [id], onDelete: SetNull)
 
   @@unique([submittedById, reportDate])
   @@index([reportDate, id])
   @@index([boqItemId])
   @@index([projectId])
+  @@index([drawingId])
   @@map("dpr")
 }
 
@@ -355,6 +377,12 @@ model InspectionRecord {
   // working without a parallel migration.
   projectId   String?           @map("project_id")
   project     Project?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  // [N3] Phase E: optional FK to the drawing this inspection was filed
+  // against. SetNull on delete mirrors the DPR link — un-registering a
+  // drawing does not cascade-delete historic records.
+  drawingId   String?           @map("drawing_id")
+  drawingRev  String?           @map("drawing_rev")
+  drawing     Drawing?          @relation("InspectionDrawing", fields: [drawingId], references: [id], onDelete: SetNull)
 
   // Indexes mirror DPR's pattern: owner + date for "my inspections this week",
   // dprId for "show me inspections on this DPR", and (date,id) for cursor
@@ -365,6 +393,7 @@ model InspectionRecord {
   @@index([inspectionType])
   @@index([boqItemId])
   @@index([projectId])
+  @@index([drawingId])
   @@map("inspection_record")
 }
 
@@ -1104,10 +1133,202 @@ model Project {
   dprs        DPR[]
   inspections InspectionRecord[]
   boqItems    BoqItem[]
+  // [N2] Phase C: back-relations for RFI + VariationOrder. Both are
+  // CASCADE on project delete — an RFI / variation IS the project
+  // record (see migration header for the rationale and the deviation
+  // from the DPR/Inspection/BoqItem SetNull contract).
+  rfis        Rfi[]
+  variations  VariationOrder[]
+  // [N3] Phase E: back-relation for the drawing register. Drawing rows
+  // cascade-delete with the project (un-registering a project sweeps its
+  // drawings) — distinct from DPR / InspectionRecord / BoqItem (those
+  // preserve history with SetNull because they're operational records).
+  // The drawing register is metadata, not history.
+  drawings    Drawing[]
 
   // Hot read: the KPI list endpoint filters by `isActive = true` so the
   // active-projects dropdown doesn't surface soft-deleted rows. Index is
   // not on `name` because the @unique constraint already creates one.
   @@index([isActive])
   @@map("project")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// N3 (Phase E): Drawing Revision Register
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Curated register of construction drawings per project. Each drawing has a
+// (drawingNumber, revision) pair; subsequent revisions are added as NEW rows
+// that supersede the previous one (the `supersedes` self-relation). DPR /
+// Inspection records can link to a specific drawing revision so the stamp
+// UI can render "Filed against drawing X rev Y".
+//
+// Status is a free-form String (`ACTIVE` | `SUPERSEDED`) rather than an enum
+// so a future state (e.g. `ARCHIVED`) doesn't require a schema change. The
+// DPR / Inspection drawing link is drawn from the ACTIVE row of a
+// (project, drawingNumber) pair.
+//
+// `pdfBlobPath` references an R2 path uploaded through the existing DPR
+// upload flow (the dpr-documents bucket). The blob path is stored verbatim —
+// the same `applyR2Cors` self-heal covers it.
+//
+// onDelete behaviour:
+//   - Project:    Cascade. Un-registering a project sweeps its drawings.
+//   - Employee:   SetNull on issuedById. Deleting an admin must not
+//                 orphan a drawing.
+//   - self:       SetNull on supersedesId. Deleting a superseded drawing
+//                 must not orphan the row that points at it.
+//
+// Drawing cannot be cascade-deleted by DPR / InspectionRecord because the
+// FKs there are nullable with SetNull — the reverse direction does not
+// exist in Prisma (you don't draw an "is referenced by" list from the
+// drawing side).
+// ─────────────────────────────────────────────────────────────────────────────
+model Drawing {
+  id            String    @id @default(uuid())
+  projectId     String    @map("project_id")
+  drawingNumber String    @map("drawing_number")
+  title         String?
+  revision      String    @default("0")
+  status        String    @default("ACTIVE")
+  issuedDate    DateTime? @map("issued_date") @db.Date
+  issuedById    String?   @map("issued_by_id")
+  pdfBlobPath   String?   @map("pdf_blob_path")
+  supersedesId  String?   @map("supersedes_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  project                       Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  issuedBy                      Employee?          @relation("DrawingIssuer", fields: [issuedById], references: [id], onDelete: SetNull)
+  supersedes                    Drawing?           @relation("DrawingSupersedes", fields: [supersedesId], references: [id], onDelete: SetNull)
+  supersededBy                  Drawing[]          @relation("DrawingSupersedes")
+  // Back-relations: which DPRs / Inspections reference this drawing. The
+  // queries that need these counts run via `prisma.dPR.count({ where:
+  // { drawingId } })` etc., so a Prisma-level relation isn't strictly
+  // required, but declaring it lets `prisma format` validate the schema
+  // and gives the editor autocomplete.
+  dprsReferencingDrawing        DPR[]              @relation("DPRDrawing")
+  inspectionsReferencingDrawing InspectionRecord[] @relation("InspectionDrawing")
+
+  // Natural key: a (project, drawingNumber, revision) pair is unique. The
+  // POST handler relies on this so a duplicate revision upload surfaces as
+  // Prisma P2002 → 409 DUPLICATE through the standard error mapper.
+  @@unique([projectId, drawingNumber, revision])
+  @@index([projectId])
+  @@index([status])
+  @@index([supersedesId])
+  @@map("drawing")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// N2 (Phase C — ACS Portal): RFI (Request for Information) and Variation Order.
+//
+// RFIs are project-level questions a contractor raises against the design
+// documents, with an optional target responder, an optional due date, and a
+// free-form response field. Lifecycle: OPEN → RESPONDED → CLOSED. An OPEN
+// RFI with a past due date is reported as OVERDUE by the route layer
+// (deriveRfiStatus in src/routes/rfis.js) so the DB schema stays status-
+// only and the temporal view is derived on read — no cron, no migration to
+// add an OVERDUE column when the deadline semantics change.
+//
+// Variation Orders are contract change-of-scope documents with a monetary
+// delta. They may reference an RFI (referenceRfiId) so the trail from
+// "we asked a question" → "the answer revealed a scope gap" → "we issued a
+// variation" stays auditable. Lifecycle: DRAFT → SUBMITTED → APPROVED |
+// REJECTED. clientApprovalRequired is a per-row flag — a small in-scope
+// variation can be approved in-house without a client sign-off round trip,
+// a structural change cannot.
+//
+// FK semantics
+//   raisedById    -> employees  RESTRICT  (deleting an employee who raised
+//                                         an RFI / variation is a business
+//                                         operation, not a silent cascade;
+//                                         same pattern as BoqItem.createdById)
+//   projectId     -> project    CASCADE   (an RFI / variation IS the
+//                                         project record; see migration header)
+//   approvedById  -> employees  SET NULL  (audit trail, must not cascade)
+//   targetResponderId / responderId (RFI only) -> employees SET NULL
+//   referenceRfiId (VariationOrder only) -> rfi SET NULL (informational link)
+//
+// Indexes
+//   rfi:            (projectId), (status), (dueDate)
+//   variation_order: (projectId), (status)
+//
+// Why no `version` column
+//   RFIs and variations are not collaborative-edit records (unlike DPRs).
+//   Each write is either a create, a status transition, or a small content
+//   patch — the route's allowed-status set + the `updatedAt` timestamp
+//   are sufficient to detect concurrent writes via 409 INVALID_TRANSITION.
+//   Adding a `version` column would inflate the row for no audit benefit.
+// ─────────────────────────────────────────────────────────────────────────────
+model Rfi {
+  id                String    @id @default(uuid())
+  // Nullable so a contractor can raise an RFI before a curated Project
+  // row exists; the legacy free-text workflow stays valid. projectId=NULL
+  // rows are surfaced by the list endpoint with a "(unfiled)" badge.
+  projectId         String?   @map("project_id")
+  subject           String    @map("subject")
+  question          String    @map("question")
+  response          String?   @map("response")
+  status            String    @default("OPEN") @map("status") // OPEN | RESPONDED | CLOSED
+  targetResponderId String?   @map("target_responder_id")
+  responderId       String?   @map("responder_id")
+  dueDate           DateTime? @map("due_date") @db.Date
+  raisedById        String    @map("raised_by_id")
+  respondedAt       DateTime? @map("responded_at")
+  closedAt          DateTime? @map("closed_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  project         Project?         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  targetResponder Employee?        @relation("RfiTargetResponder", fields: [targetResponderId], references: [id], onDelete: SetNull)
+  responder       Employee?        @relation("RfiResponder", fields: [responderId], references: [id], onDelete: SetNull)
+  raisedBy        Employee         @relation("RfiRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
+  // Back-relation for VariationOrder.referenceRfiId so the prisma client
+  // exposes rfi.variations[] (every variation that links to this RFI).
+  variations      VariationOrder[]
+
+  // Hot reads:
+  //   - per-project RFI list              → (projectId)
+  //   - admin queue by status              → (status)
+  //   - overdue dashboard tile (status +
+  //     dueDate)                           → (dueDate) — route filter
+  @@index([projectId])
+  @@index([status])
+  @@index([dueDate])
+  @@map("rfi")
+}
+
+model VariationOrder {
+  id                     String    @id @default(uuid())
+  // NOT NULL — every variation is project-anchored. An unfiled RFI is
+  // allowed (legacy), an unfiled variation is not.
+  projectId              String    @map("project_id")
+  referenceRfiId         String?   @map("reference_rfi_id")
+  title                  String    @map("title")
+  description            String?   @map("description")
+  // Signed: positive = scope addition (extra cost), negative = scope
+  // reduction (credit). NUMERIC(15, 2) matches the Project.contractValue
+  // precision ceiling so variance reports can sum without overflow.
+  deltaAmount            Decimal   @map("delta_amount") @db.Decimal(15, 2)
+  status                 String    @default("DRAFT") @map("status") // DRAFT | SUBMITTED | APPROVED | REJECTED
+  clientApprovalRequired Boolean   @default(true) @map("client_approval_required")
+  raisedById             String    @map("raised_by_id")
+  approvedById           String?   @map("approved_by_id")
+  rejectedReason         String?   @map("rejected_reason")
+  submittedAt            DateTime? @map("submitted_at")
+  approvedAt             DateTime? @map("approved_at")
+  rejectedAt             DateTime? @map("rejected_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  referenceRfi Rfi?      @relation(fields: [referenceRfiId], references: [id], onDelete: SetNull)
+  raisedBy     Employee  @relation("VariationRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
+  approvedBy   Employee? @relation("VariationApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+
+  // Hot reads: per-project list, admin queue by status.
+  @@index([projectId])
+  @@index([status])
+  @@map("variation_order")
 }

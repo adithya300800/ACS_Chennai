@@ -52,6 +52,25 @@ const contactRoutes = require('./routes/contact');
 // O(100) items, so an admin dashboard polling once a minute is well under
 // any throttling threshold.
 const boqRoutes = require('./routes/boq');
+// N3 (Phase E): Drawing Revision Register — curated list of construction
+// drawings per project. See backend/src/routes/drawings.js for the
+// endpoints + auth model. Mounted at /api/drawings with no extra
+// rate limiter — the register is small per project (<= O(100) drawings
+// typical) and reads are gated by requireAuth inside the route.
+const drawingsRoutes = require('./routes/drawings');
+// N2 (Phase C): RFI (Request for Information) — contractor-raised design
+// queries against a project, with a target responder + optional due date.
+// Mounted at /api/rfis; the route file owns auth (requireAuth for reads,
+// requireAuth + ownership for response edits, requireFreshAdmin for
+// close + escalate-to-variation). See backend/src/routes/rfis.js.
+const rfiRoutes = require('./routes/rfis');
+// N2 (Phase C): Variation Order — change-of-scope rows with a monetary
+// delta, optionally linked to the source RFI. Lifecycle: DRAFT →
+// SUBMITTED → APPROVED | REJECTED. Mounted at /api/variations; auth gate
+// lives inside the route file (requireAuth for reads / create / DRAFT
+// edits, requireFreshAdmin for approve + reject). See
+// backend/src/routes/variations.js.
+const variationRoutes = require('./routes/variations');
 // DR-017: admin storage health — orphan-blob summary + on-demand sweep trigger.
 // Mounted at /api/admin/storage — the only admin-only ops surface left after
 // DR-012 removed the /api/diag routes. Auth model is requireAuth +
@@ -416,6 +435,20 @@ function createApp(deps = {}) {
   // gate lives inside the route file (requireAuth for reads,
   // creator-or-admin for writes).
   app.use('/api/boq', boqRoutes);
+  // N3 (Phase E): Drawing Revision Register — list / create / detail /
+  // patch / soft-delete. Auth gate lives inside the route file
+  // (requireAuth for reads, requireFreshAdmin for mutations).
+  app.use('/api/drawings', drawingsRoutes);
+  // N2 (Phase C): RFIs — list / create / detail / response patch /
+  // admin close / escalate-to-variation. Auth gate lives inside the
+  // route file (requireAuth for reads, ownership-or-admin for response,
+  // requireFreshAdmin for escalate). No extra middleware at the mount.
+  app.use('/api/rfis', rfiRoutes);
+  // N2 (Phase C): Variation Orders — list / create / detail / DRAFT
+  // patch / submit / approve (admin) / reject (admin). Auth gate lives
+  // inside the route file (requireAuth for reads + DRAFT edits,
+  // requireFreshAdmin for approve + reject).
+  app.use('/api/variations', variationRoutes);
   // Round-25 (M2): daily digest cron endpoint. Gated by INTERNAL_API_TOKEN
   // (404 when unset, 403 when the header doesn't match) — same envelope as
   // the /version probe. Render Cron Job hits this at 02:30 UTC = 08:00 IST.

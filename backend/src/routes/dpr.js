@@ -66,6 +66,9 @@ const { getTodayBusinessDate } = require('../lib/dateOnly');
 // that relationship, fall back to an inline `resolveProjectId()` helper
 // that mirrors the UUID + name-match logic.
 const { resolveProject } = require('./projects');
+// [N3] Phase E: shared drawing-link resolver used by POST + PUT. Same
+// helper backs inspection.js so a cross-route contract drift is impossible.
+const { resolveDrawingForReport } = require('../lib/drawingLink');
 
 // Tiny asyncHandler so unhandled rejections in async route handlers reach
 // the global error handler instead of hanging the request or crashing the
@@ -394,6 +397,9 @@ router.post('/', async (req, res) => {
     // projectName (preferring projectId when both supplied — a fast
     // PK lookup beats a name match). If neither is supplied, 400.
     projectId,
+    // [N3] Phase E: optional drawing link. drawingRev is denormalized
+    // at submit time so list views render the stamp without JOIN.
+    drawingId, drawingRev,
     status, photos = [],
   } = req.body || {};
 
@@ -485,6 +491,25 @@ router.post('/', async (req, res) => {
     // Prisma would reject with a type error.
     var normalisedBoqItemId = null;
   }
+
+  // [N3] Phase E: optional drawing link. Validates that the drawing
+  // exists + belongs to the same project; otherwise 400. drawingRev is
+  // denormalized to the row's current revision when the client doesn't
+  // override it.
+  const drawingResolution = await resolveDrawingForReport({
+    prisma,
+    drawingId: drawingId === '' ? null : drawingId,
+    drawingRev,
+    resolvedProjectId,
+  });
+  if (drawingResolution.error) {
+    if (typeof drawingResolution.error === 'string') {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'VALIDATION_ERROR', message: drawingResolution.error });
+    }
+    return res.status(drawingResolution.error.status).json(drawingResolution.error.body);
+  }
+  const resolvedDrawingId = drawingResolution.drawingId ?? null;
+  const resolvedDrawingRev = drawingResolution.drawingRev ?? null;
 
   // Length caps (P1-3) — keep the database tidy, prevent abuse. Round-12:
   // extended with caps for the 5 new daily-narrative PMC fields.
@@ -639,6 +664,10 @@ router.post('/', async (req, res) => {
           // N7 (round-28): BOQ link. null when omitted so the FK column
           // is NULL (the row stays unlinked).
           boqItemId: (boqItemId && typeof boqItemId === 'string') ? boqItemId : (normalisedBoqItemId === undefined ? null : normalisedBoqItemId),
+          // [N3] Phase E: drawing link. null when omitted so the FK
+          // column is NULL. drawingRev is denormalized at submit time.
+          drawingId: resolvedDrawingId,
+          drawingRev: resolvedDrawingRev,
           status: status || 'DRAFT',
           submittedById: req.employeeId,
           // P2-3: DRAFT saves don't have a submittedAt timestamp
@@ -668,6 +697,10 @@ router.post('/', async (req, res) => {
           // the frontend's project picker / detail panel can render the
           // FK target without a second round-trip.
           project: { select: { id: true, name: true, code: true } },
+          // [N3] include the Drawing summary on the create response so
+          // the stamp UI renders "filed against X rev Y" without a
+          // per-row roundtrip.
+          drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
         },
       });
 
@@ -898,6 +931,8 @@ router.get('/', asyncHandler(async (req, res) => {
         // [N1] Project summary on the list endpoint — admin queue cards
         // can render the FK target without a per-row roundtrip.
         project: { select: { id: true, name: true, code: true } },
+        // [N3] Drawing summary on the list endpoint.
+        drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
       },
       orderBy: [{ reportDate: 'desc' }, { id: 'desc' }],
       take: take + 1,
@@ -1157,6 +1192,8 @@ router.get('/:id', async (req, res) => {
         boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
         // [N1] Project summary on detail. Same shape as the list endpoint.
         project: { select: { id: true, name: true, code: true } },
+        // [N3] Drawing summary on detail. Same shape as the list endpoint.
+        drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
       },
     });
 
@@ -1266,6 +1303,10 @@ router.put('/:id', async (req, res) => {
     'workExecutedToday', 'workLocation', 'manpowerSummary',
     'risksHindrances', 'materialsReceivedSummary', 'customSections',
     'boqItemId',
+    // [N3] Phase E: drawing link. Owner can attach / detach a drawing
+    // (set drawingId to null to clear); drawingRev is denormalized so
+    // it follows drawingId automatically unless the client overrides.
+    'drawingId', 'drawingRev',
   ];
   const unknown = Object.keys(fields).filter(k => !ALLOWED_UPDATE_FIELDS.includes(k));
   if (unknown.length) {
@@ -1390,6 +1431,31 @@ router.put('/:id', async (req, res) => {
     return res.status(403).json({ error: 'FORBIDDEN', message: 'Only owner can update' });
   }
 
+  // [N3] Phase E: drawingId PUT validation. Same shape as POST — drawing
+  // must exist, must belong to the target project (either newly-set in
+  // this PUT, or the existing row's project if projectId isn't being
+  // changed), and drawingRev is denormalized from the row unless the
+  // client overrides.
+  if (fields.drawingId !== undefined) {
+    const targetProjectId = fields.projectId || existing.projectId;
+    const drawingResolution = await resolveDrawingForReport({
+      prisma,
+      drawingId: fields.drawingId === '' ? null : fields.drawingId,
+      drawingRev: fields.drawingRev,
+      resolvedProjectId: targetProjectId,
+    });
+    if (drawingResolution.error) {
+      if (typeof drawingResolution.error === 'string') {
+        return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'VALIDATION_ERROR', message: drawingResolution.error });
+      }
+      return res.status(drawingResolution.error.status).json(drawingResolution.error.body);
+    }
+    // Normalise the payload so the update lands the resolved values
+    // (drawingRev defaults from the row, drawingId clears when null).
+    fields.drawingId = drawingResolution.drawingId ?? null;
+    fields.drawingRev = drawingResolution.drawingRev ?? null;
+  }
+
   // DR-006 (round-20): terminal states are immutable. APPROVED and
   // REJECTED represent decisions an admin made on the submitted DPR —
   // the owner editing them afterwards would silently rewrite the audit
@@ -1433,6 +1499,8 @@ router.put('/:id', async (req, res) => {
         boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
         // [N1] Project summary on PUT response, mirror of POST.
         project: { select: { id: true, name: true, code: true } },
+        // [N3] Drawing summary on PUT response, mirror of POST.
+        drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
       },
     });
 
