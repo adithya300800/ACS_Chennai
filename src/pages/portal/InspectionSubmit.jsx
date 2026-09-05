@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -169,6 +169,8 @@ export default function InspectionSubmit() {
         reportDate: queryDate || getLocalDate(),
         weather: '',
         contractor: '',
+        // N7: optional BOQ link.
+        boqItemId: '',
       };
     }
     return d.form || {
@@ -177,6 +179,7 @@ export default function InspectionSubmit() {
       reportDate: queryDate || getLocalDate(),
       weather: '',
       contractor: '',
+      boqItemId: '',
     };
   });
   const [initialWorkEntry] = useState(() => {
@@ -206,6 +209,12 @@ export default function InspectionSubmit() {
   const [showDraftBanner, setShowDraftBanner] = useState(showDraftBannerInitial);
   const [uploadStatuses, setUploadStatuses] = useState({});
   const [prefillAttempted, setPrefillAttempted] = useState(false);
+  // N7: BOQ items for the named project. Loaded debounced so we don't
+  // fire a request per keystroke. Used by the BOQ selector below and
+  // dropped if the project is renamed mid-form (selected id no longer
+  // valid).
+  const [boqItems, setBoqItems] = useState([]);
+  const [boqItemsLoaded, setBoqItemsLoaded] = useState(false);
   const photoObjectUrlsRef = useRef(new Set());
 
   // [DR-006 client] Live count of photos still going through the SAS / PUT
@@ -239,6 +248,7 @@ export default function InspectionSubmit() {
         reportDate: queryDate || getLocalDate(),
         weather: '',
         contractor: '',
+        boqItemId: '',
       });
       setWorkEntry(null);
       setPhotos([]);
@@ -284,6 +294,39 @@ export default function InspectionSubmit() {
     // afterwards and we don't want to overwrite their edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // N7: load BOQ items for the named project (debounced). Same
+  // shape as the DPR submit form — see DprSubmit.jsx for the
+  // rationale on the debounce window and the "selected id survives a
+  // rename" guard.
+  useEffect(() => {
+    const trimmed = (form.projectName || '').trim();
+    if (!trimmed || !accessToken) {
+      setBoqItems([]);
+      setBoqItemsLoaded(false);
+      return undefined;
+    }
+    const t = setTimeout(async () => {
+      try {
+        const data = await api.getBoqItems(
+          { projectName: trimmed, isActive: 'true', limit: '100' },
+          accessToken
+        );
+        setBoqItems(data.items || []);
+        setBoqItemsLoaded(true);
+        setForm((f) => {
+          if (!f.boqItemId) return f;
+          const stillValid = (data.items || []).some((b) => b.id === f.boqItemId);
+          return stillValid ? f : { ...f, boqItemId: '' };
+        });
+      } catch {
+        setBoqItems([]);
+        setBoqItemsLoaded(true);
+      }
+    }, 400);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.projectName]);
 
   // Persist draft (debounced 750ms — matches DPR pattern at DprSubmit.jsx:124).
   useEffect(() => {
@@ -558,6 +601,8 @@ export default function InspectionSubmit() {
           // object stays null because there is no structured entry yet.
           inspectionType: workEntry?.workType || 'material_inspection',
           data: workEntry?.data || null,
+          // N7: optional BOQ link. null when unset.
+          boqItemId: form.boqItemId || null,
           // SOL DR-005: the two buttons finally diverge. "Save as Draft"
           // stores an owner-visible DRAFT row that does NOT trigger admin
           // fan-out (backend/src/routes/inspection.js ALLOWED_STATUSES).
@@ -606,6 +651,7 @@ export default function InspectionSubmit() {
       reportDate: queryDate || getLocalDate(),
       weather: '',
       contractor: '',
+      boqItemId: '',
     });
     setWorkEntry(null);
     setPhotos([]);
@@ -821,6 +867,90 @@ export default function InspectionSubmit() {
                 placeholder="Contractor name"
               />
             </div>
+          </div>
+
+          {/* N7: optional BOQ link. Same UX as the DPR form — disabled
+              until a project is named; the list re-fetches on debounced
+              projectName change. "No BOQ items" gets an admin shortcut
+              into the registry. */}
+          <div className="form-group">
+            <label htmlFor="boqItemId">BOQ Item Link (optional)</label>
+            {(() => {
+              const trimmedProject = (form.projectName || '').trim();
+              if (!trimmedProject) {
+                return (
+                  <select id="boqItemId" className="form-input" disabled>
+                    <option>Name a project first to see BOQ items</option>
+                  </select>
+                );
+              }
+              if (!boqItemsLoaded) {
+                return (
+                  <select id="boqItemId" className="form-input" disabled>
+                    <option>Loading BOQ items for {trimmedProject}…</option>
+                  </select>
+                );
+              }
+              if (boqItems.length === 0) {
+                return (
+                  <div
+                    style={{
+                      padding: '0.5rem 0.75rem',
+                      background: '#f8fafc',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: 6,
+                      fontSize: '0.85rem',
+                      color: 'var(--steel)',
+                    }}
+                  >
+                    No BOQ items for "{trimmedProject}".
+                    {' '}
+                    {employee?.isAdmin ? (
+                      <Link to="/portal/admin/boq">Open BOQ Registry →</Link>
+                    ) : (
+                      <span>Ask the billing engineer to add some.</span>
+                    )}
+                  </div>
+                );
+              }
+              return (
+                <>
+                  <select
+                    id="boqItemId"
+                    name="boqItemId"
+                    className="form-input"
+                    value={form.boqItemId || ''}
+                    onChange={handleChange}
+                  >
+                    <option value="">— No BOQ link —</option>
+                    {boqItems.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.itemCode} — {b.description}
+                      </option>
+                    ))}
+                  </select>
+                  {form.boqItemId && (() => {
+                    const selected = boqItems.find((b) => b.id === form.boqItemId);
+                    if (!selected) return null;
+                    return (
+                      <div
+                        style={{
+                          marginTop: '0.4rem',
+                          padding: '0.5rem 0.75rem',
+                          background: '#f0f9ff',
+                          border: '1px solid #bae6fd',
+                          borderRadius: 6,
+                          fontSize: '0.8rem',
+                          color: '#075985',
+                        }}
+                      >
+                        <strong>{selected.itemCode}</strong> · {selected.unit} · qty {Number(selected.quantity).toLocaleString('en-IN')}
+                      </div>
+                    );
+                  })()}
+                </>
+              );
+            })()}
           </div>
           </section>
 

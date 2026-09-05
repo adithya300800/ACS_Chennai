@@ -161,7 +161,19 @@ export default function DprSubmit() {
     temperature: '',
     contractor: '',
     workType: 'SITE_INSPECTION',
+    // N7: optional link to a Bill-of-Quantities item. Backend treats
+    // null/missing as "no link" so the field never breaks existing
+    // submissions.
+    boqItemId: '',
   });
+  // N7: BOQ items for the current projectName, loaded when the project
+  // is named. We don't fetch on every keystroke — only when the user
+  // has finished typing a project name and either blurred the field
+  // OR explicitly cleared it. The selector renders "No BOQ items" if
+  // the list is empty for the named project, with an "Open BOQ
+  // Registry" link for admins.
+  const [boqItems, setBoqItems] = useState([]);
+  const [boqItemsLoaded, setBoqItemsLoaded] = useState(false);
   // Round-12: 5 daily-narrative fields every site engineer records at end
   // of day. Backend caps match the route validator.
   const [dailyFields, setDailyFields] = useState(initialDraft?.dailyFields || {
@@ -229,6 +241,8 @@ export default function DprSubmit() {
           temperature: d.temperature || '',
           contractor: d.contractor || '',
           workType: d.workType || 'SITE_INSPECTION',
+          // N7: preserve linked BOQ item across draft resume.
+          boqItemId: d.boqItemId || '',
         });
         setDailyFields({
           workExecutedToday: d.workExecutedToday || '',
@@ -288,6 +302,7 @@ export default function DprSubmit() {
         temperature: '',
         contractor: '',
         workType: 'SITE_INSPECTION',
+        boqItemId: '',
       });
       setDailyFields({
         workExecutedToday: '',
@@ -325,6 +340,47 @@ export default function DprSubmit() {
   useEffect(() => {
     loadTodayInspections();
   }, [loadTodayInspections]);
+
+  // N7: load BOQ items for the named project. Debounced 400ms so the
+  // request doesn't fire per keystroke; cleared when projectName is
+  // empty (so switching projects back to "" doesn't keep stale items
+  // in the selector). The selected boqItemId is reset to '' if it no
+  // longer matches a loaded item — otherwise the form would carry a
+  // dangling reference into a different project.
+  useEffect(() => {
+    const trimmed = (form.projectName || '').trim();
+    if (!trimmed || !accessToken) {
+      setBoqItems([]);
+      setBoqItemsLoaded(false);
+      return undefined;
+    }
+    const t = setTimeout(async () => {
+      try {
+        const data = await api.getBoqItems(
+          { projectName: trimmed, isActive: 'true', limit: '100' },
+          accessToken
+        );
+        setBoqItems(data.items || []);
+        setBoqItemsLoaded(true);
+        // If the currently-selected boqItemId doesn't belong to the
+        // freshly-loaded project list, drop it. This catches the
+        // "project renamed mid-form" edge case.
+        setForm((f) => {
+          if (!f.boqItemId) return f;
+          const stillValid = (data.items || []).some((b) => b.id === f.boqItemId);
+          return stillValid ? f : { ...f, boqItemId: '' };
+        });
+      } catch {
+        setBoqItems([]);
+        setBoqItemsLoaded(true);
+      }
+    }, 400);
+    return () => clearTimeout(t);
+    // accessToken omitted from deps — the function captures it via the
+    // closure and re-running on every token refresh would cause a
+    // 400ms-flush of unrelated network traffic.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.projectName]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -534,6 +590,9 @@ export default function DprSubmit() {
             materialsReceivedSummary: dailyFields.materialsReceivedSummary || null,
             // User-added ad-hoc text + table sections.
             customSections: Array.isArray(customSections) && customSections.length > 0 ? customSections : null,
+            // N7: optional BOQ link. Sent as null when unset so the
+            // backend treats it as "no link" rather than a literal "".
+            boqItemId: form.boqItemId || null,
           },
           editingVersion,
           accessToken
@@ -573,6 +632,8 @@ export default function DprSubmit() {
             customSections: Array.isArray(customSections) && customSections.length > 0 ? customSections : null,
             photos: photosToSubmit,
             // workEntries intentionally omitted — moved to Inspection & Compliance Records.
+            // N7: optional BOQ link. Sent as null when unset.
+            boqItemId: form.boqItemId || null,
           },
           accessToken,
           idempotencyKey
@@ -610,6 +671,7 @@ export default function DprSubmit() {
       temperature: '',
       contractor: '',
       workType: 'SITE_INSPECTION',
+      boqItemId: '',
     });
     setDailyFields({
       workExecutedToday: '',
@@ -733,6 +795,90 @@ export default function DprSubmit() {
               <label htmlFor="contractor">Contractor</label>
               <input id="contractor" name="contractor" className="form-input" value={form.contractor} onChange={handleChange} placeholder="Contractor name" />
             </div>
+          </div>
+
+          {/* N7: optional BOQ link. Dropdown is empty / disabled until
+              the user names a project — the list re-fetches on
+              debounced projectName change. "No BOQ items" includes a
+              shortcut for admins to jump straight to the registry. */}
+          <div className="form-group">
+            <label htmlFor="boqItemId">BOQ Item Link (optional)</label>
+            {(() => {
+              const trimmedProject = (form.projectName || '').trim();
+              if (!trimmedProject) {
+                return (
+                  <select id="boqItemId" className="form-input" disabled>
+                    <option>Name a project first to see BOQ items</option>
+                  </select>
+                );
+              }
+              if (!boqItemsLoaded) {
+                return (
+                  <select id="boqItemId" className="form-input" disabled>
+                    <option>Loading BOQ items for {trimmedProject}…</option>
+                  </select>
+                );
+              }
+              if (boqItems.length === 0) {
+                return (
+                  <div
+                    style={{
+                      padding: '0.5rem 0.75rem',
+                      background: '#f8fafc',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: 6,
+                      fontSize: '0.85rem',
+                      color: 'var(--steel)',
+                    }}
+                  >
+                    No BOQ items for "{trimmedProject}".
+                    {' '}
+                    {employee?.isAdmin ? (
+                      <Link to="/portal/admin/boq">Open BOQ Registry →</Link>
+                    ) : (
+                      <span>Ask the billing engineer to add some.</span>
+                    )}
+                  </div>
+                );
+              }
+              return (
+                <>
+                  <select
+                    id="boqItemId"
+                    name="boqItemId"
+                    className="form-input"
+                    value={form.boqItemId || ''}
+                    onChange={handleChange}
+                  >
+                    <option value="">— No BOQ link —</option>
+                    {boqItems.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.itemCode} — {b.description}
+                      </option>
+                    ))}
+                  </select>
+                  {form.boqItemId && (() => {
+                    const selected = boqItems.find((b) => b.id === form.boqItemId);
+                    if (!selected) return null;
+                    return (
+                      <div
+                        style={{
+                          marginTop: '0.4rem',
+                          padding: '0.5rem 0.75rem',
+                          background: '#f0f9ff',
+                          border: '1px solid #bae6fd',
+                          borderRadius: 6,
+                          fontSize: '0.8rem',
+                          color: '#075985',
+                        }}
+                      >
+                        <strong>{selected.itemCode}</strong> · {selected.unit} · qty {Number(selected.quantity).toLocaleString('en-IN')}
+                      </div>
+                    );
+                  })()}
+                </>
+              );
+            })()}
           </div>
 
           {/* Primary work category — backend-required tag for filtering on the admin dashboard. */}
