@@ -236,13 +236,21 @@ export {
   MIGRATION_MARKER_KEY,
 };
 
-module.exports = {
-  scopedKey,
-  load,
-  loadDiagnostic,
-  save,
-  clear,
-  clearForUser,
-  clearAllExcept,
-  MIGRATION_MARKER_KEY,
-};
+// [PHASE-3] CJS fallback for Jest (`require()`) — guarded so the
+// browser bundle doesn't throw "module is not defined". Vite/Rollup
+// strip the ESM `export {…}` above at build time and the browser
+// never sees module.exports; Jest with babel-jest transforms the
+// `export` to a CJS assignment, so the guarded block below is what
+// Jest actually runs against.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    scopedKey,
+    load,
+    loadDiagnostic,
+    save,
+    clear,
+    clearForUser,
+    clearAllExcept,
+    MIGRATION_MARKER_KEY,
+  };
+}
