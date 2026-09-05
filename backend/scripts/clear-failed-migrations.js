@@ -63,10 +63,19 @@ const KNOWN_BAD = Object.freeze([
     for (const name of KNOWN_BAD) {
       // $executeRawUnsafe is intentional: parameterized table / column
       // names aren't supported by Prisma's $executeRaw templating.
+      //
+      // [N1 fix 2] Prisma 5's `_prisma_migrations` has NO `status` column —
+      // state is derived from `finished_at` / `rolled_back_at` /
+      // `applied_steps_count`. So the predicate is simply the migration
+      // name. The corrective migration is idempotent (`ADD COLUMN IF
+      // NOT EXISTS`, etc.) so deleting a row that was somehow applied
+      // (it never is, by definition: these are KNOWN_BAD entries) won't
+      // cause data drift — re-applying the corrective migration recreates
+      // any partially-applied DDL harmlessly.
       const res = await prisma.$executeRawUnsafe(
         "DELETE FROM \"_prisma_migrations\" WHERE \"migration_name\" = '" +
         name +
-        "' AND \"status\" <> 'applied'",
+        "'",
       );
       console.log('[clear-failed-migrations] cleared', res, 'rows for', name);
       totalCleared += res;
