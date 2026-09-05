@@ -3164,13 +3164,20 @@ footer {
   align-items: center;
 }
 .notification-bell-btn:hover { background: var(--light-gray); color: var(--navy); }
-.notification-bell-btn.active { background: #dbeafe; color: var(--blue); }
+/* S5 contrast: #0066FF on #dbeafe was 4.46:1 (AA-large pass, AA-normal
+   fail). Darken the foreground so the bell text + icon are readable at
+   the 0.85rem font size used by axe tests. */
+.notification-bell-btn.active { background: #dbeafe; color: #1e3a8a; }
 
+/* S5 contrast: white on #ef4444 was 3.73:1 — fails WCAG AA for the
+   0.65rem badge counts. Switch the background to red-700 (#b91c1c) for
+   a 6.42:1 foreground pair (still recognisably red, brighter ring
+   survives against the header surface). */
 .notification-badge {
   position: absolute;
   top: 2px;
   right: 2px;
-  background: #ef4444;
+  background: #b91c1c;
   color: white;
   border-radius: 9999px;
   min-width: 18px;

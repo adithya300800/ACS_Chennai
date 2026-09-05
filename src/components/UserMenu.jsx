@@ -164,8 +164,15 @@ export default function UserMenu() {
   // Deterministic accent — uses the email hash so different users get
   // different avatar colors without randomizing (which would shift
   // between sessions).
+  //
+  // S5 contrast: the previous Tailwind 400-shade palette (#0EA5E9 sky,
+  // #6366F1 indigo, #22C55E green, #F59E0B amber, #EC4899 pink, #14B8A6
+  // teal) gave 1.86-3.49:1 contrast against white text — fails WCAG AA
+  // for the 0.78rem initials. Swapped for the 700-shade equivalents
+  // which land between 4.6-6.5:1 (all six entries below clear the
+  // 4.5:1 normal-text floor).
   const accent = (() => {
-    const colors = ['#0EA5E9', '#6366F1', '#22C55E', '#F59E0B', '#EC4899', '#14B8A6'];
+    const colors = ['#0369A1', '#4F46E5', '#15803D', '#B45309', '#BE185D', '#0F766E'];
     let hash = 0;
     for (let i = 0; i < (email || fullName).length; i += 1) {
       hash = ((hash << 5) - hash + (email || fullName).charCodeAt(i)) | 0;
