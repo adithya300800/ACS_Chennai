@@ -34,9 +34,14 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = DEFAULT_TIMEOUT_MS) 
     return await fetch(url, { ...opts, signal: controller.signal });
   } catch (err) {
     if (err && err.name === 'AbortError') {
-      throw new ApiError('Request timed out — please try again.', 0, 'TIMEOUT');
+      throw new ApiError('The request took too long. Please try again.', 0, 'TIMEOUT');
     }
-    throw new ApiError('Network error — is the server running?', 0, 'NETWORK_ERROR');
+    // S5 (audit): replace the developer-oriented "is the server running?"
+    // copy with something a non-technical user can act on. The internal
+    // `code` stays as 'NETWORK_ERROR' so the cold-start retry at
+    // api.js:request() and any error.code === 'NETWORK_ERROR' branches
+    // in callers keep working unchanged.
+    throw new ApiError("Couldn't reach the server. Check your internet connection and try again.", 0, 'NETWORK_ERROR');
   } finally {
     clearTimeout(timeoutId);
   }
@@ -165,14 +170,14 @@ async function request(method, path, body, token, { _retried, _networkRetried, i
     // first request after a sleep often gets a TCP-level reset from the
     // waking server (the connection drops before the response begins). The
     // browser's fetch surfaces that as a TypeError, which fetchWithTimeout
-    // translates to ApiError('Network error — is the server running?',
-    // 0, 'NETWORK_ERROR'). For mutating verbs (POST/PUT/DELETE) a single
-    // retry almost always succeeds — the server is now awake and the second
-    // round-trip lands cleanly. GETs are skipped (browsers cache + retries
-    // can confuse the user with duplicate loads). Token-bearing requests
-    // are safe to retry because the server-side handlers are idempotent or
-    // guarded with state-machine checks (DPR DELETE requires DRAFT; a second
-    // DELETE returns 404, which the caller surfaces as "already deleted").
+    // translates to an ApiError with code 'NETWORK_ERROR'. For mutating
+    // verbs (POST/PUT/DELETE) a single retry almost always succeeds — the
+    // server is now awake and the second round-trip lands cleanly. GETs are
+    // skipped (browsers cache + retries can confuse the user with duplicate
+    // loads). Token-bearing requests are safe to retry because the server-
+    // side handlers are idempotent or guarded with state-machine checks
+    // (DPR DELETE requires DRAFT; a second DELETE returns 404, which the
+    // caller surfaces as "already deleted").
     if (
       err.code === 'NETWORK_ERROR' &&
       !_networkRetried &&
@@ -298,10 +303,10 @@ export const api = {
       };
     } catch (err) {
       if (err && err.name === 'AbortError') {
-        throw new ApiError('Download timed out — please try again.', 0, 'TIMEOUT');
+        throw new ApiError('The download took too long. Please try again.', 0, 'TIMEOUT');
       }
       if (err instanceof ApiError) throw err;
-      throw new ApiError('Network error — is the server running?', 0, 'NETWORK_ERROR');
+      throw new ApiError("Couldn't reach the server. Check your internet connection and try again.", 0, 'NETWORK_ERROR');
     } finally {
       clearTimeout(timeoutId);
     }
