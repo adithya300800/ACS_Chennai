@@ -202,6 +202,13 @@ export default function DprAll() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [dprs, setDprs] = useState([]);
   const [loading, setLoading] = useState(true);
+  // S5-pagination: cursor state for "Load more". The backend encodes the
+  // cursor as (reportDate, id) from the last row of the current page
+  // (see backend/src/routes/dpr.js:807-810 and backend/src/lib/cursor.js).
+  // On filter change the loader resets nextCursor to null so a partial
+  // page from the previous filter doesn't bleed into the new view.
+  const [nextCursor, setNextCursor] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
   const [selectedDpr, setSelectedDpr] = useState(null);
   // DR-017: capture the DPR card that opened the modal so the Modal
@@ -315,12 +322,20 @@ export default function DprAll() {
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
+    // S5-pagination: starting a fresh page (initial load or filter
+    // change) clears any prior cursor so the page count is honest.
+    setNextCursor(null);
     try {
       // GET /api/dpr returns every org row for admins by default (no
       // `my=true` filter). See backend/src/routes/dpr.js:641 — the
-      // restrictToSelf check is `!isAdmin || my === 'true'`. Limit 100
-      // matches InspectionAll's browse-view contract.
-      const params = { limit: '100' };
+      // restrictToSelf check is `!isAdmin || my === 'true'`.
+      //
+      // S5-pagination: limit dropped from 100 → 50 so "Load more" is
+      // visible at meaningful data sizes (the backend's default is 20,
+      // which is too small for the admin browse view). The backend
+      // returns `nextCursor: null` when the result is the tail, so the
+      // footer can read "Showing N DPRs · all loaded".
+      const params = { limit: '50' };
       // Round-27: send `month` as the YYYY-MM string. The backend
       // expands to a half-open IST window via getMonthRangeUtc() and
       // refuses `from`/`to` in the same request with 400.
@@ -332,6 +347,7 @@ export default function DprAll() {
       if (filter.submittedById) params.submittedById = filter.submittedById;
       const data = await api.getDprs(params, accessToken);
       setDprs(data.dprs || []);
+      setNextCursor(data.nextCursor || null);
     } catch (err) {
       if (err.status !== 401) {
         // MONTH_AND_RANGE_CONFLICT and INVALID_MONTH surface here as a
@@ -344,6 +360,34 @@ export default function DprAll() {
       setLoading(false);
     }
   }, [accessToken, toast, filter]);
+
+  // S5-pagination: appends the next page to `dprs` using the cursor from
+  // the previous page. Reset (clear + initial load) still goes through
+  // `load` above; this handler is only for "Load more" presses.
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore || loading) return;
+    setLoadingMore(true);
+    setError('');
+    try {
+      const params = { limit: '50', cursor: nextCursor };
+      if (filter.month) params.month = filter.month;
+      if (filter.status) params.status = filter.status;
+      if (filter.from) params.from = filter.from;
+      if (filter.to) params.to = filter.to;
+      if (filter.projectName) params.projectName = filter.projectName;
+      if (filter.submittedById) params.submittedById = filter.submittedById;
+      const data = await api.getDprs(params, accessToken);
+      setDprs((prev) => [...prev, ...(data.dprs || [])]);
+      setNextCursor(data.nextCursor || null);
+    } catch (err) {
+      if (err.status !== 401) {
+        setError(err.message || 'Failed to load more daily reports.');
+        toast.push(err.message || 'Failed to load more daily reports.', 'error');
+      }
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [accessToken, toast, filter, nextCursor, loadingMore, loading]);
 
   useEffect(() => { load(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, [accessToken, filter]);
 
@@ -648,6 +692,11 @@ export default function DprAll() {
         </div>
         <div className="dpr-list-count" style={{ textAlign: 'center', color: 'var(--steel)', fontSize: '0.8rem', padding: '0.75rem 0.5rem' }}>
           Showing {dprs.length} DPR{dprs.length !== 1 ? 's' : ''}
+          {/* S5-pagination: tell the admin when more rows exist behind
+              the cursor so they know the page is intentionally clipped.
+              `nextCursor: null` means the backend's last page — see
+              backend/src/routes/dpr.js:807-810. */}
+          {nextCursor ? ' · more available' : ' · all loaded'}
           {/* DR-016: surface the active scope beside the count so the
               admin always knows whether they're looking at a specific
               month, all-time, or the current default. The previous
@@ -660,6 +709,22 @@ export default function DprAll() {
           })()}
           {hasActiveFilters ? ' · filtered' : ''}
         </div>
+        {/* S5-pagination: append-next-page affordance. Disabled while
+            loading or while the backend reported no cursor — both
+            states mean "nothing to append right now". */}
+        {nextCursor && (
+          <div style={{ textAlign: 'center', padding: '0 0 1.5rem' }}>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={loadMore}
+              disabled={loadingMore}
+              aria-label="Load more daily reports"
+            >
+              {loadingMore ? 'Loading…' : 'Load more'}
+            </button>
+          </div>
+        )}
         </>
       )}
 
