@@ -1237,6 +1237,27 @@ footer {
 .portal-topbar-date {
   font-size: 0.85rem;
   color: var(--steel);
+  white-space: nowrap;                            /* SOL-P2 bug #11: stop the header date
+                                                    ("Sat, 5 Sept, 2026") wrapping onto two
+                                                    lines on the narrowest mobile viewport.
+                                                    The shorter format below keeps the whole
+                                                    row legible above the avatar/dropdown
+                                                    cluster. */
+}
+@media (max-width: 480px) {
+  .portal-topbar-date {
+    font-size: 0.72rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 7.5rem;
+  }
+  .portal-greeting {
+    font-size: 0.85rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 8.5rem;
+  }
 }
 
 /* Portal Content */
@@ -2185,7 +2206,16 @@ footer {
     width: 100%;
   }
   .employee-email {
-    max-width: 140px;
+    /* SOL-P2 bug #6: full email must be legible on mobile so admins can
+       unambiguously identify the employee they are auditing. The old
+       140px cap relied on truncation with an ellipsis which hid the
+       important middle of the local part (e.g. "irfan.hassan@…" lost the
+       "assan"). Wrap-anywhere lets long addresses break at any character
+       while short ones still display in a single line. */
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    font-size: 0.78rem;
   }
   .employee-dept {
     display: none !important;
@@ -5282,7 +5312,9 @@ footer {
 .draft-banner {                                   /* restored-draft banner on DPR / Inspection submit forms */
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  flex-wrap: wrap;                                /* SOL-P2 bug #4: wrap on narrow mobile so the
+                                                    text doesn't pin to each-word-only lines */
+  gap: 0.5rem 0.75rem;
   padding: 0.75rem 1rem;
   background: #eff6ff;
   border: 1px solid #bfdbfe;
@@ -5290,6 +5322,23 @@ footer {
   margin-bottom: 1rem;
   font-size: 0.875rem;
   color: #1e40af;
+}
+.draft-banner > span {
+  flex: 1 1 200px;                                /* min width before the buttons wrap below */
+  min-width: 0;                                    /* allow word-wrap inside a flex item */
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+.draft-banner > button {
+  flex-shrink: 0;                                  /* keep buttons on their own line / full width on mobile */
+}
+@media (max-width: 480px) {
+  .draft-banner {
+    align-items: stretch;
+  }
+  .draft-banner > button {
+    flex: 1 1 auto;                                /* buttons share width on the smallest mobile */
+  }
 }
 .error-boundary {                                 /* dark-mode ErrorBoundary fallback wrapper */
   max-width: 560px;

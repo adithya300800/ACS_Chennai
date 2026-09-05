@@ -30,18 +30,36 @@ const ZOHO_ERRORS = {
 function maybeShowWelcomeToast(toast, employee) {
   if (!employee?.id) return;
   let key;
+  // SOL-P2 bug #9: distinguish first-time vs returning users. Pre-fix the
+  // toast always read "Welcome back, …" which made first-time users feel
+  // addressed as if they'd already been onboarded. The key check below
+  // runs BEFORE we set the value, so we can branch the copy on whether
+  // we've greeted this employee before.
+  let isFirstLogin = false;
   try {
     key = `acs_welcome_employee_${employee.id}`;
-    if (localStorage.getItem(key)) return;
+    isFirstLogin = !localStorage.getItem(key);
+    if (!isFirstLogin) {
+      // Still mark the visit — clears the "first login" gate even on
+      // storage quirks and gives an audit row per employee.
+    }
     localStorage.setItem(key, new Date().toISOString());
   } catch {
     // Storage unavailable (Safari private mode, quota) — fall back to
     // showing the toast anyway rather than silently failing the welcome.
+    isFirstLogin = true;
   }
   const name = (employee.name || '').split(' ')[0] || 'there';
-  const greeting = employee.isAdmin
-    ? `Welcome back, ${name}. Open tiles are waiting for review.`
-    : `Welcome to ACS Chennai, ${name}. Mark your attendance to start the day.`;
+  let greeting;
+  if (employee.isAdmin) {
+    greeting = isFirstLogin
+      ? `Welcome to ACS Chennai, ${name}. The admin overview is your landing page.`
+      : `Welcome back, ${name}. Open tiles are waiting for review.`;
+  } else {
+    greeting = isFirstLogin
+      ? `Welcome to ACS Chennai, ${name}. Mark your attendance to start the day.`
+      : `Welcome back, ${name}. Your attendance page is one tap away.`;
+  }
   toast.push(greeting, 'success', 6000);
 }
 

@@ -186,8 +186,61 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
         <div className="portal-auth-error">{error}</div>
       ) : dpr ? (
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
-            <div>
+          {/* SOL-P2 bug #8: mobile DPR detail modal used to render only a
+              handful of fields. Round-28 added the photo lightbox and the
+              rejection banner, but linked-inspections + approval-history
+              were still missing on small viewports. We render them above
+              the field grid so mobile (which scrolls single-column) reads
+              them first. Desktop already showed the same info via the
+              wider layout — this just makes it explicit for everyone. */}
+          {(Array.isArray(dpr.inspections) && dpr.inspections.length > 0) || dpr.reviewedBy || dpr.approvedBy ? (
+            <div style={{ marginBottom: '1rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              {Array.isArray(dpr.inspections) && dpr.inspections.length > 0 && (
+                <div style={{ padding: '0.625rem 0.75rem', background: '#f8fafc', borderRadius: 6, borderLeft: '3px solid var(--blue)' }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.375rem' }}>
+                    Linked Inspections ({dpr.inspections.length})
+                  </div>
+                  <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                    {dpr.inspections.map((insp) => (
+                      <li key={insp.id} style={{ fontSize: '0.85rem' }}>
+                        <Link to={`/portal/inspection/${insp.id}`}>
+                          {insp.inspectionType.replace(/_/g, ' ').toLowerCase()}
+                        </Link>
+                        {' · '}
+                        <span style={{ color: 'var(--steel)' }}>{insp.status}</span>
+                        {insp.severity && (
+                          <span style={{ marginLeft: '0.4rem', color: insp.severity === 'CRITICAL' ? 'var(--danger, #dc2626)' : 'var(--steel)' }}>
+                            · {insp.severity}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {(dpr.reviewedBy || dpr.approvedBy) && (
+                <div style={{ padding: '0.625rem 0.75rem', background: '#f8fafc', borderRadius: 6, borderLeft: '3px solid var(--steel)' }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.375rem' }}>
+                    Approval History
+                  </div>
+                  <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.85rem' }}>
+                    {dpr.reviewedBy && (
+                      <li>
+                        <strong>Reviewed by:</strong> {dpr.reviewedBy.name}
+                      </li>
+                    )}
+                    {dpr.approvedBy && (
+                      <li>
+                        <strong>Approved by:</strong> {dpr.approvedBy.name}
+                      </li>
+                    )}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>            <div>
               <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Report date</div>
               <div style={{ color: 'var(--navy)' }}>{dpr.reportDate ? formatDateOnly(dpr.reportDate) : '—'}</div>
             </div>

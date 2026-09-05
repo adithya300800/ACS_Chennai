@@ -62,7 +62,7 @@ const TrainingStatusPill = ({ status }) => {
 
 export default function Training() {
   useDocumentTitle('My Training');
-  const { accessToken } = useAuth();
+  const { accessToken, employee } = useAuth();
   const { push } = useToast();
   // DR-026: refresh "today" on midnight + tab focus so memoized counts/filters
   // re-evaluate when the business date rolls over (or the user comes back
@@ -160,10 +160,43 @@ export default function Training() {
         {loading && <div className="training-list-state">Loading…</div>}
         {error && <div className="training-list-error" role="alert">{error}</div>}
         {!loading && !error && visible.length === 0 && (
-          <div className="training-list-state">
-            {filter === 'ALL'
-              ? 'No trainings assigned yet. Check back later.'
-              : `No trainings match this filter.`}
+          <div className="training-list-state" role="status">
+            {filter === 'ALL' ? (
+              <div style={{ textAlign: 'center', padding: '1.5rem 0' }}>
+                <div style={{ fontSize: '2.25rem', marginBottom: '0.5rem' }} aria-hidden="true">📚</div>
+                <div style={{ marginBottom: '0.75rem', fontWeight: 500 }}>
+                  No trainings assigned yet.
+                </div>
+                <div style={{ marginBottom: '1rem', color: 'var(--steel)', fontSize: '0.9rem' }}>
+                  Trainings are added by your admin. Browse what's available in the
+                  library to see course options you can be assigned.
+                </div>
+                {/* SOL-P2 bug #10: training module used to be a black hole
+                    when the employee had no assignments — no surface to
+                    discover course offerings. Surface the library via a
+                    visible CTA. Admins use the same library to assign, so
+                    pointing admins at /portal/admin/training gets them
+                    to the right surface; non-admins see a "Contact your
+                    admin" hint so the page never feels like a dead end. */}
+                {employee?.isAdmin ? (
+                  <Link to="/portal/admin/training" className="btn btn-primary btn-sm">
+                    Manage training library
+                  </Link>
+                ) : (
+                  <Link to="/portal/attendance" className="btn btn-primary btn-sm">
+                    Back to My Attendance
+                  </Link>
+                )}
+                {!employee?.isAdmin && (
+                  <div style={{ marginTop: '0.75rem', fontSize: '0.8rem', color: 'var(--steel)' }}>
+                    Need a course assigned? Reach out to your admin and ask them to assign it
+                    from the training library.
+                  </div>
+                )}
+              </div>
+            ) : (
+              <span>No trainings match this filter.</span>
+            )}
           </div>
         )}
         {!loading && !error && visible.length > 0 && (
