@@ -31,7 +31,13 @@ describe('PortalLayout — S5 nav grouping taxonomy', () => {
     // The whole admin block must be conditional on isAdmin so employees
     // don't see "Leave Approvals" or "Training Library" in their sidebar.
     expect(src).toMatch(/\.\.\.\(employee\?\.isAdmin\s*\?/);
-    expect(src).toMatch(/label:\s*['"]Review['"][\s\S]{0,800}label:\s*['"]Records['"][\s\S]{0,800}label:\s*['"]Administration['"]/);
+    // N5+N7+N17 (round-29): grew the Records + Administration groups with
+    // Cube Tests Review, BOQ Registry, Projects, and Project Dashboard.
+    // The 800-char window in the S5 baseline is too tight for the post-
+    // N17 sidebar; we widened to 3000 so the test still asserts "all three
+    // labels exist in the same admin block" without re-tightening every
+    // round.
+    expect(src).toMatch(/label:\s*['"]Review['"][\s\S]{0,3000}label:\s*['"]Records['"][\s\S]{0,3000}label:\s*['"]Administration['"]/);
   });
 
   test('renders <h3 className="portal-nav-section-label"> for each non-empty group', () => {
