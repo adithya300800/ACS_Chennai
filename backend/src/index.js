@@ -181,17 +181,22 @@ function createApp(deps = {}) {
   });
 
   // CORS — manual headers, exact origin allowlist.
-  // Round-7: trimmed methods to what this API actually uses. Audited the
-  // routes: only GET, POST, PUT are mounted (no DELETE or PATCH handlers).
-  // Listing unused methods gives browsers no extra capability but makes
-  // intent fuzzing easier (e.g. an attacker probing for DELETE endpoints
-  // knows the server's CORS policy explicitly allows it).
+  // Round-7: trimmed methods to what this API actually uses.
+  //
+  // Live bug, 5 Sept 2026: the SOL-P0#4 DPR-draft delete handler
+  // (backend/src/routes/dpr.js:1226) was added but this allowlist was not
+  // updated, so the browser's CORS preflight for DELETE returned
+  // Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS — the browser
+  // then blocked every actual DELETE call as net::ERR_FAILED, the frontend
+  // interpreted it as NETWORK_ERROR, and the 4s/8s/16s retry ladder just
+  // repeated the same failure. Always keep this list in sync with the
+  // methods mounted under router.* in src/routes/*.js.
   app.use((req, res, next) => {
     const origin = req.headers.origin;
     if (origin && ALLOWED_ORIGINS.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-Request-ID, X-Internal-Token');
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       // Round-13: expose Content-Disposition + X-Export-* so the browser JS
