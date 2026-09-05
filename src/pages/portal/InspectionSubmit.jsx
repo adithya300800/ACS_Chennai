@@ -13,6 +13,12 @@ import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
 const DRAFT_KEY = 'inspection_draft_v1';
+// SOL DR-001: bumped to v2 after a serializer bug dropped workEntry.data
+// during autosave. v1 drafts (no __v, workEntry.data missing) are surfaced as
+// "malformed" so the user can discard instead of crashing on reload.
+const DRAFT_SCHEMA_VERSION = 2;
+
+const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 // A-11: section skip-nav anchors. Keep in sync with the <section id>
 // attributes below — used by the sticky in-form nav at the top of the page.
@@ -43,17 +49,46 @@ function loadDraft() {
   try {
     const raw = localStorage.getItem(DRAFT_KEY);
     if (!raw) return null;
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+
+    // SOL DR-001: detect v1 drafts that lost structured workEntry.data.
+    // A well-formed v2 draft always has __v === 2 and, if workEntry is set,
+    // includes a `data` object. Anything else is treated as malformed so the
+    // user sees an explicit recover/discard banner instead of a crash on
+    // render.
+    if (!isObject(parsed)) return { __malformed: true, reason: 'corrupt-shape' };
+    const version = parsed.__v;
+    if (version !== DRAFT_SCHEMA_VERSION) {
+      return { __malformed: true, reason: 'legacy-shape', payload: parsed };
+    }
+    if (parsed.workEntry !== null && parsed.workEntry !== undefined) {
+      if (!isObject(parsed.workEntry) || !isObject(parsed.workEntry.data)) {
+        return { __malformed: true, reason: 'workentry-data-missing', payload: parsed };
+      }
+    }
+    return parsed;
   } catch {
-    return null;
+    return { __malformed: true, reason: 'parse-failed' };
   }
 }
 
 function saveDraft(payload) {
   try {
     const safe = {
+      __v: DRAFT_SCHEMA_VERSION,
+      savedAt: new Date().toISOString(),
       form: payload.form,
-      workEntry: payload.workEntry ? { workType: payload.workEntry.workType } : null,
+      // SOL DR-001: previous serializer only kept `workType`, dropping the
+      // structured field data the renderer needs (see render at lines ~473).
+      // Persist the full entry — `data` is required for the inspection card
+      // and for submit.
+      workEntry: payload.workEntry
+        ? {
+            workType: payload.workEntry.workType,
+            data: payload.workEntry.data || {},
+            addedAt: payload.workEntry.addedAt || null,
+          }
+        : null,
       photos: (payload.photos || []).map((p) => ({
         ulid: p.ulid,
         container: p.container,
@@ -88,22 +123,59 @@ export default function InspectionSubmit() {
   const queryDprId = searchParams.get('dpr') || null;
   const queryDate = searchParams.get('date') || null;
 
-  const initialDraft = loadDraft();
-  const [form, setForm] = useState(initialDraft?.form || {
-    projectName: '',
-    location: '',
-    reportDate: queryDate || getLocalDate(),
-    weather: '',
-    contractor: '',
+  // SOL DR-001: compute draft + malformed flag ONCE on mount via useState
+  // initializers. A regular const would re-evaluate on every render, which
+  // means after `clearDraft()` runs in a useEffect a later re-render would
+  // see empty localStorage and silently drop the malformed banner. Pinning
+  // the values to state preserves the user-visible recovery state across
+  // subsequent renders and state updates.
+  const [malformedReason] = useState(() => {
+    const d = loadDraft();
+    return d?.__malformed ? d.reason : null;
   });
-  const [workEntry, setWorkEntry] = useState(initialDraft?.workEntry || null);
+  const [initialForm] = useState(() => {
+    const d = loadDraft();
+    if (d?.__malformed || !d) {
+      return {
+        projectName: '',
+        location: '',
+        reportDate: queryDate || getLocalDate(),
+        weather: '',
+        contractor: '',
+      };
+    }
+    return d.form || {
+      projectName: '',
+      location: '',
+      reportDate: queryDate || getLocalDate(),
+      weather: '',
+      contractor: '',
+    };
+  });
+  const [initialWorkEntry] = useState(() => {
+    const d = loadDraft();
+    if (d?.__malformed || !d) return null;
+    return d.workEntry || null;
+  });
+  const [showDraftBannerInitial] = useState(() => {
+    const d = loadDraft();
+    return !d?.__malformed && !!d;
+  });
+  const [form, setForm] = useState(initialForm);
+  const [workEntry, setWorkEntry] = useState(initialWorkEntry);
   const [photos, setPhotos] = useState([]);
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
-  const [showDraftBanner, setShowDraftBanner] = useState(!!initialDraft);
+  const [showDraftBanner, setShowDraftBanner] = useState(showDraftBannerInitial);
   const [uploadStatuses, setUploadStatuses] = useState({});
   const [prefillAttempted, setPrefillAttempted] = useState(false);
   const photoObjectUrlsRef = useRef(new Set());
+
+  // On mount, clear any malformed legacy draft so we never show it again
+  // and don't keep crashing the user on every reload.
+  useEffect(() => {
+    if (malformedReason) clearDraft();
+  }, [malformedReason]);
 
   // Best-effort pre-fill of project/location from the latest submitted DPR
   // today. Runs once. If no DPR exists for today, the engineer types the
@@ -272,6 +344,17 @@ export default function InspectionSubmit() {
       submittingRef.current = false;
       return;
     }
+    // SOL DR-001: belt-and-braces — refuse to submit a workEntry whose
+    // structured data has been lost. A correct serializer keeps `data` intact,
+    // so reaching this branch means the in-memory draft was constructed
+    // unsafely.
+    if (!workEntry.data || typeof workEntry.data !== 'object') {
+      const msg = 'This inspection record is missing its structured fields. Please re-add the record before submitting.';
+      setError(msg);
+      toast.push(msg, 'warning');
+      submittingRef.current = false;
+      return;
+    }
     const dateErr = validateReportDate(form.reportDate);
     if (dateErr) {
       setError(dateErr);
@@ -389,6 +472,33 @@ export default function InspectionSubmit() {
           </div>
         )}
 
+        {/* SOL DR-001: an older draft saved before the serializer fix has lost
+            its structured workEntry.data. We cannot restore those fields, but
+            we also must not crash the page or pretend the work is preserved. */}
+        {malformedReason && (
+          <div
+            role="alert"
+            className="portal-auth-error"
+            style={{ marginBottom: '1rem' }}
+          >
+            <strong>We couldn't restore your previous draft.</strong>
+            <p style={{ margin: '0.5rem 0 0 0' }}>
+              A saved draft from a previous visit was found, but its structured
+              fields could not be recovered. Your uploaded photos are no longer
+              attached. Start a new entry below — your entries are not lost from
+              reports you already submitted.
+            </p>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              style={{ marginTop: '0.75rem' }}
+              onClick={handleDiscardDraft}
+            >
+              Discard old draft and start fresh
+            </button>
+          </div>
+        )}
+
         {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
 
         <div className="dpr-form">
@@ -457,7 +567,7 @@ export default function InspectionSubmit() {
           <section id="inspection-section-record" className="dpr-form-section">
           <div className="form-group">
             <label>Inspection Record *</label>
-            {workEntry && (
+            {workEntry && workEntry.data && (
               <div className="work-entries-list">
                 <div className="work-entry-card">
                   <div className="work-entry-card-header">
