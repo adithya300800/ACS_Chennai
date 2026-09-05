@@ -346,33 +346,37 @@ export default function DprList() {
             </div>
 
             {dprs.map(dpr => (
+              // S5-dpr-a11y: the previous row was role=button with a
+              // nested <button> for Resume. axe flagged that as
+              // nested-interactive (one focusable inside another
+              // focusable). The audit's recommendation: a semantic
+              // card/list-item plus a SEPARATE sibling action. Now:
+              //   - outer container is role=listitem — read-only, not
+              //     in the tab order, not a phantom button.
+              //   - the project-title cell IS the open-detail button
+              //     (the primary "see this DPR" action).
+              //   - Resume is a sibling, not a descendant.
+              // Keyboard flow: Tab moves project-title → Resume
+              // (if present) → next row's project-title. Enter/Space
+              // on the project-title opens the modal.
               <div
                 key={dpr.id}
-                role="button"
-                tabIndex={0}
                 className="dpr-list-item"
-                onClick={() => handleRowClick(dpr)}
-                // SOL-P0#3: row is keyboard-operable — Enter / Space open
-                // the detail modal. The element is announced as a button
-                // (its role) with the project name + status as accessible
-                // name via aria-label.
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    handleRowClick(dpr);
-                  }
-                }}
-                aria-label={`${dpr.projectName || 'Untitled'} — ${dpr.status}${dpr.submittedAt ? `, submitted ${timeAgo(dpr.submittedAt)}` : ', draft'}`}
-                style={{ cursor: 'pointer' }}
               >
                 <div style={{ flex: '0 0 36px', fontSize: '1.25rem' }} aria-hidden="true">📄</div>
-                <div style={{ flex: 2 }}>
+                <button
+                  type="button"
+                  className="dpr-list-item-detail"
+                  onClick={() => handleRowClick(dpr)}
+                  aria-label={`${dpr.projectName || 'Untitled'} — ${dpr.status}${dpr.submittedAt ? `, submitted ${timeAgo(dpr.submittedAt)}` : ', draft'}`}
+                  style={{ flex: 2, textAlign: 'left', background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit' }}
+                >
                   <div style={{ fontWeight: 600, color: 'var(--navy)', marginBottom: '0.25rem' }}>{dpr.projectName}</div>
                   <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
                     {formatDateOnly(dpr.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })}
                     {dpr.contractor ? ` · ${dpr.contractor}` : ''}
                   </div>
-                </div>
+                </button>
                 <div style={{ flex: 1 }}>
                   <StatusBadge status={dpr.status} map={DPR_STATUS_MAP} />
                 </div>
@@ -386,13 +390,13 @@ export default function DprList() {
                       <div style={{ fontSize: '0.75rem' }}>{dpr.submittedBy?.name}</div>
                     </div>
                   ) : (
-                    // SOL-P0#4: Resume button directly on draft rows so users
-                    // don't have to open the modal first. The row itself
-                    // remains keyboard-openable for viewing details.
+                    // SOL-P0#4: Resume button as a SIBLING of the
+                    // detail button (no longer nested inside the
+                    // clickable row wrapper, which is gone).
                     <button
                       type="button"
                       className="btn btn-primary btn-sm"
-                      onClick={(e) => { e.stopPropagation(); handleResumeDraft(dpr.id); }}
+                      onClick={() => handleResumeDraft(dpr.id)}
                       style={{ padding: '0.3rem 0.7rem', fontSize: '0.78rem' }}
                       aria-label={`Resume editing ${dpr.projectName || 'draft'}`}
                     >

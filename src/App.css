@@ -2473,11 +2473,12 @@ footer {
   gap: 1rem;
   padding: 1rem;
   border-bottom: 1px solid var(--light-gray);
-  cursor: pointer;
   transition: background 0.15s;
 }
+/* S5-dpr-a11y: row is no longer clickable. Hover/focus now applies
+   to the inner project-title button which is the action target. */
 .dpr-list-item:hover { background: #f8fafc; }
-.dpr-list-item:focus-visible {
+.dpr-list-item > .dpr-list-item-detail:focus-visible {
   outline: 2px solid var(--blue);
   outline-offset: -2px;
   background: #eff6ff;
@@ -2492,7 +2493,11 @@ footer {
    styles) which beats the attribute-selector CSS rule because
    inline styles have higher specificity than any selector. The fix
    is `!important` here so the mobile breakpoint actually wins at
-   narrow widths. */
+   narrow widths.
+
+   S5-dpr-a11y: the project-title cell is now a <button> not a <div>;
+   the attribute-selector still matches because we kept the inline
+   flex style. Resume button is also matched (it has flex: 1 inline). */
 @media (max-width: 640px) {
   .dpr-list-item {
     flex-wrap: wrap !important;
@@ -2504,11 +2509,14 @@ footer {
     align-self: center !important;
   }
   .dpr-list-item > div[style*="flex: 2"],
-  .dpr-list-item > div[style*="flex: 1"] {
+  .dpr-list-item > button[style*="flex: 2"],
+  .dpr-list-item > div[style*="flex: 1"],
+  .dpr-list-item > button[style*="flex: 1"] {
     flex: 1 1 calc(50% - 40px) !important;
     min-width: 0 !important;
   }
-  .dpr-list-item > div[style*="flex: 1"]:last-of-type {
+  .dpr-list-item > div[style*="flex: 1"]:last-of-type,
+  .dpr-list-item > button[style*="flex: 1"]:last-of-type {
     flex: 1 1 100% !important;
   }
 }
