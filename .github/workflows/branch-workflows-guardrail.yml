@@ -1,0 +1,91 @@
+# SOL DR-007 guardrail — workflows must exist on the default branch.
+#
+# GitHub scheduled events run from the repository's *default* branch, not
+# from whichever branch a workflow YAML lives on. The SOL audit (DR-007)
+# flagged that the new backup, admin-email, upload-sweep, warmup, and
+# digest workflows were all committed to `add-react-website` while
+# `main` was still the default — so the schedules silently never fired.
+#
+# Required fix direction: change the default branch to `add-react-website`
+# in repo Settings → Branches. Until that happens, this guardrail fails
+# loudly on every push so the gap can't be silently re-introduced.
+#
+# Why a guardrail and not just a docs note: the audit explicitly noted
+# that "commit history on a feature branch does not establish an
+# automatic schedule." If a future engineer merges a workflow-only
+# change to a non-default branch and doesn't update settings, this CI
+# job blocks the PR with a clear error message that names the fix.
+#
+# Cost: one `gh api` call per push. Stays well under the action-minutes
+# budget.
+
+name: Default-branch workflow guardrail
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  assert-workflows-on-default:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve the actual default branch
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DEFAULT=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')
+          echo "default=$DEFAULT" >> "$GITHUB_OUTPUT"
+          echo "Repository default branch: $DEFAULT"
+
+      - name: List scheduled workflows on the default branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DEFAULT="${{ steps.resolve.outputs.default }}"
+          echo "Listing .github/workflows/*.yml contents on $DEFAULT ..."
+          # -H "Accept: application/vnd.github+json" is the default; included
+          # explicitly so the call shape is obvious to a future debugger.
+          FILES=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/contents/.github/workflows?ref=$DEFAULT" \
+            --jq '.[].name')
+          if [ -z "$FILES" ]; then
+            echo "::error::No .github/workflows/ files exist on the default branch ($DEFAULT). Scheduled events run from the default branch, so any cron YAML committed elsewhere will not execute."
+            exit 1
+          fi
+          COUNT=$(echo "$FILES" | wc -l | tr -d ' ')
+          echo "Found $COUNT workflow file(s) on $DEFAULT:"
+          echo "$FILES" | sed 's/^/  - /'
+
+      - name: At least one scheduled workflow must exist on default
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DEFAULT="${{ steps.resolve.outputs.default }}"
+          # Fetch each workflow file's `on:` schedule key. We use gh api
+          # contents + jq rather than a checkout because the file shape on
+          # `main` is irrelevant — we want what's actually published.
+          FOUND_SCHEDULED=0
+          for FILE in $(gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${{ github.repository }}/contents/.github/workflows?ref=$DEFAULT" \
+              --jq '.[].name'); do
+            HAS_CRON=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${{ github.repository }}/contents/.github/workflows/$FILE?ref=$DEFAULT" \
+              --jq '.content' | base64 -d | grep -E '^\s*schedule:' || true)
+            if [ -n "$HAS_CRON" ]; then
+              echo "  scheduled: $FILE"
+              FOUND_SCHEDULED=$((FOUND_SCHEDULED + 1))
+            fi
+          done
+          if [ "$FOUND_SCHEDULED" -eq 0 ]; then
+            echo "::error::No workflow on the default branch ($DEFAULT) declares a 'schedule:' trigger. The audit's DR-007 gap is open — change the default branch in repo Settings, or move the cron YAMLs to the branch that is actually default."
+            exit 1
+          fi
+          echo "OK: $FOUND_SCHEDULED scheduled workflow(s) live on $DEFAULT."

@@ -90,6 +90,14 @@ A `DigestRun` row left in `PENDING` for > 1 hour is stale. The backend now has a
 
 `/api/internal/warmup/ping` keeps the Render free-tier container warm (15-min idle sleep). GH Actions cron at `*/13 * * * *` (see `cron-warmup.yml`). Owner: platform.
 
+## 7a. Default branch and scheduled workflows
+
+GitHub scheduled events run from the repository's **default branch**, not from whichever branch a workflow YAML lives on. The audit (DR-007) caught that the portal's cron workflows (`cron-backup.yml`, `cron-upload-sweep.yml`, `cron-admin-emails.yml`, `cron-warmup.yml`, `digest.yml`) were committed to `add-react-website` while `main` was still the default — so the schedules silently never fired against the live environment.
+
+**Required state:** the default branch must be `add-react-website` for the schedules to execute. This is a repo Settings → Branches change; it cannot be made from a commit. The `branch-workflows-guardrail.yml` CI job (added with DR-007) fails any push that detects a default branch with zero `schedule:`-triggered workflows — so the gap cannot be silently re-introduced.
+
+If the workflows ever need to live on a separate `ops` branch (e.g. to keep app code isolated from schedule code), set `ops` as the default and pin the workflow YAMLs there. Until that's a deliberate decision, `add-react-website` is the intended default.
+
 ## 8. Incident response owners
 
 | Domain | Owner | Contact |
