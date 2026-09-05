@@ -79,17 +79,32 @@ function scan(file) {
  * Parse SKIPPED_TESTS.md and return the set of relative paths (e.g.
  * `__tests__/dpr.cursor.test.js`) that are explicitly inventoried. The
  * inventory uses backtick-wrapped paths inside markdown table cells.
+ *
+ * DR-018 (audit): the original regex matched ANY backtick-wrapped
+ * `.test.js` path in the markdown — including rows in the "Un-skipped
+ * this round (proof of life)" section. That made a file that we
+ * documented as un-skipped appear in the inventory, so a future
+ * accidental `.skip` in that file would silently pass. Now we scope
+ * the match to the "Skipped file inventory" section specifically:
+ * the heading line below must precede the path. This keeps the
+ * allow-list strictly shrinking.
  */
 function loadInventory() {
   if (!fs.existsSync(INVENTORY_PATH)) return new Set();
   const src = fs.readFileSync(INVENTORY_PATH, 'utf8');
   const set = new Set();
-  // Match backtick-quoted paths that contain __tests__/ or end with .test.js.
-  // Tolerate both `__tests__/foo.test.js` and just `foo.test.js` — the
-  // inventory writes them as `__tests__/foo.test.js`, but be lenient.
+  // Find the "Skipped file inventory" section heading (any level) and
+  // match backtick-quoted .test.js paths that appear AFTER it. Any
+  // path mentioned before that heading (in the "Un-skipped this round"
+  // table, the prose intro, the "Re-enable playbook", etc.) is
+  // excluded from the allow-list.
+  const headingRe = /^#{1,6}\s+Skipped file inventory/m;
+  const headingMatch = headingRe.exec(src);
+  if (!headingMatch) return set;
+  const tail = src.slice(headingMatch.index);
   const re = /`((?:__tests__\/)?[\w./-]+\.test\.js)`/g;
   let m;
-  while ((m = re.exec(src)) !== null) {
+  while ((m = re.exec(tail)) !== null) {
     set.add(m[1].startsWith('__tests__/') ? m[1] : `__tests__/${m[1]}`);
   }
   return set;
@@ -117,20 +132,45 @@ function main() {
   }
 
   // Tier 2: unit suite — allowed only if file is in SKIPPED_TESTS.md.
+  //
+  // DR-018 (audit): the previous code lumped `.skip(` and `.only(` into
+  // the same branch, so an inventoried file could contain `.only(`
+  // without the guard firing. `.only(` focused-test runs can mask real
+  // regressions — the script header documents both markers as
+  // "FORBIDDEN_MARKERS" but only enforced it inconsistently. Now we
+  // treat them separately:
+  //   - `.skip(` in an inventoried file → allowed (the inventory row
+  //     is the contract).
+  //   - `.skip(` in a non-inventoried file → violation.
+  //   - `.only(` ANYWHERE → unconditional violation. Focused runs are
+  //     not part of the production-boundary CI path and must never
+  //     reach a regular `npm test` invocation.
   const inventory = loadInventory();
   for (const file of unitFiles) {
     const rel = path.relative(ROOT, file);
     const hits = scan(file);
     if (hits.length === 0) continue;
+    const onlyHits = hits.filter((h) => h.marker === '.only(');
+    const skipHits = hits.filter((h) => h.marker === '.skip(');
+    for (const h of onlyHits) {
+      violations.push({
+        tier: 'unit',
+        file: rel,
+        marker: h.marker,
+        line: h.line,
+        snippet: h.snippet,
+        reason: 'unit suite — .only( is unconditionally forbidden (focused tests can mask regressions)',
+      });
+    }
     if (!inventory.has(rel)) {
-      for (const h of hits) {
+      for (const h of skipHits) {
         violations.push({
           tier: 'unit',
           file: rel,
           marker: h.marker,
           line: h.line,
           snippet: h.snippet,
-          reason: `unit suite — file not in SKIPPED_TESTS.md inventory (add a row there first)`,
+          reason: 'unit suite — file not in SKIPPED_TESTS.md inventory (add a row there first)',
         });
       }
     }
