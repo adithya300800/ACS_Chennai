@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
@@ -15,6 +15,7 @@ import {
   emptyStateActions,
   scopeBadge as scopeBadgeFor,
 } from '../../lib/scopeCopy.js';
+import Modal from '../../components/Modal.jsx';
 
 // Round-22: admin cross-org DPR list. The previous "My Daily Reports" page
 // (DprList at /portal/dpr/my) rendered every org DPR for admins because the
@@ -80,7 +81,7 @@ function PhotoThumb({ photo }) {
   );
 }
 
-function DprDetailModal({ dprSummary, onClose }) {
+function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
   const { accessToken } = useAuth();
   const [dpr, setDpr] = useState(dprSummary);
   const [loading, setLoading] = useState(true);
@@ -104,89 +105,77 @@ function DprDetailModal({ dprSummary, onClose }) {
     return () => { cancelled = true; };
   }, [dprSummary.id, accessToken]);
 
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={`DPR ${dpr?.projectName || ''} details`}
-      onClick={onClose}
-      style={{
-        position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        zIndex: 100, padding: '1rem',
-      }}
+    // DR-017: replaced the inline <div role="dialog"> with the shared
+    // Modal primitive. The audit found that six Tab presses escaped
+    // the dialog into the cards behind it; the primitive now handles
+    // initial focus, focus trap, Escape, and focus return to the
+    // trigger. The DPR card ref captured by the parent <DprAll>
+    // render is passed through via the parent (see `<DprDetailModal
+    // ... returnFocusRef={triggerRef} />` below).
+    <Modal
+      open={!!dprSummary}
+      onClose={onClose}
+      ariaLabel={`DPR ${dpr?.projectName || ''} details`}
+      returnFocusRef={returnFocusRef}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: '#fff', borderRadius: 12, maxWidth: 720, width: '100%',
-          maxHeight: '90vh', overflowY: 'auto', padding: '1.5rem',
-          boxShadow: '0 20px 60px rgba(15,23,42,0.3)',
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem', gap: '1rem' }}>
-          <div>
-            <h2 style={{ margin: 0, color: 'var(--navy)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-              {dpr?.projectName || 'DPR'}
-            </h2>
-            <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-              <StatusBadge status={dpr?.status} map={DPR_STATUS_MAP} />
-              <span style={{ fontSize: '0.85rem', color: 'var(--steel)' }}>
-                {WORK_TYPE_LABEL[dpr?.workType] || dpr?.workType || '—'}
-              </span>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem', gap: '1rem' }}>
+        <div>
+          <h2 style={{ margin: 0, color: 'var(--navy)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+            {dpr?.projectName || 'DPR'}
+          </h2>
+          <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <StatusBadge status={dpr?.status} map={DPR_STATUS_MAP} />
+            <span style={{ fontSize: '0.85rem', color: 'var(--steel)' }}>
+              {WORK_TYPE_LABEL[dpr?.workType] || dpr?.workType || '—'}
+            </span>
+          </div>
+        </div>
+        <button type="button" onClick={onClose} className="btn btn-ghost btn-sm" aria-label="Close details">✕</button>
+      </div>
+
+      {loading ? (
+        <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--steel)' }}>Loading details…</div>
+      ) : error ? (
+        <div className="portal-auth-error">{error}</div>
+      ) : dpr ? (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
+            <div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Report date</div>
+              <div style={{ color: 'var(--navy)' }}>{dpr.reportDate ? formatDateOnly(dpr.reportDate) : '—'}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Location</div>
+              <div style={{ color: 'var(--navy)' }}>{dpr.location || '—'}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Submitted by</div>
+              <div style={{ color: 'var(--navy)' }}>{dpr.submittedBy?.name || '—'}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Weather</div>
+              <div style={{ color: 'var(--navy)' }}>{dpr.weather || '—'}{dpr.temperature ? ` · ${dpr.temperature}` : ''}</div>
             </div>
           </div>
-          <button type="button" onClick={onClose} className="btn btn-ghost btn-sm" aria-label="Close details">✕</button>
-        </div>
 
-        {loading ? (
-          <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--steel)' }}>Loading details…</div>
-        ) : error ? (
-          <div className="portal-auth-error">{error}</div>
-        ) : dpr ? (
-          <>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
-              <div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Report date</div>
-                <div style={{ color: 'var(--navy)' }}>{dpr.reportDate ? formatDateOnly(dpr.reportDate) : '—'}</div>
-              </div>
-              <div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Location</div>
-                <div style={{ color: 'var(--navy)' }}>{dpr.location || '—'}</div>
-              </div>
-              <div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Submitted by</div>
-                <div style={{ color: 'var(--navy)' }}>{dpr.submittedBy?.name || '—'}</div>
-              </div>
-              <div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Weather</div>
-                <div style={{ color: 'var(--navy)' }}>{dpr.weather || '—'}{dpr.temperature ? ` · ${dpr.temperature}` : ''}</div>
-              </div>
+          {dpr.workExecutedToday && (
+            <div style={{ marginBottom: '1rem' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.25rem' }}>Work executed today</div>
+              <div style={{ whiteSpace: 'pre-wrap', color: 'var(--navy)' }}>{dpr.workExecutedToday}</div>
             </div>
+          )}
+          {dpr.notes && (
+            <div style={{ marginBottom: '1rem' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.25rem' }}>Other observations</div>
+              <div style={{ whiteSpace: 'pre-wrap', color: 'var(--navy)' }}>{dpr.notes}</div>
+            </div>
+          )}
 
-            {dpr.workExecutedToday && (
-              <div style={{ marginBottom: '1rem' }}>
-                <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.25rem' }}>Work executed today</div>
-                <div style={{ whiteSpace: 'pre-wrap', color: 'var(--navy)' }}>{dpr.workExecutedToday}</div>
-              </div>
-            )}
-            {dpr.notes && (
-              <div style={{ marginBottom: '1rem' }}>
-                <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.25rem' }}>Other observations</div>
-                <div style={{ whiteSpace: 'pre-wrap', color: 'var(--navy)' }}>{dpr.notes}</div>
-              </div>
-            )}
-
-            {Array.isArray(dpr.photos) && dpr.photos.length > 0 && (
-              <div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.5rem' }}>
-                  Photos ({dpr.photos.length})
+          {Array.isArray(dpr.photos) && dpr.photos.length > 0 && (
+            <div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.5rem' }}>
+                Photos ({dpr.photos.length})
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '0.5rem' }}>
                   {dpr.photos.map((p) => (
@@ -202,8 +191,7 @@ function DprDetailModal({ dprSummary, onClose }) {
             )}
           </>
         ) : null}
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -216,6 +204,10 @@ export default function DprAll() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selectedDpr, setSelectedDpr] = useState(null);
+  // DR-017: capture the DPR card that opened the modal so the Modal
+  // primitive can return focus to it after close. Without this the
+  // user is dropped at <body> and has to Tab back through the page.
+  const lastTriggerRef = useRef(null);
 
   // R22.5: filter state for the admin browse view. The backend supports
   // `status`, `from`, `to` (date range on reportDate), `projectName`
@@ -609,10 +601,15 @@ export default function DprAll() {
                 role="button"
                 tabIndex={0}
                 className="dpr-card"
-                onClick={() => setSelectedDpr(dpr)}
+                onClick={(e) => {
+                  // Capture the trigger for focus-return on close.
+                  lastTriggerRef.current = e.currentTarget;
+                  setSelectedDpr(dpr);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
+                    lastTriggerRef.current = e.currentTarget;
                     setSelectedDpr(dpr);
                   }
                 }}
@@ -667,7 +664,11 @@ export default function DprAll() {
       )}
 
       {selectedDpr && (
-        <DprDetailModal dprSummary={selectedDpr} onClose={() => setSelectedDpr(null)} />
+        <DprDetailModal
+          dprSummary={selectedDpr}
+          onClose={() => setSelectedDpr(null)}
+          returnFocusRef={lastTriggerRef}
+        />
       )}
     </div>
   );
