@@ -37,6 +37,28 @@ const validateReportDate = (value) => {
   return null;
 };
 
+// SOL DR-004: when editing an existing draft the server may send
+// `reportDate` as either a strict YYYY-MM-DD string (post-fix) or a raw
+// JS Date that JSON.stringify renders as ISO datetime (pre-fix). Either
+// form is reduced to YYYY-MM-DD for the date input, falling back to the
+// local "today" string when the value is missing/invalid so the form
+// still mounts cleanly.
+function normalizeReportDate(value) {
+  if (!value) return getLocalDate();
+  if (typeof value === 'string') {
+    // Already a date-only string.
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+    if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  }
+  // Date instance or any other Date-coercible input.
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return getLocalDate();
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 // Round-12: DPR's `workType` is now a category tag, not a derived value.
 // All 15 sub-work-types moved to Inspection & Compliance Records, so the
 // DPR's workType just needs to classify the day's narrative. Keep the
@@ -185,7 +207,11 @@ export default function DprSubmit() {
         setForm({
           projectName: d.projectName || '',
           location: d.location || '',
-          reportDate: d.reportDate || getLocalDate(),
+          // SOL DR-004: backend now emits strict YYYY-MM-DD (see
+          // backend/src/routes/dpr.js:1063 normalization). If a pre-fix
+          // server still returns an ISO datetime, strip the time suffix
+          // so the date input keeps its value.
+          reportDate: normalizeReportDate(d.reportDate),
           weather: d.weather || 'Sunny',
           temperature: d.temperature || '',
           contractor: d.contractor || '',
@@ -453,14 +479,16 @@ export default function DprSubmit() {
         return;
       }
 
-      // SOL-P0#4: when editing an existing server-side draft, PUT the update
-      // (with the version we read on load — backend enforces optimistic lock).
-      // Otherwise POST a brand-new DPR.
+      // SOL DR-004: when editing an existing server-side draft, PUT the
+      // update with the version we read on load — backend enforces the
+      // optimistic lock. The api signature is `updateDpr(id, data, version,
+      // token)`; previous code passed the token in the version slot AND
+      // embedded version in the body, which both mis-set the version field
+      // AND left the PUT unauthenticated.
       if (editingId) {
         await api.updateDpr(
           editingId,
           {
-            version: editingVersion,
             projectName: form.projectName,
             location: form.location,
             reportDate: form.reportDate,
@@ -478,6 +506,7 @@ export default function DprSubmit() {
             // User-added ad-hoc text + table sections.
             customSections: Array.isArray(customSections) && customSections.length > 0 ? customSections : null,
           },
+          editingVersion,
           accessToken
         );
         toast.push(submitStatus === 'DRAFT' ? 'Draft updated.' : 'DPR submitted successfully.', 'success');

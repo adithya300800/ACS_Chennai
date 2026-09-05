@@ -113,4 +113,30 @@ function parseISODateTime(value) {
   return isNaN(d.getTime()) ? null : d;
 }
 
-module.exports = { mapPrismaError, safeHandler, parseStrictISODate, parseISODateTime };
+/**
+ * Render a Date (typically from a Postgres `@db.Date` column) as a strict
+ * YYYY-MM-DD string in UTC. SOL DR-004: the GET /dpr/:id endpoint was
+ * emitting the raw `Date.toJSON()` form ("2026-09-01T00:00:00.000Z"),
+ * which the frontend's `<input type="date">` rejected as malformed. The
+ * matching PUT validator already accepts only `YYYY-MM-DD` — pin the GET
+ * shape so the round-trip is consistent.
+ *
+ * Returns `null` for null/undefined/invalid input so callers can
+ * straightforwardly pass through nullable DB columns.
+ */
+function toDateOnly(value) {
+  if (value == null) return null;
+  if (value instanceof Date) {
+    if (isNaN(value.getTime())) return null;
+    return value.toISOString().slice(0, 10);
+  }
+  if (typeof value === 'string') {
+    // Accept anything already YYYY-MM-DD prefixed (e.g. already serialized).
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+    if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+    return null;
+  }
+  return null;
+}
+
+module.exports = { mapPrismaError, safeHandler, parseStrictISODate, parseISODateTime, toDateOnly };

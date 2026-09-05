@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
 const { generateReadSASUrl, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
-const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
+const { mapPrismaError, parseStrictISODate, parseISODateTime, toDateOnly } = require('../lib/errors');
 // Round-27: shared IST date helpers. The `month` query shortcut on the list
 // endpoint uses `getMonthRangeUtc` to expand `?month=YYYY-MM` into a
 // half-open [gte, lt) `reportDate` window aligned to the company's
@@ -817,6 +817,13 @@ router.get('/', asyncHandler(async (req, res) => {
 
     const hasMore = enriched.length > take;
     const items = hasMore ? enriched.slice(0, -1) : enriched;
+    // SOL DR-004: normalize `reportDate` to strict YYYY-MM-DD on every list
+    // row so client list/table components can render the date column
+    // directly without re-parsing an ISO datetime string. The enriched
+    // rows already hold a copy of the Date object, so this is a shallow
+    // overwrite — `lastItem` below is taken AFTER normalization so the
+    // cursor encoder sees the same value the client received.
+    items.forEach((d) => { d.reportDate = toDateOnly(d.reportDate); });
     const lastItem = items[items.length - 1];
     // reportDate is @db.Date in Postgres — Prisma sometimes returns it as
     // a "YYYY-MM-DD" string rather than a JS Date (depends on column type
@@ -1060,7 +1067,18 @@ router.get('/:id', async (req, res) => {
       return { ...photoForClient, readUrl: sasUrl };
     }));
 
-    res.json({ ...dpr, photos: photosWithUrls });
+    // SOL DR-004: normalize the `reportDate` field to strict YYYY-MM-DD so
+    // the frontend's `<input type="date">` accepts the value directly.
+    // Previously this emitted `Date.toJSON()` ("2026-09-01T00:00:00.000Z"),
+    // which the input rejected as malformed and the user had to retype the
+    // date by hand. Matches the PUT validator's `parseStrictISODate`.
+    const responseBody = {
+      ...dpr,
+      reportDate: toDateOnly(dpr.reportDate),
+      photos: photosWithUrls,
+    };
+
+    res.json(responseBody);
   } catch (err) {
     console.error('DPR get error', {
       employeeHash: hashIdentifier(req.employeeId),
