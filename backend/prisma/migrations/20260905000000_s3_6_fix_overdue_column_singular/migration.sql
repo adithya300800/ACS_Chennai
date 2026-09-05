@@ -1,0 +1,61 @@
+-- [S3-6 follow-up] Fix the table-name typo in the original S3-6 migration.
+--
+-- Original (20260904000000_s3_6_overdue_notification_audit):
+--   ALTER TABLE training_enrollments          ← PLURAL (wrong)
+--     ADD COLUMN IF NOT EXISTS overdue_notified_at TIMESTAMP NULL;
+--
+-- Actual table name (per schema.prisma @@map):
+--   training_enrollment                       ← SINGULAR
+--
+-- The original migration silently did nothing on prod — `IF NOT EXISTS` only
+-- guards the column clause, not the table reference. Postgres raises
+-- `relation "training_enrollments" does not exist` and the migration is
+-- marked failed in _prisma_migrations.
+--
+-- Production evidence (2026-09-04, Phase 4 / P0 follow-up):
+--   - /api/training/enrollments and /api/training/enrollments/my return 500
+--     with Prisma error code P2022 ("column does not exist") after the
+--     baseline-deploy that marked all 9 migrations as applied.
+--   - Querying information_schema.columns on training_enrollment returns
+--     19 columns — overdue_notified_at is NOT in the list.
+--   - _prisma_migrations records s3_6 as applied_steps_count=0 (because it
+--     was force-marked applied during the baseline-resolve to bypass P3005;
+--     the underlying ALTER TABLE never ran).
+--
+-- Why a new migration instead of editing the old one:
+--   Migration history is append-only. Editing 20260904000000 would diverge
+--   the migrations folder from the SHA that already ran on prod (and from
+--   _prisma_migrations), and would break `prisma migrate diff` for every
+--   future deploy. A new migration is the standard Prisma pattern for
+--   correcting a missed change.
+--
+-- Why we do NOT drop or rewrite the old S3-6 migration:
+--   `prisma migrate resolve --applied` was already run against it during
+--   Phase 4 to clear the P3005 baseline blocker. Removing the row from
+--   _prisma_migrations without re-running the underlying SQL would create
+--   the same drift problem we're trying to avoid. The old migration is
+--   now historically incorrect but harmless: it will never run again
+--   because (a) it's marked applied and (b) even if it did run on a fresh
+--   DB, the ALTER would error on the missing table — exactly the safety
+--   net the wrong table name gave us.
+--
+-- Idempotency:
+--   ALTER TABLE ... ADD COLUMN IF NOT EXISTS is supported on Postgres 9.6+
+--   (Supabase runs 15+). Re-running this migration on a database that
+--   already has the column is a no-op. Verified against the S3-6 pattern.
+--
+-- Forward path:
+--   1. Commit this migration.
+--   2. Render auto-deploys → startCommand chain:
+--        `npx prisma migrate deploy ; node src/index.js`
+--      picks up the new migration, adds the column.
+--   3. After this lands, /api/training/enrollments should return 200 (it
+--      will still need a real admin token to see admin-side data, but the
+--      P2022 column error is gone).
+--   4. After verification, the Phase-4 diagnostic endpoint (`/diag/schema`)
+--      and the baseline script (whatever shape it ended up as on Render's
+--      startCommand) should be cleaned up. The original S3-6 migration
+--      stays as historical record per the no-rewrite rule above.
+
+ALTER TABLE training_enrollment
+  ADD COLUMN IF NOT EXISTS overdue_notified_at TIMESTAMP NULL;
