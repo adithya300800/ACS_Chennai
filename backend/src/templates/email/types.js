@@ -17,8 +17,18 @@ function heading(text) {
   return `<h1 style="margin:0 0 12px 0;font-size:18px;line-height:1.3;color:#0a2540;font-weight:600;">${text}</h1>`;
 }
 
+// DR-015: route map — every CTA in every template goes through
+// portalLinks so the `#/` hash prefix is always present and the
+// target is one of the App.jsx routes in the route inventory. Inline
+// `${portalUrl}/portal/...` strings were broken on two axes:
+//   1. No `#` — the static-site host serves the homepage shell for
+//      any non-hash path.
+//   2. Some targets didn't exist in App.jsx (e.g. `/portal/dpr/:id`).
+const portalLinks = require('../../lib/portalLinks');
+
 function renderDprReviewed({ notification, context, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
   const projectName = context.projectName || 'your project';
+  const cta = notification.dprId ? portalLinks.dprDetailHref(notification.dprId) : portalLinks.dprMyHref();
   return {
     subject: `Your DPR for ${projectName} was reviewed`,
     html: wrapHtml({
@@ -26,13 +36,14 @@ function renderDprReviewed({ notification, context, wrapHtml, ctaButton, escapeH
       bodyHtml: heading('Daily Progress Report reviewed')
         + paragraph(`Your Daily Progress Report for <strong>${escapeHtml(projectName)}</strong> on <strong>${escapeHtml(context.reportDate || '')}</strong> was reviewed by an admin.`)
         + paragraph(escapeHtml(notification.message || ''))
-        + ctaButton({ href: `${portalUrl}/portal/dpr/${escapeHtml(notification.dprId || '')}`, label: 'View DPR' }),
+        + ctaButton({ href: cta, label: 'View DPR' }),
     }),
   };
 }
 
 function renderDprApproved({ notification, context, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
   const projectName = context.projectName || 'your project';
+  const cta = notification.dprId ? portalLinks.dprDetailHref(notification.dprId) : portalLinks.dprMyHref();
   return {
     subject: `Your DPR for ${projectName} was approved`,
     html: wrapHtml({
@@ -40,13 +51,14 @@ function renderDprApproved({ notification, context, wrapHtml, ctaButton, escapeH
       bodyHtml: heading('Daily Progress Report approved')
         + paragraph(`Your Daily Progress Report for <strong>${escapeHtml(projectName)}</strong> on <strong>${escapeHtml(context.reportDate || '')}</strong> was approved.`)
         + paragraph(escapeHtml(notification.message || ''))
-        + ctaButton({ href: `${portalUrl}/portal/dpr/${escapeHtml(notification.dprId || '')}`, label: 'View DPR' }),
+        + ctaButton({ href: cta, label: 'View DPR' }),
     }),
   };
 }
 
 function renderDprRejected({ notification, context, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
   const projectName = context.projectName || 'your project';
+  const cta = notification.dprId ? portalLinks.dprDetailHref(notification.dprId) : portalLinks.dprMyHref();
   return {
     subject: `Your DPR for ${projectName} was rejected`,
     html: wrapHtml({
@@ -54,19 +66,25 @@ function renderDprRejected({ notification, context, wrapHtml, ctaButton, escapeH
       bodyHtml: heading('Daily Progress Report rejected')
         + paragraph(`Your Daily Progress Report for <strong>${escapeHtml(projectName)}</strong> on <strong>${escapeHtml(context.reportDate || '')}</strong> was rejected.`)
         + paragraph(escapeHtml(notification.message || ''))
-        + ctaButton({ href: `${portalUrl}/portal/dpr/${escapeHtml(notification.dprId || '')}`, label: 'View DPR' }),
+        + ctaButton({ href: cta, label: 'View DPR' }),
     }),
   };
 }
 
 function renderInspectionAcknowledged({ notification, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
+  // Per inspection.js: the notification row carries the inspection's
+  // own ID in `meta.inspectionId` (round-26 fan-out). Fall back to
+  // `notification.id` for older rows; if neither is set, route to the
+  // employee's list (they can find it there).
+  const inspectionId = notification.inspectionId || notification.id;
+  const cta = inspectionId ? portalLinks.inspectionDetailHref(inspectionId) : portalLinks.inspectionMyHref();
   return {
     subject: 'Inspection acknowledged',
     html: wrapHtml({
       preheader: 'Inspection acknowledged by admin.',
       bodyHtml: heading('Inspection acknowledged')
         + paragraph(escapeHtml(notification.message || 'An admin acknowledged your inspection.'))
-        + (notification.dprId ? ctaButton({ href: `${portalUrl}/portal/inspection/${escapeHtml(notification.id || '')}`, label: 'View inspection' }) : ''),
+        + ctaButton({ href: cta, label: 'View inspection' }),
     }),
   };
 }
@@ -78,7 +96,7 @@ function renderInspectionClosed({ notification, wrapHtml, ctaButton, escapeHtml,
       preheader: 'Inspection closed by admin.',
       bodyHtml: heading('Inspection closed')
         + paragraph(escapeHtml(notification.message || 'An admin closed your inspection.'))
-        + ctaButton({ href: `${portalUrl}/portal/inspection`, label: 'View inspections' }),
+        + ctaButton({ href: portalLinks.inspectionMyHref(), label: 'View inspections' }),
     }),
   };
 }
@@ -91,7 +109,7 @@ function renderInspectionRejected({ notification, context, wrapHtml, ctaButton, 
       bodyHtml: heading('Inspection rejected')
         + paragraph(escapeHtml(notification.message || 'Your inspection was rejected.'))
         + (context.reason ? paragraph(`<strong>Reason:</strong> ${escapeHtml(context.reason)}`) : '')
-        + ctaButton({ href: `${portalUrl}/portal/inspection`, label: 'View inspections' }),
+        + ctaButton({ href: portalLinks.inspectionMyHref(), label: 'View inspections' }),
     }),
   };
 }
@@ -103,13 +121,17 @@ function renderLeaveDecided({ notification, wrapHtml, ctaButton, escapeHtml, por
       preheader: 'Your leave request was decided.',
       bodyHtml: heading('Leave request update')
         + paragraph(escapeHtml(notification.message || 'Your leave request was updated.'))
-        + ctaButton({ href: `${portalUrl}/portal/leave`, label: 'View leave' }),
+        + ctaButton({ href: portalLinks.leaveMyHref(), label: 'View leave' }),
     }),
   };
 }
 
 function renderTrainingAssigned({ notification, context, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
   const title = context.courseTitle || 'a training course';
+  // The notification row carries `trainingEnrollmentId` for player-link
+  // routes; fall back to the hub list when the row is older/missing.
+  const enrollmentId = notification.trainingEnrollmentId;
+  const cta = enrollmentId ? portalLinks.trainingDetailHref(enrollmentId) : portalLinks.trainingMyHref();
   return {
     subject: `New training assigned: ${title}`,
     html: wrapHtml({
@@ -117,7 +139,7 @@ function renderTrainingAssigned({ notification, context, wrapHtml, ctaButton, es
       bodyHtml: heading('New training assigned')
         + paragraph(`You have been assigned to <strong>${escapeHtml(title)}</strong>.`)
         + (context.dueDate ? paragraph(`<strong>Due:</strong> ${escapeHtml(context.dueDate)}.`) : '')
-        + ctaButton({ href: `${portalUrl}/portal/training/${escapeHtml(notification.trainingEnrollmentId || '')}`, label: 'Start course' }),
+        + ctaButton({ href: cta, label: 'Start course' }),
     }),
   };
 }
@@ -131,20 +153,22 @@ function renderTrainingCancelled({ notification, context, wrapHtml, ctaButton, e
       bodyHtml: heading('Training unassigned')
         + paragraph(`An admin unassigned <strong>${escapeHtml(title)}</strong> from your queue.`)
         + (context.note ? paragraph(`<strong>Reason:</strong> ${escapeHtml(context.note)}`) : '')
-        + ctaButton({ href: `${portalUrl}/portal/training`, label: 'View my training' }),
+        + ctaButton({ href: portalLinks.trainingMyHref(), label: 'View my training' }),
     }),
   };
 }
 
 function renderTrainingInProgress({ notification, context, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
   const title = context.courseTitle || 'a training course';
+  const enrollmentId = notification.trainingEnrollmentId;
+  const cta = enrollmentId ? portalLinks.trainingDetailHref(enrollmentId) : portalLinks.trainingMyHref();
   return {
     subject: `You started: ${title}`,
     html: wrapHtml({
       preheader: 'You started a course.',
       bodyHtml: heading('Course started')
         + paragraph(`You started <strong>${escapeHtml(title)}</strong>. Continue whenever you're ready.`)
-        + ctaButton({ href: `${portalUrl}/portal/training/${escapeHtml(notification.trainingEnrollmentId || '')}`, label: 'Resume' }),
+        + ctaButton({ href: cta, label: 'Resume' }),
     }),
   };
 }
@@ -157,7 +181,7 @@ function renderTrainingCompleted({ notification, context, wrapHtml, ctaButton, e
       preheader: 'You finished a course.',
       bodyHtml: heading('Training completed 🎉')
         + paragraph(`You completed <strong>${escapeHtml(title)}</strong>.`)
-        + ctaButton({ href: `${portalUrl}/portal/training`, label: 'View my training' }),
+        + ctaButton({ href: portalLinks.trainingMyHref(), label: 'View my training' }),
     }),
   };
 }
@@ -221,7 +245,10 @@ function renderDigest({ context, wrapHtml, ctaButton, escapeHtml, portalUrl }) {
     + (totalCount === 0
       ? '<p style="margin:0 0 12px 0;font-size:15px;color:#6b7280;">No new updates — you&rsquo;re all caught up.</p>'
       : groupSections)
-    + ctaButton({ href: `${portalUrl}/portal/notifications`, label: 'View all notifications' });
+    // DR-015: `/portal/notifications` is not a route in App.jsx; the
+    // nearest reachable target is the preferences page, which is also
+    // the user's logical "notifications inbox" for this digest.
+    + ctaButton({ href: portalLinks.notificationsInboxHref(), label: 'View all notifications' });
 
   return {
     subject,
@@ -256,7 +283,7 @@ function renderAdminDprSubmitted({ context, wrapHtml, ctaButton, escapeHtml, por
       preheader: `New DPR submitted by ${employeeName}.`,
       bodyHtml: heading('New Daily Progress Report submitted')
         + paragraph(`<strong>${escapeHtml(employeeName)}</strong> submitted a DPR for <strong>${escapeHtml(projectName)}</strong>${reportDate ? ` on <strong>${escapeHtml(reportDate)}</strong>` : ''}.`)
-        + (context.dprId ? ctaButton({ href: `${portalUrl}/portal/dpr/${escapeHtml(context.dprId)}`, label: 'Review DPR' }) : ctaButton({ href: `${portalUrl}/portal/dpr`, label: 'Open DPR queue' })),
+        + (context.dprId ? ctaButton({ href: portalLinks.dprDetailHref(context.dprId), label: 'Review DPR' }) : ctaButton({ href: portalLinks.dprQueueAdminHref(), label: 'Open DPR queue' })),
     }),
   };
 }
@@ -271,7 +298,7 @@ function renderAdminInspectionOpened({ context, wrapHtml, ctaButton, escapeHtml,
       preheader: `New inspection opened by ${employeeName}.`,
       bodyHtml: heading('New inspection opened')
         + paragraph(`<strong>${escapeHtml(employeeName)}</strong> opened a new inspection: <strong>${escapeHtml(recordTitle)}</strong>${inspectionType ? ` (${escapeHtml(inspectionType)})` : ''}.`)
-        + (context.inspectionId ? ctaButton({ href: `${portalUrl}/portal/inspection/${escapeHtml(context.inspectionId)}`, label: 'Review inspection' }) : ctaButton({ href: `${portalUrl}/portal/inspection`, label: 'Open inspection queue' })),
+        + (context.inspectionId ? ctaButton({ href: portalLinks.inspectionDetailHref(context.inspectionId), label: 'Review inspection' }) : ctaButton({ href: portalLinks.inspectionQueueAdminHref(), label: 'Open inspection queue' })),
     }),
   };
 }
@@ -289,7 +316,7 @@ function renderAdminLeaveRequested({ context, wrapHtml, ctaButton, escapeHtml, p
       bodyHtml: heading('New leave request')
         + paragraph(`<strong>${escapeHtml(employeeName)}</strong> requested leave${leaveType ? ` (${escapeHtml(leaveType)})` : ''}.`)
         + (fromDate && toDate ? paragraph(`<strong>Dates:</strong> ${escapeHtml(fromDate)} → ${escapeHtml(toDate)}${daysCount ? ` · <strong>${escapeHtml(String(daysCount))}</strong> day${Number(daysCount) === 1 ? '' : 's'}` : ''}.`) : '')
-        + ctaButton({ href: `${portalUrl}/portal/leave`, label: 'Review leave request' }),
+        + ctaButton({ href: portalLinks.leaveMyHref(), label: 'Review leave request' }),
     }),
   };
 }
@@ -307,7 +334,7 @@ function renderAdminTrainingOverdue({ context, wrapHtml, ctaButton, escapeHtml, 
       bodyHtml: heading('Training course overdue')
         + paragraph(`<strong>${escapeHtml(employeeName)}</strong> has not completed <strong>${escapeHtml(courseTitle)}</strong> by the due date.`)
         + (dueDate ? paragraph(`<strong>Due:</strong> ${escapeHtml(dueDate)}${daysOverdue != null ? ` · <strong>${escapeHtml(String(daysOverdue))}</strong> day${Number(daysOverdue) === 1 ? '' : 's'} overdue` : ''}${priority ? ` · <strong>Priority:</strong> ${escapeHtml(priority)}` : ''}.`) : '')
-        + (context.enrollmentId ? ctaButton({ href: `${portalUrl}/portal/training/${escapeHtml(context.enrollmentId)}`, label: 'Open enrollment' }) : ctaButton({ href: `${portalUrl}/portal/training`, label: 'Open training queue' })),
+        + (context.enrollmentId ? ctaButton({ href: portalLinks.trainingDetailHref(context.enrollmentId), label: 'Open enrollment' }) : ctaButton({ href: portalLinks.trainingQueueAdminHref(), label: 'Open training queue' })),
     }),
   };
 }
@@ -353,7 +380,7 @@ function renderAdminAttendanceDigest({ context, wrapHtml, ctaButton, escapeHtml,
     + renderSection('Present', present, 'No one checked in today.')
     + renderSection('On approved leave', onLeave, 'No one on approved leave.')
     + renderSection('Absent', absent, 'No one is absent.')
-    + ctaButton({ href: `${portalUrl}/portal/attendance`, label: 'View timesheet' });
+    + ctaButton({ href: portalLinks.attendanceAdminHref(), label: 'View timesheet' });
 
   return {
     subject: `Daily attendance${dateLabel ? ` · ${dateLabel}` : ''}`,

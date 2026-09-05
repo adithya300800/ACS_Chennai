@@ -17,6 +17,14 @@
 
 const { escapeHtml } = require('../../lib/email');
 const { types, renderDigest, renderAdminAttendanceDigest } = require('./types');
+// DR-015: central route map. Every portal link in every email
+// template goes through `portalLinks` so the `#/` hash prefix and
+// the route → app-route mapping are consistent. The previous inline
+// `PORTAL_URL + '/portal/...'` build omitted the hash, so the link
+// hit the static-site 404 instead of the HashRouter route.
+const {
+  notificationsPreferencesHref,
+} = require('../../lib/portalLinks');
 
 const PORTAL_URL = process.env.FRONTEND_URL || 'https://acschennai.com';
 
@@ -56,7 +64,7 @@ function wrapHtml({ preheader, bodyHtml }) {
             <tr>
               <td style="padding:16px 24px;background:#fafbfc;border-top:1px solid #ececef;font-size:12px;color:#6b7280;line-height:1.5;">
                 You can change which notifications we email you from
-                <a href="${escapeHtml(PORTAL_URL)}/portal/notifications/preferences" style="color:#0a2540;">your preferences</a>.
+                <a href="${escapeHtml(notificationsPreferencesHref())}" style="color:#0a2540;">your preferences</a>.
               </td>
             </tr>
           </table>

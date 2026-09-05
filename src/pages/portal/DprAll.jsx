@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -205,6 +206,7 @@ export default function DprAll() {
   useDocumentTitle('All Daily Reports Records');
   const { accessToken } = useAuth();
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [dprs, setDprs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -268,6 +270,39 @@ export default function DprAll() {
   }, [accessToken, toast, filter]);
 
   useEffect(() => { load(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, [accessToken, filter]);
+
+  // DR-015: deep-link opener. Email CTAs for DPR detail route here
+  // with `?id=<DPR_ID>` (see backend/src/lib/portalLinks.js:
+  // dprDetailHref maps the logical "DPR detail page" to
+  // /portal/dpr/all?id=<id>). When the user lands, we auto-open the
+  // detail modal for that record IF it appears in the current loaded
+  // list. If the record isn't in the loaded list (filtered out by the
+  // current month/status filters), we clear the query param so the
+  // empty-result state isn't misleading — the user keeps their filter
+  // and can switch to "All time" to find the record.
+  useEffect(() => {
+    const idParam = searchParams.get('id');
+    if (!idParam || loading) return;
+    const match = dprs.find((d) => d.id === idParam);
+    if (match) {
+      setSelectedDpr(match);
+      // Strip the param so a reload doesn't re-open the modal forever,
+      // and so the URL doesn't keep a stale id after the user closes
+      // the modal themselves.
+      const next = new URLSearchParams(searchParams);
+      next.delete('id');
+      setSearchParams(next, { replace: true });
+    }
+    // We deliberately only respond once per ?id value: when no match
+    // is found, drop the param so a back-and-forth with the filters
+    // doesn't repeatedly try (and fail) to find it.
+    if (!match) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('id');
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dprs, loading]);
 
   const handleFilterChange = (key, value) => {
     setFilter((f) => {

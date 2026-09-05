@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext.jsx';
 import { useToast } from '../contexts/ToastContext.jsx';
 import { api } from '../lib/api.js';
 import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
+import { resolveLanding } from '../lib/loginRedirect.js';
 
 // Map the backend's typed OAuth error codes to something a human can act on.
 // The popup posts `{ type: 'zoho-oauth-error', error: '<code>' }`; showing the
@@ -60,6 +61,14 @@ export default function PortalLogin() {
   const [status, setStatus] = useState('idle'); // idle | loading
   const [showPassword, setShowPassword] = useState(false);
 
+  // DR-015: resolved by `resolveLanding(from, employee)` (see
+  // src/lib/loginRedirect.js). When ProtectedRoute redirected an
+  // unauthenticated user here, it captured the original target in
+  // `location.state.from` and we honor it so an email-CTA link
+  // opened while signed out lands on the intended record/preferences
+  // page after sign-in. Falls back to the role landing on manual
+  // login.
+
   // Surface "session expired" navigation state from AuthContext's logout
   // listener as a friendly toast instead of letting the user wonder why
   // they got bounced back to login.
@@ -106,11 +115,19 @@ export default function PortalLogin() {
         .then((data) => {
           setAuthData(data.accessToken, data.employee, data.refreshToken);
           maybeShowWelcomeToast(toast, data.employee);
-          // P0/A-02: land admins on the new Overview.
-          // SOL-P2#16: employees now land on the home dashboard (which itself
-          // surfaces today's attendance state). Attendance stays at
-          // /portal/attendance for the full month history view.
-          const landing = data.employee?.isAdmin ? '/portal/admin' : '/portal/dashboard';
+          // DR-015: ProtectedRoute passes the intended destination in
+          // `location.state.from` when it redirects unauthenticated users
+          // to /portal/login. Honor it so an email link opened while
+          // logged out lands on the intended page after sign-in instead
+          // of the role landing. Fall back to the role landing when no
+          // `from` was recorded (manual navigation to /portal/login).
+          // DR-015 acceptance: "a generated email link opened while
+          // logged out ends at the intended record/preferences page
+          // after sign-in. Check the rendered page and record, not
+          // only HTTP 200." — this is the SPA-side half of the
+          // contract; the other half is the `#/` hash on the link
+          // itself (backend/src/lib/portalLinks.js).
+          const landing = resolveLanding(location.state?.from, data.employee);
           // SPA navigation — preserves any draft state and avoids a full reload
           navigate(landing, { replace: true });
         })
@@ -166,9 +183,11 @@ export default function PortalLogin() {
         });
       } catch {}
       maybeShowWelcomeToast(toast, employee);
-      // P0/A-02: branch landing on role post-auth.
-      // SOL-P2#16: employees now land on the home dashboard.
-      const landing = employee?.isAdmin ? '/portal/admin' : '/portal/dashboard';
+      // DR-015: honor `location.state.from` if ProtectedRoute recorded
+      // an intended destination. Falls back to the role landing on
+      // manual login. (See renderAdmin branch below for the parallel
+      // Zoho OAuth popup path.)
+      const landing = resolveLanding(location.state?.from, employee);
       navigate(landing);
     } catch (err) {
       const msg = err.message || 'Login failed. Please check your credentials.';
@@ -254,8 +273,12 @@ export default function PortalLogin() {
             });
           } catch {}
           maybeShowWelcomeToast(toast, event.data.employee);
-          // P0/A-02: branch landing on role post-auth.
-          const landing = event.data.employee?.isAdmin ? '/portal/admin' : '/portal/attendance';
+          // DR-015: same `from`-aware landing resolution as the
+          // password path above. Zoho OAuth popup is the common
+          // path for first-time / device-pairing users hitting an
+          // email CTA while signed out, so honoring `from` here is
+          // what closes the loop on the audit acceptance criterion.
+          const landing = resolveLanding(location.state?.from, event.data.employee);
           navigate(landing, { replace: true });
         } else if (event.data?.type === 'zoho-oauth-error') {
           cleanup();

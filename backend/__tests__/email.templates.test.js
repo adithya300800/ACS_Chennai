@@ -133,11 +133,18 @@ describe('email templates — CTA links point to the portal', () => {
     expect(html).toMatch(/href="[^"]*\/portal\/training\/tenr-abc"/);
   });
 
-  it('DPR_APPROVED CTA links to /portal/dpr/:id', () => {
+  it('DPR_APPROVED CTA links to the deep-link URL (modal on /portal/dpr/all?id=...)', () => {
+    // DR-015: there is no `/portal/dpr/:id` route in App.jsx — DPR
+    // detail is a modal that opens on the list page when the URL
+    // contains `?id=<DPR_ID>`. The template's CTA therefore points at
+    // /portal/dpr/all?id=dpr-abc (HashRouter-form, hash-prefixed),
+    // which DprAll.jsx reads via useSearchParams and uses to auto-open
+    // the DprDetailModal. Asserting the OLD `/portal/dpr/dpr-abc`
+    // pattern would re-pin the audit's pre-existing broken-link bug.
     const { html } = renderTemplate('DPR_APPROVED', makeContext('DPR_APPROVED', {
       context: { projectName: 'X', reportDate: '2026-09-03' },
     }));
-    expect(html).toMatch(/href="[^"]*\/portal\/dpr\/dpr-abc"/);
+    expect(html).toMatch(/href="[^"]*\/portal\/dpr\/all\?id=dpr-abc(#\/?)?"/);
   });
 
   it('INSPECTION_REJECTED surfaces the reason in the body when provided', () => {
