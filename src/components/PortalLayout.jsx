@@ -13,23 +13,76 @@ import useFocusTrap from '../hooks/useFocusTrap.js';
 import useKeyboardShortcut from '../hooks/useKeyboardShortcut.js';
 import { formatDateOnly } from '../lib/format.js';
 
+// S5 audit: desktop sidebar used to start icon-only with no way to
+// remember the user's choice. The new contract:
+//   - First visit on desktop → expanded (so labels are visible and the
+//     audit's "no discoverable affordance" finding stays fixed).
+//   - First visit on mobile  → collapsed (the drawer overlay covers the
+//     page; opening it should be a deliberate gesture).
+//   - The user's last toggle persists across reloads via localStorage.
+//   - The persisted choice wins on desktop; mobile always collapses the
+//     drawer off-canvas regardless of the desktop preference.
+// This breaks the "always icon-only on desktop" regression class.
+
+const SIDEBAR_PREF_KEY = 'acs.sidebarExpanded';
+// Read synchronously so the first render uses the saved preference —
+// avoids the icon-only → expanded flash the audit captured.
+const readSidebarPref = () => {
+  if (typeof window === 'undefined') return null;
+  const v = window.localStorage.getItem(SIDEBAR_PREF_KEY);
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  return null; // never set → fall back to defaults below
+};
+
 export default function PortalLayout() {
   const { employee, logout } = useAuth();
   const navigate = useNavigate();
-  const [sidebarOpen, setSidebarOpen] = useState(false); // Start collapsed on mobile
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  const [sidebarOpen, setSidebarOpenState] = useState(() => {
+    // Mobile should always start collapsed; desktop honours the saved
+    // choice, defaulting to expanded on first visit.
+    if (window.innerWidth < 768) return false;
+    const saved = readSidebarPref();
+    return saved === null ? true : saved;
+  });
   const sidebarRef = useRef(null);
+
+  // Wrapper that also persists the desktop choice. On mobile the drawer
+  // state isn't persisted — every reload starts closed, by design — so
+  // we only write the key when we're on a desktop-sized viewport.
+  const setSidebarOpen = useCallback((next) => {
+    setSidebarOpenState((prev) => {
+      const resolved = typeof next === 'function' ? next(prev) : next;
+      const mobile = window.innerWidth < 768;
+      if (!mobile) {
+        try { window.localStorage.setItem(SIDEBAR_PREF_KEY, String(resolved)); } catch (_) { /* private mode / quota — ignore */ }
+      }
+      return resolved;
+    });
+  }, []);
 
   // Handle resize
   React.useEffect(() => {
     const handleResize = () => {
       const mobile = window.innerWidth < 768;
+      const wasMobile = isMobile;
       setIsMobile(mobile);
-      if (!mobile) setSidebarOpen(true); // Auto-expand on desktop
+      // Crossing the desktop boundary: collapse the mobile drawer (it
+      // would cover everything off-canvas on desktop) but DO NOT touch
+      // the desktop sidebar state — the user's saved preference wins.
+      if (mobile !== wasMobile) {
+        if (mobile) {
+          setSidebarOpenState(false);
+        } else {
+          const saved = readSidebarPref();
+          setSidebarOpenState(saved === null ? true : saved);
+        }
+      }
     };
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, []);
+  }, [isMobile]);
 
   // Close mobile sidebar on Escape
   React.useEffect(() => {
