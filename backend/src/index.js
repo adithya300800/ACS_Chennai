@@ -25,6 +25,17 @@ const dprRoutes = require('./routes/dpr');
 // structured sub-work types formerly nested inside DPR.workEntries (material
 // receipt, cube test, water quality, waterproofing, NCR, safety, etc.).
 const inspectionRoutes = require('./routes/inspection');
+// N5 (round-29): cube-test integration — links the cube_casting inspection
+// to the parent concrete-pour DPR and tracks 7-day / 28-day compression-
+// test results. See backend/src/routes/cubeTest.js header for the auth
+// model and the status-lifecycle derivation rules.
+const cubeTestRoutes = require('./routes/cubeTest');
+// N17 (round-29): Project-level dashboard with KPI tiles. Lightweight
+// Project master (half-step to N1, which is XL and out of scope) plus a
+// single aggregated counts endpoint the PM dashboard hits per render.
+// The route file owns its own auth gates — requireAuth for reads,
+// requireFreshAdmin for mutations.
+const projectRoutes = require('./routes/projects');
 // Round-13: Leave Request workflow (employee submit / admin approve-reject).
 const leaveRoutes = require('./routes/leave');
 // Round-14: Employee Training — admin assigns external courses (LinkedIn,
@@ -34,6 +45,13 @@ const leaveRoutes = require('./routes/leave');
 // trainingWriteLimiter inside the route file; reads are not throttled.
 const trainingRoutes = require('./routes/training');
 const contactRoutes = require('./routes/contact');
+// N7 (round-28): Bill-of-Quantities items — registry + variance report.
+// Half-step to N1 (Project Master). See backend/src/routes/boq.js for
+// the endpoints + auth model. Mounted at /api/boq with no rate limiter —
+// the BOQ list is read-mostly and a single project never has more than
+// O(100) items, so an admin dashboard polling once a minute is well under
+// any throttling threshold.
+const boqRoutes = require('./routes/boq');
 // DR-017: admin storage health — orphan-blob summary + on-demand sweep trigger.
 // Mounted at /api/admin/storage — the only admin-only ops surface left after
 // DR-012 removed the /api/diag routes. Auth model is requireAuth +
@@ -372,6 +390,18 @@ function createApp(deps = {}) {
   // material receipt) and can legitimately approach 1 MB.
   app.use('/api/inspection/sas-url', sasLimiter);
   app.use('/api/inspection', inspectionRoutes);
+  // N5 (round-29): cube-test integration — list / create / patch / due-soon
+  // / pour-summary. Reads are unthrottled; the cube-test row creation is
+  // rare (one per pour, not per photo) so no write-rate-limiter is
+  // mounted. Body payloads are tiny (location + grade + cast date), well
+  // under the global 1mb default.
+  app.use('/api/cube-tests', cubeTestRoutes);
+  // N17 (round-29): Project-level dashboard with KPI tiles. Mounted at
+  // /api/projects so the frontend PM dashboard can GET the curated list,
+  // resolve a project by id or name, and fetch the aggregated KPI
+  // payload in one round trip. No extra middleware — the route file owns
+  // its own auth + rate-limit decisions.
+  app.use('/api/projects', projectRoutes);
   app.use('/api/contact', contactLimiter, contactRoutes);
   // DR-017: admin storage health — orphan counts + on-demand sweep trigger.
   // Routes inside use requireAuth + requireFreshAdmin; the mount itself has
@@ -382,6 +412,10 @@ function createApp(deps = {}) {
   app.use('/api/admin', adminEmployeesRoutes);
   // Round-25: per-employee notification preferences + admin-only test send.
   app.use('/api/notifications', notificationsRoutes);
+  // N7 (round-28): BOQ items — registry CRUD + variance report. Auth
+  // gate lives inside the route file (requireAuth for reads,
+  // creator-or-admin for writes).
+  app.use('/api/boq', boqRoutes);
   // Round-25 (M2): daily digest cron endpoint. Gated by INTERNAL_API_TOKEN
   // (404 when unset, 403 when the header doesn't match) — same envelope as
   // the /version probe. Render Cron Job hits this at 02:30 UTC = 08:00 IST.

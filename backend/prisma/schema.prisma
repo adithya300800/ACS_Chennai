@@ -57,6 +57,10 @@ model Employee {
   trainingCoursesCreated TrainingCourse[]        @relation("CourseCreatedBy")
   trainingEnrollments    TrainingEnrollment[]    @relation("EnrollEmployee")
   trainingAssignedByMe   TrainingEnrollment[]    @relation("EnrollAssignedBy")
+  // N17: back-relation for Project.createdBy — projects admin-curated
+  // through the dashboard. SetNull on the FK (see Project model notes),
+  // so a deleted admin does not delete the projects they created.
+  projectsCreated        Project[]               @relation("ProjectCreator")
   // Round-25: email notification preferences + audit log + digest runs.
   // NotificationPreference is 1:1 (PK = employeeId); EmailLog / DigestRun
   // are 1:N and outlive notification rows via onDelete: SetNull.
@@ -70,6 +74,14 @@ model Employee {
   // claim/update pattern + the P2002 catch race-safety.
   adminDigestRuns        AdminDigestRun[]
   uploadIntents          UploadIntent[]
+  // N5 cube-test integration: back-relation to CubeTest.submittedById so
+  // the Prisma validator accepts the relation on CubeTest.
+  cubeTestsSubmitted     CubeTest[]            @relation("CubeTestSubmitter")
+  // N7 (round-28): back-relation for BOQ items this employee created.
+  // boqsCreated is for audit ("who added item 2.3.1?") — the create-time
+  // audit trail. Mirror with the inspect/dpr back-relations above so the
+  // prisma client offers the navigation in both directions.
+  boqsCreated            BoqItem[]       @relation("BoqCreator")
 
   @@map("employees")
 }
@@ -223,9 +235,22 @@ model DPR {
   revisions     DPRRevision[]
   notifications Notification[]
   inspections   InspectionRecord[]
+  // N5 cube-test integration: a concrete-pour DPR can have multiple cube
+  // tests attached (one per cube-cast set). Nullable FK on CubeTest so
+  // cubes filed standalone (no parent pour row) still work — see
+  // CubeTest.dprId docs.
+  cubeTests     CubeTest[]
+  // N7 (round-28): BOQ link. Nullable FK to BoqItem so a DPR line can be
+  // traced back to its bill-of-quantities item without requiring a full
+  // Project Master (the projectName column stays free-text for now).
+  // onDelete: SetNull so archiving a BOQ item doesn't cascade-delete the
+  // historic DPR rows that referenced it (the audit trail survives).
+  boqItemId     String?            @map("boq_item_id")
+  boqItem       BoqItem?           @relation(fields: [boqItemId], references: [id], onDelete: SetNull)
 
   @@unique([submittedById, reportDate])
   @@index([reportDate, id])
+  @@index([boqItemId])
   @@map("dpr")
 }
 
@@ -304,6 +329,16 @@ model InspectionRecord {
   dpr         DPR?              @relation(fields: [dprId], references: [id])
   submittedBy Employee          @relation("InspectionSubmitter", fields: [submittedById], references: [id])
   photos      InspectionPhoto[]
+  // N5 cube-test integration: a cube_casting inspection is the source of
+  // truth for the cast event (when, where, mix design). One inspection can
+  // produce multiple cube-test rows (e.g. separate M30 + M40 sets in one
+  // pour). OnDelete SetNull so deleting the parent inspection does not
+  // orphan the cube-test history.
+  cubeTests   CubeTest[]
+  // N7 (round-28): BOQ link — same shape as DPR. Nullable FK with SetNull
+  // so archiving a BOQ item doesn't cascade-delete historic inspections.
+  boqItemId   String?           @map("boq_item_id")
+  boqItem     BoqItem?          @relation(fields: [boqItemId], references: [id], onDelete: SetNull)
 
   // Indexes mirror DPR's pattern: owner + date for "my inspections this week",
   // dprId for "show me inspections on this DPR", and (date,id) for cursor
@@ -312,6 +347,7 @@ model InspectionRecord {
   @@index([dprId])
   @@index([reportDate, id])
   @@index([inspectionType])
+  @@index([boqItemId])
   @@map("inspection_record")
 }
 
@@ -333,6 +369,67 @@ model InspectionPhoto {
   @@index([inspectionId])
   @@index([ulid])
   @@map("inspection_photo")
+}
+
+// ─────────────────────────────────────────────
+// N7 (round-28) — Bill of Quantities (BOQ) line items
+// ─────────────────────────────────────────────
+//
+// Half-step to N1 (Project Master). Lets a DPR / Inspection record link
+// back to a specific bill-of-quantities item so the billing engineer can
+// trace what was actually executed on-site against the contract quantity.
+//
+// projectName is free-text (mirrors DPR.projectName / InspectionRecord.
+// projectName) because a full Project Master does not exist yet — the FK
+// to Project is a deliberate gap, NOT an oversight. When N1 ships, swap
+// projectName for a `projectId` FK and a separate BOQ-by-project
+// uniqueness rule.
+//
+// itemCode is the BOQ convention (e.g. "2.3.1", "5.4.2.1") and must be
+// unique per projectName so a contractor's "Steel reinforcement — 12mm
+// dia — Fe500D" cannot be entered twice under the same project. The
+// @@unique lets a 400 DUPLICATE surface cleanly via the Prisma error
+// mapper (errors.js:mapPrismaError).
+//
+// quantity × rate is stored pre-computed in `amount` so variance reports
+// don't need to JOIN another table; the computed column is a
+// convenience, NOT the source of truth — server-side routes always
+// recompute from quantity × rate on write.
+//
+// isActive is the soft-delete flag — DELETE /api/boq/:id sets
+// isActive=false rather than removing the row, because DPR / Inspection
+// records keep a FK reference and the audit trail must survive.
+//
+// createdById is the Employee who added the item. PATCH/DELETE permit
+// either the creator or an admin (mirrors DPR ownership model).
+//
+// onDelete: Restrict on the Employee FK — deleting an employee must not
+// orphan a BOQ row, and an admin transfer-out flow can reassign createdBy
+// if needed (out of scope for this round).
+model BoqItem {
+  id          String   @id @default(uuid())
+  projectName String
+  itemCode    String   @db.VarChar(60)
+  description String
+  unit        String   @db.VarChar(20)
+  quantity    Float
+  rate        Float
+  // computed (quantity × rate) — convenience, not source of truth
+  amount      Float
+  category    String?  @db.VarChar(60)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdById String   @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  createdBy   Employee           @relation("BoqCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  dprs        DPR[]
+  inspections InspectionRecord[]
+
+  @@unique([projectName, itemCode])
+  @@index([projectName])
+  @@index([isActive])
+  @@map("boq_item")
 }
 
 model Notification {
@@ -798,4 +895,161 @@ model UploadIntent {
   //   EXPIRED-blob-verify → (status='EXPIRED',   boundAt IS NULL)
   @@index([status, boundAt])
   @@map("upload_intent")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// N5 (round-29): Cube-test integration — links the cube-casting inspection
+// (the CAST event) to the concrete-pour DPR, and tracks the 7-day / 28-day
+// compression-test results.
+//
+// One CubeTest row = one cube set = N cubes cast from one pour on one day,
+// tested at 7d (optional, for QA progression check) and 28d (the spec-
+// acceptance result). The status enum encodes the lifecycle so a dashboard
+// can derive pass/fail without re-comparing result vs expectedStrength on
+// every read:
+//
+//   PENDING                  — cast but no results yet (waiting on 7d/28d)
+//   SEVEN_DAY_PASSED         — 7d result recorded, met expectedStrength
+//   SEVEN_DAY_FAILED         — 7d result recorded, BELOW expectedStrength
+//   TWENTY_EIGHT_DAY_PASSED  — 28d result recorded, met expectedStrength
+//   TWENTY_EIGHT_DAY_FAILED  — 28d result recorded, BELOW expectedStrength
+//   OVERDUE                  — 28d due-date passed with no result on file
+//
+// Both castingRecordId (the cube_casting inspection) and dprId (the parent
+// pour) are nullable independently:
+//   - castingRecordId null  — standalone filing (no inspection row yet)
+//   - dprId null            — pour happened without a DPR entry (e.g. Sunday
+//                             pour filed retroactively)
+//
+// Only one inspection per cube set in v1 (a 1:N between inspection and cube
+// tests is supported via cubeTests[]) so a single cube-cast inspection can
+// spawn multiple cube_test rows when one pour produced multiple grade sets
+// (e.g. M30 columns + M40 beams in one slab).
+//
+// expectedStrength is the mix-design characteristic strength (e.g. 30.0
+// for M30). Pass/fail is "result >= expectedStrength" — same formula the
+// IS 456 strength-conformance check uses. Per-cube results are not modelled
+// at this granularity (a cube "set" is averaged for v1).
+// ─────────────────────────────────────────────────────────────────────────────
+model CubeTest {
+  id                    String    @id @default(uuid())
+  // FK to the cube_casting InspectionRecord (the CAST event). Nullable so
+  // a standalone filing (no inspection yet) is allowed. SetNull on delete:
+  // deleting the inspection should not destroy the cube-test history — the
+  // test results are a compliance record that may be referenced by external
+  // billing / acceptance paperwork long after the inspection is purged.
+  castingRecordId       String?   @map("casting_record_id")
+  // FK to the parent DPR (the concrete pour). Nullable for standalone
+  // filings. SetNull on delete — same reasoning as above.
+  dprId                 String?   @map("dpr_id")
+  // Free-text location label (e.g. "Grid A3-B4, Slab Level 2"). Capped at
+  // 200 chars by the route handler; column is plain TEXT for forward
+  // compatibility with longer multi-line locations.
+  pourLocation          String    @map("pour_location")
+  // Mix-design grade label (e.g. "M30"). Capped at 40 chars; not normalized
+  // because the value-set is small enough to spot-check in code rather than
+  // a lookup table.
+  concreteGrade         String    @map("concrete_grade")
+  // The day the cubes were cast (date only, IST business day).
+  castDate              DateTime  @db.Date @map("cast_date")
+  // castDate + 7 days, computed on write. Indexed for the 7-day admin
+  // dashboard tile.
+  sevenDayDueDate       DateTime  @db.Date @map("seven_day_due_date")
+  // castDate + 28 days, computed on write. Indexed for the 28-day admin
+  // dashboard tile and the /api/cube-tests/due-soon endpoint.
+  twentyEightDayDueDate DateTime  @db.Date @map("twenty_eight_day_due_date")
+  // N/mm² at 7d. Null until the lab reports the result. Capped at 200 to
+  // reject typos like 3000 N/mm² that a misread decimal could cause.
+  sevenDayResult        Float?    @map("seven_day_result")
+  // When the 7d test was run. Null until sevenDayResult is set.
+  sevenDayTestedAt      DateTime? @map("seven_day_tested_at")
+  // N/mm² at 28d. Null until the lab reports the result.
+  twentyEightDayResult  Float?    @map("twenty_eight_day_result")
+  // When the 28d test was run. Null until twentyEightDayResult is set.
+  twentyEightDayTestedAt DateTime? @map("twenty_eight_day_tested_at")
+  // Target characteristic strength (e.g. 30.0 for M30). Stored on the row
+  // (rather than derived from concreteGrade) so a strength override on a
+  // particular pour does not require a code change.
+  expectedStrength      Float     @map("expected_strength")
+  // Lifecycle state. See the header comment for the value set. Default is
+  // PENDING (cast but no tests reported).
+  status                String    @default("PENDING")
+  // FK to the employee who filed the cube-test row.
+  submittedById         String    @map("submitted_by_id")
+  notes                 String?
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  castingRecord InspectionRecord? @relation(fields: [castingRecordId], references: [id], onDelete: SetNull)
+  dpr           DPR?              @relation(fields: [dprId], references: [id], onDelete: SetNull)
+  submittedBy   Employee          @relation("CubeTestSubmitter", fields: [submittedById], references: [id])
+
+  // Hot reads:
+  //   - calendar timeline "what was cast in Sept 2026" → (castDate)
+  //   - 28-day compliance dashboard "tests due in next 7 days" →
+  //     (twentyEightDayDueDate) [the route filters by status]
+  //   - admin queue "all PENDING/SEVEN_DAY_FAILED cubes awaiting action" →
+  //     (status)
+  // The 7-day due-date index is omitted — admin workflow is dominated by
+  // 28-day readings (the spec-acceptance test); 7-day is QA-only and the
+  // 28d index covers the cross-due bucket it would need anyway.
+  @@index([castDate])
+  @@index([twentyEightDayDueDate])
+  @@index([status])
+  // Pour-summary endpoint: `WHERE dprId = ? GROUP BY status` — the
+  // (dprId, status) index makes that an index scan, not a full table read.
+  @@index([dprId, status])
+  @@map("cube_test")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// N17 (Project-level dashboard with KPI tiles): lightweight Project master.
+//
+// Half-step to N1 (full Project module, XL). The dashboard needs a project
+// dimension today, so admins can group DPR / Inspection / CubeTest / BOQ
+// roll-ups by site, but N1's full scope (RFI, Drawings, BOQ management
+// flows, document storage) is out of scope. This model is the minimum
+// metadata that lets:
+//   1. The admin UI show "this DPR belongs to project T-NAGAR" rather
+//      than a bare free-text string.
+//   2. The dashboard's KPI endpoint resolve an `idOrName` URL param
+//      against a curated row OR fall back to auto-discovering names from
+//      existing DPR.projectName values.
+//
+// `name` is the canonical cross-module identifier — it matches the
+// `projectName` column already on DPR / InspectionRecord / BoqItem, so the
+// KPI endpoint can do a string match against either source.
+//
+// `code` is an optional short label for human-readable displays (e.g. on
+// admin tables and on PDF exports). It is OPTIONAL and UNIQUE because the
+// dashboard must work for projects that have not yet been registered in
+// this table (auto-discovered from DPR.projectName).
+//
+// `isActive` is the soft-delete flag — admin DELETE flips this to false
+// rather than removing the row, so historical DPRs that reference the
+// project still join correctly.
+//
+// onDelete: SetNull on createdById — deleting an admin must not orphan a
+// project row. The audit trail (name + created_at) is preserved.
+// ─────────────────────────────────────────────────────────────────────────────
+model Project {
+  id              String    @id @default(uuid())
+  name            String    @unique
+  code            String?   @unique
+  client          String?
+  location        String?
+  isActive        Boolean   @default(true) @map("is_active")
+  startDate       DateTime? @db.Date @map("start_date")
+  expectedEndDate DateTime? @db.Date @map("expected_end_date")
+  createdById     String?   @map("created_by_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  createdBy Employee? @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  // Hot read: the KPI list endpoint filters by `isActive = true` so the
+  // active-projects dropdown doesn't surface soft-deleted rows. Index is
+  // not on `name` because the @unique constraint already creates one.
+  @@index([isActive])
+  @@map("project")
 }
