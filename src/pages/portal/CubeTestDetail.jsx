@@ -123,7 +123,7 @@ export default function CubeTestDetail() {
 
   if (!test) return null;
 
-  const projectName = test.dpr?.projectName || test.castingRecord?.projectName || 'Cube test';
+  const projectName = test.dpr?.project?.name || test.dpr?.projectName || test.castingRecord?.project?.name || test.castingRecord?.projectName || 'Cube test';
   const isOwnerOrAdmin = test.submittedById === employee?.id || employee?.isAdmin;
 
   return (
@@ -192,7 +192,7 @@ export default function CubeTestDetail() {
                 Linked DPR
               </div>
               <div style={{ fontWeight: 600, color: 'var(--navy)', marginBottom: '0.25rem' }}>
-                {test.dpr.projectName}
+                {test.dpr.project?.name || test.dpr.projectName}
               </div>
               <div style={{ fontSize: '0.85rem', color: 'var(--steel)' }}>
                 {formatIndianDate(test.dpr.reportDate)} · {test.dpr.location}
@@ -210,7 +210,7 @@ export default function CubeTestDetail() {
                 Casting inspection
               </div>
               <div style={{ fontWeight: 600, color: 'var(--navy)', marginBottom: '0.25rem' }}>
-                {test.castingRecord.projectName}
+                {test.castingRecord.project?.name || test.castingRecord.projectName}
               </div>
               <div style={{ fontSize: '0.85rem', color: 'var(--steel)' }}>
                 {formatIndianDate(test.castingRecord.reportDate)} · {test.castingRecord.inspectionType}

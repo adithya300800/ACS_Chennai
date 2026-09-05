@@ -103,3 +103,41 @@ export function uploadBlob(sasUrl, body, {
     xhr.send(body);
   });
 }
+
+// N3 (Phase F) — Drawing PDF upload helper. Mirrors the inline pattern
+// used for DPR photos (see DprSubmit.jsx:445-453): mint a SAS, PUT the
+// bytes with progress, then confirm-upload so the server records the
+// blob as belonging to the drawing. Returns the { ulid, blobPath, ... }
+// shape that POST /api/drawings expects.
+//
+// `token` is the access token from useAuth(). `api` is passed in (not
+// imported) so this module stays free of API surface coupling — keeps
+// it testable + lets future upload helpers (e.g. inspection PDFs)
+// reuse the same 3-step pattern without a circular import.
+//
+// `onProgress` is forwarded to the underlying `uploadBlob` call so the
+// admin upload zone can render a 0..100 bar.
+export async function uploadDrawing(file, token, api, { onProgress, signal, timeoutMs } = {}) {
+  if (!file) throw new BlobUploadError('No file provided', 'NO_FILE');
+  // /sas-url returns { sasUrl, ulid, blobPath, expiresAt } — the blobPath
+  // is the canonical R2 key the server will echo back from
+  // /confirm-upload. We capture it up-front so the upload can finish
+  // before the parent form attempts to POST /drawings.
+  const { sasUrl, ulid, blobPath } = await api.getDrawingSasUrl(file.name, file.type, token);
+  await uploadBlob(sasUrl, file, {
+    contentType: file.type,
+    onProgress,
+    signal,
+    timeoutMs,
+  });
+  await api.confirmDrawingUpload(
+    ulid, file.name, file.type, file.size, token,
+  );
+  return {
+    ulid,
+    blobPath,
+    filename: file.name,
+    contentType: file.type,
+    sizeBytes: file.size,
+  };
+}

@@ -317,7 +317,7 @@ export default function DprDashboard() {
         tone: confirmAction.kind === 'single-approve' ? 'success' : 'danger',
         title: `${confirmAction.kind === 'single-approve' ? 'Approve' : 'Reject'} this DPR?`,
         rows: [
-          ['Project', d.projectName || '(untitled)'],
+          ['Project', d.project?.name || d.projectName || '(untitled)'],
           ['Date', formatShortDate(d.reportDate)],
           ['Submitted by', d.submittedBy?.name || '—'],
           ['Contractor', d.contractor || '—'],
@@ -345,7 +345,7 @@ export default function DprDashboard() {
           ['Records', targets.length],
           ...(confirmAction.reason ? [['Reason', confirmAction.reason]] : []),
         ],
-        list: targets.map((d) => `${d.projectName || '(untitled)'} · ${formatShortDate(d.reportDate)} · ${d.submittedBy?.name || '—'}`),
+        list: targets.map((d) => `${d.project?.name || d.projectName || '(untitled)'} · ${formatShortDate(d.reportDate)} · ${d.submittedBy?.name || '—'}`),
         footer: confirmAction.action === 'APPROVE'
           ? 'Each report will be approved independently. Per-record failures are reported.'
           : confirmAction.action === 'REJECT'
@@ -461,7 +461,7 @@ export default function DprDashboard() {
                   handleCardOpen();
                 }
               }}
-              aria-label={isReviewing ? undefined : `Open ${dpr.projectName || 'DPR'} details`}
+              aria-label={isReviewing ? undefined : `Open ${dpr.project?.name || dpr.projectName || 'DPR'} details`}
             >
               {/* Round-17 B-06: per-card checkbox. Only rendered for reviewable
                   statuses; APPROVED/REJECTED cards keep their layout untouched.
@@ -475,13 +475,13 @@ export default function DprDashboard() {
                     checked={isSelected}
                     onChange={() => toggleSelected(dpr.id)}
                     disabled={bulkActionLoading}
-                    aria-label={`Select ${dpr.projectName} for bulk action`}
+                    aria-label={`Select ${dpr.project?.name || dpr.projectName || 'DPR'} for bulk action`}
                   />
                 </label>
               )}
               <div className="dpr-card-header">
                 <div>
-                  <h3 className="dpr-card-title">{dpr.projectName}</h3>
+                  <h3 className="dpr-card-title">{dpr.project?.name || dpr.projectName}</h3>
                   <div className="dpr-card-meta" style={{ marginTop: '0.5rem' }}>
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
                       <MapPinIcon size={13} style={{ color: 'var(--steel)' }} />

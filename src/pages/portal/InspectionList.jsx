@@ -212,8 +212,17 @@ export default function InspectionList() {
               <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
                 <SeverityBadge severity={insp.severity} />
                 <span style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
-                  {insp.projectName}
+                  {insp.project?.name || insp.projectName}
                 </span>
+                {/* N3 (Phase F): drawing stamp sub-line. Renders only when
+                    the inspection was filed against a specific drawing
+                    revision. drawingId is the joined UUID; drawingRev is
+                    the denormalised revision string. */}
+                {insp.drawingId && insp.drawingRev && (
+                  <span style={{ fontSize: '0.75rem', color: '#075985', fontFamily: 'monospace' }}>
+                    Drawing · Rev {insp.drawingRev}
+                  </span>
+                )}
               </div>
 
               <div style={{ display: 'flex', gap: '1rem', fontSize: '0.8rem', color: 'var(--steel)' }}>

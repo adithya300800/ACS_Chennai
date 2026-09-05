@@ -252,7 +252,7 @@ function CubeTestModal({ open, onClose, onCreated }) {
                 <option value="">None</option>
                 {dprs.map((d) => (
                   <option key={d.id} value={d.id}>
-                    {d.projectName} · {formatShortDate(d.reportDate)}
+                    {d.project?.name || d.projectName} · {formatShortDate(d.reportDate)}
                   </option>
                 ))}
               </select>
@@ -269,7 +269,7 @@ function CubeTestModal({ open, onClose, onCreated }) {
                 <option value="">None</option>
                 {inspections.map((i) => (
                   <option key={i.id} value={i.id}>
-                    {formatShortDate(i.reportDate)} · {i.location || i.projectName || 'Cube casting'}
+                    {formatShortDate(i.reportDate)} · {i.location || i.project?.name || i.projectName || 'Cube casting'}
                   </option>
                 ))}
               </select>
@@ -311,7 +311,7 @@ function CubeStatusText({ status }) {
 }
 
 function CubeTestCard({ test }) {
-  const projectName = test.dpr?.projectName || test.castingRecord?.projectName || 'Cube test';
+  const projectName = test.dpr?.project?.name || test.dpr?.projectName || test.castingRecord?.project?.name || test.castingRecord?.projectName || 'Cube test';
   return (
     <Link
       to={`/portal/cube-tests/${test.id}`}

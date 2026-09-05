@@ -218,6 +218,36 @@ const BUILDING_ICON = (
     <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" />
   </svg>
 );
+// Phase-D (N2): RFI (Request for Information) icon — chat-bubble shape
+// used as a quick semantic marker for "ask a question, get a response".
+// Distinct from DOC_ICON (DPR/Inspection) and CLIPBOARD_ICON (Inspection
+// records) so the sidebar stays scannable.
+const RFI_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z" />
+  </svg>
+);
+// Phase-D (N2): Variation Order icon — a fork-and-node glyph echoing the
+// "scope change branching from the original contract" concept. Distinct
+// from CHART_ICON (BOQ variance bars) so admins don't conflate the two.
+const VARIATION_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <circle cx="6" cy="6" r="2" /><circle cx="6" cy="18" r="2" /><circle cx="18" cy="6" r="2" />
+    <path d="M6 8v8" /><path d="M6 12c0-3.31 2.69-6 6-6" />
+  </svg>
+);
+// N3 (Phase F): Drawing Revision Register icon — a simple "blueprint"
+// triangle-over-rectangle glyph echoing the engineering-drawing aesthetic.
+// Distinct from DOC_ICON (DPR) and CLIPBOARD_ICON (Inspection) so the
+// admin sidebar stays scannable when three record-shaped links share a
+// group.
+const DRAWING_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <path d="M3 17l4-4 4 4 3-3 7 7" />
+    <path d="M14 6l4 4-4 4" />
+  </svg>
+);
 
 const navGroups = [
   {
@@ -239,11 +269,21 @@ const navGroups = [
       // filed records. The page hosts both the user's own cube tests
       // and (for admins) a deep-link to the org-wide review queue.
       { to: '/portal/cube-tests', label: 'My Cube Tests', icon: CUBE_ICON },
+      // Phase-D (N2): RFIs (Request for Information) — filed-records
+      // shape so they live alongside DPR / Inspection. Available to all
+      // auth'd users: employees raise + respond; admins get the same
+      // list plus an admin-only "All RFIs" cross-org view (see Records).
+      { to: '/portal/rfis', label: 'My RFIs', icon: RFI_ICON },
       // N7: BOQ variance report — read-only contract-vs-executed view
       // scoped to one project. The page is useful to anyone who files
       // DPR / Inspection rows against a BOQ item, so it lives in the
       // shared "My Reports" group rather than behind the admin tree.
       { to: '/portal/boq', label: 'BOQ Variance', icon: CHART_ICON },
+      // [N1 Phase B] My Projects — anchor to the new "My Projects" list.
+      // Distinct from the admin /portal/admin/projects registry
+      // (which lives under Records). Same icon (BUILDING_ICON) so the
+      // visual language stays consistent.
+      { to: '/portal/projects', label: 'My Projects', icon: BUILDING_ICON },
     ],
   },
   ...(employee?.isAdmin ? [
@@ -276,6 +316,19 @@ const navGroups = [
         // because PATCH/DELETE on boqItem is gated to creator-or-admin
         // server-side; employees read variance on the public page.
         { to: '/portal/admin/boq', label: 'BOQ Registry', icon: LIST_ICON },
+        // Phase-D (N2): admin cross-org RFI view. Distinct from the
+        // shared /portal/rfis because the server-side filter rules and
+        // per-row actions (escalate to variation) differ. Sits under
+        // Records as the cross-org browse surface it is.
+        { to: '/portal/admin/rfis', label: 'All RFIs', icon: RFI_ICON },
+        // Phase-D (N2): Variation Order admin list + detail (drill-in).
+        // Also lives under Records because VOs are admin-curated and the
+        // page is a cross-org browse with the same UI shape.
+        { to: '/portal/admin/variations', label: 'Variations', icon: VARIATION_ICON },
+        // N3 (Phase F): Drawing Revision Register. Cross-org browse +
+        // create/supersede/archive — admin-curated. Lives under Records
+        // alongside the other admin-managed registries.
+        { to: '/portal/admin/drawings', label: 'Drawings', icon: DRAWING_ICON },
       ],
     },
     {

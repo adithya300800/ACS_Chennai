@@ -121,7 +121,7 @@ export default function InspectionDetail() {
               // consistent with the page title. Falls back to project name
               // when no typeMeta label exists (defensive — `typeMeta` lookup
               // covers SUB_WORK_TYPE_OPTIONS enum values).
-              label: `${typeMeta?.label || record.inspectionType}${record.projectName ? ` · ${record.projectName}` : ''}`,
+              label: `${typeMeta?.label || record.inspectionType}${(record.project?.name || record.projectName) ? ` · ${record.project?.name || record.projectName}` : ''}`,
             },
           ]}
         />
@@ -134,7 +134,7 @@ export default function InspectionDetail() {
               {typeMeta?.label || record.inspectionType}
             </h1>
             <div style={{ color: 'var(--steel)', fontSize: '0.9rem', overflowWrap: 'anywhere' }}>
-              {record.projectName} · {record.location}
+              {record.project?.name || record.projectName} · {record.location}
             </div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.5rem', flexShrink: 0 }}>
@@ -204,7 +204,7 @@ export default function InspectionDetail() {
                 {' — '}
                 <span>{record.boqItem.description}</span>
                 {' · '}
-                <Link to={`/portal/boq?projectName=${encodeURIComponent(record.projectName || '')}`}>
+                <Link to={`/portal/boq?projectName=${encodeURIComponent((record.project?.name || record.projectName) || '')}`}>
                   View variance
                 </Link>
               </>

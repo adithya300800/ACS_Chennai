@@ -9,6 +9,7 @@ import {
 } from '../../lib/constants.js';
 import WorkEntryAdder from './WorkEntryAdder.jsx';
 import FormProgress from '../../components/FormProgress.jsx';
+import DrawingPicker from '../../components/DrawingPicker.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { getBusinessToday } from '../../lib/businessDate.js';
 import { loadDiagnostic as loadScopedDraft, save as saveScopedDraft, clear as clearScopedDraft } from '../../lib/ownerScopedDraft.js';
@@ -164,6 +165,9 @@ export default function InspectionSubmit() {
     const d = loadDraftForEmployee(currentEmployeeId);
     if (d?.__malformed || !d) {
       return {
+        // [N1 Phase B] projectId is the new foreign-key; projectName
+        // stays for legacy wire-compat. Both reset in lockstep.
+        projectId: '',
         projectName: '',
         location: '',
         reportDate: queryDate || getLocalDate(),
@@ -171,15 +175,22 @@ export default function InspectionSubmit() {
         contractor: '',
         // N7: optional BOQ link.
         boqItemId: '',
+        // N3 (Phase F): optional drawing stamp (drawingId + drawingRev).
+        drawingId: '',
+        drawingRev: '',
       };
     }
     return d.form || {
+      projectId: '',
       projectName: '',
       location: '',
       reportDate: queryDate || getLocalDate(),
       weather: '',
       contractor: '',
       boqItemId: '',
+      // N3 (Phase F): optional drawing stamp.
+      drawingId: '',
+      drawingRev: '',
     };
   });
   const [initialWorkEntry] = useState(() => {
@@ -215,6 +226,11 @@ export default function InspectionSubmit() {
   // valid).
   const [boqItems, setBoqItems] = useState([]);
   const [boqItemsLoaded, setBoqItemsLoaded] = useState(false);
+  // [N1 Phase B] project picker data — one-time fetch on mount, same
+  // shape as the DPR submit dropdown. Drives the new project <select>;
+  // see handleProjectChange for the lockstep projectId+projectName set.
+  const [projects, setProjects] = useState([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   const photoObjectUrlsRef = useRef(new Set());
 
   // [DR-006 client] Live count of photos still going through the SAS / PUT
@@ -249,6 +265,10 @@ export default function InspectionSubmit() {
         weather: '',
         contractor: '',
         boqItemId: '',
+        // N3 (Phase F): drop the drawing stamp on session-expiry too —
+        // a shared computer shouldn't retain the previous user's pick.
+        drawingId: '',
+        drawingRev: '',
       });
       setWorkEntry(null);
       setPhotos([]);
@@ -277,6 +297,11 @@ export default function InspectionSubmit() {
         if (!cancelled && latest && !form.projectName) {
           setForm((f) => ({
             ...f,
+            // [N1 Phase B] carry the projectId from the latest DPR if
+            // the backend joined it; otherwise the user re-picks from
+            // the dropdown. projectName is kept for the canonical
+            // display + wire-compat.
+            projectId: latest.projectId || (latest.project && latest.project.id) || f.projectId,
             projectName: latest.projectName || f.projectName,
             location: latest.location || f.location,
             contractor: latest.contractor || f.contractor,
@@ -338,6 +363,35 @@ export default function InspectionSubmit() {
     return () => clearTimeout(t);
   }, [form, workEntry, photos, currentEmployeeId]);
 
+  // [N1 Phase B] Project picker — one-time fetch on mount. Same shape
+  // as the DprSubmit.jsx equivalent; defensive on failure so the form
+  // still mounts even if /api/projects is temporarily down.
+  useEffect(() => {
+    if (!accessToken || projectsLoaded) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await api.getProjects(accessToken);
+        if (cancelled) return;
+        const registered = (data.projects || []).map((p) => ({
+          id: p.id, name: p.name, code: p.code || '', isRegistered: true,
+        }));
+        const registeredNames = new Set(registered.map((p) => p.name));
+        const discovered = (data.discovered || [])
+          .filter((d) => d.name && !registeredNames.has(d.name))
+          .map((d) => ({ id: '', name: d.name, code: '', isRegistered: false }));
+        setProjects([...registered, ...discovered]);
+      } catch {
+        // Non-fatal — the dropdown renders its empty state and the
+        // user can still pick via the typed-fallback.
+      } finally {
+        if (!cancelled) setProjectsLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken]);
+
   // Cleanup blob URLs on unmount.
   useEffect(() => {
     return () => {
@@ -349,6 +403,30 @@ export default function InspectionSubmit() {
   const handleChange = (e) => {
     const { name, value } = e.target;
     setForm((f) => ({ ...f, [name]: value }));
+  };
+
+  // [N1 Phase B] Project picker change handler. Mirrors the
+  // DprSubmit.jsx version — the dropdown's value is the projectId
+  // (UUID) for registered rows or the literal name for discovered
+  // rows. We set both fields atomically so they never drift.
+  const handleProjectChange = (e) => {
+    const value = e.target.value;
+    if (!value) {
+      setForm((f) => ({ ...f, projectId: '', projectName: '', boqItemId: '', drawingId: '', drawingRev: '' }));
+      return;
+    }
+    const match = projects.find((p) => (p.id || p.name) === value);
+    if (!match) return; // defensive: stale option
+    setForm((f) => ({
+      ...f,
+      projectId: match.id || '',
+      projectName: match.name,
+      boqItemId: '',
+      // N3 (Phase F): clear the drawing stamp when the project changes
+      // so we never carry a stale drawingId/rev across sites.
+      drawingId: '',
+      drawingRev: '',
+    }));
   };
 
   const removePhoto = (idx) => {
@@ -581,6 +659,10 @@ export default function InspectionSubmit() {
 
       await api.createInspection(
         {
+          // [N1 Phase B] projectId is the new foreign-key; projectName
+          // is kept for legacy-compat. Both come from form state — set
+          // atomically by handleProjectChange.
+          projectId: form.projectId || null,
           projectName: form.projectName,
           // N-4: DRAFT can be saved with bare-bones fields. The schema
           // requires non-null `location`/`reportDate`/`inspectionType`,
@@ -603,6 +685,11 @@ export default function InspectionSubmit() {
           data: workEntry?.data || null,
           // N7: optional BOQ link. null when unset.
           boqItemId: form.boqItemId || null,
+          // N3 (Phase F): optional drawing stamp — drawingId (UUID) +
+          // drawingRev (denormalised revision string). Both null when
+          // unset so the backend skips the join.
+          drawingId: form.drawingId || null,
+          drawingRev: form.drawingRev || null,
           // SOL DR-005: the two buttons finally diverge. "Save as Draft"
           // stores an owner-visible DRAFT row that does NOT trigger admin
           // fan-out (backend/src/routes/inspection.js ALLOWED_STATUSES).
@@ -646,12 +733,17 @@ export default function InspectionSubmit() {
   const handleDiscardDraft = () => {
     clearDraftForEmployee(currentEmployeeId);
     setForm({
+      // [N1 Phase B] reset projectId + projectName in lockstep.
+      projectId: '',
       projectName: '',
       location: '',
       reportDate: queryDate || getLocalDate(),
       weather: '',
       contractor: '',
       boqItemId: '',
+      // N3 (Phase F): drop the drawing stamp too.
+      drawingId: '',
+      drawingRev: '',
     });
     setWorkEntry(null);
     setPhotos([]);
@@ -789,18 +881,37 @@ export default function InspectionSubmit() {
           <section id="inspection-section-site" className="dpr-form-section">
           <div className="form-row">
             <div className="form-group" style={{ flex: 2 }}>
-              <label htmlFor="projectName">Project Name *</label>
-              <input
-                id="projectName"
-                ref={projectNameRef}
-                name="projectName"
-                className={`form-input${fieldErrors.projectName ? ' form-input-invalid' : ''}`}
-                value={form.projectName}
-                onChange={handleChange}
-                aria-invalid={fieldErrors.projectName ? 'true' : 'false'}
-                aria-describedby={fieldErrors.projectName ? 'projectName-error' : undefined}
-                placeholder="e.g. Metro Station Phase 2"
-              />
+              <label htmlFor="projectId">Project *</label>
+              {!projectsLoaded ? (
+                <select id="projectId" className="form-input" disabled>
+                  <option>Loading projects…</option>
+                </select>
+              ) : (
+                <select
+                  id="projectId"
+                  name="projectId"
+                  ref={projectNameRef}
+                  className={`form-input${fieldErrors.projectName ? ' form-input-invalid' : ''}`}
+                  value={(() => {
+                    if (form.projectId) return form.projectId;
+                    if (form.projectName) {
+                      const match = projects.find((p) => p.name === form.projectName);
+                      return (match?.id) || form.projectName;
+                    }
+                    return '';
+                  })()}
+                  onChange={handleProjectChange}
+                  aria-invalid={fieldErrors.projectName ? 'true' : 'false'}
+                  aria-describedby={fieldErrors.projectName ? 'projectName-error' : undefined}
+                >
+                  <option value="">— Select a project —</option>
+                  {projects.map((p) => (
+                    <option key={p.id || p.name} value={p.id || p.name}>
+                      {p.name}{p.code ? ` (${p.code})` : ''}{!p.isRegistered ? ' · auto-discovered' : ''}
+                    </option>
+                  ))}
+                </select>
+              )}
               {fieldErrors.projectName && (
                 <div id="projectName-error" className="form-field-error" role="alert">
                   {fieldErrors.projectName}
@@ -867,6 +978,32 @@ export default function InspectionSubmit() {
                 placeholder="Contractor name"
               />
             </div>
+          </div>
+
+          {/* N3 (Phase F): optional drawing stamp. DrawingPicker reads
+              the active register for the chosen projectId and emits
+              {drawingId, drawingRev} via onChange. Empty when the
+              project is unregistered (discovered-only) — the picker
+              renders its own "Pick a project first" placeholder. */}
+          <div className="form-group">
+            <label htmlFor="drawingId">Drawing (optional)</label>
+            <DrawingPicker
+              projectId={form.projectId || ''}
+              value={form.drawingId || ''}
+              onChange={(drawingId, drawingRev) => {
+                setForm((f) => ({
+                  ...f,
+                  drawingId: drawingId || '',
+                  drawingRev: drawingRev || '',
+                }));
+              }}
+              accessToken={accessToken}
+            />
+            <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
+              Stamp this inspection against a specific drawing revision. Ask
+              the design lead to add drawings in the Drawings Register
+              if none are listed.
+            </span>
           </div>
 
           {/* N7: optional BOQ link. Same UX as the DPR form — disabled

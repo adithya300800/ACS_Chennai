@@ -13,6 +13,12 @@ import RoleBranchLanding from './components/RoleBranchLanding.jsx';
 const Home = React.lazy(() => import('./pages/Home.jsx'));
 const About = React.lazy(() => import('./pages/About.jsx'));
 const Projects = React.lazy(() => import('./pages/Projects.jsx'));
+// [N1 Phase B] Portal-side Projects list + ProjectDetail. Aliased to
+// avoid colliding with the public marketing `Projects` import above
+// (same default-export name from a different folder would otherwise
+// shadow the public page on lazy-chunk resolution).
+const PortalProjects = React.lazy(() => import('./pages/portal/Projects.jsx'));
+const PortalProjectDetail = React.lazy(() => import('./pages/portal/ProjectDetail.jsx'));
 const Contact = React.lazy(() => import('./pages/Contact.jsx'));
 const Blog = React.lazy(() => import('./pages/Blog.jsx'));
 const Careers = React.lazy(() => import('./pages/Careers.jsx'));
@@ -76,6 +82,22 @@ const PortalNotFound = React.lazy(() => import('./pages/portal/PortalNotFound.js
 // AdminOverview. Lazy-loaded so they don't bloat the initial bundle.
 const BoqAdmin = React.lazy(() => import('./pages/admin/BoqAdmin.jsx'));
 const BoqVariance = React.lazy(() => import('./pages/portal/BoqVariance.jsx'));
+// Phase-D (N2): RFI + Variation Order pages. Five routes — three
+// employee-facing (my RFIs, my RFI detail, new-RFI modal lives inside the
+// list page) and two admin-facing (cross-org RFIs, Variation Order
+// admin list, Variation Order detail). Literal-before-param ordering
+// applies: rfis before rfis/:id, admin/variations before admin/variations/:id
+// — same lesson as the training + project routes.
+const Rfis = React.lazy(() => import('./pages/Rfis.jsx'));
+const RfiDetail = React.lazy(() => import('./pages/RfiDetail.jsx'));
+const RfisAdmin = React.lazy(() => import('./pages/admin/RfisAdmin.jsx'));
+const VariationOrdersAdmin = React.lazy(() => import('./pages/admin/VariationOrdersAdmin.jsx'));
+const VariationOrderDetail = React.lazy(() => import('./pages/VariationOrderDetail.jsx'));
+// N3 (Phase F): Drawing Revision Register — admin list + detail. The
+// list page hosts the create/supersede/archive modal; the detail page
+// hosts the read-SAS PDF preview + the cross-record stamp panels.
+const DrawingsAdmin = React.lazy(() => import('./pages/admin/DrawingsAdmin.jsx'));
+const DrawingDetail = React.lazy(() => import('./pages/admin/DrawingDetail.jsx'));
 
 function App() {
   const location = useLocation();
@@ -166,6 +188,30 @@ function App() {
               concerns here since neither route takes a path param. */}
           <Route path="boq" element={<BoqVariance />} />
           <Route path="admin/boq" element={<BoqAdmin />} />
+          {/* Phase-D (N2): RFIs + Variation Orders. Literal-before-param:
+              /rfis must come before /rfis/:id, /admin/variations must
+              come before /admin/variations/:id (round-20 lesson). The
+              admin/rfis path is a separate literal — no ordering concern
+              with /admin/variations/* since they share no prefix. */}
+          <Route path="rfis" element={<Rfis />} />
+          <Route path="rfis/:id" element={<RfiDetail />} />
+          <Route path="admin/rfis" element={<RfisAdmin />} />
+          <Route path="admin/variations" element={<VariationOrdersAdmin />} />
+          <Route path="admin/variations/:id" element={<VariationOrderDetail />} />
+          {/* N3 (Phase F): Drawing Revision Register. Literal-before-param:
+              /admin/drawings MUST come before /admin/drawings/:id so
+              HashRouter matches the literal path instead of treating
+              the row id as :id (same lesson as the training + project
+              routes above). */}
+          <Route path="admin/drawings" element={<DrawingsAdmin />} />
+          <Route path="admin/drawings/:id" element={<DrawingDetail />} />
+          {/* [N1 Phase B] My Projects list + anchor detail. Literal
+              /projects MUST come before /projects/:id so HashRouter
+              matches the literal "projects" instead of treating it as
+              :id="projects" (round-20 lesson pinned on training +
+              cube-tests + RFI + drawing routes). */}
+          <Route path="projects" element={<PortalProjects />} />
+          <Route path="projects/:id" element={<PortalProjectDetail />} />
           <Route path="admin/training/new" element={<TrainingCourseNew />} />
           <Route path="admin/training/:id" element={<TrainingCourseDetail />} />
           <Route path="admin/training/:id/edit" element={<TrainingCourseEdit />} />

@@ -7,6 +7,7 @@ import { uploadBlob } from '../../lib/blobUpload.js';
 import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../../lib/constants.js';
 import DprCustomSection from './DprCustomSection.jsx';
 import FormProgress from '../../components/FormProgress.jsx';
+import DrawingPicker from '../../components/DrawingPicker.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { formatShortDate } from '../../lib/format.js';
 import {
@@ -154,6 +155,13 @@ export default function DprSubmit() {
   const currentEmployeeId = employee?.id ?? null;
   const initialDraft = loadDraftForEmployee(currentEmployeeId);
   const [form, setForm] = useState(initialDraft?.form || {
+    // [N1 Phase B] projectId drives the new project picker; projectName
+    // is the denormalized canonical name we keep sending on the wire
+    // for legacy compatibility (the backend still requires it alongside
+    // the new projectId field). When the user picks a project from the
+    // dropdown, we set BOTH atomically in handleProjectChange so the
+    // two never drift.
+    projectId: '',
     projectName: '',
     location: '',
     reportDate: getLocalDate(),
@@ -165,7 +173,20 @@ export default function DprSubmit() {
     // null/missing as "no link" so the field never breaks existing
     // submissions.
     boqItemId: '',
+    // N3 (Phase F): optional drawing stamp. drawingRev is denormalized
+    // from the selected drawing row at submit time so the wire record
+    // survives even if the drawing is later superseded or renamed.
+    drawingId: '',
+    drawingRev: '',
   });
+  // [N1 Phase B] project picker data — same payload the admin
+  // ProjectsAdmin page uses (registered + auto-discovered). We merge
+  // them into one list keyed by name (the dropdown's value is the
+  // project UUID for registered rows, or the literal name string for
+  // discovered rows). The selected option's `name` is what we send as
+  // `projectName` to the backend.
+  const [projects, setProjects] = useState([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   // N7: BOQ items for the current projectName, loaded when the project
   // is named. We don't fetch on every keystroke — only when the user
   // has finished typing a project name and either blurred the field
@@ -230,6 +251,13 @@ export default function DprSubmit() {
         setEditingId(d.id);
         setEditingVersion(d.version);
         setForm({
+          // [N1 Phase B] projectId is denormalized on the DPR row going
+          // forward; legacy rows may have it null. When the server
+          // includes a `project` relation we use its id; otherwise we
+          // fall back to '' and the form renders the free-text name
+          // (the user can re-pick from the dropdown to attach a real
+          // projectId).
+          projectId: d.projectId || (d.project && d.project.id) || '',
           projectName: d.projectName || '',
           location: d.location || '',
           // SOL DR-004: backend now emits strict YYYY-MM-DD (see
@@ -243,6 +271,11 @@ export default function DprSubmit() {
           workType: d.workType || 'SITE_INSPECTION',
           // N7: preserve linked BOQ item across draft resume.
           boqItemId: d.boqItemId || '',
+          // N3 (Phase F): preserve linked drawing across draft resume.
+          // drawingRev is denormalized server-side so we read it from
+          // the response rather than refetching the drawing.
+          drawingId: d.drawingId || '',
+          drawingRev: d.drawingRev || '',
         });
         setDailyFields({
           workExecutedToday: d.workExecutedToday || '',
@@ -295,6 +328,8 @@ export default function DprSubmit() {
     const handler = (e) => {
       if (e.detail?.employeeId && e.detail.employeeId !== currentEmployeeId) return;
       setForm({
+        // [N1 Phase B] reset both projectId + projectName in lockstep.
+        projectId: '',
         projectName: '',
         location: '',
         reportDate: getLocalDate(),
@@ -347,6 +382,39 @@ export default function DprSubmit() {
   // in the selector). The selected boqItemId is reset to '' if it no
   // longer matches a loaded item — otherwise the form would carry a
   // dangling reference into a different project.
+  //
+  // [N1 Phase B] Project picker: the dropdown is driven by a one-time
+  // GET /api/projects fetch on mount. We don't debounce this one —
+  // the list is static for the duration of the form, so re-fetching
+  // on every projectId change would just hammer the server.
+  useEffect(() => {
+    if (!accessToken || projectsLoaded) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await api.getProjects(accessToken);
+        if (cancelled) return;
+        const registered = (data.projects || []).map((p) => ({
+          id: p.id, name: p.name, code: p.code || '', isRegistered: true,
+        }));
+        const registeredNames = new Set(registered.map((p) => p.name));
+        const discovered = (data.discovered || [])
+          .filter((d) => d.name && !registeredNames.has(d.name))
+          .map((d) => ({ id: '', name: d.name, code: '', isRegistered: false }));
+        setProjects([...registered, ...discovered]);
+      } catch {
+        // Non-fatal — the dropdown will render its empty state and the
+        // user can still submit with whatever they type into the
+        // backup "Other" branch.
+      } finally {
+        if (!cancelled) setProjectsLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+    // accessToken omitted — captures via closure; re-fetching on every
+    // token refresh would race against an in-flight 401.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken]);
   useEffect(() => {
     const trimmed = (form.projectName || '').trim();
     if (!trimmed || !accessToken) {
@@ -385,6 +453,41 @@ export default function DprSubmit() {
   const handleChange = (e) => {
     const { name, value } = e.target;
     setForm((f) => ({ ...f, [name]: value }));
+  };
+
+  // [N1 Phase B] Project picker change handler. The dropdown's value
+  // is either a UUID (registered project) or a name (discovered
+  // project with no Project row yet) — we look it up in the cached
+  // `projects` list to pull the canonical name. This is the ONLY
+  // sanctioned way to set both projectId + projectName in lockstep;
+  // any other path (typing into a free-text input, etc.) is a code
+  // smell we should catch in review.
+  const handleProjectChange = (e) => {
+    const value = e.target.value;
+    if (!value) {
+      setForm((f) => ({ ...f, projectId: '', projectName: '', boqItemId: '' }));
+      return;
+    }
+    const match = projects.find((p) => (p.id || p.name) === value);
+    if (!match) {
+      // Shouldn't happen — the option list is sourced from `projects`.
+      // Defensive: keep the existing form untouched so we don't lose
+      // data on a stale onChange.
+      return;
+    }
+    setForm((f) => ({
+      ...f,
+      projectId: match.id || '',     // empty string for discovered rows
+      projectName: match.name,
+      // Reset BOQ link — it belonged to the old project, and the BOQ
+      // items effect re-fetches when projectName changes anyway.
+      boqItemId: '',
+      // Reset drawing stamp — drawings are scoped to one project so
+      // the previous pick becomes invalid the moment the project
+      // changes. DrawingPicker will refetch on form.projectId change.
+      drawingId: '',
+      drawingRev: '',
+    }));
   };
 
   const handleDailyChange = (e) => {
@@ -574,6 +677,11 @@ export default function DprSubmit() {
         await api.updateDpr(
           editingId,
           {
+            // [N1 Phase B] projectId is the new foreign-key; projectName
+            // is kept on the wire for legacy-compat and as the canonical
+            // name to denormalize if the relation is null. Both come
+            // from form state — set atomically in handleProjectChange.
+            projectId: form.projectId || null,
             projectName: form.projectName,
             location: form.location,
             reportDate: form.reportDate,
@@ -593,6 +701,12 @@ export default function DprSubmit() {
             // N7: optional BOQ link. Sent as null when unset so the
             // backend treats it as "no link" rather than a literal "".
             boqItemId: form.boqItemId || null,
+            // N3 (Phase F): optional drawing stamp. drawingId is the
+            // foreign key; drawingRev is denormalized so the wire
+            // record survives the original drawing being renamed or
+            // superseded.
+            drawingId: form.drawingId || null,
+            drawingRev: form.drawingRev || null,
           },
           editingVersion,
           accessToken
@@ -613,6 +727,11 @@ export default function DprSubmit() {
 
         await api.createDpr(
           {
+            // [N1 Phase B] projectId is the new foreign-key; projectName
+            // is kept on the wire for legacy-compat and as the canonical
+            // name to denormalize if the relation is null. Both come
+            // from form state — set atomically in handleProjectChange.
+            projectId: form.projectId || null,
             projectName: form.projectName,
             location: form.location,
             reportDate: form.reportDate,
@@ -664,6 +783,8 @@ export default function DprSubmit() {
   const handleDiscardDraft = () => {
     clearDraftForEmployee(currentEmployeeId);
     setForm({
+      // [N1 Phase B] reset both projectId + projectName in lockstep.
+      projectId: '',
       projectName: '',
       location: '',
       reportDate: getLocalDate(),
@@ -672,6 +793,10 @@ export default function DprSubmit() {
       contractor: '',
       workType: 'SITE_INSPECTION',
       boqItemId: '',
+      // N3: drawing stamp resets with the rest of the form so a
+      // discarded draft doesn't carry the previous drawing link.
+      drawingId: '',
+      drawingRev: '',
     });
     setDailyFields({
       workExecutedToday: '',
@@ -755,11 +880,55 @@ export default function DprSubmit() {
         <div className="dpr-form">
           {/* A-11: section anchor — see DPR_SECTIONS for the matching skip-nav target. */}
           <section id="dpr-section-site" className="dpr-form-section">
-          {/* Project metadata */}
+          {/* Project metadata — [N1 Phase B] dropdown of registered +
+              auto-discovered projects. The picker is the source of
+              truth for projectId; the denormalized projectName field
+              is set in lockstep by handleProjectChange. We still allow
+              no pick so an employee can submit a DPR for a brand-new
+              project name (the backend's resolveProject() auto-creates
+              a discovered row on POST). */}
           <div className="form-row">
             <div className="form-group" style={{ flex: 2 }}>
-              <label htmlFor="projectName">Project Name *</label>
-              <input id="projectName" name="projectName" className="form-input" value={form.projectName} onChange={handleChange} placeholder="e.g. Metro Station Phase 2" />
+              <label htmlFor="projectId">Project *</label>
+              {!projectsLoaded ? (
+                <select id="projectId" className="form-input" disabled>
+                  <option>Loading projects…</option>
+                </select>
+              ) : (
+                <select
+                  id="projectId"
+                  name="projectId"
+                  className="form-input"
+                  // Value is the projectId (UUID) for registered rows
+                  // or the name for discovered rows; an empty string
+                  // represents "no pick yet". We resolve the current
+                  // form's projectId to the dropdown's value so legacy
+                  // drafts (which only have projectName) still highlight
+                  // the right option.
+                  value={(() => {
+                    if (form.projectId) return form.projectId;
+                    if (form.projectName) {
+                      const match = projects.find((p) => p.name === form.projectName);
+                      return (match?.id) || form.projectName;
+                    }
+                    return '';
+                  })()}
+                  onChange={handleProjectChange}
+                >
+                  <option value="">— Select a project —</option>
+                  {projects.map((p) => (
+                    <option key={p.id || p.name} value={p.id || p.name}>
+                      {p.name}{p.code ? ` (${p.code})` : ''}{!p.isRegistered ? ' · auto-discovered' : ''}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {form.projectName ? (
+                <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
+                  Picked: <strong>{form.projectName}</strong>
+                  {form.projectId ? '' : ' · not yet registered'}
+                </span>
+              ) : null}
             </div>
             <div className="form-group" style={{ flex: 1 }}>
               <label htmlFor="reportDate">Report Date</label>
@@ -795,6 +964,32 @@ export default function DprSubmit() {
               <label htmlFor="contractor">Contractor</label>
               <input id="contractor" name="contractor" className="form-input" value={form.contractor} onChange={handleChange} placeholder="Contractor name" />
             </div>
+          </div>
+
+          {/* N3 (Phase F): optional drawing stamp. DrawingPicker reads
+              the active register for the chosen projectId and emits
+              {drawingId, drawingRev} via onChange. Empty when the
+              project is unregistered (discovered-only) — the picker
+              renders its own "Pick a project first" placeholder. */}
+          <div className="form-group">
+            <label htmlFor="drawingId">Drawing (optional)</label>
+            <DrawingPicker
+              projectId={form.projectId || ''}
+              value={form.drawingId || ''}
+              onChange={(drawingId, drawingRev) => {
+                setForm((f) => ({
+                  ...f,
+                  drawingId: drawingId || '',
+                  drawingRev: drawingRev || '',
+                }));
+              }}
+              accessToken={accessToken}
+            />
+            <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
+              Stamp this report against a specific drawing revision. Ask
+              the design lead to add drawings in the Drawings Register
+              if none are listed.
+            </span>
           </div>
 
           {/* N7: optional BOQ link. Dropdown is empty / disabled until

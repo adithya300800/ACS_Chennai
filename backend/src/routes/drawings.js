@@ -47,6 +47,7 @@ const { mapPrismaError, parseStrictISODate, toDateOnly } = require('../lib/error
 const { hashIdentifier } = require('../lib/pii');
 const { randomUUID } = require('crypto');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
+const { generateReadSASUrl, READ_URL_TTL_SECONDS } = require('../lib/blobStorage');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -543,6 +544,65 @@ router.get('/:id', asyncHandler(async (req, res) => {
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to fetch drawing' });
+  }
+}));
+
+// ─── GET /api/drawings/:id/read-sas ────────────────────────────────────────
+// Mint a short-lived signed GET URL for the drawing's PDF so the admin
+// DrawingDetail page can render the file in an <iframe>. Same auth gate as
+// the detail endpoint (`requireAuth` is mounted earlier — every auth'd
+// employee can consult the register from the DPR/Inspection submit's
+// drawing picker, so they get the read-SAS too).
+//
+// Container is hard-coded to 'dpr-documents' because drawings share the
+// curated non-photo evidence bucket that DPR/Inspection generated PDFs
+// also use (see file header comment + the /api/dpr/sas-url allowlist
+// set in dpr.js:347). The drawing's stored pdfBlobPath field is the
+// blob name (e.g. "EMP123/01HF7X3YRAKO.pdf"); the client received it
+// verbatim from /api/dpr/sas-url at upload time.
+//
+// 200  → { sasUrl, expiresIn }   (1-hour TTL by default — see blobStorage DR-017)
+// 400  → VALIDATION_ERROR        (bad UUID, missing pdfBlobPath)
+// 404  → DRAWING_NOT_FOUND
+// 503  → DB_UNAVAILABLE
+router.get('/:id/read-sas', asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  const { id } = req.params;
+  if (!isValidUuid(id)) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Drawing id must be a UUID' });
+  }
+
+  try {
+    const row = await prisma.drawing.findUnique({ where: { id }, select: { pdfBlobPath: true } });
+    if (!row) {
+      return res.status(404).json({ error: 'DRAWING_NOT_FOUND', code: 'DRAWING_NOT_FOUND', message: 'Drawing not found' });
+    }
+    if (!row.pdfBlobPath || typeof row.pdfBlobPath !== 'string') {
+      // Caller distinguishes this state in the UI ("no-pdf") so they
+      // don't render an empty iframe on a drawing that has no upload.
+      return res.status(400).json({
+        error: 'NO_PDF_ATTACHED',
+        code: 'NO_PDF_ATTACHED',
+        message: 'This drawing does not have a PDF attached yet.',
+      });
+    }
+
+    const { sasUrl } = await generateReadSASUrl('dpr-documents', row.pdfBlobPath);
+    res.json({ sasUrl, expiresIn: READ_URL_TTL_SECONDS });
+  } catch (err) {
+    console.error('Drawing read-SAS error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      drawingId: id,
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to mint read URL' });
   }
 }));
 

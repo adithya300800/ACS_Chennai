@@ -131,13 +131,13 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
     <Modal
       open={!!dprSummary}
       onClose={onClose}
-      ariaLabel={`DPR ${dpr?.projectName || ''} details`}
+      ariaLabel={`DPR ${dpr?.project?.name || dpr?.projectName || ''} details`}
       returnFocusRef={returnFocusRef}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem', gap: '1rem' }}>
         <div>
           <h2 style={{ margin: 0, color: 'var(--navy)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-            {dpr?.projectName || 'DPR'}
+            {dpr?.project?.name || dpr?.projectName || 'DPR'}
           </h2>
           <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
             <StatusBadge status={dpr?.status} map={DPR_STATUS_MAP} />
@@ -268,7 +268,7 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
                     {' — '}
                     <span>{dpr.boqItem.description}</span>
                     {' · '}
-                    <Link to={`/portal/boq?projectName=${encodeURIComponent(dpr.projectName || '')}`}>View variance</Link>
+                    <Link to={`/portal/boq?projectName=${encodeURIComponent((dpr.project?.name || dpr.projectName) || '')}`}>View variance</Link>
                   </>
                 ) : (
                   <em className="text-placeholder">Not linked</em>
@@ -392,6 +392,22 @@ export default function DprAll() {
   // primitive can return focus to it after close. Without this the
   // user is dropped at <body> and has to Tab back through the page.
   const lastTriggerRef = useRef(null);
+  // [N1 Phase B] Project picker — feeds the projectId filter dropdown.
+  // Mirrors Projects.jsx's fetch but only the registered slice so the
+  // dropdown doesn't show 50+ auto-discovered names. The fetch is
+  // one-shot and tolerant of failure (an empty dropdown silently
+  // hides the new filter rather than breaking the page).
+  const [projects, setProjects] = useState([]);
+  const loadProjects = useCallback(async () => {
+    try {
+      const data = await api.getProjects({ isActive: 'true', limit: '200' }, accessToken);
+      setProjects(data.projects || []);
+    } catch (_) {
+      // Silent — the project filter is an enhancement. Admins without
+      // a working /api/projects still see every DPR.
+    }
+  }, [accessToken]);
+  useEffect(() => { loadProjects(); }, [loadProjects]);
 
   // R22.5: filter state for the admin browse view. The backend supports
   // `status`, `from`, `to` (date range on reportDate), `projectName`
@@ -413,13 +429,14 @@ export default function DprAll() {
   // URL is the single source of truth: `filter` is initialized from
   // URL params on every change (refresh, back/forward, share-link),
   // and writing a filter pushes it back to the URL.
-  const FILTER_PARAM_KEYS = ['month', 'status', 'from', 'to', 'projectName', 'submittedById'];
+  const FILTER_PARAM_KEYS = ['month', 'status', 'from', 'to', 'projectName', 'projectId', 'submittedById'];
   const defaultFilter = () => ({
     month: getCurrentIstMonth(),
     status: '',
     from: '',
     to: '',
     projectName: '',
+    projectId: '',
     submittedById: '',
   });
   const [filter, setFilter] = useState(() => {
@@ -439,6 +456,7 @@ export default function DprAll() {
     || searchParams.get('from') !== null
     || searchParams.get('to') !== null
     || searchParams.get('projectName') !== null
+    || searchParams.get('projectId') !== null
     || searchParams.get('submittedById') !== null;
   useEffect(() => {
     if (!filterFromUrl) return;
@@ -521,6 +539,7 @@ export default function DprAll() {
       if (filter.from) params.from = filter.from;
       if (filter.to) params.to = filter.to;
       if (filter.projectName) params.projectName = filter.projectName;
+      if (filter.projectId) params.projectId = filter.projectId;
       if (filter.submittedById) params.submittedById = filter.submittedById;
       const data = await api.getDprs(params, accessToken);
       setDprs(data.dprs || []);
@@ -552,6 +571,7 @@ export default function DprAll() {
       if (filter.from) params.from = filter.from;
       if (filter.to) params.to = filter.to;
       if (filter.projectName) params.projectName = filter.projectName;
+      if (filter.projectId) params.projectId = filter.projectId;
       if (filter.submittedById) params.submittedById = filter.submittedById;
       const data = await api.getDprs(params, accessToken);
       setDprs((prev) => [...prev, ...(data.dprs || [])]);
@@ -627,12 +647,13 @@ export default function DprAll() {
       from: '',
       to: '',
       projectName: '',
+      projectId: '',
       submittedById: '',
     });
   };
 
   const hasActiveFilters = Boolean(
-    filter.status || filter.from || filter.to || filter.projectName || filter.submittedById
+    filter.status || filter.from || filter.to || filter.projectName || filter.projectId || filter.submittedById
   );
 
   // DR-016 scope flags live next to the URL-sync block so the current
@@ -744,6 +765,29 @@ export default function DprAll() {
                 placeholder="Contains…"
               />
             </div>
+            {/* [N1 Phase B] Exact-match filter on the registered Project
+                UUID — the natural deep-link target when an admin is
+                drilling into one site from ProjectDetail. The dropdown
+                is a strict superset of the text contains filter above:
+                empty selection = no extra filtering; a selection here
+                AND text in projectName = AND (so both can co-exist). */}
+            <div className="form-group">
+              <label htmlFor="dprall-filter-projectId">Project (registered)</label>
+              <select
+                id="dprall-filter-projectId"
+                className="form-input"
+                value={filter.projectId}
+                onChange={(e) => handleFilterChange('projectId', e.target.value)}
+                disabled={projects.length === 0}
+              >
+                <option value="">All projects</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}{p.code ? ` (${p.code})` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div className="form-group">
               <label htmlFor="dprall-filter-submitter">Submitted by</label>
               <select
@@ -842,12 +886,12 @@ export default function DprAll() {
                     setSelectedDpr(dpr);
                   }
                 }}
-                aria-label={`${dpr.projectName || 'Untitled'} — ${dpr.status}`}
+                aria-label={`${dpr.project?.name || dpr.projectName || 'Untitled'} — ${dpr.status}`}
                 style={{ cursor: 'pointer', textDecoration: 'none', color: 'inherit', display: 'block' }}
               >
                 <div className="dpr-card-header">
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <h3 className="dpr-card-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{dpr.projectName || 'Untitled'}</h3>
+                    <h3 className="dpr-card-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{dpr.project?.name || dpr.projectName || 'Untitled'}</h3>
                     <div className="dpr-card-meta" style={{ marginTop: '0.5rem' }}>
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
                         <CalendarIcon size={13} style={{ color: 'var(--steel)' }} />
@@ -858,6 +902,15 @@ export default function DprAll() {
                         {dpr.location || '—'}
                       </span>
                     </div>
+                    {/* N3 (Phase F): drawing stamp sub-line. Renders only when
+                        the DPR was filed against a specific drawing revision.
+                        drawingId is the joined UUID; drawingRev is the
+                        denormalised revision string (e.g. "Rev 3"). */}
+                    {dpr.drawingId && dpr.drawingRev && (
+                      <div style={{ fontSize: '0.75rem', color: '#075985', marginTop: '0.25rem', fontFamily: 'monospace' }}>
+                        Drawing · Rev {dpr.drawingRev}
+                      </div>
+                    )}
                   </div>
                   <StatusBadge status={dpr.status} map={DPR_STATUS_MAP} />
                 </div>

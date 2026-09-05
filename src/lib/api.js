@@ -618,7 +618,26 @@ export const api = {
   // CubeTest / BOQ / People counts scoped to one project. `idOrName`
   // accepts either a UUID or the project name (URL-decoded); the backend
   // resolves both.
-  getProjects: (token) => api.get('/projects', token),
+  getProjects: (params, token) => {
+    // [N1 Phase B] Accept an optional filter map (e.g. {isActive: 'true',
+    // limit: '200'}) so the admin browse views can scope the dropdown to
+    // registered+active projects without a separate /projects?isActive=…
+    // method. Backward-compatible: callers that pass a token as the
+    // first argument (the old single-arg form) still work because
+    // `typeof params === 'string'` short-circuits the params branch.
+    let path = '/projects';
+    if (params && typeof params !== 'string') {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) {
+        if (v != null && v !== '') qs.set(k, String(v));
+      }
+      const s = qs.toString();
+      if (s) path += `?${s}`;
+      return api.get(path, token);
+    }
+    // Backward-compat: (token) => api.get('/projects', token)
+    return api.get('/projects', typeof params === 'string' ? params : token);
+  },
   createProject: (data, token) => api.post('/projects', data, token),
   // getProject accepts either a UUID or a free-text name. We URL-encode
   // the value so a name like "T-Nagar / Phase II" survives the trip —
@@ -636,6 +655,14 @@ export const api = {
   // a full-year view and the dedicated stats endpoints otherwise.
   getProjectKpis: (idOrName, days = 30, token) =>
     api.get(`/projects/${encodeURIComponent(idOrName)}/kpis?days=${days}`, token),
+  // [N1 Phase B] getProjectParties — anchor-page sidebar payload
+  // (parties / contractValue / sites / description). Resolves by
+  // UUID or name; a discovered (name-only) project returns 200 with
+  // isRegistered=false and the metadata fields null. Mirrors the
+  // `/:idOrName/kpis` URL encoding rule so a name with slashes
+  // survives the round trip.
+  getProjectParties: (idOrName, token) =>
+    api.get(`/projects/${encodeURIComponent(idOrName)}/parties`, token),
 
   // N7 (round-28) — Bill of Quantities (BOQ) CRUD + variance report.
   // Backend (backend/src/routes/boq.js) — committed 68611e2. The
@@ -655,4 +682,133 @@ export const api = {
   softDeleteBoqItem: (id, token) => api.delete(`/boq/${id}`, token),
   getBoqVariance: (projectName, token) =>
     api.get(`/boq/variance?projectName=${encodeURIComponent(projectName)}`, token),
+
+  // N2 (Phase C — ACS Portal): RFI (Request for Information) routes.
+  //
+  // Status lifecycle: OPEN → RESPONDED → CLOSED. OVERDUE is a presentation
+  // flag the backend derives server-side for OPEN rows past their due date
+  // (see backend/src/routes/rfis.js:deriveRfiStatus). The wire shape from
+  // the list + detail endpoints is:
+  //   { id, subject, question, response, status, displayStatus,
+  //     dueDate, createdAt, project, raisedBy, targetResponder,
+  //     responder, _count: { variations } }
+  //
+  // Filters: projectId, status (OPEN/RESPONDED/CLOSED/OVERDUE), myOnly,
+  // from/to on createdAt, cursor (keyset), limit (1..100, default 20).
+  getRfis: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/rfis${qs ? '?' + qs : ''}`, token);
+  },
+  createRfi: (data, token, idempotencyKey) => api.post('/rfis', data, token, idempotencyKey),
+  getRfi: (id, token) => api.get(`/rfis/${id}`, token),
+  // PATCH is multi-purpose on the backend: setting `response` records the
+  // answer (status → RESPONDED), and adding `status: 'CLOSED'` in the
+  // same body closes the row (admin-only). We expose a thin `respondRfi`
+  // wrapper for the user-facing "Respond" button so callers don't have to
+  // know the inline-state-machine rules.
+  respondRfi: (id, { response, status }, token) =>
+    api.patch(`/rfis/${id}`, { response, ...(status ? { status } : {}) }, token),
+  // Admin close (no response required — CLOSED is the terminal state).
+  closeRfi: (id, token) => api.patch(`/rfis/${id}`, { status: 'CLOSED' }, token),
+  // Admin escalation: turns an RFI into a VariationOrder DRAFT. The
+  // backend returns the new variation row so we can navigate to it.
+  escalateRfiToVariation: (id, payload = {}, token) =>
+    api.post(`/rfis/${id}/escalate-to-variation`, payload || {}, token),
+
+  // N2 (Phase C — ACS Portal): Variation Order routes.
+  //
+  // Status lifecycle: DRAFT → SUBMITTED → APPROVED | REJECTED.
+  // Wire shape (list + detail):
+  //   { id, title, description, deltaAmount (string|number),
+  //     status, clientApprovalRequired, project, referenceRfi,
+  //     raisedBy, approvedBy, createdAt }
+  //
+  // Filters: projectId, status, from/to on createdAt, cursor, limit.
+  // No `myOnly` — variations are org-visible.
+  getVariations: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/variations${qs ? '?' + qs : ''}`, token);
+  },
+  createVariation: (data, token, idempotencyKey) =>
+    api.post('/variations', data, token, idempotencyKey),
+  getVariation: (id, token) => api.get(`/variations/${id}`, token),
+  // PATCH is DRAFT-only (raiser or admin). Allowed fields: title,
+  // description, deltaAmount, clientApprovalRequired. Status transitions
+  // route through /submit, /approve, /reject.
+  updateVariation: (id, data, token) =>
+    api.patch(`/variations/${id}`, data, token),
+  // DRAFT → SUBMITTED (raiser or admin).
+  submitVariation: (id, token) =>
+    api.post(`/variations/${id}/submit`, {}, token),
+  // SUBMITTED → APPROVED (admin only — requireFreshAdmin on the server).
+  approveVariation: (id, token) =>
+    api.post(`/variations/${id}/approve`, {}, token),
+  // SUBMITTED → REJECTED (admin only). `reason` is required by the server
+  // (rejected_reason column); passing null/empty will 400.
+  rejectVariation: (id, { reason }, token) =>
+    api.post(`/variations/${id}/reject`, { reason }, token),
+
+  // N3 (Phase F) — Drawing Revision Register frontend wiring. Backend
+  // (backend/src/routes/drawings.js) shipped in Phase E; this mirrors
+  // the routes the admin registry + DPR/Inspection picker need.
+  //
+  //   - getDrawings              → list with filters (projectId REQUIRED,
+  //                                status 'ACTIVE' | 'SUPERSEDED' | 'ALL',
+  //                                cursor + limit). Cursor-paginated by
+  //                                (issuedDate DESC, id DESC).
+  //   - createDrawing            → admin create. Supports `supersedesId`
+  //                                to atomically flip a predecessor to
+  //                                SUPERSEDED inside the same transaction.
+  //   - getDrawing               → detail + reference list + supersedes chain.
+  //   - updateDrawing            → admin metadata edit (cannot change the
+  //                                natural key (projectId, drawingNumber,
+  //                                revision); those require a supersede).
+  //   - softDeleteDrawing        → admin soft-delete via status=SUPERSEDED.
+  //                                Idempotent on the server.
+  //
+  // Drawing PDFs ride the existing dpr-documents bucket (see
+  // backend/src/routes/drawings.js header). The helpers below reuse
+  // /api/dpr/sas-url + /api/dpr/confirm-upload with `drawing/` blob-path
+  // prefix so a leaky SAS can't cross to photo or inspection buckets.
+  getDrawings: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/drawings${qs ? '?' + qs : ''}`, token);
+  },
+  createDrawing: (data, token, idempotencyKey) => api.post('/drawings', data, token, idempotencyKey),
+  getDrawing: (id, token) => api.get(`/drawings/${id}`, token),
+  updateDrawing: (id, data, token, idempotencyKey) => api.patch(`/drawings/${id}`, data, token, idempotencyKey),
+  softDeleteDrawing: (id, token, idempotencyKey) => api.delete(`/drawings/${id}`, token, idempotencyKey),
+
+  // Drawing PDF upload. Reuses /api/dpr/sas-url + /api/dpr/confirm-upload
+  // but tags the container as 'dpr-documents' so a freshly-minted SAS
+  // can't reach photo buckets. The blob path the server stores is the
+  // verbatim R2 key returned by confirmUpload — the admin detail page
+  // uses that key (via getDrawingReadSas) to mint a read SAS for the
+  // iframe preview.
+  //
+  // `drawing/` prefix is a server-side naming convention so a bucket-wide
+  // listing still shows which objects belong to drawings vs other
+  // dpr-documents blobs. Matches the contract pinned in
+  // backend/src/routes/dpr.js (sas-url handler).
+  getDrawingSasUrl: (filename, contentType, token) =>
+    api.post('/dpr/sas-url', {
+      filename: `drawing/${filename}`,
+      contentType,
+      container: 'dpr-documents',
+    }, token),
+  confirmDrawingUpload: (ulid, filename, contentType, sizeBytes, token) =>
+    api.post('/dpr/confirm-upload', {
+      ulid,
+      container: 'dpr-documents',
+      filename: `drawing/${filename}`,
+      contentType,
+      sizeBytes,
+    }, token),
+  // PDF read SAS for the iframe preview on the Drawing detail page.
+  // The backend route is NOT shipped yet (Phase E only exposes CRUD +
+  // confirm-upload). The DrawingDetail page renders a "Preview pending"
+  // state until this endpoint lands — keep the wrapper here so the
+  // frontend contract is fixed and a backend PR can slot in without
+  // a frontend refactor.
+  getDrawingReadSas: (id, token) => api.get(`/drawings/${id}/read-sas`, token),
 };

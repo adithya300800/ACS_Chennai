@@ -76,6 +76,7 @@ export default function InspectionAll() {
     severity: '',
     from: '',
     to: '',
+    projectId: '',
   }));
   const [showFilters, setShowFilters] = useState(false);
 
@@ -92,6 +93,11 @@ export default function InspectionAll() {
       if (filter.severity) params.severity = filter.severity;
       if (filter.from) params.from = filter.from;
       if (filter.to) params.to = filter.to;
+      // [N1 Phase B] projectId filter — exact match against the
+      // registered Project UUID. Backend (inspection.js:822-827) accepts
+      // it as an optional `where.projectId` filter; deep-link target
+      // from ProjectDetail. Combined with the other filters by AND.
+      if (filter.projectId) params.projectId = filter.projectId;
       const data = await api.getInspections(params, accessToken);
       setInspections(data.inspections || []);
     } catch (err) {
@@ -131,11 +137,12 @@ export default function InspectionAll() {
       severity: '',
       from: '',
       to: '',
+      projectId: '',
     });
   };
 
   const hasActiveFilters = Boolean(
-    filter.status || filter.inspectionType || filter.severity || filter.from || filter.to,
+    filter.status || filter.inspectionType || filter.severity || filter.from || filter.to || filter.projectId,
   );
 
   // DR-016: scope flags for the empty-state copy + recovery actions.
@@ -152,6 +159,18 @@ export default function InspectionAll() {
   const { pullDistance, isRefreshing } = usePullToRefresh(async () => {
     await load();
   });
+
+  // [N1 Phase B] Project picker — feeds the projectId filter dropdown.
+  // Mirrors DprAll's fetch. One-shot + tolerant of failure: empty
+  // dropdown silently hides the new filter instead of breaking the page.
+  const [projects, setProjects] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    api.getProjects({ isActive: 'true', limit: '200' }, accessToken)
+      .then((data) => { if (!cancelled) setProjects(data.projects || []); })
+      .catch(() => { if (!cancelled) setProjects([]); });
+    return () => { cancelled = true; };
+  }, [accessToken]);
 
   return (
     <div className="dpr-page">
@@ -222,6 +241,27 @@ export default function InspectionAll() {
                 onChange={(e) => handleFilterChange('severity', e.target.value)}
               >
                 {SEVERITY_FILTERS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+              </select>
+            </div>
+            {/* [N1 Phase B] projectId filter — exact-match dropdown over
+                the registered Project UUIDs. Deep-linkable from
+                ProjectDetail; complements the existing month/type/status/
+                severity/range filters via AND. */}
+            <div className="form-group">
+              <label htmlFor="inspall-filter-projectId">Project (registered)</label>
+              <select
+                id="inspall-filter-projectId"
+                className="form-input"
+                value={filter.projectId}
+                onChange={(e) => handleFilterChange('projectId', e.target.value)}
+                disabled={projects.length === 0}
+              >
+                <option value="">All projects</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}{p.code ? ` (${p.code})` : ''}
+                  </option>
+                ))}
               </select>
             </div>
             <fieldset className="form-group" style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
@@ -331,12 +371,21 @@ export default function InspectionAll() {
                       </span>
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
                         <BuildingIcon size={13} style={{ color: 'var(--steel)' }} />
-                        {insp.projectName}
+                        {insp.project?.name || insp.projectName}
                       </span>
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
                         <CalendarIcon size={13} style={{ color: 'var(--steel)' }} />
                         {formatShortDate(insp.reportDate)}
                       </span>
+                      {/* N3 (Phase F): drawing stamp sub-line. Renders only when
+                          the inspection was filed against a specific drawing
+                          revision. drawingId is the joined UUID; drawingRev is
+                          the denormalised revision string. */}
+                      {insp.drawingId && insp.drawingRev && (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', color: '#075985', fontFamily: 'monospace' }}>
+                          Drawing · Rev {insp.drawingRev}
+                        </span>
+                      )}
                     </div>
                   </div>
                   {/* S5 audit, item 7: cards must surface the filtered

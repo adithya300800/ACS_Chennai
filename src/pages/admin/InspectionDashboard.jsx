@@ -481,7 +481,7 @@ export default function InspectionDashboard() {
                     onChange={() => toggleSelected(insp.id)}
                     onClick={(e) => e.stopPropagation()}
                     disabled={bulkActionLoading}
-                    aria-label={`Select ${insp.projectName || insp.location || 'inspection'} for bulk action`}
+                    aria-label={`Select ${insp.project?.name || insp.projectName || insp.location || 'inspection'} for bulk action`}
                   />
                 </label>
               )}
@@ -507,7 +507,7 @@ export default function InspectionDashboard() {
               <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
                 <SeverityBadge severity={insp.severity} />
                 <span style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
-                  {insp.projectName}
+                  {insp.project?.name || insp.projectName}
                 </span>
               </div>
 

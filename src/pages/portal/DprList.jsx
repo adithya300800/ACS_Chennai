@@ -555,14 +555,23 @@ export default function DprList() {
                   type="button"
                   className="dpr-list-item-detail"
                   onClick={() => handleRowClick(dpr)}
-                  aria-label={`${dpr.projectName || 'Untitled'} — ${dpr.status}${dpr.submittedAt ? `, submitted ${timeAgo(dpr.submittedAt)}` : ', draft'}`}
+                  aria-label={`${dpr.project?.name || dpr.projectName || 'Untitled'} — ${dpr.status}${dpr.submittedAt ? `, submitted ${timeAgo(dpr.submittedAt)}` : ', draft'}`}
                   style={{ flex: 2, textAlign: 'left', background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit' }}
                 >
-                  <div style={{ fontWeight: 600, color: 'var(--navy)', marginBottom: '0.25rem' }}>{dpr.projectName}</div>
+                  <div style={{ fontWeight: 600, color: 'var(--navy)', marginBottom: '0.25rem' }}>{dpr.project?.name || dpr.projectName}</div>
                   <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
                     {formatDateOnly(dpr.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })}
                     {dpr.contractor ? ` · ${dpr.contractor}` : ''}
                   </div>
+                  {/* N3 (Phase F): drawing stamp sub-line. Renders only when
+                      the DPR was filed against a specific drawing revision
+                      — drawingId is the joined UUID, drawingRev is the
+                      denormalised revision string (e.g. "Rev 3"). */}
+                  {dpr.drawingId && dpr.drawingRev && (
+                    <div style={{ fontSize: '0.75rem', color: '#075985', marginTop: '0.15rem', fontFamily: 'monospace' }}>
+                      Drawing · Rev {dpr.drawingRev}
+                    </div>
+                  )}
                 </button>
                 <div style={{ flex: 1 }}>
                   <StatusBadge status={dpr.status} map={DPR_STATUS_MAP} />
@@ -593,7 +602,7 @@ export default function DprList() {
                         className="btn btn-primary btn-sm"
                         onClick={() => handleResumeDraft(dpr.id)}
                         style={{ padding: '0.3rem 0.7rem', fontSize: '0.78rem' }}
-                        aria-label={`Resume editing ${dpr.projectName || 'draft'}`}
+                        aria-label={`Resume editing ${dpr.project?.name || dpr.projectName || 'draft'}`}
                       >
                         Resume
                       </button>
@@ -640,7 +649,7 @@ export default function DprList() {
                             e.stopPropagation();
                             setConfirmDeleteId(dpr.id);
                           }}
-                          aria-label={`Delete draft ${dpr.projectName || 'untitled'}`}
+                          aria-label={`Delete draft ${dpr.project?.name || dpr.projectName || 'untitled'}`}
                         >
                           Delete
                         </button>
@@ -685,7 +694,7 @@ export default function DprList() {
         <div
           role="dialog"
           aria-modal="true"
-          aria-label={`DPR ${expandedDpr.projectName} details`}
+          aria-label={`DPR ${expandedDpr.project?.name || expandedDpr.projectName} details`}
           onClick={handleCloseModal}
           style={{
             position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)',
@@ -710,7 +719,7 @@ export default function DprList() {
                       // Prefer projectName; fall back to formatted reportDate so
                       // the breadcrumb always carries context even if the project
                       // name is empty (defensive — modal already gates on `expandedDpr`).
-                      label: expandedDpr.projectName
+                      label: expandedDpr.project?.name || expandedDpr.projectName
                         || formatDateOnly(expandedDpr.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })
                         || 'Daily Report',
                     },
@@ -718,9 +727,9 @@ export default function DprList() {
                 />
                 <h1
                   style={{ margin: 0, fontSize: '1.15rem', color: 'var(--navy)' }}
-                  aria-label={`${expandedDpr.projectName} — Daily Progress Report`}
+                  aria-label={`${expandedDpr.project?.name || expandedDpr.projectName} — Daily Progress Report`}
                 >
-                  {expandedDpr.projectName}
+                  {expandedDpr.project?.name || expandedDpr.projectName}
                 </h1>
                 <div style={{ marginTop: '0.25rem', fontSize: '0.85rem', color: 'var(--steel)' }}>
                   {formatDateOnly(expandedDpr.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })}
@@ -763,7 +772,7 @@ export default function DprList() {
                           {' — '}
                           <span>{expandedDpr.boqItem.description}</span>
                           {' · '}
-                          <Link to={`/portal/boq?projectName=${encodeURIComponent(expandedDpr.projectName || '')}`}>
+                          <Link to={`/portal/boq?projectName=${encodeURIComponent((expandedDpr.project?.name || expandedDpr.projectName) || '')}`}>
                             View variance
                           </Link>
                         </>

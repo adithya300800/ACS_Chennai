@@ -119,8 +119,21 @@ export function PlaneIcon({ size = 14, style }) {
 export function BellIcon({ size = 14, style }) {
   return (
     <svg width={size} height={size} {...ICON_BASE} style={style}>
-      <path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
-      <path d="M13.73 21a2 2 0 01-3.46 0" />
+      <path d="M6 8a6 6 0 0112 0c0 7 3 9 3 9H3s3-2 3-9" />
+      <path d="M10.3 21a1.94 1.94 0 003.4 0" />
+    </svg>
+  );
+}
+
+// Phase-D (N2): UserIcon — used by RFI detail (raised by / responder)
+// and Variation detail (raised by / approved-by) so the "who" rows have
+// a consistent person glyph. Mirrors the line-icon style of the other
+// Icons (24x24 viewBox, stroke=2, currentColor).
+export function UserIcon({ size = 14, style }) {
+  return (
+    <svg width={size} height={size} {...ICON_BASE} style={style}>
+      <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
     </svg>
   );
 }

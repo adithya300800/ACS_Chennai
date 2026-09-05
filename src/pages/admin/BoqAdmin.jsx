@@ -374,9 +374,18 @@ export default function BoqAdmin() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [projectNameFilter, setProjectNameFilter] = useState('');
+  // [N1 Phase B] Exact-match projectId filter — applied immediately on
+  // selection change (no Apply button needed because the dropdown has
+  // no typing delay). The legacy `appliedFilter` text input still drives
+  // the projectName substring search + variance fetch so the two
+  // surfaces remain independently useful.
+  const [projectIdFilter, setProjectIdFilter] = useState('');
   // Apply button only triggers a refetch — the user can type the project
   // name first and only fire the network call when they're sure.
   const [appliedFilter, setAppliedFilter] = useState('');
+  // [N1 Phase B] Registered projects for the dropdown. One-shot +
+  // silent-on-failure — an empty dropdown just hides the new control.
+  const [projects, setProjects] = useState([]);
 
   // Variance is fetched as a separate request so a stale item list
   // doesn't block the table render. Variance is project-scoped; we
@@ -393,6 +402,11 @@ export default function BoqAdmin() {
     try {
       const params = { isActive: 'true', limit: '100' };
       if (appliedFilter) params.projectName = appliedFilter;
+      // [N1 Phase B] projectId exact-match filter. Backend (boq.js:190-194)
+      // honours it as `where.projectId` so the dropdown acts as a quick
+      // switch to one site's bill-of-quantities. Independent of the
+      // projectName substring search above.
+      if (projectIdFilter) params.projectId = projectIdFilter;
       const data = await api.getBoqItems(params, accessToken);
       setItems(data.items || []);
     } catch (err) {
@@ -400,7 +414,7 @@ export default function BoqAdmin() {
     } finally {
       setLoading(false);
     }
-  }, [accessToken, appliedFilter]);
+  }, [accessToken, appliedFilter, projectIdFilter]);
 
   // Variance only matters for projects — we fetch it when the user has
   // applied a project filter so the variance column can show real
@@ -423,7 +437,18 @@ export default function BoqAdmin() {
       // don't block the table render on a transient failure.
       setVarianceByItem({});
     }
-  }, [accessToken, appliedFilter]);
+  }, [accessToken, appliedFilter, projectIdFilter]);
+
+  // [N1 Phase B] One-shot project list fetch. Backend (boq.js) doesn't
+  // gate /projects on isAdmin, so admins get the same set the rest of
+  // the portal sees. Capped to limit=200 so the dropdown stays scannable.
+  useEffect(() => {
+    let cancelled = false;
+    api.getProjects({ isActive: 'true', limit: '200' }, accessToken)
+      .then((data) => { if (!cancelled) setProjects(data.projects || []); })
+      .catch(() => { if (!cancelled) setProjects([]); });
+    return () => { cancelled = true; };
+  }, [accessToken]);
 
   useEffect(() => {
     fetchItems();
@@ -529,6 +554,40 @@ export default function BoqAdmin() {
                 }}
               >
                 Clear
+              </button>
+            </div>
+          )}
+        </div>
+        {/* [N1 Phase B] Second filter row — exact-match projectId dropdown.
+            Lives on its own row so the toolbar doesn't wrap awkwardly on
+            narrow admin viewports; auto-applies on selection so the user
+            sees results without an extra Apply click. */}
+        <div className="form-row" style={{ marginTop: '0.5rem' }}>
+          <div className="form-group" style={{ minWidth: 240 }}>
+            <label htmlFor="boq-filter-projectId">Or pick a registered project</label>
+            <select
+              id="boq-filter-projectId"
+              className="form-input"
+              value={projectIdFilter}
+              onChange={(e) => setProjectIdFilter(e.target.value)}
+              disabled={projects.length === 0}
+            >
+              <option value="">All projects</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}{p.code ? ` (${p.code})` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          {projectIdFilter && (
+            <div className="form-group" style={{ alignSelf: 'flex-end' }}>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setProjectIdFilter('')}
+              >
+                Clear project
               </button>
             </div>
           )}
