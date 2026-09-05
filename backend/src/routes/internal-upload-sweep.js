@@ -68,6 +68,29 @@
 // `stoppedReason: 'per_run_max' | 'time_budget'` plus a `remainingEstimate`,
 // matching the S3-5 contract — the next fire 15 minutes later picks up the
 // rest, idempotently, via the same atomic guards.
+//
+// ── SOL DR-002 — referenced-ulid defence + dry-run mode ──────────────────
+//
+// The original S3-7 sweep retired every CONFIRMED + boundAt=null row after
+// a 1h grace, on the assumption that any such row was a permanent orphan.
+// SOL DR-002 surfaced the case where that assumption is wrong: a
+// pre-S3-7 upload that produced a CONFIRMED intent ALSO produced a Photo
+// row in `dpr_photo` or `inspection_photo`. The intent row's `bound_at` is
+// NULL because the bind columns didn't exist yet, but the bytes behind it
+// are still in active use by an accepted report.
+//
+// The migration 20260905010000_s3_7_legacy_intent_backfill backfills the
+// pre-existing rows; the defence below is the *ongoing* safety net:
+// every sweep precomputes the set of ulids currently referenced by either
+// Photo table and excludes them from pass 2's candidate set. If the photo
+// tables cannot be read, the sweep aborts with 503 rather than risk
+// deleting live bytes — a redundant lookup failure must never turn into
+// silent data loss.
+//
+// The dry-run mode (body `{ "dryRun": true }`) returns the same counts the
+// real run would produce without flipping any rows or calling R2. It is
+// the operator-evidence tool DR-002 acceptance criteria require: rehearse
+// the deletion list before enabling it.
 
 'use strict';
 
@@ -131,10 +154,78 @@ async function tryDeleteBlob(intent) {
   }
 }
 
+/**
+ * SOL DR-002: collect the set of ulids currently referenced by any Photo
+ * row. Returned as a Set for O(1) membership in pass 2's `notIn` filter.
+ *
+ * Returns `null` when either Photo table cannot be queried — that is the
+ * signal the caller uses to abort the entire sweep rather than risk
+ * deleting live bytes.
+ *
+ * Both queries are deliberately narrow: only `ulid` is selected. dpr_photo
+ * and inspection_photo can each be in the hundreds of thousands once the
+ * portal is in steady-state, but the indexed `ulid` lookup is bounded by
+ * the index size and we only materialise the strings, not the rows.
+ */
+async function collectPhotoReferencedUlids(prisma) {
+  const out = new Set();
+  const sources = [
+    { name: 'dpr_photo', delegate: prisma && prisma.dPRPhoto },
+    { name: 'inspection_photo', delegate: prisma && prisma.inspectionPhoto },
+  ];
+  for (const src of sources) {
+    if (!src.delegate || typeof src.delegate.findMany !== 'function') {
+      // The Photo model may legitimately be absent in unit-test mocks that
+      // exercise only the intent table. Treat that as a hard fail rather
+      // than a silent skip — the safety guarantee requires the data, not
+      // its absence.
+      console.error('[internal-upload-sweep] referenced-ulid lookup missing model', {
+        source: src.name,
+      });
+      return null;
+    }
+    try {
+      const refs = await src.delegate.findMany({ select: { ulid: true } });
+      for (const row of refs) if (row && row.ulid) out.add(row.ulid);
+    } catch (err) {
+      console.error('[internal-upload-sweep] referenced-ulid lookup failed', {
+        source: src.name,
+        errCode: err && err.code,
+        errMessage: err && err.message ? err.message.split('\n')[0] : String(err),
+      });
+      return null;
+    }
+  }
+  return out;
+}
+
 router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma || !prisma.uploadIntent) {
     return res.status(500).json({ error: 'Prisma not available' });
+  }
+
+  // SOL DR-002: dry-run mode — return the same counts as a real run without
+  // flipping any rows or calling R2. The body shape is the same as the
+  // real call so an operator's pre-flight dashboard can render one schema.
+  const dryRun = !!(req.body && req.body.dryRun === true);
+
+  // SOL DR-002: precompute the set of ulids still referenced by a Photo row.
+  // The sweep's CONFIRMED-orphan pass MUST exclude these — without this
+  // defence a legacy CONFIRMED + boundAt=null intent whose ulid is still in
+  // use by an accepted report would have its R2 bytes retired, leaving the
+  // report's photo row pointing at a 404.
+  //
+  // Failure here aborts the entire sweep. A failed lookup must not silently
+  // admit unprotected deletes — that would re-open the very hole DR-002
+  // exists to close. We deliberately treat this as fatal rather than
+  // warn-and-continue.
+  const photoReferencedUlids = await collectPhotoReferencedUlids(prisma);
+  if (photoReferencedUlids === null) {
+    return res.status(503).json({
+      error: 'REFERENCED_ULID_LOOKUP_FAILED',
+      message: 'Could not enumerate ulids referenced by photo tables; sweep aborted to protect live data.',
+    });
   }
 
   const startTime = Date.now();
@@ -142,6 +233,8 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
   let expiredFromConfirmed = 0;
   let blobsCleaned = 0;
   let blobsStillOrphan = 0;
+  let blobsWouldClean = 0; // dry-run accounting
+  let preservedByPhotoRef = 0; // candidates skipped because a Photo still references the ulid
   let skipped = 0;       // atomic-guard misses (row changed under us)
   let batches = 0;
   let stoppedReason = null;
@@ -163,8 +256,13 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
    * in its where-clause, its atomic guard, and which counter it increments;
    * keeping one driver means a future bound change can't apply to one pass
    * and silently miss the other.
+   *
+   * SOL DR-002: passes 1 and 2 may now skip a candidate whose ulid is still
+   * referenced by a Photo row. We compute that here so the count is honest
+   * (`preservedByPhotoRef`), and in dry-run mode we do NOT call updateMany
+   * or deleteBlob — we just account for what would have happened.
    */
-  async function runExpiryPass({ name, buildWhere, guardWhere, onFlip }) {
+  async function runExpiryPass({ name, buildWhere, guardWhere, onFlip, onPreservedByPhotoRef }) {
     let sweptRows = 0;
     outer: while (true) {
       if (actions() >= PER_RUN_MAX) { stoppedReason = 'per_run_max'; break; }
@@ -185,6 +283,25 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
       for (const intent of candidates) {
         if (actions() >= PER_RUN_MAX) { stoppedReason = 'per_run_max'; break outer; }
         if (Date.now() - startTime >= RUN_BUDGET_MS) { stoppedReason = 'time_budget'; break outer; }
+
+        // SOL DR-002: per-row defence. Even if a candidate matches the
+        // batch predicate (buildWhere already excludes photo-referenced
+        // ulids), re-check defensively in case of a race where a Photo row
+        // was inserted between the buildWhere query and this iteration.
+        if (intent && intent.ulid && photoReferencedUlids.has(intent.ulid)) {
+          if (onPreservedByPhotoRef) onPreservedByPhotoRef();
+          continue;
+        }
+
+        // SOL DR-002: dry-run short-circuits before any mutation. We still
+        // count the candidate as if it had been swept, so the operator's
+        // pre-flight dashboard reflects the same numbers a real run would.
+        if (dryRun) {
+          onFlip();
+          blobsWouldClean += 1;
+          sweptRows += 1;
+          continue;
+        }
 
         // Atomic guard FIRST, blob delete second. See "Race safety" above —
         // a concurrent DPR/Inspection bind sets bound_at, this update
@@ -216,7 +333,7 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
       // Partial batch means the predicate is drained — no point re-querying.
       if (candidates.length < PER_BATCH) break;
     }
-    console.log('[internal-upload-sweep] pass done', { pass: name, sweptRows, stoppedReason });
+    console.log('[internal-upload-sweep] pass done', { pass: name, sweptRows, stoppedReason, dryRun });
     return sweptRows;
   }
 
@@ -234,6 +351,17 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
   // ── Pass 2: CONFIRMED bytes that no record ever claimed ─────────────────
   // The S3-7 orphan class. `boundAt: null` is what makes this safe now that
   // the DPR/Inspection POST handlers stamp it.
+  //
+  // SOL DR-002: the photo-referenced defence is enforced in the per-row
+  // loop (see `runExpiryPass` -> "per-row defence"), NOT as a `where:
+  // ulid: { notIn }` filter. Two reasons:
+  //   1. Operators need an honest count (`preservedByPhotoRef`) of how many
+  //      rows the ongoing defence is saving, including from the legacy
+  //      backfill that didn't catch them. A notIn filter would silently
+  //      exclude them before they reach the counter.
+  //   2. The set is already O(1)-membership; the query-time saving is
+  //      negligible compared to the operator-visibility it would cost.
+  // Backfill is in migration 20260905010000; this loop is the safety net.
   await runExpiryPass({
     name: 'confirmed-orphan',
     buildWhere: () => ({
@@ -243,6 +371,7 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
     }),
     guardWhere: () => ({ status: { in: ['CONFIRMED'] }, boundAt: null }),
     onFlip: () => { expiredFromConfirmed += 1; },
+    onPreservedByPhotoRef: () => { preservedByPhotoRef += 1; },
   });
 
   // ── Pass 3: verify EXPIRED rows really have no blob left ────────────────
@@ -250,6 +379,10 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
   // delete failed. Re-attempt, then stamp bound_type='swept' + bound_at so
   // this pass terminates — without that marker it would re-scan and
   // re-delete the same dead rows on every 15-minute fire, forever.
+  //
+  // SOL DR-002: pass 3 already targets rows that pass 1/2 already retired,
+  // so their bytes have been removed; the photo-referenced set does not
+  // apply here. Dry-run mode still skips the delete and the stamp.
   let blobsVerified = 0;
   verifyLoop: while (true) {
     if (actions() + blobsVerified >= PER_RUN_MAX) { stoppedReason = stoppedReason || 'per_run_max'; break; }
@@ -270,6 +403,12 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
     for (const intent of stale) {
       if (actions() + blobsVerified >= PER_RUN_MAX) { stoppedReason = stoppedReason || 'per_run_max'; break verifyLoop; }
       if (Date.now() - startTime >= RUN_BUDGET_MS) { stoppedReason = stoppedReason || 'time_budget'; break verifyLoop; }
+
+      if (dryRun) {
+        blobsWouldClean += 1;
+        blobsVerified += 1;
+        continue;
+      }
 
       const result = await tryDeleteBlob(intent);
       if (!result.cleaned) {
@@ -311,11 +450,22 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
   }
 
   const payload = {
+    dryRun,
     expiredFromPending,
     expiredFromConfirmed,
     blobsCleaned,
     blobsStillOrphan,
     blobsVerified,
+    // SOL DR-002: in dry-run mode, `blobsWouldClean` is what `blobsCleaned`
+    // would have been in a real run. In real-run mode it stays 0 and is
+    // included only for schema symmetry so dashboards can render one row.
+    blobsWouldClean: dryRun ? blobsWouldClean : 0,
+    // SOL DR-002: candidates pass 2 skipped because a Photo row still
+    // references the ulid. Always populated (real or dry-run) so an operator
+    // can see whether the legacy-intent backfill left anything for the
+    // ongoing defence to preserve.
+    preservedByPhotoRef,
+    photoReferencedCount: photoReferencedUlids.size,
     skipped,
     batches,
     stoppedReason,

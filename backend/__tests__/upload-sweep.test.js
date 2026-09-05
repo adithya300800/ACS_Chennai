@@ -99,6 +99,16 @@ function buildPrisma(seedRows = []) {
       }),
       count: jest.fn(async ({ where }) => intents.filter((r) => matches(r, where)).length),
     },
+    // SOL DR-002: the sweep now consults these two Photo tables to defend
+    // against the legacy-intent class. Existing tests run with no Photo
+    // rows, which is the safe default — every candidate is unreferenced
+    // and the sweep behaves exactly as it did before this fix.
+    dPRPhoto: {
+      findMany: jest.fn(async () => []),
+    },
+    inspectionPhoto: {
+      findMany: jest.fn(async () => []),
+    },
     _intents: intents,
     _updateManyCalls: updateManyCalls,
   };
