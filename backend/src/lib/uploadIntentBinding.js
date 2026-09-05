@@ -177,6 +177,12 @@ async function validatePhotoIntents({ prisma, employeeId, photos, context }) {
  * `count` comes back short and we log rather than resurrect a row whose
  * blob has already been deleted.
  *
+ * NOTE (DR-006): the DPR and Inspection create paths no longer use this —
+ * they use `bindPhotoIntentsTx` below, which throws instead of logging so
+ * the enclosing transaction rolls back. This best-effort variant is kept
+ * for callers that genuinely cannot roll back (a record that already
+ * committed in an earlier request).
+ *
  * @returns {Promise<{ bound: number, expected: number, ok: boolean }>}
  */
 async function bindPhotoIntents({ prisma, employeeId, photos, boundType, recordId }) {
@@ -221,8 +227,179 @@ async function bindPhotoIntents({ prisma, employeeId, photos, boundType, recordI
   }
 }
 
+/**
+ * ── [DR-006] The server race the best-effort bind above cannot close ──────
+ *
+ * SOL DR-006 (server half): the create path validated the intents, COMMITTED
+ * the report + photo rows, and only then bound the intents. Two things can
+ * go wrong inside that window:
+ *
+ *   - the durable sweep flips a CONFIRMED row to EXPIRED and deletes the
+ *     blob, so the committed photo row points at bytes that no longer exist;
+ *   - the bind write itself fails.
+ *
+ * In both cases the old code logged a warning and still returned 201. The
+ * user is told "saved", the evidence is gone, and nobody who matters ever
+ * sees the log line. The audit is explicit: *"a short binding count is an
+ * error, not successful publication."*
+ *
+ * The fix is to make the claim and the create ONE transaction:
+ *
+ *   1. `validatePhotoIntents` still runs first, outside the tx — it is the
+ *      cheap rejection path (400 UPLOAD_NOT_CONFIRMED) and we do not want to
+ *      open a transaction just to reject a fabricated ulid.
+ *   2. Inside `prisma.$transaction`:
+ *      a. `assertPhotoIntentsBindable` re-reads the intents with the SAME
+ *         `status: 'CONFIRMED'` predicate,
+ *      b. the report + photo rows are created,
+ *      c. `bindPhotoIntentsTx` stamps `boundType`/`boundAt` with the same
+ *         predicate and compares `count` against the expected set.
+ *   3. A short count throws `PhotoBindingLostError`, which rolls the whole
+ *      transaction back — no report, no photo rows — and the route
+ *      translates it to **409 PHOTO_BINDING_LOST** so the client can
+ *      re-upload. Never a 500: nothing is broken, the evidence just moved.
+ *
+ * The `status: 'CONFIRMED'` filter on the updateMany is the atomic guard.
+ * A sweep that retires a row mid-request makes the count short, which is
+ * exactly the signal we want to surface.
+ */
+
+/** Tagged error so the route can translate the failure to 409, not 500. */
+class PhotoBindingLostError extends Error {
+  constructor({ expected, bound, boundType }) {
+    super('Photo upload ownership was lost before the record could be saved');
+    this.name = 'PhotoBindingLostError';
+    // Duck-typed flag: `instanceof` is unreliable across jest module
+    // registries and any future re-require of this module.
+    this.isPhotoBindingLost = true;
+    this.expected = expected;
+    this.bound = bound;
+    this.boundType = boundType;
+  }
+}
+
+/**
+ * Express envelope for a `PhotoBindingLostError`, or `null` for any other
+ * error (the caller keeps its existing prisma-mapping / 500 path).
+ *
+ * Wire shape mirrors the rest of both routes: `{ error, code, message }`.
+ */
+function photoBindingLostResponse(err) {
+  if (!err || !err.isPhotoBindingLost) return null;
+  return {
+    status: 409,
+    body: {
+      error: 'PHOTO_BINDING_LOST',
+      code: 'PHOTO_BINDING_LOST',
+      message:
+        'One or more photo uploads expired before the record was saved. ' +
+        'Nothing was saved — re-attach the photo(s) and submit again.',
+    },
+  };
+}
+
+/**
+ * Run `fn` inside a real interactive transaction when the client supports
+ * one, otherwise straight through on the base client.
+ *
+ * Two callers need the fallback:
+ *   - deployments/tests whose Prisma stub has no `$transaction`;
+ *   - stubs whose `$transaction` hands back a PARTIAL client that does not
+ *     expose the model being written (several suites wire a tx store with
+ *     only the handful of delegates their route path touches).
+ *
+ * A real PrismaClient always satisfies both checks, so production always
+ * gets the transactional path. Degrading here keeps the pre-existing
+ * behaviour for those stubs instead of turning them into 500s.
+ *
+ * @param {object} prisma      base client
+ * @param {string} modelName   delegate the callback will write (e.g. 'dPR')
+ * @param {(db: object) => Promise<any>} fn
+ */
+async function withRecordTransaction(prisma, modelName, fn) {
+  if (!prisma || typeof prisma.$transaction !== 'function') return fn(prisma);
+  return prisma.$transaction(async (tx) => {
+    const usable = tx && tx[modelName] && typeof tx[modelName].create === 'function';
+    return fn(usable ? tx : prisma);
+  });
+}
+
+/**
+ * [DR-006] Step (a): re-assert, INSIDE the transaction, that every photo
+ * still maps to a CONFIRMED intent owned by `employeeId`.
+ *
+ * This is not a duplicate of `validatePhotoIntents` — that one ran before
+ * the transaction opened. This read happens under the same snapshot as the
+ * create and the bind, so it fails fast (before we write anything) when a
+ * sweep landed between request validation and here.
+ *
+ * @throws {PhotoBindingLostError}
+ */
+async function assertPhotoIntentsBindable({ tx, employeeId, photos }) {
+  if (!Array.isArray(photos) || photos.length === 0) return;
+  if (!tx || !tx.uploadIntent || typeof tx.uploadIntent.findMany !== 'function') return;
+
+  const ulids = uniqueUlids(photos);
+  if (ulids.length === 0) return;
+
+  const confirmed = await tx.uploadIntent.findMany({
+    where: { employeeId, ulid: { in: ulids }, status: 'CONFIRMED' },
+    select: { ulid: true },
+  });
+  if (confirmed.length !== ulids.length) {
+    throw new PhotoBindingLostError({ expected: ulids.length, bound: confirmed.length });
+  }
+}
+
+/**
+ * [DR-006] Steps (c)+(d): claim the intents INSIDE the create transaction.
+ *
+ * Unlike `bindPhotoIntents`, a short count or a failed write THROWS, which
+ * rolls the enclosing transaction back. That is the whole point: a report
+ * whose evidence could not be claimed must not exist.
+ *
+ * An empty photos array is a no-op (`ulid: { in: [] }` would be too, but we
+ * short-circuit so the no-photo path never touches the registry).
+ *
+ * @throws {PhotoBindingLostError}
+ */
+async function bindPhotoIntentsTx({ tx, employeeId, photos, boundType, recordId }) {
+  if (!Array.isArray(photos) || photos.length === 0) return { bound: 0, expected: 0 };
+  if (!tx || !tx.uploadIntent || typeof tx.uploadIntent.updateMany !== 'function') {
+    return { bound: 0, expected: 0 }; // see "Graceful degradation" above
+  }
+
+  const ulids = uniqueUlids(photos);
+  if (ulids.length === 0) return { bound: 0, expected: 0 };
+
+  const result = await tx.uploadIntent.updateMany({
+    // `status: 'CONFIRMED'` is the atomic guard — see the DR-006 block above.
+    where: { employeeId, ulid: { in: ulids }, status: 'CONFIRMED' },
+    data: { boundType, boundAt: new Date() },
+  });
+  const bound = (result && typeof result.count === 'number') ? result.count : 0;
+
+  if (bound !== ulids.length) {
+    console.warn('[upload/intent] bind short — rolling back record create', {
+      employeeHash: hashIdentifier(employeeId),
+      boundType,
+      recordId,
+      expected: ulids.length,
+      bound,
+    });
+    throw new PhotoBindingLostError({ expected: ulids.length, bound, boundType });
+  }
+  return { bound, expected: ulids.length };
+}
+
 module.exports = {
   validatePhotoIntents,
   bindPhotoIntents,
   uniqueUlids,
+  // [DR-006] atomic claim-with-create
+  PhotoBindingLostError,
+  photoBindingLostResponse,
+  withRecordTransaction,
+  assertPhotoIntentsBindable,
+  bindPhotoIntentsTx,
 };

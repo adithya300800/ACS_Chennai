@@ -28,10 +28,18 @@ const { fanOutToAdmins } = require('../lib/notify');
 const { mountUploadRoutes } = require('../lib/uploadRoutes');
 // [S3-7] Consumption half of LPR-012. `validatePhotoIntents` refuses any
 // photo whose ulid has no CONFIRMED intent owned by the caller (closing
-// both the no-intent-at-all gap and the cross-employee IDOR); once the
-// DPR row exists, `bindPhotoIntents` stamps boundType/boundAt so the
-// durable sweep knows the blob has an owner. See lib/uploadIntentBinding.js.
-const { validatePhotoIntents, bindPhotoIntents } = require('../lib/uploadIntentBinding');
+// both the no-intent-at-all gap and the cross-employee IDOR). [DR-006]
+// The claim itself now runs INSIDE the create transaction via
+// `assertPhotoIntentsBindable` + `bindPhotoIntentsTx`, so a sweep that
+// retires a blob mid-request rolls the record back (409) instead of
+// committing a report with missing evidence. See lib/uploadIntentBinding.js.
+const {
+  validatePhotoIntents,
+  withRecordTransaction,
+  assertPhotoIntentsBindable,
+  bindPhotoIntentsTx,
+  photoBindingLostResponse,
+} = require('../lib/uploadIntentBinding');
 // DR-027: parseStrictISODate only validates calendar shape, so a well-formed
 // future date used to persist. rejectIfFutureReportDate is the authority.
 const { rejectIfFutureReportDate } = require('../lib/reportDate');
@@ -528,69 +536,76 @@ router.post('/', async (req, res) => {
   if (intentErr) return res.status(intentErr.status).json(intentErr.body);
 
   try {
-    const dpr = await prisma.dPR.create({
-      data: {
-        projectName: projectName.trim(),
-        location: location.trim(),
-        reportDate: dateUTC,
-        weather: weather || null,
-        temperature: temperature || null,
-        contractor: contractor || null,
-        // P0-3: `workType` is now validated upstream as required. No silent
-        // default here — if the validator above let it through, it's a real
-        // string and we pass it through verbatim.
-        workType,
-        notes: notes || null,
-        // Round-12: write the 5 daily-narrative fields + customSections blob.
-        // workEntries is intentionally NOT persisted — it's legacy from the
-        // pre-refactor DPR and lives on the Inspection page now. Old rows
-        // that already have it are untouched (column is nullable).
-        workExecutedToday: workExecutedToday || null,
-        workLocation: workLocation || null,
-        manpowerSummary: manpowerSummary || null,
-        risksHindrances: risksHindrances || null,
-        materialsReceivedSummary: materialsReceivedSummary || null,
-        customSections: customSections || null,
-        status: status || 'DRAFT',
-        submittedById: req.employeeId,
-        // P2-3: DRAFT saves don't have a submittedAt timestamp
-        submittedAt: status === 'SUBMITTED' ? new Date() : null,
-        photos: {
-          create: photos.map(p => ({
-            ulid: p.ulid,
-            container: p.container,
-            filename: p.filename,
-            contentType: p.contentType,
-            sizeBytes: p.sizeBytes,
-            caption: p.caption || null,
-            location: p.location || null,
-            takenAt: p.takenAt ? new Date(p.takenAt) : null,
-          })),
-        },
-      },
-      include: {
-        photos: true,
-        submittedBy: { select: { id: true, name: true, email: true } },
-        inspections: { select: { id: true, inspectionType: true, status: true, severity: true } },
-      },
-    });
+    // [DR-006] The create and the intent claim are ONE transaction. The
+    // pre-flight `validatePhotoIntents` above is a fast rejection path, but
+    // it cannot stop the durable sweep from retiring a blob in the gap
+    // before the row lands — so we re-assert inside the tx, create, then
+    // claim, and roll everything back if the claim comes up short.
+    const dpr = await withRecordTransaction(prisma, 'dPR', async (db) => {
+      await assertPhotoIntentsBindable({ tx: db, employeeId: req.employeeId, photos });
 
-    // [S3-7] Consume the upload intents this DPR just took ownership of.
-    // Runs before the 201 so binding is part of the create contract, not a
-    // background afterthought: once the client is told "created", the
-    // blobs behind those photos must already be marked as owned or the
-    // durable sweep will retire them out from under the record.
-    //
-    // Best-effort on failure — the DPR exists and the client has earned
-    // its 201. A short count is logged (with the PII-hashed employee id)
-    // by the helper so an operator can see the create path racing the
-    // sweep, which is the only way this legitimately happens.
-    await bindPhotoIntents({
-      prisma,
-      employeeId: req.employeeId,
-      photos,
-      boundType: 'dpr',
-      recordId: dpr.id,
+      const created = await db.dPR.create({
+        data: {
+          projectName: projectName.trim(),
+          location: location.trim(),
+          reportDate: dateUTC,
+          weather: weather || null,
+          temperature: temperature || null,
+          contractor: contractor || null,
+          // P0-3: `workType` is now validated upstream as required. No silent
+          // default here — if the validator above let it through, it's a real
+          // string and we pass it through verbatim.
+          workType,
+          notes: notes || null,
+          // Round-12: write the 5 daily-narrative fields + customSections blob.
+          // workEntries is intentionally NOT persisted — it's legacy from the
+          // pre-refactor DPR and lives on the Inspection page now. Old rows
+          // that already have it are untouched (column is nullable).
+          workExecutedToday: workExecutedToday || null,
+          workLocation: workLocation || null,
+          manpowerSummary: manpowerSummary || null,
+          risksHindrances: risksHindrances || null,
+          materialsReceivedSummary: materialsReceivedSummary || null,
+          customSections: customSections || null,
+          status: status || 'DRAFT',
+          submittedById: req.employeeId,
+          // P2-3: DRAFT saves don't have a submittedAt timestamp
+          submittedAt: status === 'SUBMITTED' ? new Date() : null,
+          photos: {
+            create: photos.map(p => ({
+              ulid: p.ulid,
+              container: p.container,
+              filename: p.filename,
+              contentType: p.contentType,
+              sizeBytes: p.sizeBytes,
+              caption: p.caption || null,
+              location: p.location || null,
+              takenAt: p.takenAt ? new Date(p.takenAt) : null,
+            })),
+          },
+        },
+        include: {
+          photos: true,
+          submittedBy: { select: { id: true, name: true, email: true } },
+          inspections: { select: { id: true, inspectionType: true, status: true, severity: true } },
+        },
+      });
+
+      // [S3-7 + DR-006] Claim the upload intents this DPR just took
+      // ownership of, in the SAME transaction as the create. A short count
+      // means the sweep retired a blob mid-request, so this throws and the
+      // whole create rolls back — the client gets 409 PHOTO_BINDING_LOST and
+      // can re-upload, instead of a "successful" report with missing
+      // evidence and nothing but a log line to show for it.
+      await bindPhotoIntentsTx({
+        tx: db,
+        employeeId: req.employeeId,
+        photos,
+        boundType: 'dpr',
+        recordId: created.id,
+      });
+
+      return created;
     });
 
     if (idempotencyKey && typeof idempotencyKey === 'string' && bodyHash) {
@@ -628,6 +643,18 @@ router.post('/', async (req, res) => {
       }
     }
   } catch (err) {
+    // [DR-006] A lost photo claim is not a server fault — nothing was
+    // written (the tx rolled back) and the client can recover by
+    // re-uploading. 409, never 500, and never the generic prisma mapping.
+    const bindingLost = photoBindingLostResponse(err);
+    if (bindingLost) {
+      console.warn('DPR create rolled back — photo binding lost', {
+        employeeHash: hashIdentifier(req.employeeId),
+        expected: err.expected,
+        bound: err.bound,
+      });
+      return res.status(bindingLost.status).json(bindingLost.body);
+    }
     // Log the Prisma error code + meta only — never the full request body
     // (P1-7). Then map the error to a meaningful HTTP status (P1-1).
     console.error('DPR create error', {

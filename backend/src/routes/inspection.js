@@ -24,7 +24,15 @@ const { mountUploadRoutes } = require('../lib/uploadRoutes');
 // must carry a CONFIRMED intent owned by the caller, and the created
 // record stamps boundType/boundAt so the durable sweep leaves the blobs
 // alone. See lib/uploadIntentBinding.js for the full rationale.
-const { validatePhotoIntents, bindPhotoIntents } = require('../lib/uploadIntentBinding');
+// [DR-006] The claim runs INSIDE the create transaction so a sweep racing
+// the create rolls the record back (409) instead of committing evidence-less.
+const {
+  validatePhotoIntents,
+  withRecordTransaction,
+  assertPhotoIntentsBindable,
+  bindPhotoIntentsTx,
+  photoBindingLostResponse,
+} = require('../lib/uploadIntentBinding');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
 // DR-027: parseStrictISODate only validates calendar shape, so a well-formed
 // future date used to persist. rejectIfFutureReportDate is the authority.
@@ -328,49 +336,56 @@ router.post('/', async (req, res) => {
   if (intentErr) return res.status(intentErr.status).json(intentErr.body);
 
   try {
-    const record = await prisma.inspectionRecord.create({
-      data: {
-        projectName: projectName.trim(),
-        location: location.trim(),
-        reportDate: dateUTC,
-        weather: weather || null,
-        contractor: contractor || null,
-        dprId: dprId || null,
-        inspectionType,
-        data,
-        status: finalStatus,
-        severity: severity || null,
-        submittedById: req.employeeId,
-        photos: {
-          create: photos.map(p => ({
-            ulid: p.ulid,
-            container: p.container,
-            filename: p.filename,
-            contentType: p.contentType,
-            sizeBytes: p.sizeBytes,
-            caption: p.caption || null,
-            location: p.location || null,
-            takenAt: p.takenAt ? new Date(p.takenAt) : null,
-          })),
-        },
-      },
-      include: {
-        photos: true,
-        submittedBy: { select: { id: true, name: true, email: true } },
-        dpr: { select: { id: true, reportDate: true, projectName: true } },
-      },
-    });
+    // [DR-006] Same contract as dpr.js: re-assert the intents, create the
+    // record + photo rows, and claim the intents — all in one transaction.
+    const record = await withRecordTransaction(prisma, 'inspectionRecord', async (db) => {
+      await assertPhotoIntentsBindable({ tx: db, employeeId: req.employeeId, photos });
 
-    // [S3-7] Consume the upload intents this record just took ownership
-    // of, before the 201 — same contract as dpr.js. Best-effort: the
-    // record exists, so a bind failure is logged (PII-hashed) rather than
-    // turned into a 500.
-    await bindPhotoIntents({
-      prisma,
-      employeeId: req.employeeId,
-      photos,
-      boundType: 'inspection',
-      recordId: record.id,
+      const created = await db.inspectionRecord.create({
+        data: {
+          projectName: projectName.trim(),
+          location: location.trim(),
+          reportDate: dateUTC,
+          weather: weather || null,
+          contractor: contractor || null,
+          dprId: dprId || null,
+          inspectionType,
+          data,
+          status: finalStatus,
+          severity: severity || null,
+          submittedById: req.employeeId,
+          photos: {
+            create: photos.map(p => ({
+              ulid: p.ulid,
+              container: p.container,
+              filename: p.filename,
+              contentType: p.contentType,
+              sizeBytes: p.sizeBytes,
+              caption: p.caption || null,
+              location: p.location || null,
+              takenAt: p.takenAt ? new Date(p.takenAt) : null,
+            })),
+          },
+        },
+        include: {
+          photos: true,
+          submittedBy: { select: { id: true, name: true, email: true } },
+          dpr: { select: { id: true, reportDate: true, projectName: true } },
+        },
+      });
+
+      // [S3-7 + DR-006] Claim the intents in the SAME transaction as the
+      // create. A short count throws, rolling the record and its photo rows
+      // back, and the catch below turns it into 409 PHOTO_BINDING_LOST.
+      await bindPhotoIntentsTx({
+        tx: db,
+        employeeId: req.employeeId,
+        photos,
+        boundType: 'inspection',
+        recordId: created.id,
+      });
+
+      return created;
     });
 
     res.status(201).json(record);
@@ -405,6 +420,17 @@ router.post('/', async (req, res) => {
       }
     }
   } catch (err) {
+    // [DR-006] Lost photo claim → 409, not 500. The transaction rolled
+    // back, so there is no half-saved record; the client re-uploads.
+    const bindingLost = photoBindingLostResponse(err);
+    if (bindingLost) {
+      console.warn('Inspection create rolled back — photo binding lost', {
+        employeeHash: hashIdentifier(req.employeeId),
+        expected: err.expected,
+        bound: err.bound,
+      });
+      return res.status(bindingLost.status).json(bindingLost.body);
+    }
     console.error('Inspection create error', {
       employeeHash: hashIdentifier(req.employeeId),
       prismaCode: err.code,
