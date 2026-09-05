@@ -9,7 +9,12 @@ import MonthFilter from '../../components/MonthFilter.jsx';
 import MonthStepper from '../../components/MonthStepper.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { CalendarIcon, MapPinIcon, CameraIcon, ClipboardIcon } from '../../components/Icons.jsx';
-import { formatDateOnly, getCurrentIstMonth } from '../../lib/format.js';
+import { formatDateOnly, formatMonthLabel, getCurrentIstMonth } from '../../lib/format.js';
+import {
+  emptyStateMessage,
+  emptyStateActions,
+  scopeBadge as scopeBadgeFor,
+} from '../../lib/scopeCopy.js';
 
 // Round-22: admin cross-org DPR list. The previous "My Daily Reports" page
 // (DprList at /portal/dpr/my) rendered every org DPR for admins because the
@@ -226,14 +231,93 @@ export default function DprAll() {
   // — the FE prevents that by clearing the matching filter when month
   // changes. Setting `month` to '' opts the admin out into an "all-time"
   // view; the Clear button snaps back to current month instead of empty.
-  const [filter, setFilter] = useState(() => ({
+  //
+  // DR-016: persist filter state in the URL so refresh / back /
+  // share-link / email-CTA all land on the same filtered view. The
+  // URL is the single source of truth: `filter` is initialized from
+  // URL params on every change (refresh, back/forward, share-link),
+  // and writing a filter pushes it back to the URL.
+  const FILTER_PARAM_KEYS = ['month', 'status', 'from', 'to', 'projectName', 'submittedById'];
+  const defaultFilter = () => ({
     month: getCurrentIstMonth(),
     status: '',
     from: '',
     to: '',
     projectName: '',
     submittedById: '',
-  }));
+  });
+  const [filter, setFilter] = useState(() => {
+    const initial = defaultFilter();
+    for (const k of FILTER_PARAM_KEYS) {
+      const v = searchParams.get(k);
+      if (v !== null) initial[k] = v;
+    }
+    return initial;
+  });
+  // URL -> filter sync (handles back/forward + share links). We only
+  // re-derive when a key that we own changed in the URL — this avoids
+  // an infinite loop with the filter->URL sync below and keeps the
+  // deep-link `?id=` param alone (we don't touch it).
+  const filterFromUrl = searchParams.get('month') !== null
+    || searchParams.get('status') !== null
+    || searchParams.get('from') !== null
+    || searchParams.get('to') !== null
+    || searchParams.get('projectName') !== null
+    || searchParams.get('submittedById') !== null;
+  useEffect(() => {
+    if (!filterFromUrl) return;
+    const next = defaultFilter();
+    for (const k of FILTER_PARAM_KEYS) {
+      const v = searchParams.get(k);
+      if (v !== null) next[k] = v;
+    }
+    setFilter(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterFromUrl]);
+  // Filter -> URL sync (handles refresh + share-link). Only fires when
+  // filter actually diverges from the URL — prevents an infinite loop
+  // with the URL->filter sync above.
+  //
+  // The "value" computed for comparison normalizes the implicit
+  // current-month default to the empty string on BOTH sides so a
+  // filter == currentMonth looks identical to "no URL param" and
+  // doesn't trigger an unnecessary URL write on cold load.
+  const currentMonth = getCurrentIstMonth();
+  const normalize = (k, v) => (
+    (k === 'month' && v === currentMonth) ? '' : (v ?? '')
+  );
+  const filterKey = FILTER_PARAM_KEYS.map((k) => `${k}=${normalize(k, filter[k])}`).join('|');
+  useEffect(() => {
+    const current = FILTER_PARAM_KEYS.map((k) => `${k}=${normalize(k, searchParams.get(k))}`).join('|');
+    if (current === filterKey) return;
+    const next = new URLSearchParams(searchParams);
+    for (const k of FILTER_PARAM_KEYS) {
+      const v = filter[k];
+      if (v && v !== '' && !(k === 'month' && v === currentMonth)) {
+        next.set(k, v);
+      } else {
+        next.delete(k);
+      }
+    }
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey]);
+
+  // DR-016: distinguish three time-scope states so the empty-state copy
+  // and the recovery action are always accurate.
+  //   - monthIsHistorical: month is set but not the current month.
+  //     The admin is looking at a specific past month. An empty result
+  //     means "no DPRs in <Month>" — NOT "the org has no data".
+  //   - monthIsAllTime: month is '' (admin explicitly picked "All
+  //     records" from the Month dropdown). An empty result means
+  //     "no DPRs match your other filters".
+  //   - monthIsCurrent: month is the current month (default landing).
+  //     An empty result with no other filters means "no DPRs yet
+  //     this month across the org" — only this branch uses the
+  //     original copy.
+  const monthIsAllTime = filter.month === '';
+  const monthIsHistorical = !!filter.month && filter.month !== currentMonth;
+  const monthIsCurrent = !!filter.month && filter.month === currentMonth;
   const [showFilters, setShowFilters] = useState(false);
 
   const load = useCallback(async () => {
@@ -337,6 +421,9 @@ export default function DprAll() {
   const hasActiveFilters = Boolean(
     filter.status || filter.from || filter.to || filter.projectName || filter.submittedById
   );
+
+  // DR-016 scope flags live next to the URL-sync block so the current
+  // month is computed in one place.
 
   // The submitter dropdown is populated from the unique names found in the
   // currently loaded list. This avoids a separate /api/employees fetch and
@@ -474,16 +561,42 @@ export default function DprAll() {
           <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", color: 'var(--navy)' }}>
             No daily reports found
           </h3>
+          {/* DR-016: copy is delegated to scopeCopy.emptyStateMessage()
+              so the logic is unit-tested in isolation. The helper picks
+              one of five branches based on (month, hasOtherFilters) —
+              see frontend/__tests__/scopeCopy.test.js. */}
           <p style={{ color: 'var(--steel)' }}>
-            {hasActiveFilters
-              ? 'No DPRs match your current filters.'
-              : 'Nothing has been submitted across the org.'}
+            {emptyStateMessage({
+              entityName: 'daily reports',
+              entityNameSingular: 'daily report',
+              month: filter.month,
+              currentMonth,
+              hasOtherFilters: hasActiveFilters,
+              formatMonthLabel,
+            })}
           </p>
-          {hasActiveFilters && (
-            <button className="btn btn-secondary btn-sm" onClick={clearFilters} style={{ marginTop: '0.5rem' }}>
-              Clear filters
-            </button>
-          )}
+          {/* Recovery actions come from the same helper so they cannot
+              drift out of sync with the copy. ALWAYS at least one
+              action so the admin can never be stranded. */}
+          <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+            {emptyStateActions({
+              month: filter.month,
+              currentMonth,
+              hasOtherFilters: hasActiveFilters,
+              formatMonthLabel,
+            }).map((a) => (
+              <button
+                key={a.key}
+                className={`btn btn-sm ${a.key === 'view-all' || a.key === 'clear-all' ? 'btn-secondary' : 'btn-ghost'}`}
+                onClick={() => {
+                  if (a.clearsAllFilters) clearFilters();
+                  else handleFilterChange('month', a.targetMonth);
+                }}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
         </div>
       ) : (
         <>
@@ -538,6 +651,16 @@ export default function DprAll() {
         </div>
         <div className="dpr-list-count" style={{ textAlign: 'center', color: 'var(--steel)', fontSize: '0.8rem', padding: '0.75rem 0.5rem' }}>
           Showing {dprs.length} DPR{dprs.length !== 1 ? 's' : ''}
+          {/* DR-016: surface the active scope beside the count so the
+              admin always knows whether they're looking at a specific
+              month, all-time, or the current default. The previous
+              '· filtered' suffix didn't tell the admin WHICH filter.
+              scopeBadgeFor() returns '' for the default case so the
+              common view stays clean. */}
+          {(() => {
+            const badge = scopeBadgeFor({ month: filter.month, currentMonth, formatMonthLabel });
+            return badge ? ` · ${badge}` : '';
+          })()}
           {hasActiveFilters ? ' · filtered' : ''}
         </div>
         </>

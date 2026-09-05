@@ -8,7 +8,12 @@ import MonthFilter from '../../components/MonthFilter.jsx';
 import MonthStepper from '../../components/MonthStepper.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { MapPinIcon, BuildingIcon, ClipboardIcon } from '../../components/Icons.jsx';
-import { getCurrentIstMonth } from '../../lib/format.js';
+import { getCurrentIstMonth, formatMonthLabel } from '../../lib/format.js';
+import {
+  emptyStateMessage,
+  emptyStateActions,
+  scopeBadge as scopeBadgeFor,
+} from '../../lib/scopeCopy.js';
 
 // P0/A-13: admin cross-org inspection list. The previous dead link at
 // /portal/inspection/all (rendered for admins in InspectionList.jsx)
@@ -127,6 +132,16 @@ export default function InspectionAll() {
   const hasActiveFilters = Boolean(
     filter.status || filter.inspectionType || filter.severity || filter.from || filter.to,
   );
+
+  // DR-016: scope flags for the empty-state copy + recovery actions.
+  // Computed in one place so the JSX block below doesn't have to repeat
+  // the same ternary ladder (which is how the original "Nothing has
+  // been submitted across the org." bug shipped — see
+  // src/lib/scopeCopy.js for the pure helper + tests).
+  const currentMonth = getCurrentIstMonth();
+  const monthIsAllTime = filter.month === '';
+  const monthIsHistorical = !!filter.month && filter.month !== currentMonth;
+  const monthIsCurrent = !!filter.month && filter.month === currentMonth;
 
   return (
     <div className="dpr-page">
@@ -249,16 +264,39 @@ export default function InspectionAll() {
           <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", color: 'var(--navy)' }}>
             No inspection records found
           </h3>
+          {/* DR-016: same scope-aware copy as DprAll (see
+              frontend/__tests__/scopeCopy.test.js). The previous code
+              said "Nothing has been submitted across the org." even
+              when the admin had picked a non-current month. */}
           <p style={{ color: 'var(--steel)' }}>
-            {hasActiveFilters
-              ? 'No inspections match your current filters.'
-              : 'Nothing has been submitted across the org.'}
+            {emptyStateMessage({
+              entityName: 'inspection records',
+              entityNameSingular: 'inspection record',
+              month: filter.month,
+              currentMonth,
+              hasOtherFilters: hasActiveFilters,
+              formatMonthLabel,
+            })}
           </p>
-          {hasActiveFilters && (
-            <button className="btn btn-secondary btn-sm" onClick={clearFilters} style={{ marginTop: '0.5rem' }}>
-              Clear filters
-            </button>
-          )}
+          <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+            {emptyStateActions({
+              month: filter.month,
+              currentMonth,
+              hasOtherFilters: hasActiveFilters,
+              formatMonthLabel,
+            }).map((a) => (
+              <button
+                key={a.key}
+                className={`btn btn-sm ${a.key === 'view-all' || a.key === 'clear-all' ? 'btn-secondary' : 'btn-ghost'}`}
+                onClick={() => {
+                  if (a.clearsAllFilters) clearFilters();
+                  else setFilter((f) => ({ ...f, month: a.targetMonth }));
+                }}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
         </div>
       ) : (
         <>
@@ -296,6 +334,13 @@ export default function InspectionAll() {
         </div>
         <div className="dpr-list-count" style={{ textAlign: 'center', color: 'var(--steel)', fontSize: '0.8rem', padding: '0.75rem 0.5rem' }}>
           Showing {inspections.length} inspection{inspections.length !== 1 ? 's' : ''}
+          {/* DR-016: surface the active scope beside the count, same
+              pattern as DprAll. scopeBadgeFor() returns '' for the
+              default case so the common view stays clean. */}
+          {(() => {
+            const badge = scopeBadgeFor({ month: filter.month, currentMonth, formatMonthLabel });
+            return badge ? ` · ${badge}` : '';
+          })()}
           {hasActiveFilters ? ' · filtered' : ''}
         </div>
         </>
