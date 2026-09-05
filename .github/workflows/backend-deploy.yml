@@ -10,6 +10,20 @@ on:
 permissions:
   contents: read
 
+# DR-010 fix: serialize backend deploys. Pre-fix, two concurrent
+# pushes to `add-react-website` could trigger overlapping Render
+# deploys — the second's PUT DEPLOY_SHA would race the first's
+# SHA-verify, and the SHA gate would see the second's SHA before
+# the first's deploy had finished binding env vars. cancel-in-progress
+# means the OLDER run's deploy trigger is cancelled when a newer
+# commit lands — older run's tests + drift-gate still happened on
+# the older commit, but the actually-deployed SHA is always the
+# newest commit that completed pre-deploy checks. Group keyed on
+# the service so we don't block the unrelated Pages deploy.
+concurrency:
+  group: 'render-backend-deploy'
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -204,7 +218,16 @@ jobs:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
           url="https://api.render.com/v1/services/srv-da9jvkhf2nfc73fpq230/deploys"
-          body='{"branch":"add-react-website"}'
+          # DR-010 fix: pin to the EXACT commit SHA, not a branch ref.
+          # Pre-fix the body was `{"branch":"add-react-website"}`, which
+          # made Render resolve the branch head at trigger time — so the
+          # deployed code could be a newer commit than the one the CI
+          # tested. With `commit`, Render deploys that specific SHA
+          # regardless of subsequent branch updates. The DEPLOY_SHA env
+          # var was independently editable from the same risk family;
+          # pinning the deploy request closes it.
+          PINNED_SHA="${{ github.sha }}"
+          body=$(printf '{"commit":"%s"}' "$PINNED_SHA")
           echo "[render] POST $url (body=$body)"
           response=$(curl -fsS -m 30 -X POST "$url" \
             -H "Authorization: Bearer $RENDER_API_KEY" \
@@ -214,7 +237,7 @@ jobs:
           echo "$response"
           status=$(echo "$response" | tail -n 1 | sed 's/HTTP_STATUS://')
           case "$status" in
-            200|201|202) echo "[render] deploy accepted (status=$status) — proceeding to SHA verify" ;;
+            200|201|202) echo "[render] deploy accepted (status=$status, commit=$PINNED_SHA) — proceeding to SHA verify" ;;
             *) echo "::error::Render deploy trigger returned status=$status (expected 200/201/202)"; exit 1 ;;
           esac
 

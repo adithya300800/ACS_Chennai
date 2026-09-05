@@ -1,0 +1,101 @@
+# DR-010 fix: independent frontend CI gate.
+#
+# Why this exists:
+#   The original test gate lived inside .github/workflows/deploy.yml
+#   (the GitHub Pages publisher). When acschennai.com cuts over from
+#   GitHub Pages to the Render static site (docs/HOSTING_CUTOVER.md),
+#   that publisher workflow gets retired — and its test gate would
+#   die with it. A bad commit landing on `add-react-website` after
+#   cutover would have NO frontend validation gate between author
+#   and production.
+#
+# What this workflow does:
+#   1. Runs the frontend test suite on every push/PR to add-react-website
+#      that touches src/** (same trigger scope as the Pages publisher's
+#      build job used to gate).
+#   2. Runs the production build (`npm run build`) so a build-time
+#      failure (missing dep, Vite plugin misconfig, env var typo) is
+#      also caught here, not silently on Render.
+#   3. Is itself NOT a publisher — it has no deploy job. The actual
+#      publication continues to happen in deploy.yml (Pages, today)
+#      and any future Render static-site publisher, which depend on
+#      this workflow's green status via `needs:` if the publisher
+#      authors want to enforce that linkage.
+#
+# This is the "independent CI that remains active after hosting
+# changes" the DR-010 acceptance criterion calls for.
+
+name: Frontend CI (test + build gate)
+
+on:
+  push:
+    branches: [ add-react-website ]
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.js'
+      - 'babel.config.js'
+      - 'tailwind.config.js'
+      - 'index.html'
+      - 'public/**'
+      - '.github/workflows/frontend-ci.yml'
+  pull_request:
+    branches: [ add-react-website ]
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.js'
+      - 'babel.config.js'
+      - 'tailwind.config.js'
+      - 'index.html'
+      - 'public/**'
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install root dependencies
+        run: npm ci
+
+      # The frontend tests import helpers that touch backend setup
+        # (auth/pii env seeding lives in backend/__tests__/jest.setup.js).
+        # Without backend deps installed the test gate fails with a
+        # misleading "Cannot find module 'jsonwebtoken'" instead of
+        # reporting the real test result.
+      - name: Install backend test dependencies
+        run: npm ci --prefix backend --ignore-scripts
+
+      # Same gate deploy.yml used to run. Scoped to src/__tests__/
+        # because this workflow is the frontend's validation — the
+        # backend has its own deploy.yml + integration gate.
+      - name: Run frontend tests
+        run: npx jest --testPathPattern='(^|/)src/__tests__/' --runInBand --forceExit
+
+      # Build-gate: a missing dep or Vite plugin typo shouldn't reach
+        # production. The build is cheap (the bundle is ~214KB after
+        # round-18's tree-shake), so running it on every push is fine.
+      - name: Build production bundle
+        run: |
+          export NODE_OPTIONS=--max-old-space-size=4096
+          npm run build
+        env:
+          # DR-018 follow-up: only VITE_API_URL (public, scoped to the
+          # portal backend URL) is wired. RESEND / SMTP / Zoho / R2
+          # secrets must NEVER reach this step — see deploy.yml comment
+          # for the inlining hazard.
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}

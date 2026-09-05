@@ -24,11 +24,29 @@
 #
 # See docs/HOSTING_CUTOVER.md sections 5-8 for the exact
 # trigger-disable + rollback procedure.
+#
+# DR-010 fix: the test + build gate now lives in
+# frontend-ci.yml (a publisher-independent gate). This Pages
+# workflow triggers AFTER frontend-ci has completed successfully
+# on the same commit via `workflow_run` — when acschennai.com
+# cuts over to Render static site and this workflow is retired,
+# the gate stays alive in frontend-ci.yml.
 # ============================================================
 
 name: Deploy to GitHub Pages
 
 on:
+  # DR-010: trigger this Pages publisher AFTER frontend-ci succeeds
+  # on the same commit + branch. workflow_run fires once the gating
+  # workflow's run is `completed` (with the success/failure branch
+  # filter below), regardless of the gating workflow's own trigger
+  # event (push, PR, dispatch). branches: filter restricts to the
+  # deploy branch so PRs into add-react-website don't accidentally
+  # publish Pages on every push.
+  workflow_run:
+    workflows: ['Frontend CI (test + build gate)']
+    types: [completed]
+    branches: [ add-react-website ]
   push:
     branches: [ add-react-website ]
     paths-ignore:
@@ -46,6 +64,18 @@ concurrency:
 
 jobs:
   build:
+    # DR-010: only run if frontend-ci just succeeded on this same commit.
+    #   github.event.workflow_run.conclusion === 'success'
+    #   → frontend-ci finished green for the head commit
+    #   github.event_name === 'push' || 'workflow_dispatch'
+    #   → bypass the gate check for direct triggers (manual override path)
+    # This guard prevents a failed gate from silently publishing the
+    # Pages bundle while still allowing an emergency manual deploy via
+    # Actions → Run workflow.
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -65,19 +95,12 @@ jobs:
         # test gate fails with "Cannot find module 'jsonwebtoken'" and
         # blocks the Pages deploy.
         run: npm ci --prefix backend --ignore-scripts
-      # Round-7: gate frontend deploys on the existing test suite (api.js,
-      # ErrorBoundary, auth context, blob upload, attendance). A failed
-      # test now blocks GitHub Pages instead of pushing a regression to
-      # users. Tests run from repo root using the root jest config which
-      # pulls in the backend setup file for auth/pii env seeding.
-      #
-      # PHASE-2 deploy gate: scope to src/__tests__/ only. Pages deploys
-      # only ship the frontend bundle, so backend integration tests
-      # (real Azure/R2 SAS-url, AWS SDK ESM/CJS resolution, jest-worker
-      # OOM on smoke suites) are NOT a release gate for this workflow.
-      # Backend has its own deploy.yml + integration gate.
-      - name: Run tests
-        run: npx jest --testPathPattern='(^|/)src/__tests__/' --runInBand --forceExit
+      # The test step was removed in DR-010 (now lives in frontend-ci.yml).
+      # The build still happens here because Pages needs the artifact
+      # locally to upload; frontend-ci also builds, so we re-do the
+      # work but with the Pages config (NODE_OPTIONS, VITE_API_URL) —
+      # a single-job pipeline would have to inline the Pages upload
+      # config into the gate, which is what we're trying to decouple.
       - name: Build
         # DR-018 fix: Resend email sending is backend-owned. The previous
         # workflow passed ${{ secrets.RESEND_API_KEY }} into the build as
