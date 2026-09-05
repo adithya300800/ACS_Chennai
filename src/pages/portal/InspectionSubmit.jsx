@@ -10,7 +10,7 @@ import {
 import WorkEntryAdder from './WorkEntryAdder.jsx';
 import FormProgress from '../../components/FormProgress.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
-import ownerScopedDraft from '../../lib/ownerScopedDraft.js';
+import { loadDiagnostic as loadScopedDraft, save as saveScopedDraft, clear as clearScopedDraft } from '../../lib/ownerScopedDraft.js';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
 const DRAFT_BASE = 'inspection_draft_v1';
@@ -55,7 +55,7 @@ function loadDraftForEmployee(employeeId) {
   // underlying localStorage entry exists but is unreadable. `load` alone
   // collapses "no draft" and "corrupt JSON" into the same null result,
   // which silently loses the user's data instead of telling them.
-  const { value: raw, corrupt } = ownerScopedDraft.loadDiagnostic(DRAFT_BASE, employeeId);
+  const { value: raw, corrupt } = loadScopedDraft(DRAFT_BASE, employeeId);
   if (corrupt) return { __malformed: true, reason: 'corrupt-storage' };
   if (raw === null) return null;
   // SOL DR-001: detect v1 drafts that lost structured workEntry.data.
@@ -103,11 +103,11 @@ function saveDraftForEmployee(employeeId, payload) {
       takenAt: p.takenAt,
     })),
   };
-  ownerScopedDraft.save(DRAFT_BASE, employeeId, safe);
+  saveScopedDraft(DRAFT_BASE, employeeId, safe);
 }
 
 function clearDraftForEmployee(employeeId) {
-  ownerScopedDraft.clear(DRAFT_BASE, employeeId);
+  clearScopedDraft(DRAFT_BASE, employeeId);
 }
 
 // No-employee wrappers retained for the legacy `Discard` button which is

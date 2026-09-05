@@ -211,6 +211,31 @@ function loadDiagnostic(base, employeeId) {
   return { value: null, corrupt: false, migrated: false };
 }
 
+// [PHASE-3] ESM named exports at module top so Vite/Rollup can do
+// static analysis. The previous single-literal `module.exports = {…}`
+// worked under Jest's CJS-bundled babel transform but Rollup (used by
+// Vite for the production bundle) needs `export` statements to resolve
+// named imports like `import { clearForUser } from './ownerScopedDraft.js'`.
+//
+// The functions are declared above via `function …` (hoisted), so the
+// `export const … = fn` bindings below reference them statically. We
+// also keep `module.exports` as a fallback so node-side callers (e.g.
+// require()) still work — this is the CommonJS-compatible dual shape.
+// Runtime: tests run via Jest with babel-jest (CJS target), so the
+// `module.exports` path is what Jest sees; the production bundle uses
+// `export` for Rollup. Both end up pointing at the same functions.
+
+export {
+  scopedKey,
+  load,
+  loadDiagnostic,
+  save,
+  clear,
+  clearForUser,
+  clearAllExcept,
+  MIGRATION_MARKER_KEY,
+};
+
 module.exports = {
   scopedKey,
   load,
