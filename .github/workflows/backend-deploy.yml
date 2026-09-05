@@ -234,7 +234,6 @@ jobs:
           deadline=$(( $(date +%s) + 300 ))   # 5-minute total budget
           attempt=0
           DEPLOY_SHA=""
-          MATCHES=""
           while [ "$(date +%s)" -lt "$deadline" ]; do
             attempt=$((attempt + 1))
             RESP=$(curl -fsS -m 15 -H "X-Internal-Token: $INTERNAL_API_TOKEN" https://acs-chennai.onrender.com/version 2>/dev/null || echo "")
@@ -243,16 +242,25 @@ jobs:
               sleep 10
               continue
             fi
+            # Round-27 follow-up: trust the LOCAL comparison of
+            # `deploySha` (what /version reports from process.env.DEPLOY_SHA)
+            # against `EXPECTED_SHA` (this workflow's own github.sha). Do
+            # NOT gate on the server's `matches` field — that field is
+            # populated only when Render's `EXPECTED_SHA` env var is set,
+            # which it never is (the workflow only knows EXPECTED_SHA
+            # locally). The server's `matches` is for ops dashboards; the
+            # CI gate is the local string equality. Previous versions of
+            # this step required both conditions, which made the gate
+            # impossible to satisfy even after the SHAs agreed.
             DEPLOY_SHA=$(echo "$RESP" | sed -n 's/.*"deploySha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-            MATCHES=$(echo "$RESP" | sed -n 's/.*"matches"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')
-            echo "[poll $attempt] deploySha=$DEPLOY_SHA matches=$MATCHES"
-            if [ "$DEPLOY_SHA" = "$EXPECTED_SHA" ] && [ "$MATCHES" = "true" ]; then
+            echo "[poll $attempt] deploySha=$DEPLOY_SHA"
+            if [ "$DEPLOY_SHA" = "$EXPECTED_SHA" ]; then
               echo "[poll $attempt] SHA verified — release matches the pushed commit"
               exit 0
             fi
             sleep 10
           done
-          echo "::error::Release SHA never matched after 5 minutes — expected $EXPECTED_SHA, last live $DEPLOY_SHA (matches=$MATCHES)"
+          echo "::error::Release SHA never matched after 5 minutes — expected $EXPECTED_SHA, last live $DEPLOY_SHA"
           exit 1
 
       - name: Smoke test deployed app
