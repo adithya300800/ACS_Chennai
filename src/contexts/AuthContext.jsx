@@ -295,9 +295,13 @@ export function AuthProvider({ children }) {
 }
 
 // Internal component that lives inside the router so we can read navigate().
-// We don't want AuthProvider itself inside the router (it's mounted outside
-// in main.jsx so ToastProvider wraps it), so we use a small child to inject
-// the router hooks back into the context.
+// In the current main.jsx, AuthProvider is itself rendered inside HashRouter,
+// so this bridge is technically redundant — we could call useNavigate
+// directly in the provider. We keep RouterScope anyway: (a) the AuthContext
+// value is consumed from outside the router (toast, lib/api.js), and the
+// router hooks must be captured by something that's guaranteed to be inside
+// the router; (b) it makes the AuthProvider-outside-the-router alternative
+// a one-line refactor. See CLAUDE.md for the full threat model.
 function RouterScope({ setRouter, children }) {
   const navigate = useNavigate();
   const location = useLocation();
