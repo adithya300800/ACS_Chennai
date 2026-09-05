@@ -219,39 +219,6 @@ jobs:
           else
             echo "[lpr-029] nothing to resolve (rc=$RC) — failed-migration row already cleared"
           fi
-
-          # N1 (Phase-A): the migration `20260906000000_n1_project_fk` failed
-          # at Render deploy time on 2026-09-05 with Postgres error 42703
-          # (`column d.project_name does not exist` / hint: use "d.projectName").
-          # The DPR / InspectionRecord column is camelCase quoted "projectName"
-          # (no @map on the field); BoqItem is snake_case quoted "project_name".
-          # The corrective migration `20260906000001_n1_project_fk_fix` re-runs
-          # the DDL with corrected backfill. We need to mark the failed original
-          # as rolled-back so migrate deploy doesn't refuse to apply the new one.
-          echo "[n1-fix] deleting any non-applied rows for 20260906000000_n1_project_fk…"
-          node -e "
-            const { PrismaClient } = require('@prisma/client');
-            const p = new PrismaClient();
-            (async () => {
-              try {
-                const res = await p.\$executeRawUnsafe(\"DELETE FROM \\\"_prisma_migrations\\\" WHERE migration_name = '20260906000000_n1_project_fk' AND status <> 'applied'\");
-                console.log('[n1-fix] deleted', res, 'failed/rolled_back rows for original n1_project_fk');
-              } catch (e) {
-                console.log('[n1-fix] raw DELETE failed (continuing):', e.message);
-              } finally {
-                await p.\$disconnect();
-              }
-            })();
-          " 2>&1 || echo "[n1-fix] raw DELETE step exited non-zero (continuing)"
-
-          set +e
-          npx prisma migrate resolve --rolled-back 20260906000000_n1_project_fk 2>&1
-          RC=$?
-          if [ "$RC" -eq 0 ]; then
-            echo "[n1-fix] migration 20260906000000_n1_project_fk marked rolled back"
-          else
-            echo "[n1-fix] nothing to resolve (rc=$RC) — failed-migration row already cleared"
-          fi
           exit 0
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
