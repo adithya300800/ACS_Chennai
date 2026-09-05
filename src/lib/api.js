@@ -46,6 +46,16 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = DEFAULT_TIMEOUT_MS) 
 // /api/auth/refresh call goes out — every other caller awaits the same promise.
 let refreshingPromise = null;
 
+// Session-identity guard for refresh responses. AuthContext sets
+// `sessionEpoch` to a fresh value on every login; the refresh response
+// is dropped (and treated as if the refresh failed → triggers logout)
+// if the epoch that started the call doesn't match the current epoch
+// at the time the response lands. Without this, a slow in-flight
+// refresh from account A could overwrite the freshly-installed
+// access token for account B after a logout-then-login in the same
+// page lifetime.
+let refreshEpoch = 0;
+
 // Single-fire logout: once we decide the session is dead (TOKEN_INVALID,
 // refresh failed, or no token at all), we dispatch auth:logout exactly
 // ONCE per page lifetime. Without this, every parallel 401 in flight
@@ -62,6 +72,13 @@ function dispatchLogoutOnce(reason) {
 }
 
 function doRefresh() {
+  // DR-011 fix: capture the epoch this refresh call started with so a
+  // late response (slow network, render-blocking tab) can't apply
+  // account A's token to account B's session if a logout/login
+  // happened mid-flight. Every refresh initiator — timer-fired
+  // preemptive, 401-fired reactive, or a manual call to
+  // api.refreshToken() — routes through this single guard.
+  const epochAtCall = refreshEpoch;
   const refresh = localStorage.getItem('acs_refresh');
   if (!refresh) {
     return Promise.reject(new ApiError('No refresh token', 401, 'NO_REFRESH_TOKEN'));
@@ -74,6 +91,13 @@ function doRefresh() {
     .then(async (res) => {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new ApiError(data.error || 'Refresh failed', res.status, data.code);
+      // DR-011: drop the response if the session identity changed
+      // while we were waiting. Throwing here funnels the caller into
+      // the same error path as a refresh failure, so AuthContext's
+      // normal 'auth:logout' fire ends this stale attempt cleanly.
+      if (epochAtCall !== refreshEpoch) {
+        throw new ApiError('Session changed during refresh', 401, 'SESSION_CHANGED');
+      }
       const newToken = data.accessToken;
       try {
         const stored = localStorage.getItem('acs_auth');
@@ -92,7 +116,16 @@ function doRefresh() {
           localStorage.setItem('acs_refresh', data.refreshToken);
         }
       } catch {}
-      window.dispatchEvent(new CustomEvent('auth:token-refreshed', { detail: { accessToken: newToken } }));
+      // DR-011 fix: include the epoch in the event detail so a late
+      // subscriber can still drop the event if a newer epoch has
+      // started. AuthContext subscribes to this and updates React
+      // state so any mounted consumer sees the new token on the next
+      // render — without this subscription the api.js path's
+      // localStorage write was the only publication and React state
+      // drifted out of sync.
+      window.dispatchEvent(new CustomEvent('auth:token-refreshed', {
+        detail: { accessToken: newToken, epoch: epochAtCall },
+      }));
       return newToken;
     })
     .finally(() => {
@@ -160,8 +193,12 @@ async function request(method, path, body, token, { _retried, _networkRetried } 
 
     if (shouldRefresh) {
       try {
-        if (!refreshingPromise) refreshingPromise = doRefresh();
-        const newToken = await refreshingPromise;
+        // DR-011 fix: route through api.refreshToken() so all refresh
+        // initiators (this 401 path, timer-fired preemptive, download(),
+        // manual call) share the single-flight slot AND the session-
+        // identity guard in doRefresh(). The single-flight guarantee is
+        // preserved by the implementation in api.refreshToken itself.
+        const newToken = await api.refreshToken();
         return request(method, path, body, newToken, { _retried: true });
       } catch (refreshErr) {
         // Refresh itself failed — fall through to the normal error path
@@ -207,11 +244,14 @@ export const api = {
       // Mirror the JSON request() path: on TOKEN_EXPIRED/TOKEN_NBF, try a
       // single refresh then retry. Binary responses rarely come back 401,
       // but a long-running session can hit this during a slow export.
+      // DR-011 fix: route through the SHARED single-flight slot via
+      // api.refreshToken() so a download-initiated refresh serializes
+      // with any other refresh in flight (timer-fired, 401-fired from
+      // request()) instead of racing a duplicate refresh on the same
+      // rotating token.
       if (res.status === 401 && token && !path.startsWith('/auth/')) {
         try {
-          const newToken = await (refreshingPromise || (refreshingPromise = doRefresh().finally(() => {
-            setTimeout(() => { refreshingPromise = null; }, 0);
-          })));
+          const newToken = await api.refreshToken();
           res = await fetch(`${API_BASE}/api${path}`, {
             method: 'GET',
             headers: { Authorization: `Bearer ${newToken}` },
@@ -327,6 +367,38 @@ export const api = {
   // fetchMe returns the current employee; used by AuthContext for preemptive
   // refresh when the access token is about to expire (round-8 P1).
   fetchMe: (token) => api.get('/auth/me', token),
+
+  // DR-011 fix: ONE coordinator for token rotation. Every refresh initiator
+  // (timer-fired preemptive, 401-fired reactive inside request()/download(),
+  // and a manual AuthContext call) routes through this function so they all
+  // serialize on the same single-flight slot. Pre-fix, AuthContext had its
+  // OWN refresh implementation that bypassed `refreshingPromise`, so two
+  // parallel refreshes (timer + 401) could race on the same rotating
+  // refresh token — sending it twice, getting one revoked server-side, and
+  // forcing an unnecessary logout on the user.
+  //
+  // This helper is also what bumps `refreshEpoch` when the session identity
+  // changes — callers that mount a fresh login call `api.bumpRefreshEpoch()`
+  // (see below) so any in-flight refresh from the previous account is
+  // dropped on landing via the epoch-mismatch check inside doRefresh().
+  refreshToken: () => {
+    if (!refreshingPromise) refreshingPromise = doRefresh();
+    return refreshingPromise;
+  },
+  // Bump the refresh epoch so any in-flight refresh from a previous session
+  // is rejected on landing (epoch mismatch in doRefresh → ApiError
+  // SESSION_CHANGED → caller treats as a refresh failure → logout path).
+  // AuthContext.login() calls this AFTER persisting the new tokens; it's a
+  // no-op for fresh page loads where doRefresh hasn't been called yet.
+  bumpRefreshEpoch: () => {
+    refreshEpoch += 1;
+  },
+  // Read-only accessor for the current refresh epoch. AuthContext's
+  // auth:token-refreshed listener uses this to drop a late event whose
+  // epoch is stale (a refresh from a previous session landing after a
+  // logout/login cycle). Optional chain (`api.getRefreshEpoch?.()`) so
+  // an older bundle without this helper doesn't crash.
+  getRefreshEpoch: () => refreshEpoch,
 
   // Zoho OAuth — public endpoints (no auth token).
   // Round-7: these previously used raw fetch() in PortalLogin, bypassing

@@ -27,32 +27,28 @@ export function AuthProvider({ children }) {
   const navigateRef = useRef(null);
   const locationRef = useRef(null);
 
-  // Defined early so the preemptive-refresh useEffect below can reference it
-  // in its dependency array without hitting a JS TDZ (declared-later is a
-  // ReferenceError for `const`). This callback's own deps are [] so it never
-  // changes identity — moving it up is safe and stable.
+  // DR-011 fix: route the preemptive-refresh path through api.js's
+  // single-flight coordinator. Pre-fix, this function had its OWN refresh
+  // implementation (calling api.post('/auth/refresh', ...)) that bypassed
+  // the `refreshingPromise` slot, so a timer-fired refresh racing a 401-
+  // fired refresh could send the rotating refresh token twice — the second
+  // request would 401 server-side (token already spent) and force an
+  // unnecessary logout on the user.
+  //
+  // The new flow: api.refreshToken() either returns the in-flight refresh
+  // promise OR starts a new one and caches it. Both the 401 path inside
+  // api.request()/download() AND the preemptive timer here share that
+  // single slot. The api.js path also fires `auth:token-refreshed` so this
+  // provider can update React state — see the useEffect below.
   const refreshTokenFn = useCallback(async () => {
-    const refresh = localStorage.getItem('acs_refresh');
-    if (!refresh) throw new Error('No refresh token');
-
-    const data = await api.post('/auth/refresh', { refreshToken: refresh });
-    const newAccessToken = data.accessToken;
-
-    const stored = localStorage.getItem('acs_auth');
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      localStorage.setItem('acs_auth', JSON.stringify({ ...parsed, accessToken: newAccessToken }));
+    try {
+      return await api.refreshToken();
+    } catch (err) {
+      // Re-throw the underlying ApiError so the preemptive timer and
+      // any direct caller preserves the original failure mode. The
+      // 401 path's auth:logout fire handles the actual UX.
+      throw err;
     }
-    // Round-20 (DR-005): backend rotates refresh tokens. The one we just sent
-    // is dead server-side; the response carries a replacement. Persist it
-    // before doing anything else so a 401 on the next page doesn't see the
-    // spent value. Guarded on presence so we still work against a backend
-    // that hasn't rolled the rotation out yet.
-    if (data.refreshToken) {
-      localStorage.setItem('acs_refresh', data.refreshToken);
-    }
-    setAccessToken(newAccessToken);
-    return newAccessToken;
   }, []);
 
   // On mount, try to restore session from localStorage
@@ -119,6 +115,36 @@ export function AuthProvider({ children }) {
     };
   }, [accessToken, refreshTokenFn]);
 
+  // DR-011 fix: subscribe to auth:token-refreshed so React state mirrors
+  // whichever refresh path ran (timer-fired preemptive, 401-fired
+  // reactive inside request()/download(), or a manual caller). Pre-fix,
+  // api.js dispatched this event but NO provider listened, so the
+  // api.js path's localStorage write was the only publication and React
+  // state drifted out of sync — components could see a stale `accessToken`
+  // for the lifetime of the page even after a successful refresh. The
+  // event detail also carries the refresh epoch so we can drop a late
+  // event from a previous session (e.g. user logged out and back in
+  // during a slow refresh).
+  useEffect(() => {
+    const handler = (e) => {
+      const newToken = e.detail?.accessToken;
+      const epoch = e.detail?.epoch;
+      // Belt-and-suspenders epoch check: api.js's doRefresh already
+      // rejects mismatched epochs inside the promise chain, but the
+      // event could in theory land before the rejection reaches the
+      // catch if the timing is unlucky. Defensive drop is safe — the
+      // current refreshEpoch is the source of truth on this side.
+      if (typeof epoch === 'number' && epoch !== api.getRefreshEpoch?.()) {
+        return;
+      }
+      if (newToken) {
+        setAccessToken(newToken);
+      }
+    };
+    window.addEventListener('auth:token-refreshed', handler);
+    return () => window.removeEventListener('auth:token-refreshed', handler);
+  }, []);
+
   // Wire up auth:logout listener from the api.js interceptor. When a 401
   // comes back with TOKEN_INVALID (or refresh itself fails), the interceptor
   // dispatches this event so we can clear local state and bounce the user to
@@ -175,6 +201,15 @@ export function AuthProvider({ children }) {
     const data = await api.post('/auth/login', { email, password });
     const { accessToken, refreshToken, employee } = data;
 
+    // DR-011 fix: bump the refresh epoch BEFORE persisting the new
+    // tokens so any in-flight refresh from the previous session (a
+    // user logged out, then logged back in within the lifetime of a
+    // slow refresh response) is rejected on landing via the epoch
+    // mismatch check inside doRefresh. Without this bump, the late
+    // response could overwrite the freshly-installed access token for
+    // the new account with one for the previous account.
+    api.bumpRefreshEpoch();
+
     localStorage.setItem('acs_auth', JSON.stringify({ accessToken, employee }));
     localStorage.setItem('acs_refresh', refreshToken);
 
@@ -184,6 +219,12 @@ export function AuthProvider({ children }) {
   }, []);
 
   const setAuthData = useCallback((accessToken, employee, refreshToken) => {
+    // DR-011 fix: bump the refresh epoch here too. Zoho OAuth and any
+    // other "set auth without /auth/login" entry point must invalidate
+    // any in-flight refresh from the previous session for the same
+    // reason as login() — otherwise a stale response can land and
+    // overwrite the new identity's tokens.
+    api.bumpRefreshEpoch();
     localStorage.setItem('acs_auth', JSON.stringify({ accessToken, employee }));
     if (refreshToken) {
       localStorage.setItem('acs_refresh', refreshToken);
@@ -211,6 +252,12 @@ export function AuthProvider({ children }) {
     } catch {
       // Swallowed — see comment above; the local clear is the source of truth.
     }
+    // DR-011 fix: bump the refresh epoch on logout too so any in-flight
+    // refresh from the just-ended session is rejected when its response
+    // arrives. (Without this, a slow /auth/refresh response landing
+    // right after logout could re-populate localStorage with tokens for
+    // the user who just signed out — see SESSION_CHANGED in api.js.)
+    api.bumpRefreshEpoch();
     // SOL DR-003 — capture the id before we null out employee so subscribers
     // can correlate the event with the user being logged out. Cleanup runs
     // for both persisted keys and in-memory form state.
