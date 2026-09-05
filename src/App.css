@@ -1138,8 +1138,12 @@ footer {
 .portal-nav-icon { display: flex; align-items: center; flex-shrink: 0; }
 .portal-nav-label { white-space: nowrap; overflow: hidden; }
 .portal-nav-section-label {
-  /* P0/A-03: subtle, uppercase section labels that split the admin
-     sidebar into Personal / Reports / Admin instead of 13 flat items. */
+  /* S5 audit: subtle, uppercase section labels that split the sidebar
+     into My Work / My Reports / Review / Records / Administration
+     (employees see My Work + My Reports; admins see all five). The
+     labels only render in expanded mode — icon-only mode shows just
+     the icons (each NavLink still carries `title` + `aria-label` for
+     that case). */
   font-family: 'Plus Jakarta Sans', sans-serif;
   font-size: 0.65rem;
   font-weight: 700;
@@ -1152,9 +1156,8 @@ footer {
   /* Round-22 live-fix: the global `* { overflow-x: hidden }` rule at
      App.css:66 implicitly converts overflow-y: visible → auto, which
      reserves scrollbar space even on empty text leaves like this one
-     — making a vertical "pill" appear next to "FIELD REPORTS" and
-     "ADMIN" labels. Same trap as the dropdown clipping (see line ~2885
-     below). Override to visible so the implicit auto goes away. */
+     — making a vertical "pill" appear next to the labels. Same trap
+     as the dropdown clipping. Override to visible. */
   overflow: visible;
 }
 .portal-nav-section-label:first-child { margin-top: 0; }
