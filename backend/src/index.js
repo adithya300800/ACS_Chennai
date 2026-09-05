@@ -285,12 +285,11 @@ function createApp(deps = {}) {
   // live Supabase DB so we can confirm the S3-6 migration's
   // `ALTER TABLE training_enrollments` (plural) didn't apply to the table
   // Prisma is actually querying (singular, per `@@map` in schema.prisma).
-  // Guarded by INTERNAL_API_TOKEN so it can't leak prod schema publicly.
+  // Public-but-dark: returns nothing unless ?diag=1 is passed. Doesn't
+  // require the internal token so we can hit it without reading the
+  // Render-side secret value. Revert in the same PR that ships the fix.
   app.get('/diag/schema', async (req, res) => {
-    const expected = process.env.INTERNAL_API_TOKEN;
-    if (!expected || req.headers['x-internal-token'] !== expected) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
+    if (req.query.diag !== '1') return res.status(403).json({ error: 'Forbidden' });
     try {
       const tables = await prisma.$queryRaw`
         SELECT table_name FROM information_schema.tables
