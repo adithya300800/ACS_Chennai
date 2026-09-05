@@ -135,12 +135,20 @@ function doRefresh() {
     });
 }
 
-async function request(method, path, body, token, { _retried, _networkRetried } = {}) {
+async function request(method, path, body, token, { _retried, _networkRetried, idempotencyKey } = {}) {
   const opts = {
     method,
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      // DR-012: forward the Idempotency-Key header on every send AND
+      // on every NETWORK_ERROR retry of the same call (the retry path
+      // re-enters request() with the same `idempotencyKey` arg, so the
+      // server can dedupe a "POST committed but response lost" replay
+      // back to the cached 201 instead of producing a duplicate row +
+      // duplicate admin fan-out). Round-10 added the server-side
+      // dedupe; this is the matching client-side contract.
+      ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
     },
   };
 
@@ -173,7 +181,7 @@ async function request(method, path, body, token, { _retried, _networkRetried } 
     ) {
       // Small backoff so the waking server has a beat to bind its socket.
       await new Promise((r) => setTimeout(r, 750));
-      return request(method, path, body, token, { _retried, _networkRetried: true });
+      return request(method, path, body, token, { _retried, _networkRetried: true, idempotencyKey });
     }
     throw err;
   }
@@ -199,7 +207,7 @@ async function request(method, path, body, token, { _retried, _networkRetried } 
         // identity guard in doRefresh(). The single-flight guarantee is
         // preserved by the implementation in api.refreshToken itself.
         const newToken = await api.refreshToken();
-        return request(method, path, body, newToken, { _retried: true });
+        return request(method, path, body, newToken, { _retried: true, idempotencyKey });
       } catch (refreshErr) {
         // Refresh itself failed — fall through to the normal error path
         // but tell the app to log out (single-fire to avoid toast spam).
@@ -224,9 +232,15 @@ async function request(method, path, body, token, { _retried, _networkRetried } 
 
 export const api = {
   get: (path, token) => request('GET', path, null, token),
-  post: (path, body, token) => request('POST', path, body, token),
-  put: (path, body, token) => request('PUT', path, body, token),
-  delete: (path, token) => request('DELETE', path, null, token),
+  // DR-012: post/put/delete accept an optional idempotencyKey as the
+  // 4th positional arg. Forwarded as `Idempotency-Key: <key>` so the
+  // backend can dedupe a NETWORK_ERROR-retry-with-same-key to the
+  // cached 201 instead of producing a duplicate row + admin fan-out.
+  // The retry path inside request() preserves the key, so the
+  // client only needs to mint a key ONCE per submit intent.
+  post: (path, body, token, idempotencyKey) => request('POST', path, body, token, { idempotencyKey }),
+  put: (path, body, token, idempotencyKey) => request('PUT', path, body, token, { idempotencyKey }),
+  delete: (path, token, idempotencyKey) => request('DELETE', path, null, token, { idempotencyKey }),
 
   // Round-13: download() — fetch a binary response (XLSX / CSV) and return
   // a Blob + parsed Content-Disposition filename. Routes through the same
@@ -298,7 +312,7 @@ export const api = {
     api.post('/dpr/sas-url', { filename, contentType, container }, token),
   confirmUpload: (ulid, container, filename, contentType, sizeBytes, token) =>
     api.post('/dpr/confirm-upload', { ulid, container, filename, contentType, sizeBytes }, token),
-  createDpr: (data, token) => api.post('/dpr', data, token),
+  createDpr: (data, token, idempotencyKey) => api.post('/dpr', data, token, idempotencyKey),
   getDprs: (params = {}, token) => {
     const qs = new URLSearchParams(params).toString();
     return api.get(`/dpr${qs ? '?' + qs : ''}`, token);
@@ -423,7 +437,7 @@ export const api = {
     api.post('/inspection/confirm-upload', {
       ulid, container: 'inspection-photos', filename, contentType, sizeBytes,
     }, token),
-  createInspection: (data, token) => api.post('/inspection', data, token),
+  createInspection: (data, token, idempotencyKey) => api.post('/inspection', data, token, idempotencyKey),
   getInspections: (params = {}, token) => {
     const qs = new URLSearchParams(params).toString();
     return api.get(`/inspection${qs ? '?' + qs : ''}`, token);

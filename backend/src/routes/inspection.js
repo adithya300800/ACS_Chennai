@@ -14,6 +14,12 @@
 const express = require('express');
 const router = express.Router();
 const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
+// DR-012: shared idempotency replay store. The Inspection POST is the
+// canonical write surface SOL flagged — the create route previously had
+// no request idempotency lookup, so a NETWORK_ERROR retry that landed
+// after the original committed produced a duplicate InspectionRecord +
+// duplicate admin notification fan-out. Same contract as dpr.js POST.
+const { tryReplay: tryIdempotentReplay, recordSuccess: recordIdempotentSuccess } = require('../lib/idempotency');
 const {
   generateReadSASUrl,
   CONTENT_TYPE_EXT,
@@ -168,6 +174,29 @@ mountUploadRoutes(router, {
 // ─── POST /api/inspection ────────────────────────────────────────────────────
 router.post('/', async (req, res) => {
   const prisma = getPrisma(req);
+
+  // DR-012: Idempotency-Key replay protection. Mirror of dpr.js POST
+  // (round-10). The frontend's NETWORK_ERROR retry path in src/lib/api.js
+  // re-sends the same payload — without this gate, the retry creates a
+  // duplicate InspectionRecord, a duplicate notification row, and a
+  // duplicate admin email fan-out. Replay returns the cached 201 with
+  // the Idempotent-Replay header so the client can debug "did my second
+  // click create a duplicate?" without a second notification.
+  // Body-hash mismatch returns 409 IDEMPOTENCY_MISMATCH so a leaked key
+  // cannot be used to probe arbitrary payloads against the cached slot
+  // (DR-006 security pin).
+  const idempotencyResult = tryIdempotentReplay(req);
+  if (idempotencyResult && idempotencyResult.mismatch) {
+    return res.status(409).json({
+      error: 'Idempotency-Key was used for a different request body',
+      code: 'IDEMPOTENCY_MISMATCH',
+    });
+  }
+  if (idempotencyResult && idempotencyResult.replay) {
+    res.setHeader('Idempotent-Replay', 'true');
+    return res.status(idempotencyResult.cached.status).json(idempotencyResult.cached.body);
+  }
+
   const {
     projectName, location, reportDate, weather, contractor,
     dprId, inspectionType, data, severity, status, photos = [],
@@ -389,6 +418,17 @@ router.post('/', async (req, res) => {
     });
 
     res.status(201).json(record);
+
+    // DR-012: persist the success under (employeeId, idempotencyKey)
+    // so a same-key retry within the TTL window returns the cached
+    // body instead of re-running the side effects (record + photos +
+    // bind-claims + admin notification fan-out). MUST run BEFORE the
+    // admin fan-out below — otherwise a retry that lands while the
+    // fan-out is still in flight would re-queue a duplicate
+    // notification email.
+    if (idempotencyResult && idempotencyResult.key) {
+      recordIdempotentSuccess(req, 201, record, req.body);
+    }
 
     // Round-26: fire admin-targeted fan-out for newly-OPENED inspections.
     // Guard on `record.status === 'OPEN'` — admin-set non-OPEN statuses

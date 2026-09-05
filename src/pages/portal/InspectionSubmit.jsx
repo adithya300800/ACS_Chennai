@@ -443,6 +443,17 @@ export default function InspectionSubmit() {
           ulid, container, filename, contentType, sizeBytes, caption, location, takenAt,
         }));
 
+      // DR-012: mint a fresh idempotency key per submit intent. The
+      // backend stores (employeeId, Idempotency-Key, bodyHash) → 201
+      // for 5 minutes so a NETWORK_ERROR retry (api.js:168-178) replays
+      // the same key + body and returns the cached row instead of
+      // creating a duplicate inspection + duplicate admin notification
+      // email. Submitting twice intentionally must mint TWO keys (a
+      // second submit click is a fresh user intent, not a retry).
+      const idempotencyKey = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID()
+        : `insp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
       await api.createInspection(
         {
           projectName: form.projectName,
@@ -467,7 +478,8 @@ export default function InspectionSubmit() {
           severity: null,
           photos: photosToSubmit,
         },
-        accessToken
+        accessToken,
+        idempotencyKey
       );
 
       clearDraftForEmployee(currentEmployeeId);

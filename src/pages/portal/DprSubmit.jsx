@@ -540,6 +540,17 @@ export default function DprSubmit() {
         toast.push(submitStatus === 'DRAFT' ? 'Draft updated.' : 'DPR submitted successfully.', 'success');
         navigate('/portal/dpr/my');
       } else {
+        // DR-012: mint a fresh idempotency key per submit intent. The
+        // backend stores (employeeId, Idempotency-Key, bodyHash) → 201
+        // for 5 minutes so a NETWORK_ERROR retry (api.js:168-178)
+        // replays the same key + body and returns the cached row
+        // instead of creating a duplicate DPR + duplicate admin
+        // notification email. Submitting twice intentionally mints
+        // TWO keys (a second submit click is a fresh user intent).
+        const idempotencyKey = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+          ? crypto.randomUUID()
+          : `dpr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
         await api.createDpr(
           {
             projectName: form.projectName,
@@ -562,7 +573,8 @@ export default function DprSubmit() {
             photos: photosToSubmit,
             // workEntries intentionally omitted — moved to Inspection & Compliance Records.
           },
-          accessToken
+          accessToken,
+          idempotencyKey
         );
         clearDraftForEmployee(currentEmployeeId);
         toast.push(submitStatus === 'DRAFT' ? 'Draft saved.' : 'DPR submitted successfully.', 'success');

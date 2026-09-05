@@ -1,6 +1,11 @@
 const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
+// DR-012: idempotency machinery extracted to a shared lib so future
+// write surfaces (inspection, leave, training-enrollment) can reuse
+// the same canonical-JSON body-hash + replay contract without copying
+// dpr.js verbatim. See lib/idempotency.js for the contract and TTL.
+const { tryReplay: tryIdempotentReplay, recordSuccess: recordIdempotentSuccess } = require('../lib/idempotency');
 const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
 const { generateReadSASUrl, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime, toDateOnly } = require('../lib/errors');
@@ -152,67 +157,12 @@ function validateCustomSections(v) {
 // are keyed by employeeId + server-generated ulid, so the two
 // consumers cannot collide.
 
-// ─── Idempotency-Key store ─────────────────────────────────────────────────
-// Round-10: when a client retries a POST (mobile flaky network, browser
-// refresh, double-click) with the same Idempotency-Key, return the cached
-// response instead of creating a duplicate DPR. Capped at 5 min — long enough
-// to ride out a slow mobile retry, short enough that the map can't grow
-// unboundedly. Keyed by (employeeId, Idempotency-Key) so a leaked key from
-// employee A can't replay employee B's response. The CORS Allow-Headers list
-// (index.js) already exposes this header to the browser.
-//
-// DR-006 (round-20): the cache now stores a SHA-256 hash of the POST
-// body alongside the response. A replay request with the SAME key but
-// a DIFFERENT body returns 409 IDEMPOTENCY_MISMATCH instead of
-// silently returning the first response — that's a security bug
-// (an attacker who learned/leaked a key could probe arbitrary
-// payloads against the cached slot). Same key + same body is the only
-// valid replay. Canonical JSON via stable JSON.stringify (sorted
-// keys, no whitespace) so {a:1,b:2} and {b:2,a:1} hash identically.
-const idempotencyCache = new Map(); // key: `${employeeId}:${idempotencyKey}` → { status, body, bodyHash, savedAt }
-const IDEMPOTENCY_TTL_MS = 5 * 60 * 1000;
-
-function pruneIdempotency() {
-  const cutoff = Date.now() - IDEMPOTENCY_TTL_MS;
-  for (const [k, v] of idempotencyCache.entries()) {
-    if (v.savedAt <= cutoff) idempotencyCache.delete(k);
-  }
-}
-
-// Stable JSON stringify: sort object keys recursively so {a:1,b:2} and
-// {b:2,a:1} produce identical output. Arrays preserve order.
-function canonicalJsonStringify(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) {
-    return '[' + value.map((v) => canonicalJsonStringify(v)).join(',') + ']';
-  }
-  const keys = Object.keys(value).sort();
-  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalJsonStringify(value[k])).join(',') + '}';
-}
-
-function sha256Hex(s) {
-  return crypto.createHash('sha256').update(s).digest('hex');
-}
-
-function getCachedIdempotent(employeeId, key) {
-  const cacheKey = `${employeeId}:${key}`;
-  const cached = idempotencyCache.get(cacheKey);
-  if (!cached) return null;
-  if (Date.now() - cached.savedAt > IDEMPOTENCY_TTL_MS) {
-    idempotencyCache.delete(cacheKey);
-    return null;
-  }
-  return cached;
-}
-function storeIdempotent(employeeId, key, status, body, bodyHash) {
-  pruneIdempotency();
-  idempotencyCache.set(`${employeeId}:${key}`, {
-    status,
-    body,
-    bodyHash,
-    savedAt: Date.now(),
-  });
-}
+// Idempotency-Key replay protection lives in lib/idempotency.js
+// (extracted for DR-012). Round-10 introduced this on DPR so a retry
+// (mobile blip / refresh / double-click) returns the cached 201
+// response instead of creating a duplicate row. See that file for the
+// canonical-JSON body-hash contract that prevents a leaked key from
+// probing arbitrary payloads against a cached slot.
 
 // SSE connections per employee
 const sseConnections = new Map(); // employeeId -> Set<{res, lastNotificationId}>
@@ -383,27 +333,22 @@ router.post('/', async (req, res) => {
   // silently returning the first cached response — that silent-return
   // was the security hole (a leaked key let an attacker probe arbitrary
   // payloads against the cached slot).
-  const idempotencyKey = req.headers['idempotency-key'];
-  let bodyHash = null;
-  if (idempotencyKey && typeof idempotencyKey === 'string' && idempotencyKey.length > 0 && idempotencyKey.length <= 200) {
-    bodyHash = sha256Hex(canonicalJsonStringify(req.body || {}));
-    const cached = getCachedIdempotent(req.employeeId, idempotencyKey);
-    if (cached) {
-      if (cached.bodyHash !== bodyHash) {
-        // Same key, different body — refuse. The client should mint a
-        // new key for a new submission; reusing a key across distinct
-        // intents is a client bug.
-        return res.status(409).json({
-          error: 'Idempotency-Key was used for a different request body',
-          code: 'IDEMPOTENCY_MISMATCH',
-        });
-      }
-      // Replay — return the original response with a header so the client
-      // can tell this is a replay (helps debug "did my second click create
-      // a duplicate?" investigations).
-      res.setHeader('Idempotent-Replay', 'true');
-      return res.status(cached.status).json(cached.body);
-    }
+  const idempotencyResult = tryIdempotentReplay(req);
+  if (idempotencyResult && idempotencyResult.mismatch) {
+    // Same key, different body — refuse. The client should mint a
+    // new key for a new submission; reusing a key across distinct
+    // intents is a client bug. (DR-006 security pin.)
+    return res.status(409).json({
+      error: 'Idempotency-Key was used for a different request body',
+      code: 'IDEMPOTENCY_MISMATCH',
+    });
+  }
+  if (idempotencyResult && idempotencyResult.replay) {
+    // Replay — return the original response with a header so the client
+    // can tell this is a replay (helps debug "did my second click create
+    // a duplicate?" investigations).
+    res.setHeader('Idempotent-Replay', 'true');
+    return res.status(idempotencyResult.cached.status).json(idempotencyResult.cached.body);
   }
 
   const {
@@ -608,8 +553,8 @@ router.post('/', async (req, res) => {
       return created;
     });
 
-    if (idempotencyKey && typeof idempotencyKey === 'string' && bodyHash) {
-      storeIdempotent(req.employeeId, idempotencyKey, 201, dpr, bodyHash);
+    if (idempotencyResult && idempotencyResult.key) {
+      recordIdempotentSuccess(req, 201, dpr, req.body);
     }
 
     res.status(201).json(dpr);
