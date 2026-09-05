@@ -47,6 +47,12 @@ const TrainingCourseNew = React.lazy(() => import('./pages/admin/TrainingCourseN
 // modal (deep-linkable via ?reassign=1).
 const TrainingCourseDetail = React.lazy(() => import('./pages/admin/TrainingCourseDetail.jsx'));
 const TrainingCourseEdit = React.lazy(() => import('./pages/admin/TrainingCourseEdit.jsx'));
+// N17 — Project-level dashboard + project registry. PM's daily landing +
+// admin project CRUD. All three share the admin chunk group and lazy-load
+// on first navigation.
+const ProjectDashboard = React.lazy(() => import('./pages/admin/ProjectDashboard.jsx'));
+const ProjectsAdmin = React.lazy(() => import('./pages/admin/ProjectsAdmin.jsx'));
+const ProjectForm = React.lazy(() => import('./pages/admin/ProjectForm.jsx'));
 // Round-25: notification email preferences page. Master switches + per-type
 // toggles + admin SMTP test button. Lazy-loaded so it doesn't bloat the
 // initial bundle (most users won't visit this page).
@@ -135,6 +141,14 @@ function App() {
           <Route path="admin/training/new" element={<TrainingCourseNew />} />
           <Route path="admin/training/:id" element={<TrainingCourseDetail />} />
           <Route path="admin/training/:id/edit" element={<TrainingCourseEdit />} />
+          {/* N17 — Project dashboard + project registry. Order matters:
+              /new and /:id/edit MUST come before /:id so HashRouter matches
+              the literal "new" instead of treating it as :id="new" (same
+              lesson the training routes above pinned in round-20). */}
+          <Route path="admin/project-dashboard" element={<ProjectDashboard />} />
+          <Route path="admin/projects" element={<ProjectsAdmin />} />
+          <Route path="admin/projects/new" element={<ProjectForm />} />
+          <Route path="admin/projects/:id/edit" element={<ProjectForm />} />
           {/* Round-25: per-user email notification preferences. Master kill
               switches + 11 per-type toggles + admin SMTP wire-check. Lives
               outside the admin tree so non-admins can manage their own. */}

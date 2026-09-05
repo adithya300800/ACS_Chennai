@@ -578,4 +578,76 @@ export const api = {
     api.post(`/training/enrollments/${id}/cancel`, { note: note || null }, token),
   markTrainingComplete: (id, note, token) =>
     api.put(`/training/enrollments/${id}/complete`, note ? { note } : {}, token),
+
+  // Round-29 (N5): Cube-test integration with DPR & Inspection. The
+  // backend ships 6 endpoints under /api/cube-tests; see
+  // backend/src/routes/cubeTest.js for the full contract.
+  //   - getCubeTests            → list with filters (status / dprId /
+  //                               castingRecordId / dueBefore). 100-row cap.
+  //   - createCubeTest          → file a new cube test (requires
+  //                               ownership of the linked inspection/DPR
+  //                               unless admin).
+  //   - getCubeTest             → detail (submitter, DPR-submitter, or admin).
+  //   - updateCubeTest          → record 7d/28d results. Status is
+  //                               server-derived from result >= expected;
+  //                               sending `status` in the body is rejected.
+  //   - getCubeTestsDueSoon     → 28-day tests due in the next N days
+  //                               (default 7) — powers the admin review queue.
+  //   - getCubePourSummary      → pour-summary view per DPR (cast /
+  //                               passed / pending / failed / overdue +
+  //                               billingStatus).
+  getCubeTests: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/cube-tests${qs ? '?' + qs : ''}`, token);
+  },
+  createCubeTest: (data, token) => api.post('/cube-tests', data, token),
+  getCubeTest: (id, token) => api.get(`/cube-tests/${id}`, token),
+  updateCubeTest: (id, data, token) => api.patch(`/cube-tests/${id}`, data, token),
+  getCubeTestsDueSoon: (days = 7, token) =>
+    api.get(`/cube-tests/due-soon?days=${days}`, token),
+  getCubePourSummary: (dprId, token) =>
+    api.get(`/cube-tests/pour-summary/${dprId}`, token),
+
+  // N17 — Project-level dashboard with KPI tiles. Lightweight project
+  // master + a single KPI endpoint that aggregates DPR / Inspection /
+  // CubeTest / BOQ / People counts scoped to one project. `idOrName`
+  // accepts either a UUID or the project name (URL-decoded); the backend
+  // resolves both.
+  getProjects: (token) => api.get('/projects', token),
+  createProject: (data, token) => api.post('/projects', data, token),
+  // getProject accepts either a UUID or a free-text name. We URL-encode
+  // the value so a name like "T-Nagar / Phase II" survives the trip —
+  // Express decodes it before the resolver runs.
+  getProject: (idOrName, token) =>
+    api.get(`/projects/${encodeURIComponent(idOrName)}`, token),
+  // updateProject / softDeleteProject take the UUID — the backend
+  // intentionally rejects PATCH on a name and routes soft-delete via
+  // DELETE on the id (see backend/src/routes/projects.js).
+  updateProject: (id, data, token) => api.patch(`/projects/${id}`, data, token),
+  softDeleteProject: (id, token) => api.delete(`/projects/${id}`, token),
+  // getProjectKpis: dashboard payload for one project. `days` is the
+  // lookback window for activity counts (default 30; backend clamps to
+  // 1..365). Pass 'all' is not supported — the dashboard uses 365 for
+  // a full-year view and the dedicated stats endpoints otherwise.
+  getProjectKpis: (idOrName, days = 30, token) =>
+    api.get(`/projects/${encodeURIComponent(idOrName)}/kpis?days=${days}`, token),
+
+  // N7 (round-28) — Bill of Quantities (BOQ) CRUD + variance report.
+  // Backend (backend/src/routes/boq.js) — committed 68611e2. The
+  // /variance endpoint MUST be called before the /:id fetch above would
+  // match the literal "variance" string (Express route ordering bug — see
+  // the file header in boq.js). Mirroring that priority here is just
+  // cosmetic (the wrapper passes path strings through), but the URL
+  // shape matters: `/boq/variance?projectName=...` not
+  // `/boq/:id?variance=1`.
+  getBoqItems: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/boq${qs ? '?' + qs : ''}`, token);
+  },
+  createBoqItem: (data, token) => api.post('/boq', data, token),
+  getBoqItem: (id, token) => api.get(`/boq/${id}`, token),
+  updateBoqItem: (id, data, token) => api.patch(`/boq/${id}`, data, token),
+  softDeleteBoqItem: (id, token) => api.delete(`/boq/${id}`, token),
+  getBoqVariance: (projectName, token) =>
+    api.get(`/boq/variance?projectName=${encodeURIComponent(projectName)}`, token),
 };

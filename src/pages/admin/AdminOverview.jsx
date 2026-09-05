@@ -85,6 +85,13 @@ export default function AdminOverview() {
         <path d="M22 10v6" /><path d="M2 10l10-5 10 5-10 5z" /><path d="M6 12v5c3 3 9 3 12 0v-5" />
       </svg>
     ),
+    // N17 — Project dashboard icon (chart bars + axis). Matches the
+    // building/chart aesthetic of the ProjectsAdmin page.
+    project: (
+      <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" />
+      </svg>
+    ),
   };
 
   const personalTiles = [
@@ -141,6 +148,20 @@ export default function AdminOverview() {
     },
   ];
 
+  // N17 — Project-level dashboard. Lives in Administration because it
+  // scopes the existing review queues (DPR/Inspection) to a single
+  // project. No badge because the count is project-specific — the
+  // tile just lands the PM on the project picker.
+  const adminTiles = [
+    {
+      to: '/portal/admin/project-dashboard',
+      icon: ICONS.project,
+      title: 'Project Dashboards',
+      sub: 'KPI overview per project',
+      desc: 'See DPR/Inspection/Cube-test/BOQ-variance counts per project.',
+    },
+  ];
+
   return (
     <div className="dpr-page">
       <div className="dpr-page-header">
@@ -155,6 +176,7 @@ export default function AdminOverview() {
       <TileSection title="Attendance" tiles={personalTiles} />
       <TileSection title="Field Reports" tiles={reviewTiles} />
       <TileSection title="People" tiles={peopleTiles} />
+      <TileSection title="Administration" tiles={adminTiles} />
     </div>
   );
 }

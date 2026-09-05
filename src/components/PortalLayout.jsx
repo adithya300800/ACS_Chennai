@@ -189,6 +189,27 @@ const BOOK_ICON = (
     <path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" /><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" />
   </svg>
 );
+// Round-29 (N5): cube-test icon. A simple "beaker" + drop combo stands in
+// for a cube mould without dragging in another library. Same 18x18
+// stroke style as the rest of the sidebar.
+const CUBE_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z" />
+    <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+    <line x1="12" y1="22.08" x2="12" y2="12" />
+  </svg>
+);
+// N17 — Project icon (building) + dashboard chart icon.
+const BUILDING_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" />
+  </svg>
+);
+const CHART_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <line x1="18" y1="20" x2="18" y2="10" /><line x1="12" y1="20" x2="12" y2="4" /><line x1="6" y1="20" x2="6" y2="14" /><line x1="3" y1="20" x2="21" y2="20" />
+  </svg>
+);
 
 const navGroups = [
   {
@@ -206,6 +227,10 @@ const navGroups = [
     items: [
       { to: '/portal/dpr/my', label: 'My Daily Reports', icon: DOC_ICON },
       { to: '/portal/inspection/my', label: 'My Inspection Records', icon: CLIPBOARD_ICON },
+      // Round-29 (N5): cube tests live alongside the other per-user
+      // filed records. The page hosts both the user's own cube tests
+      // and (for admins) a deep-link to the org-wide review queue.
+      { to: '/portal/cube-tests', label: 'My Cube Tests', icon: CUBE_ICON },
     ],
   },
   ...(employee?.isAdmin ? [
@@ -217,6 +242,10 @@ const navGroups = [
         { to: '/portal/admin/inspection', label: 'Inspections Review', icon: GRID_ICON },
         { to: '/portal/admin/leave', label: 'Leave Approvals', icon: CHECKMARK_ICON },
         { to: '/portal/admin/training', label: 'Training Library', icon: GRADUATION_ICON },
+        // Round-29 (N5): cube-test review queue — 28-day tests due
+        // soon across the org. Sits next to the existing review
+        // queues so admins have one place for action-oriented items.
+        { to: '/portal/admin/cube-tests', label: 'Cube Tests Review', icon: CUBE_ICON },
       ],
     },
     {
@@ -226,6 +255,10 @@ const navGroups = [
         { to: '/portal/admin/attendance', label: 'All Attendance', icon: ATTENDANCE_ICON },
         { to: '/portal/dpr/all', label: 'All Daily Reports', icon: DOC_ICON },
         { to: '/portal/inspection/all', label: 'All Inspection Records', icon: CLIPBOARD_LIST_ICON },
+        // N17 — Project registry. Cross-org browse for admins to register
+        // new projects or archive existing ones. Sits under Records because
+        // it's the same browse-then-act shape as the other "All …" entries.
+        { to: '/portal/admin/projects', label: 'Projects', icon: BUILDING_ICON },
       ],
     },
     {
@@ -233,6 +266,10 @@ const navGroups = [
       label: 'Administration',
       items: [
         { to: '/portal/admin', label: 'Overview', icon: GRID_ICON },
+        // N17 — Project dashboard (PM's daily landing). Lives under
+        // Administration because it's the "overview per project" page —
+        // same intent as the admin Overview, just scoped to one site.
+        { to: '/portal/admin/project-dashboard', label: 'Project Dashboard', icon: CHART_ICON },
       ],
     },
   ] : []),
