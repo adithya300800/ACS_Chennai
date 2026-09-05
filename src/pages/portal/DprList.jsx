@@ -101,9 +101,10 @@ function timeAgo(dateStr) {
 
 export default function DprList() {
   useDocumentTitle('My Daily Reports');
-  const { accessToken } = useAuth();
+  const { accessToken, employee } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
+  const isAdmin = !!employee?.isAdmin;
 
   const [dprs, setDprs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -117,7 +118,17 @@ export default function DprList() {
   // made "My Daily Reports" misleading for admins. They can still uncheck
   // the box to opt in to the cross-org view, and admins get a sidebar
   // link to the dedicated `/portal/dpr/all` browse page (round-22).
-  const [filter, setFilter] = useState({ status: '', myOnly: true, from: '', to: '' });
+  //
+  // Live-R3: also default the date range to the current calendar month so
+  // employees see "this month's DPRs" on first paint instead of an
+  // unbounded history scroll. Use `to` = today and `from` = the 1st of
+  // the month (IST business date — see getBusinessToday below).
+  const [filter, setFilter] = useState(() => {
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    const firstOfMonth = today.slice(0, 8) + '01';
+    return { status: '', myOnly: true, from: firstOfMonth, to: today };
+  });
   const [showFilters, setShowFilters] = useState(false);
   // P0 fix (round-10): clicking a row previously navigated to the same
   // route with location.state.selectedDpr — nothing read that state, so
@@ -208,17 +219,32 @@ export default function DprList() {
     navigate(`/portal/dpr/submit?draftId=${dprId}`);
   };
 
-  const handleDeleteDraft = async (dprId) => {
+  // Live-R1: Render free-plan sleeps the backend after ~15 min of
+  // inactivity. The first request to a sleeping backend often hits a
+  // TCP-level failure (NETWORK_ERROR from api.js), not a slow timeout.
+  // Surface that case as a friendlier "warming up" toast and retry once
+  // after a short backoff so the user doesn't have to click twice.
+  const handleDeleteDraft = async (dprId, attempt = 1) => {
     setDeleting(true);
     try {
       await api.deleteDpr(dprId, accessToken);
       toast.push('Draft deleted.', 'success');
       setConfirmDeleteId(null);
       handleCloseModal();
-      // Refresh list
       setDprs((prev) => prev.filter((d) => d.id !== dprId));
     } catch (err) {
-      toast.push(err.message || 'Failed to delete draft', 'error');
+      const isColdStart = err?.code === 'NETWORK_ERROR';
+      if (isColdStart && attempt === 1) {
+        toast.push('Server is waking up — retrying…', 'info');
+        await new Promise((r) => setTimeout(r, 4000));
+        return handleDeleteDraft(dprId, 2);
+      }
+      toast.push(
+        isColdStart
+          ? 'Server is taking too long to respond. Please try again in a minute.'
+          : (err.message || 'Failed to delete draft'),
+        'error'
+      );
     } finally {
       setDeleting(false);
     }
@@ -291,20 +317,51 @@ export default function DprList() {
               </div>
             </fieldset>
             <div className="form-group" style={{ justifyContent: 'flex-end' }}>
-              <label htmlFor="dpr-filter-mine" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                <input
-                  id="dpr-filter-mine"
-                  type="checkbox"
-                  checked={filter.myOnly}
-                  onChange={e => handleFilterChange('myOnly', e.target.checked)}
-                />
-                My DPRs only
-              </label>
+              {/* Live-R4: the "My DPRs only" checkbox is admin-only.
+                  Employees on this page have no cross-org view (the
+                  backend scopes them to their own records regardless of
+                  `my`), so showing them a checkbox that can never do
+                  anything is dead UI. Admins keep it as the toggle
+                  between their own records and the org-wide view. */}
+              {isAdmin && (
+                <label htmlFor="dpr-filter-mine" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                  <input
+                    id="dpr-filter-mine"
+                    type="checkbox"
+                    checked={filter.myOnly}
+                    onChange={e => handleFilterChange('myOnly', e.target.checked)}
+                  />
+                  My DPRs only
+                </label>
+              )}
             </div>
           </div>
+          {/* Live-R3: a single "Current month" pill restores the page's
+              default scope (1st-of-month → today). Useful when the user
+              has drilled into a custom range and wants to come back.
+              Lives next to "Clear filters" so the reset affordances stay
+              grouped. We compute the bounds here off Date() so the pill
+              always reflects *today's* calendar month — same as the
+              initial-state default above. */}
           {(filter.status || filter.from || filter.to) && (
-            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem' }}>
-              <button className="btn btn-ghost btn-sm" onClick={() => setFilter({ status: '', myOnly: true, from: '', to: '' })}>
+            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  const today = new Date().toISOString().slice(0, 10);
+                  const firstOfMonth = today.slice(0, 8) + '01';
+                  setFilter({ status: '', myOnly: true, from: firstOfMonth, to: today });
+                }}
+                aria-label="Reset to current month"
+              >
+                Current month
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setFilter({ status: '', myOnly: true, from: '', to: '' })}
+              >
                 Clear filters
               </button>
             </div>
@@ -384,15 +441,22 @@ export default function DprList() {
                   {dpr.photos?.length || 0} photos
                 </div>
                 <div style={{ flex: 1, color: 'var(--steel)', fontSize: '0.8rem' }}>
-                  {dpr.submittedAt ? (
-                    <div>
-                      <div>{timeAgo(dpr.submittedAt)}</div>
-                      <div style={{ fontSize: '0.75rem' }}>{dpr.submittedBy?.name}</div>
-                    </div>
-                  ) : (
-                    // SOL-P0#4: Resume button as a SIBLING of the
-                    // detail button (no longer nested inside the
-                    // clickable row wrapper, which is gone).
+                  {/* SOL-P0#4 + live-R2: Resume / Delete are gated on
+                      `status === 'DRAFT'`, not on `!dpr.submittedAt`.
+                      The old heuristic broke when an admin approved a
+                      DRAFT directly (backend/src/routes/dpr.js only
+                      stamps submittedAt on the DRAFT → SUBMITTED
+                      transition — see line 518), leaving approved rows
+                      with status=APPROVED and submittedAt=null, which
+                      the row renderer mistakenly rendered as a draft
+                      with a Resume button that 409'd on click.
+
+                      Non-DRAFT rows render the time-ago block; the
+                      ternary's else branch is required because esbuild
+                      (vite's JSX transform) rejects a truthy-only
+                      conditional — babel-jest was more permissive,
+                      which is why this slipped past `npx jest`. */}
+                  {dpr.status === 'DRAFT' ? (
                     <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
                       <button
                         type="button"
@@ -450,6 +514,20 @@ export default function DprList() {
                         >
                           Delete
                         </button>
+                      )}
+                    </div>
+                  ) : (
+                    // Non-DRAFT rows: show the original timeAgo block
+                    // that the previous `dpr.submittedAt ? ... : ...`
+                    // ternary was producing for terminal-state rows.
+                    // Without this else branch, approved/submitted
+                    // rows would render an empty cell.
+                    <div>
+                      {dpr.submittedAt && (
+                        <>
+                          <div>{timeAgo(dpr.submittedAt)}</div>
+                          <div style={{ fontSize: '0.75rem' }}>{dpr.submittedBy?.name}</div>
+                        </>
                       )}
                     </div>
                   )}

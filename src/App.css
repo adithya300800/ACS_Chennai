@@ -1138,21 +1138,24 @@ footer {
 .portal-nav-icon { display: flex; align-items: center; flex-shrink: 0; }
 .portal-nav-label { white-space: nowrap; overflow: hidden; }
 .portal-nav-section-label {
-  /* S5 audit: subtle, uppercase section labels that split the sidebar
-     into My Work / My Reports / Review / Records / Administration
-     (employees see My Work + My Reports; admins see all five). The
-     labels only render in expanded mode — icon-only mode shows just
-     the icons (each NavLink still carries `title` + `aria-label` for
-     that case). */
+  /* S5 audit + live-R5: section labels split the sidebar into My Work /
+     My Reports / Review / Records / Administration (employees see My
+     Work + My Reports; admins see all five). Bumped from 0.65rem →
+     0.82rem and font-weight 700 → 800 so the groups read as section
+     headings rather than micro-labels — user feedback was that the
+     labels were getting visually swallowed by the nav items below.
+     The labels only render in expanded mode — icon-only mode shows
+     just the icons (each NavLink still carries `title` + `aria-label`
+     for that case). */
   font-family: 'Plus Jakarta Sans', sans-serif;
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--steel);
-  opacity: 0.7;
-  padding: 0.85rem 0.85rem 0.4rem;
-  margin-top: 0.25rem;
+  color: var(--navy);
+  opacity: 0.85;
+  padding: 0.95rem 0.85rem 0.45rem;
+  margin-top: 0.4rem;
   /* Round-22 live-fix: the global `* { overflow-x: hidden }` rule at
      App.css:66 implicitly converts overflow-y: visible → auto, which
      reserves scrollbar space even on empty text leaves like this one
