@@ -148,6 +148,48 @@ jobs:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
           DIRECT_DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
+      # LPR-029 (round-29): resolve the previously-failed N17 migration.
+      #
+      # `20260905020000_n17_projects` (round-29) failed on its first run
+      # because the FK referenced `"employee"("id")` (singular) but the
+      # Employee model is `@map("employees")` (plural). Postgres rejected
+      # the CREATE TABLE, Prisma recorded the migration as FAILED in
+      # `_prisma_migrations`, and EVERY subsequent `prisma migrate deploy`
+      # now returns P3009 "migrate found failed migrations in the target
+      # database, new migrations will not be applied" — which means the
+      # backend cannot ship any future migration until the failed row is
+      # resolved.
+      #
+      # Per the lesson in
+      # memory/phase-4-p0-s3-6-typo-and-baseline-hazard.md, the fix is:
+      #   1. Append a NEW migration with the corrected SQL (already done:
+      #      `20260905030000_fix_n17_employee_fk`).
+      #   2. Mark the failed migration as rolled back so `migrate deploy`
+      #      stops gating on it.
+      #
+      # This step runs (2) once, idempotently. `|| true` swallows the
+      # "no failed migration found" exit so subsequent deploys are no-ops.
+      # Once `20260905020000_n17_projects` is rolled back, this step is
+      # harmless to keep around as a future-proofing guard — and removing
+      # it requires a careful audit that the DB's `_prisma_migrations`
+      # table no longer has any `status='failed'` rows. The cost is one
+      # ~200ms Prisma CLI invocation per deploy; acceptable.
+      - name: Resolve previously-failed migrations (LPR-029)
+        continue-on-error: true
+        run: |
+          set +e
+          npx prisma migrate resolve --rolled-back 20260905020000_n17_projects 2>&1
+          RC=$?
+          if [ "$RC" -eq 0 ]; then
+            echo "[lpr-029] migration 20260905020000_n17_projects marked rolled back"
+          else
+            echo "[lpr-029] nothing to resolve (rc=$RC) — failed-migration row already cleared"
+          fi
+          exit 0
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+          DIRECT_DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+
       # LPR-001: pre-deploy backup ping — warn-only. This is NOT a real backup;
       # it's the workflow's way of saying "before we touch prod, the operator
       # owning this run should have a fresh snapshot of the production DB".
