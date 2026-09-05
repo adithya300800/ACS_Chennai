@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatDateOnly } from '../../lib/format.js';
+import { formatShortDate } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
@@ -309,7 +309,7 @@ export default function DprDashboard() {
         title: `${confirmAction.kind === 'single-approve' ? 'Approve' : 'Reject'} this DPR?`,
         rows: [
           ['Project', d.projectName || '(untitled)'],
-          ['Date', formatDateOnly(d.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })],
+          ['Date', formatShortDate(d.reportDate)],
           ['Submitted by', d.submittedBy?.name || '—'],
           ['Contractor', d.contractor || '—'],
           ['Status', d.status],
@@ -336,7 +336,7 @@ export default function DprDashboard() {
           ['Records', targets.length],
           ...(confirmAction.reason ? [['Reason', confirmAction.reason]] : []),
         ],
-        list: targets.map((d) => `${d.projectName || '(untitled)'} · ${formatDateOnly(d.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })} · ${d.submittedBy?.name || '—'}`),
+        list: targets.map((d) => `${d.projectName || '(untitled)'} · ${formatShortDate(d.reportDate)} · ${d.submittedBy?.name || '—'}`),
         footer: confirmAction.action === 'APPROVE'
           ? 'Each report will be approved independently. Per-record failures are reported.'
           : confirmAction.action === 'REJECT'
@@ -454,7 +454,7 @@ export default function DprDashboard() {
                     </span>
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
                       <CalendarIcon size={13} style={{ color: 'var(--steel)' }} />
-                      {formatDateOnly(dpr.reportDate, { day: 'numeric', month: 'short', year: 'numeric' })}
+                      {formatShortDate(dpr.reportDate)}
                     </span>
                   </div>
                 </div>

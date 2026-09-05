@@ -3,7 +3,7 @@ import { Link, useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatDateOnly } from '../../lib/format.js';
+import { formatShortDate, formatDateTime } from '../../lib/format.js';
 import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
@@ -11,17 +11,12 @@ import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 function formatIndianDate(iso) {
   if (!iso) return '—';
-  // DR-032: route through the component-based formatter so a YYYY-MM-DD
-  // reportDate doesn't shift to the previous day in negative-offset locales.
-  const formatted = formatDateOnly(iso, { day: 'numeric', month: 'short', year: 'numeric' });
-  return formatted || String(iso);
+  return formatShortDate(iso) || String(iso);
 }
 
 function formatIndianDateTime(iso) {
   if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return String(iso);
-  return d.toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return formatDateTime(iso) || String(iso);
 }
 
 function labelize(key) {

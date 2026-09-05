@@ -10,6 +10,7 @@ import {
 } from '../../lib/constants.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { getBusinessToday, useBusinessDateKey } from '../../lib/businessDate.js';
+import { formatShortDate, formatDateTime } from '../../lib/format.js';
 
 /**
  * Admin training dashboard. Two sections stacked vertically:
@@ -61,18 +62,6 @@ const FILTERS = [
   { key: 'COMPLETED', label: 'Completed' },
   { key: 'OVERDUE', label: 'Overdue' },
 ];
-
-const formatDate = (dateStr) => {
-  if (!dateStr) return '';
-  const [y, m, d] = String(dateStr).split('T')[0].split('-').map(Number);
-  if (!y || !m || !d) return dateStr;
-  return new Date(y, m - 1, d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
-};
-
-const formatDateTime = (dateStr) => {
-  if (!dateStr) return '';
-  return new Date(dateStr).toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-};
 
 const isOverdue = (e) => {
   if (!e?.dueDate) return false;
@@ -308,7 +297,7 @@ export default function TrainingDashboard() {
                     <span className="training-card-dot">·</span>
                     <span>{courseCounts[c.id] || 0} assigned</span>
                     <span className="training-card-dot">·</span>
-                    <span>Created {formatDate(c.createdAt)}</span>
+                    <span>Created {formatShortDate(c.createdAt)}</span>
                   </div>
                   {c.description && <div className="training-card-desc">{c.description}</div>}
                 </Link>
@@ -414,7 +403,7 @@ export default function TrainingDashboard() {
                       <>
                         <span className="training-card-dot">·</span>
                         <span className={isOverdue(e) ? 'training-card-due-overdue' : ''}>
-                          Due {formatDate(e.dueDate)}
+                          Due {formatShortDate(e.dueDate)}
                           {isOverdue(e) && ' (overdue)'}
                         </span>
                       </>

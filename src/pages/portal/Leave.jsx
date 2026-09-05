@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { formatShortDate, formatDateTime } from '../../lib/format.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 const LEAVE_TYPES = ['CASUAL', 'SICK', 'EARNED', 'UNPAID', 'OPTIONAL'];
@@ -21,18 +22,6 @@ const addDaysInputValue = (n) => {
   const d = new Date();
   d.setDate(d.getDate() + n);
   return toDateInputValue(d);
-};
-
-const formatDate = (dateStr) => {
-  if (!dateStr) return '';
-  const [y, m, d] = String(dateStr).split('T')[0].split('-').map(Number);
-  if (!y || !m || !d) return dateStr;
-  return new Date(y, m - 1, d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
-};
-
-const formatDateTime = (dateStr) => {
-  if (!dateStr) return '';
-  return new Date(dateStr).toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
 
 // Compute inclusive day count between two YYYY-MM-DD strings.
@@ -329,7 +318,7 @@ export default function Leave() {
               <li key={r.id} className="leave-list-item">
                 <div className="leave-list-main">
                   <div className="leave-list-dates">
-                    {formatDate(r.startDate)} – {formatDate(r.endDate)}
+                    {formatShortDate(r.startDate)} – {formatShortDate(r.endDate)}
                     <span className="leave-list-days">({inclusiveDayCount(r.startDate, r.endDate)} day{inclusiveDayCount(r.startDate, r.endDate) === 1 ? '' : 's'})</span>
                   </div>
                   <div className="leave-list-meta">
@@ -351,7 +340,7 @@ export default function Leave() {
                       type="button"
                       className="leave-btn leave-btn-ghost"
                       onClick={() => handleCancel(r.id)}
-                      aria-label={`Cancel leave request for ${formatDate(r.startDate)}`}
+                      aria-label={`Cancel leave request for ${formatShortDate(r.startDate)}`}
                     >
                       Cancel
                     </button>

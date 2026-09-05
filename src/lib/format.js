@@ -178,3 +178,103 @@ export function shiftMonth(yearMonth, delta) {
   const newM = String(d.getMonth() + 1).padStart(2, '0');
   return `${newY}-${newM}`;
 }
+
+// S5 (audit): central helpers for the three mixed date formats that
+// were duplicated across 12+ components before this refactor. All
+// three accept the same loose input shape as formatDateOnly:
+//   - 'YYYY-MM-DD' strings               → calendar-date branch
+//   - 'YYYY-MM-DDTHH:MM:SS...'           → calendar-date branch (DB
+//                                         midnight; same DR-032 fix)
+//   - anything else, including Date, ISO
+//     timestamps, or unparseable strings → toLocaleXxx fallback
+//
+// For date-only inputs we deliberately do NOT add a time component —
+// 'YYYY-MM-DD' is a calendar value with no meaningful hour/minute.
+// For real timestamps we format with the requested clock fields.
+//
+// Returns '' for null/undefined and '' for unparseable strings — same
+// contract as the existing formatDate / formatDateOnly helpers.
+
+// "5 Sept 2026" — used by table rows, list cards, anywhere a short
+// calendar date plus year appears.
+export function formatShortDate(value) {
+  if (value == null || value === '') return '';
+  if (typeof value === 'string') {
+    const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+    if (dateOnlyMatch) {
+      const year = Number(dateOnlyMatch[1]);
+      const month = Number(dateOnlyMatch[2]);
+      const day = Number(dateOnlyMatch[3]);
+      return new Date(year, month - 1, day).toLocaleDateString('en-IN', {
+        day: 'numeric', month: 'short', year: 'numeric',
+      });
+    }
+    // Not a date-only string — fall through to the timestamp formatter.
+  }
+  // Real timestamp / Date / unparseable → use the browser default.
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-IN', {
+    day: 'numeric', month: 'short', year: 'numeric',
+  });
+}
+
+// "5 Sept 2026, 08:42 PM" — used by "Submitted at …", "Completed on
+// …", any combined calendar+wall-clock line. For date-only inputs the
+// time is omitted to avoid implying a moment the data doesn't carry.
+export function formatDateTime(value) {
+  if (value == null || value === '') return '';
+  if (typeof value === 'string') {
+    const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+    if (dateOnlyMatch) {
+      const year = Number(dateOnlyMatch[1]);
+      const month = Number(dateOnlyMatch[2]);
+      const day = Number(dateOnlyMatch[3]);
+      return new Date(year, month - 1, day).toLocaleDateString('en-IN', {
+        day: 'numeric', month: 'short', year: 'numeric',
+      });
+    }
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toLocaleString('en-IN', {
+        day: 'numeric', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+      });
+    }
+    return '';
+  }
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return '';
+    // Pure-calendar Date (midnight) → format as date only.
+    if (
+      value.getHours() === 0 &&
+      value.getMinutes() === 0 &&
+      value.getSeconds() === 0 &&
+      value.getMilliseconds() === 0
+    ) {
+      return new Date(
+        value.getFullYear(),
+        value.getMonth(),
+        value.getDate(),
+      ).toLocaleDateString('en-IN', {
+        day: 'numeric', month: 'short', year: 'numeric',
+      });
+    }
+    return value.toLocaleString('en-IN', {
+      day: 'numeric', month: 'short', year: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    });
+  }
+  return '';
+}
+
+// "08:42 PM" — time-only, hour+minute. Returns '' for null/undefined
+// and '' for unparseable (mirrors the rest of this lib).
+export function formatTimeOnly(value) {
+  if (value == null || value === '') return '';
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('en-IN', {
+    hour: '2-digit', minute: '2-digit',
+  });
+}

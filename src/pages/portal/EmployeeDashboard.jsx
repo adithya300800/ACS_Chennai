@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatTime } from '../../lib/format.js';
+import { formatDateOnly, formatFullDate, formatShortDate, formatTime } from '../../lib/format.js';
 import { getBusinessToday } from '../../lib/businessDate.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { MapPinIcon, ClockIcon, DocIcon, BookIcon, PlaneIcon, BellIcon } from '../../components/Icons.jsx';
@@ -45,10 +45,8 @@ const isDueSoon = (e) => {
 };
 
 const formatDateShort = (s) => {
-  if (!s) return '';
-  const [y, m, d] = String(s).split('T')[0].split('-').map(Number);
-  if (!y || !m || !d) return s;
-  return new Date(y, m - 1, d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  const out = formatShortDate(s);
+  return out || s;
 };
 
 const NotificationItem = ({ n }) => {
@@ -76,7 +74,7 @@ function formatRelativeTime(d) {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d ago`;
-  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  return formatShortDate(d);
 }
 
 const Skeleton = ({ w = '60%', h = 16 }) => (
@@ -178,11 +176,8 @@ export default function EmployeeDashboard() {
   const overdueTraining = training.filter(isOverdue);
   const dueSoonTraining = training.filter(isDueSoon);
 
-  const [year, month, day] = today.split('-').map(Number);
-  const friendlyDate = new Date(year, month - 1, day).toLocaleDateString('en-IN', {
-    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
-  });
   const firstName = employee?.name?.split(' ')[0] || 'there';
+  const friendlyDate = formatFullDate(today);
 
   return (
     <div className="dpr-page dashboard-page">

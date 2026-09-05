@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatDate, formatFullDate, formatTime, getMapUrl, formatCoords, getCurrentIstMonth } from '../../lib/format.js';
+import { formatDate, formatFullDate, formatMonthLabel, formatTime, getMapUrl, formatCoords, getCurrentIstMonth } from '../../lib/format.js';
 import { getBusinessToday } from '../../lib/businessDate.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
@@ -41,8 +41,8 @@ export default function Attendance() {
   }, [selectedRecord]);
 
   // Parse month for display
-  const [calYear, calMonth] = currentMonth.split('-').map(Number);
-  const monthLabel = new Date(calYear, calMonth - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const monthLabel = formatMonthLabel(currentMonth)
+    || new Date(calYear, calMonth - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
 
   // Get today's date string.
   //

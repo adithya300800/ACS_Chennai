@@ -11,6 +11,7 @@ import UserMenu from './UserMenu.jsx';
 import SkipNav from './SkipNav.jsx';
 import useFocusTrap from '../hooks/useFocusTrap.js';
 import useKeyboardShortcut from '../hooks/useKeyboardShortcut.js';
+import { formatDateOnly } from '../lib/format.js';
 
 export default function PortalLayout() {
   const { employee, logout } = useAuth();
@@ -324,7 +325,7 @@ export default function PortalLayout() {
           <div className="portal-topbar-right">
             <NotificationBell />
             <div className="portal-topbar-date">
-              {new Date().toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
+              {formatDateOnly(new Date(), { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
             </div>
             {/* SOL-P2#19: avatar + account menu replaces the bare sign-out
                 button. Sign-out is now inside the dropdown. */}

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatDate, formatFullDate, formatTimeOrDash, getMapUrl } from '../../lib/format.js';
+import { formatDate, formatFullDate, formatMonthLabel, formatTimeOrDash, getMapUrl } from '../../lib/format.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // (Round-15+ C-03: format helpers moved to src/lib/format.js. Admin.jsx
@@ -148,7 +148,8 @@ export default function Admin() {
     return acc;
   }, {});
 
-  const monthLabel = new Date(month + '-01').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const monthLabel = formatMonthLabel(month)
+    || new Date(`${month}-15`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
 
   return (
     <div className="admin-page">

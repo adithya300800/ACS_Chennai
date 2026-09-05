@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatDateOnly } from '../../lib/format.js';
+import { formatDateOnly, formatDateTime, formatTimeOnly } from '../../lib/format.js';
 import VideoPlayer from '../../components/VideoPlayer.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import {
@@ -19,11 +19,6 @@ const formatDate = (dateStr) => {
   // Prisma DateTime @ midnight). Use the component-based formatter so the
   // due date doesn't shift into the previous day in negative-offset locales.
   return formatDateOnly(dateStr, { day: 'numeric', month: 'short', year: 'numeric' });
-};
-
-const formatDateTime = (dateStr) => {
-  if (!dateStr) return '';
-  return new Date(dateStr).toLocaleString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
 
 /**
@@ -319,7 +314,7 @@ export default function TrainingDetail() {
         )}
         <span className="training-detail-ping" aria-live="polite">
           {lastPingAt > 0
-            ? `Progress saved ${new Date(lastPingAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`
+            ? `Progress saved ${formatTimeOnly(lastPingAt)}`
             : pendingPct > 0
               ? `Tracking ${Math.round(pendingPct)}%…`
               : ''}

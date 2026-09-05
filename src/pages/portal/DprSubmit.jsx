@@ -8,6 +8,7 @@ import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../..
 import DprCustomSection from './DprCustomSection.jsx';
 import FormProgress from '../../components/FormProgress.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import { formatShortDate } from '../../lib/format.js';
 import {
   load as loadScopedDraft,
   save as saveScopedDraft,
@@ -128,10 +129,10 @@ function clearDraftForEmployee(currentEmployeeId) {
 
 function formatIndianDate(iso) {
   if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return String(iso);
-  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  const out = formatShortDate(iso);
+  return out || String(iso);
 }
+
 
 export default function DprSubmit() {
   const { accessToken, employee } = useAuth();

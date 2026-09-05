@@ -6,6 +6,7 @@ import { api } from '../../lib/api.js';
 import { TRAINING_PROVIDER_LABELS, TRAINING_STATUSES, TRACKABLE_PROVIDERS, isTrainingTerminal, TRAINING_TERMINAL_STATUSES } from '../../lib/constants.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { getBusinessToday, useBusinessDateKey } from '../../lib/businessDate.js';
+import { formatShortDate } from '../../lib/format.js';
 
 // "My Learning" hub for the employee. Mirrors the Leave page's
 // structure (state, fetch + error/loading/empty triple, pill pattern)
@@ -38,13 +39,6 @@ const FILTERS = [
   { key: 'COMPLETED', label: 'Completed' },
   { key: 'OVERDUE', label: 'Overdue' },
 ];
-
-const formatDueDate = (dateStr) => {
-  if (!dateStr) return '';
-  const [y, m, d] = String(dateStr).split('T')[0].split('-').map(Number);
-  if (!y || !m || !d) return dateStr;
-  return new Date(y, m - 1, d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
-};
 
 // LPR-009: terminal-check uses the canonical list — a row in any of the
 // four *_COMPLETED evidence states is no longer eligible to be flagged
@@ -195,7 +189,7 @@ export default function Training() {
                       <>
                         <span className="training-card-dot">·</span>
                         <span className={`training-card-due ${isOverdue(e) ? 'training-card-due-overdue' : ''}`}>
-                          {isOverdue(e) ? 'Overdue · ' : 'Due '}{formatDueDate(e.dueDate)}
+                          {isOverdue(e) ? 'Overdue · ' : 'Due '}{formatShortDate(e.dueDate)}
                         </span>
                       </>
                     )}
