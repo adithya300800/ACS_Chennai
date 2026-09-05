@@ -10,8 +10,12 @@ import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
 // Mock the heavy dependencies so the component can mount under jsdom.
+// DR-003: include `employee` in the auth context mock — InspectionSubmit
+// reads `employee?.id` to scope its localStorage draft key. Without it,
+// loadDraftForEmployee(null) returns null and the malformed-draft banner
+// (DR-001) never renders.
 jest.mock('../contexts/AuthContext.jsx', () => ({
-  useAuth: () => ({ accessToken: 'test-token', user: { id: 'u1' } }),
+  useAuth: () => ({ accessToken: 'test-token', user: { id: 'u1' }, employee: { id: 'emp-test-1' } }),
 }));
 
 jest.mock('../contexts/ToastContext.jsx', () => ({
@@ -35,7 +39,13 @@ jest.mock('../hooks/useDocumentTitle.js', () => ({
   useDocumentTitle: jest.fn(),
 }));
 
-const DRAFT_KEY = 'inspection_draft_v1';
+const DRAFT_BASE = 'inspection_draft_v1';
+// SOL DR-003: drafts are owner-scoped. Tests using the auth-context mock
+// get `employee.id === 'emp-test-1'`, so the live key the component writes
+// to is `${DRAFT_BASE}:emp-test-1`. Legacy tests can still seed at the
+// unscoped base — loadDraftForEmployee triggers the one-time migration.
+const TEST_EMPLOYEE_ID = 'emp-test-1';
+const SCOPED_DRAFT_KEY = `${DRAFT_BASE}:${TEST_EMPLOYEE_ID}`;
 
 const loadModule = () => {
   // require lazily so the module's top-level loadDraft() call reads fresh
@@ -56,10 +66,10 @@ const renderSubmit = () => {
 
 const seedDraft = (value) => {
   if (value === undefined) {
-    localStorage.removeItem(DRAFT_KEY);
+    localStorage.removeItem(SCOPED_DRAFT_KEY);
     return;
   }
-  localStorage.setItem(DRAFT_KEY, JSON.stringify(value));
+  localStorage.setItem(SCOPED_DRAFT_KEY, JSON.stringify(value));
 };
 
 describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
@@ -99,7 +109,7 @@ describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
       // Simulate WorkEntryAdder onAdd by directly mutating the saved draft
       // (we trust the saveDraft round-trip — see the next test for
       // serializer-only coverage).
-      const cur = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
+      const cur = JSON.parse(localStorage.getItem(SCOPED_DRAFT_KEY) || 'null');
       const merged = {
         __v: 2,
         savedAt: new Date().toISOString(),
@@ -113,7 +123,7 @@ describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
         workEntry: structured,
         photos: [],
       };
-      localStorage.setItem(DRAFT_KEY, JSON.stringify(merged));
+      localStorage.setItem(SCOPED_DRAFT_KEY, JSON.stringify(merged));
     });
 
     unmount();
@@ -146,7 +156,7 @@ describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
     // The serializer only writes workEntry when the user adds one through
     // WorkEntryAdder. We assert the schema version instead.
     return waitFor(() => {
-      const raw = localStorage.getItem(DRAFT_KEY);
+      const raw = localStorage.getItem(SCOPED_DRAFT_KEY);
       expect(raw).not.toBeNull();
       const parsed = JSON.parse(raw);
       expect(parsed.__v).toBe(2);
@@ -188,9 +198,11 @@ describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
       screen.queryByText(/Restored unsaved draft from your previous visit/i)
     ).not.toBeInTheDocument();
     // After mounting with a malformed draft, the legacy draft should be
-    // cleared so subsequent reloads don't repeat the banner.
+    // cleared so subsequent reloads don't repeat the banner. With DR-003
+    // the migration absorbs it into the scoped key — assert the unscoped
+    // key is gone (the migration contract) rather than the scoped one.
     await waitFor(() =>
-      expect(localStorage.getItem(DRAFT_KEY)).toBeNull()
+      expect(localStorage.getItem(DRAFT_BASE)).toBeNull()
     );
   });
 
@@ -217,7 +229,9 @@ describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
   });
 
   test('corrupt JSON in storage does not crash', async () => {
-    localStorage.setItem(DRAFT_KEY, '{not-json');
+    // Seed at the SCOPED key (where the component will look) with corrupt
+    // JSON — this exercises the loadDiagnostic corrupt-storage branch.
+    localStorage.setItem(SCOPED_DRAFT_KEY, '{not-json');
     renderSubmit();
     await waitFor(() =>
       expect(screen.getByLabelText(/Project Name/i)).toBeInTheDocument()

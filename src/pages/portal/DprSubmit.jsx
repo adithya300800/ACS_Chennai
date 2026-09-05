@@ -8,9 +8,17 @@ import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../..
 import DprCustomSection from './DprCustomSection.jsx';
 import FormProgress from '../../components/FormProgress.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import {
+  load as loadScopedDraft,
+  save as saveScopedDraft,
+  clear as clearScopedDraft,
+} from '../../lib/ownerScopedDraft.js';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
-const DRAFT_KEY = 'dpr_draft_v1';
+// SOL DR-003 — owner-scoped keys. The previous unscoped `dpr_draft_v1` kept
+// the previous account's draft on a shared computer. See ownerScopedDraft.js
+// for the migration / clearing contract.
+const DRAFT_BASE = 'dpr_draft_v1';
 
 const getLocalDate = () => {
   const now = new Date();
@@ -51,39 +59,49 @@ const DPR_SECTIONS = [
 ];
 
 function loadDraft() {
-  try {
-    const raw = localStorage.getItem(DRAFT_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  // Back-compat shim — module-level callers still pass through `currentEmployeeId`
+  // via the wrappers below. Kept as a no-op default so legacy references do
+  // not silently introduce unscoped access.
+  return null;
 }
 
 function saveDraft(payload) {
-  try {
-    const safe = {
-      form: payload.form,
-      dailyFields: payload.dailyFields,
-      notes: payload.notes,
-      customSections: payload.customSections,
-      photos: (payload.photos || []).map((p) => ({
-        ulid: p.ulid,
-        container: p.container,
-        filename: p.filename,
-        contentType: p.contentType,
-        sizeBytes: p.sizeBytes,
-        caption: p.caption,
-        location: p.location,
-        takenAt: p.takenAt,
-      })),
-    };
-    localStorage.setItem(DRAFT_KEY, JSON.stringify(safe));
-  } catch {}
+  // Back-compat shim — see loadDraft above.
+  return null;
 }
 
 function clearDraft() {
-  try { localStorage.removeItem(DRAFT_KEY); } catch {}
+  // Back-compat shim — see loadDraft above.
+  return null;
+}
+
+function loadDraftForEmployee(currentEmployeeId) {
+  return loadScopedDraft(DRAFT_BASE, currentEmployeeId);
+}
+
+function saveDraftForEmployee(currentEmployeeId, payload) {
+  if (!currentEmployeeId) return;
+  saveScopedDraft(DRAFT_BASE, currentEmployeeId, {
+    form: payload.form,
+    dailyFields: payload.dailyFields,
+    notes: payload.notes,
+    customSections: payload.customSections,
+    photos: (payload.photos || []).map((p) => ({
+      ulid: p.ulid,
+      container: p.container,
+      filename: p.filename,
+      contentType: p.contentType,
+      sizeBytes: p.sizeBytes,
+      caption: p.caption,
+      location: p.location,
+      takenAt: p.takenAt,
+    })),
+  });
+}
+
+function clearDraftForEmployee(currentEmployeeId) {
+  if (!currentEmployeeId) return;
+  clearScopedDraft(DRAFT_BASE, currentEmployeeId);
 }
 
 function formatIndianDate(iso) {
@@ -94,7 +112,7 @@ function formatIndianDate(iso) {
 }
 
 export default function DprSubmit() {
-  const { accessToken } = useAuth();
+  const { accessToken, employee } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -107,7 +125,11 @@ export default function DprSubmit() {
   const fileInputRef = useRef(null);
   const submittingRef = useRef(false);
 
-  const initialDraft = loadDraft();
+  // SOL DR-003 — owner-scoped draft. The previous unscoped `dpr_draft_v1`
+  // leaked prior accounts' drafts onto shared computers. See
+  // ownerScopedDraft.js for the migration contract.
+  const currentEmployeeId = employee?.id ?? null;
+  const initialDraft = loadDraftForEmployee(currentEmployeeId);
   const [form, setForm] = useState(initialDraft?.form || {
     projectName: '',
     location: '',
@@ -194,12 +216,13 @@ export default function DprSubmit() {
   // Persist draft on every meaningful change. 750ms debounce matches the
   // pre-Round-12 behaviour at the original DprSubmit.jsx:124.
   useEffect(() => {
+    if (!currentEmployeeId) return;
     const t = setTimeout(
-      () => saveDraft({ form, dailyFields, notes, customSections, photos }),
+      () => saveDraftForEmployee(currentEmployeeId, { form, dailyFields, notes, customSections, photos }),
       750
     );
     return () => clearTimeout(t);
-  }, [form, dailyFields, notes, customSections, photos]);
+  }, [form, dailyFields, notes, customSections, photos, currentEmployeeId]);
 
   // Revoke any blob URLs we created when the component unmounts.
   useEffect(() => {
@@ -208,6 +231,40 @@ export default function DprSubmit() {
       photoObjectUrlsRef.current.clear();
     };
   }, []);
+
+  // SOL DR-003 — listen for the logout fan-out. AuthContext dispatches
+  // `draft:clear-current` with `{ employeeId }` whenever the local session
+  // ends (manual logout, 401, preemptive refresh fail). We wipe the in-memory
+  // form so the next user on a shared machine starts clean even if React
+  // doesn't unmount this component in time. The localStorage key itself is
+  // already gone — AuthContext runs `clearScopedDraft` directly.
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.detail?.employeeId && e.detail.employeeId !== currentEmployeeId) return;
+      setForm({
+        projectName: '',
+        location: '',
+        reportDate: getLocalDate(),
+        weather: 'Sunny',
+        temperature: '',
+        contractor: '',
+        workType: 'SITE_INSPECTION',
+      });
+      setDailyFields({
+        workExecutedToday: '',
+        workLocation: '',
+        manpowerSummary: '',
+        risksHindrances: '',
+        materialsReceivedSummary: '',
+      });
+      setCustomSections([]);
+      setPhotos([]);
+      setNotes('');
+      setShowDraftBanner(false);
+    };
+    window.addEventListener('draft:clear-current', handler);
+    return () => window.removeEventListener('draft:clear-current', handler);
+  }, [currentEmployeeId]);
 
   // Load today's inspection records so the summary card shows real data
   // while the engineer fills in the DPR. If none exist, the empty state
@@ -450,7 +507,7 @@ export default function DprSubmit() {
           },
           accessToken
         );
-        clearDraft();
+        clearDraftForEmployee(currentEmployeeId);
         toast.push(submitStatus === 'DRAFT' ? 'Draft saved.' : 'DPR submitted successfully.', 'success');
         navigate('/portal/dpr/my');
       }
@@ -465,7 +522,7 @@ export default function DprSubmit() {
   };
 
   const handleDiscardDraft = () => {
-    clearDraft();
+    clearDraftForEmployee(currentEmployeeId);
     setForm({
       projectName: '',
       location: '',

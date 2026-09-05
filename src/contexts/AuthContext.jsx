@@ -1,6 +1,22 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../lib/api.js';
+import {
+  clearForUser as clearScopedDraftForUser,
+  clearAllExcept as clearAllScopedDraftsExcept,
+} from '../lib/ownerScopedDraft.js';
+
+// SOL DR-003 — every form that autosaves (DPR, Inspection) subscribes to
+// this event and wipes its in-memory state. We also clear the persisted
+// localStorage keys via `clearScopedDraftForUser` so the next account on a
+// shared machine starts with a blank form, not the previous engineer's draft.
+const DRAFT_CLEAR_BASES = ['dpr_draft_v1', 'inspection_draft_v1'];
+
+function clearAllDraftsForEmployee(employeeId) {
+  if (!employeeId) return;
+  DRAFT_CLEAR_BASES.forEach((base) => clearScopedDraftForUser(base, employeeId));
+  clearAllScopedDraftsExcept(DRAFT_CLEAR_BASES, employeeId);
+}
 
 const AuthContext = createContext(null);
 
@@ -128,6 +144,13 @@ export function AuthProvider({ children }) {
       // Clear auth state.
       localStorage.removeItem('acs_auth');
       localStorage.removeItem('acs_refresh');
+
+      // SOL DR-003 — fan out draft cleanup BEFORE we null out employee, so
+      // subscribers can still observe `previousEmployeeId` for diagnostics.
+      const previousEmployeeId = e.detail?.employeeId ?? null;
+      clearAllDraftsForEmployee(previousEmployeeId);
+      window.dispatchEvent(new CustomEvent('draft:clear-current', { detail: { employeeId: previousEmployeeId } }));
+
       setAccessToken(null);
       setEmployee(null);
 
@@ -188,11 +211,17 @@ export function AuthProvider({ children }) {
     } catch {
       // Swallowed — see comment above; the local clear is the source of truth.
     }
+    // SOL DR-003 — capture the id before we null out employee so subscribers
+    // can correlate the event with the user being logged out. Cleanup runs
+    // for both persisted keys and in-memory form state.
+    const previousEmployeeId = employee?.id ?? null;
     localStorage.removeItem('acs_auth');
     localStorage.removeItem('acs_refresh');
+    clearAllDraftsForEmployee(previousEmployeeId);
+    window.dispatchEvent(new CustomEvent('draft:clear-current', { detail: { employeeId: previousEmployeeId } }));
     setAccessToken(null);
     setEmployee(null);
-  }, [accessToken]);
+  }, [accessToken, employee]);
 
   // Provide navigate via a hook wrapper so consumers don't have to wrap us.
   // Called once by <RouterScope /> (see below) to inject react-router.

@@ -10,9 +10,10 @@ import {
 import WorkEntryAdder from './WorkEntryAdder.jsx';
 import FormProgress from '../../components/FormProgress.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import ownerScopedDraft from '../../lib/ownerScopedDraft.js';
 
 const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
-const DRAFT_KEY = 'inspection_draft_v1';
+const DRAFT_BASE = 'inspection_draft_v1';
 // SOL DR-001: bumped to v2 after a serializer bug dropped workEntry.data
 // during autosave. v1 drafts (no __v, workEntry.data missing) are surfaced as
 // "malformed" so the user can discard instead of crashing on reload.
@@ -45,72 +46,82 @@ const validateReportDate = (value) => {
   return null;
 };
 
-function loadDraft() {
-  try {
-    const raw = localStorage.getItem(DRAFT_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-
-    // SOL DR-001: detect v1 drafts that lost structured workEntry.data.
-    // A well-formed v2 draft always has __v === 2 and, if workEntry is set,
-    // includes a `data` object. Anything else is treated as malformed so the
-    // user sees an explicit recover/discard banner instead of a crash on
-    // render.
-    if (!isObject(parsed)) return { __malformed: true, reason: 'corrupt-shape' };
-    const version = parsed.__v;
-    if (version !== DRAFT_SCHEMA_VERSION) {
-      return { __malformed: true, reason: 'legacy-shape', payload: parsed };
-    }
-    if (parsed.workEntry !== null && parsed.workEntry !== undefined) {
-      if (!isObject(parsed.workEntry) || !isObject(parsed.workEntry.data)) {
-        return { __malformed: true, reason: 'workentry-data-missing', payload: parsed };
-      }
-    }
-    return parsed;
-  } catch {
-    return { __malformed: true, reason: 'parse-failed' };
+// SOL DR-003: the owner-scoped draft helpers wrap the raw localStorage
+// access so the per-user scoping + one-time legacy migration stay in one
+// place. The `loadDraft`/`saveDraft`/`clearDraft` wrappers below just
+// thread the current employee id through.
+function loadDraftForEmployee(employeeId) {
+  // Diagnostic read so we can surface a malformed-draft banner when the
+  // underlying localStorage entry exists but is unreadable. `load` alone
+  // collapses "no draft" and "corrupt JSON" into the same null result,
+  // which silently loses the user's data instead of telling them.
+  const { value: raw, corrupt } = ownerScopedDraft.loadDiagnostic(DRAFT_BASE, employeeId);
+  if (corrupt) return { __malformed: true, reason: 'corrupt-storage' };
+  if (raw === null) return null;
+  // SOL DR-001: detect v1 drafts that lost structured workEntry.data.
+  // A well-formed v2 draft always has __v === 2 and, if workEntry is set,
+  // includes a `data` object. Anything else is treated as malformed so the
+  // user sees an explicit recover/discard banner instead of a crash on
+  // render.
+  if (!isObject(raw)) return { __malformed: true, reason: 'corrupt-shape' };
+  const version = raw.__v;
+  if (version !== DRAFT_SCHEMA_VERSION) {
+    return { __malformed: true, reason: 'legacy-shape', payload: raw };
   }
+  if (raw.workEntry !== null && raw.workEntry !== undefined) {
+    if (!isObject(raw.workEntry) || !isObject(raw.workEntry.data)) {
+      return { __malformed: true, reason: 'workentry-data-missing', payload: raw };
+    }
+  }
+  return raw;
 }
 
-function saveDraft(payload) {
-  try {
-    const safe = {
-      __v: DRAFT_SCHEMA_VERSION,
-      savedAt: new Date().toISOString(),
-      form: payload.form,
-      // SOL DR-001: previous serializer only kept `workType`, dropping the
-      // structured field data the renderer needs (see render at lines ~473).
-      // Persist the full entry — `data` is required for the inspection card
-      // and for submit.
-      workEntry: payload.workEntry
-        ? {
-            workType: payload.workEntry.workType,
-            data: payload.workEntry.data || {},
-            addedAt: payload.workEntry.addedAt || null,
-          }
-        : null,
-      photos: (payload.photos || []).map((p) => ({
-        ulid: p.ulid,
-        container: p.container,
-        filename: p.filename,
-        contentType: p.contentType,
-        sizeBytes: p.sizeBytes,
-        caption: p.caption,
-        location: p.location,
-        takenAt: p.takenAt,
-      })),
-    };
-    localStorage.setItem(DRAFT_KEY, JSON.stringify(safe));
-  } catch {}
+function saveDraftForEmployee(employeeId, payload) {
+  const safe = {
+    __v: DRAFT_SCHEMA_VERSION,
+    savedAt: new Date().toISOString(),
+    form: payload.form,
+    // SOL DR-001: previous serializer only kept `workType`, dropping the
+    // structured field data the renderer needs (see render at lines ~473).
+    // Persist the full entry — `data` is required for the inspection card
+    // and for submit.
+    workEntry: payload.workEntry
+      ? {
+          workType: payload.workEntry.workType,
+          data: payload.workEntry.data || {},
+          addedAt: payload.workEntry.addedAt || null,
+        }
+      : null,
+    photos: (payload.photos || []).map((p) => ({
+      ulid: p.ulid,
+      container: p.container,
+      filename: p.filename,
+      contentType: p.contentType,
+      sizeBytes: p.sizeBytes,
+      caption: p.caption,
+      location: p.location,
+      takenAt: p.takenAt,
+    })),
+  };
+  ownerScopedDraft.save(DRAFT_BASE, employeeId, safe);
 }
 
-function clearDraft() {
-  try { localStorage.removeItem(DRAFT_KEY); } catch {}
+function clearDraftForEmployee(employeeId) {
+  ownerScopedDraft.clear(DRAFT_BASE, employeeId);
 }
+
+// No-employee wrappers retained for the legacy `Discard` button which is
+// triggered before the user explicitly clicks "new draft". In practice the
+// component always has an employee id by the time the user reaches a
+// working draft, but if a draft was loaded pre-login (it shouldn't be) we
+// still want the explicit Discard path to wipe something.
+function loadDraft() { return loadDraftForEmployee(null); }
+function saveDraft() {/* no-op: never write an unscoped draft */}
+function clearDraft() {/* no-op: never wipe an unscoped draft */}
 
 export default function InspectionSubmit() {
   useDocumentTitle('New Inspection / Compliance Record');
-  const { accessToken } = useAuth();
+  const { accessToken, employee } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -123,6 +134,12 @@ export default function InspectionSubmit() {
   const queryDprId = searchParams.get('dpr') || null;
   const queryDate = searchParams.get('date') || null;
 
+  // SOL DR-003: every draft read/write is keyed by employeeId. If the
+  // auth context has not populated yet (very first render), we treat that
+  // as "no draft" — once `employee` becomes truthy the autosave useEffect
+  // below will pick it up on the next state change.
+  const currentEmployeeId = employee && employee.id ? employee.id : null;
+
   // SOL DR-001: compute draft + malformed flag ONCE on mount via useState
   // initializers. A regular const would re-evaluate on every render, which
   // means after `clearDraft()` runs in a useEffect a later re-render would
@@ -130,11 +147,11 @@ export default function InspectionSubmit() {
   // the values to state preserves the user-visible recovery state across
   // subsequent renders and state updates.
   const [malformedReason] = useState(() => {
-    const d = loadDraft();
+    const d = loadDraftForEmployee(currentEmployeeId);
     return d?.__malformed ? d.reason : null;
   });
   const [initialForm] = useState(() => {
-    const d = loadDraft();
+    const d = loadDraftForEmployee(currentEmployeeId);
     if (d?.__malformed || !d) {
       return {
         projectName: '',
@@ -153,12 +170,12 @@ export default function InspectionSubmit() {
     };
   });
   const [initialWorkEntry] = useState(() => {
-    const d = loadDraft();
+    const d = loadDraftForEmployee(currentEmployeeId);
     if (d?.__malformed || !d) return null;
     return d.workEntry || null;
   });
   const [showDraftBannerInitial] = useState(() => {
-    const d = loadDraft();
+    const d = loadDraftForEmployee(currentEmployeeId);
     return !d?.__malformed && !!d;
   });
   const [form, setForm] = useState(initialForm);
@@ -174,8 +191,30 @@ export default function InspectionSubmit() {
   // On mount, clear any malformed legacy draft so we never show it again
   // and don't keep crashing the user on every reload.
   useEffect(() => {
-    if (malformedReason) clearDraft();
-  }, [malformedReason]);
+    if (malformedReason && currentEmployeeId) clearDraftForEmployee(currentEmployeeId);
+  }, [malformedReason, currentEmployeeId]);
+
+  // SOL DR-003: subscribe to logout / session-expiry and clear the current
+  // user's draft so a Shared computer does not retain it.
+  useEffect(() => {
+    const handler = (e) => {
+      const cleared = e && e.detail && e.detail.employeeId;
+      if (!cleared || cleared !== currentEmployeeId) return;
+      clearDraftForEmployee(cleared);
+      setForm({
+        projectName: '',
+        location: '',
+        reportDate: queryDate || getLocalDate(),
+        weather: '',
+        contractor: '',
+      });
+      setWorkEntry(null);
+      setPhotos([]);
+      setShowDraftBanner(false);
+    };
+    window.addEventListener('draft:clear-current', handler);
+    return () => window.removeEventListener('draft:clear-current', handler);
+  }, [currentEmployeeId, queryDate]);
 
   // Best-effort pre-fill of project/location from the latest submitted DPR
   // today. Runs once. If no DPR exists for today, the engineer types the
@@ -216,9 +255,13 @@ export default function InspectionSubmit() {
 
   // Persist draft (debounced 750ms — matches DPR pattern at DprSubmit.jsx:124).
   useEffect(() => {
-    const t = setTimeout(() => saveDraft({ form, workEntry, photos }), 750);
+    if (!currentEmployeeId) return;
+    const t = setTimeout(
+      () => saveDraftForEmployee(currentEmployeeId, { form, workEntry, photos }),
+      750
+    );
     return () => clearTimeout(t);
-  }, [form, workEntry, photos]);
+  }, [form, workEntry, photos, currentEmployeeId]);
 
   // Cleanup blob URLs on unmount.
   useEffect(() => {
@@ -396,7 +439,7 @@ export default function InspectionSubmit() {
         accessToken
       );
 
-      clearDraft();
+      clearDraftForEmployee(currentEmployeeId);
       toast.push(submitStatus === 'DRAFT' ? 'Draft saved.' : 'Inspection record submitted.', 'success');
       navigate('/portal/inspection/my');
     } catch (err) {
@@ -410,7 +453,7 @@ export default function InspectionSubmit() {
   };
 
   const handleDiscardDraft = () => {
-    clearDraft();
+    clearDraftForEmployee(currentEmployeeId);
     setForm({
       projectName: '',
       location: '',
