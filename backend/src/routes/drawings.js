@@ -8,16 +8,24 @@
 //
 // Endpoints:
 //   GET    /api/drawings                list (cursor paginated, filters)
-//   POST   /api/drawings                create (admin) — supports supersedes
+//   POST   /api/drawings                create (any employee) — supports supersedes
 //   GET    /api/drawings/:id            detail + reference counts + supersedes chain
 //   PATCH  /api/drawings/:id            update metadata (admin)
 //   DELETE /api/drawings/:id            soft-delete via status=SUPERSEDED (admin)
 //
-// Auth model: same as DPR / Inspection / Projects — requireAuth on every
-// route, requireFreshAdmin on the mutations (admin-claim TTL is 15m, so a
-// freshly demoted admin cannot create/update/delete drawings with a stale
-// token). Reads are any-auth so any employee can consult the register from
-// the DPR / Inspection submit form's drawing picker.
+// Auth model:
+//   - requireAuth on every route (any employee can read the register).
+//   - requireFreshAdmin on PATCH + DELETE — editing metadata / archiving a
+//     drawing hides it from a future DPR's stamp picker, so that's curation
+//     and stays admin-only (admin-claim TTL is 15m, so a freshly demoted
+//     admin cannot mutate drawings with a stale token).
+//   - [Round-31] POST loosened to requireAuth — posting a fresh PDF revision
+//     is a low-curation-risk act any employee should be able to do without
+//     bouncing to an admin (mirrors how DPR / Inspection / BoqItem /
+//     VariationOrder creation is open to any employee today). The route
+//     auto-stamps `issuedById = req.employeeId` when omitted so the new
+//     drawing's audit column is meaningful for the Round-30 `?scope=assigned`
+//     union (Drawing.issuedById).
 //
 // Supercedes contract:
 //   - POST /api/drawings with `supersedesId` flips the prior row to
@@ -340,8 +348,12 @@ router.get('/', asyncHandler(async (req, res) => {
 // transaction as the new-row insert, and a cross-project supersedes is
 // rejected with 400 before any DB write.
 //
-// Auth: requireFreshAdmin (stale-JWT protection, same as project create).
-router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
+// Auth: requireAuth (Round-31 — was requireFreshAdmin before this round).
+// Auto-stamps `issuedById = req.employeeId` when omitted so the new
+// drawing's audit column is meaningful for the Round-30 ?scope=assigned
+// union (Drawing.issuedById) — without this, employee-uploaded drawings
+// would silently not push their project into the employee's picker.
+router.post('/', requireAuth, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma) {
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
@@ -366,10 +378,25 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'PROJECT_INACTIVE', code: 'PROJECT_INACTIVE', message: 'Linked project is archived (isActive=false)' });
   }
 
-  // issuedById is optional; when omitted we leave it null. When supplied it
-  // must reference an existing employee (SetNull on FK does not gate the
+  // issuedById is optional; when omitted we auto-stamp the requesting
+  // employee (Round-31 — so employee-uploaded drawings have a meaningful
+  // audit column for the ?scope=assigned union). When supplied it must
+  // reference an existing employee (SetNull on FK does not gate the
   // initial write, so we have to check explicitly).
-  if (data.issuedById) {
+  if (!data.issuedById) {
+    data.issuedById = req.employeeId;
+  } else if (data.issuedById !== req.employeeId) {
+    // Allow admin to issue on behalf of another employee (existing admin
+    // behavior) — but only if the target is a real employee. For a
+    // non-admin caller the body must match their own id (defense against
+    // a malicious employee forging an issuedById for someone else).
+    if (!req.isAdmin) {
+      return res.status(403).json({
+        error: 'CANNOT_ISSUE_ON_BEHALF',
+        code: 'CANNOT_ISSUE_ON_BEHALF',
+        message: 'Only admins may set issuedById to a different employee',
+      });
+    }
     const issuer = await prisma.employee.findUnique({
       where: { id: data.issuedById },
       select: { id: true },
