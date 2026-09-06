@@ -7,6 +7,7 @@ import Breadcrumb from '../../components/Breadcrumb.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { BuildingIcon } from '../../components/Icons.jsx';
 import { formatShortDate } from '../../lib/format.js';
+import ProjectExpandedPanel from './ProjectExpandedPanel.jsx';
 
 // [N1 Phase B] Portal-side "My projects" list. Mirrors DprList's
 // structure (fetch + header + card grid + filter row) but is a much
@@ -17,6 +18,14 @@ import { formatShortDate } from '../../lib/format.js';
 // so the employee doesn't need a separate "discovered" badge. Discovered
 // entries are flagged with `isRegistered=false` and route to the same
 // anchor page (which renders the empty-state metadata).
+//
+// [Round-33] Cards are now expandable accordions. Clicking a card
+// expands an inline panel beneath it with five sub-sections (Overview,
+// BOQ, DPRs, Inspections, Drawings). The panel lazy-loads the
+// project's parties + sub-resource lists in parallel; sub-section rows
+// are themselves clickable tiles that expand to show full details.
+// The user never leaves /portal/projects. Only one project is expanded
+// at a time (single-open accordion) so the page stays predictable.
 
 // Indian-rupee formatter. Backend serializes contractValue as a string
 // (precision-preserving — see serializeProject in
@@ -68,6 +77,10 @@ export default function Projects() {
   // Status filter: active / inactive / all. Discovered entries are
   // always "active" in the local sense (they have no isActive flag).
   const [statusFilter, setStatusFilter] = useState('active');
+  // [Round-33] Accordion: only one project expanded at a time. Keyed
+  // by the same id||name string the card uses. Stays null until the
+  // user clicks a card's chevron.
+  const [expandedKey, setExpandedKey] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -135,6 +148,10 @@ export default function Projects() {
             Every project you're associated with. Projects are created automatically
             when you file a DPR or inspection, and admins can register new ones in
             the project registry.
+          </p>
+          <p className="dpr-page-sub" style={{ color: 'var(--steel)', margin: '0.4rem 0 0', fontSize: '0.78rem' }}>
+            Tip: click any project card to expand its Overview, BOQ, DPRs,
+            Inspections, and Drawings — all in place, no navigation.
           </p>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -236,13 +253,34 @@ export default function Projects() {
               gap: '1rem',
             }}
           >
-            {filtered.map((p) => (
-              <ProjectCard
-                key={p.id || p.name}
-                project={p}
-                onOpen={() => navigate(`/portal/projects/${encodeURIComponent(p.id || p.name)}`)}
-              />
-            ))}
+            {filtered.map((p) => {
+              const key = p.id || p.name;
+              const isExpanded = expandedKey === key;
+              return (
+                <React.Fragment key={key}>
+                  <ProjectCard
+                    project={p}
+                    isExpanded={isExpanded}
+                    onToggle={() => setExpandedKey(isExpanded ? null : key)}
+                  />
+                  {isExpanded && (
+                    <div
+                      data-testid="projects-expanded-panel"
+                      style={{ gridColumn: '1 / -1' }}
+                    >
+                      <ProjectExpandedPanel
+                        project={p}
+                        accessToken={accessToken}
+                        onClose={() => setExpandedKey(null)}
+                        onOpenProjectDetail={() =>
+                          navigate(`/portal/projects/${encodeURIComponent(p.id || p.name)}`)
+                        }
+                      />
+                    </div>
+                  )}
+                </React.Fragment>
+              );
+            })}
           </div>
           <div
             className="dpr-list-count"
@@ -262,108 +300,155 @@ export default function Projects() {
 // actions (the portal user can't archive projects). The whole card is
 // keyboard-navigable via a single button wrapper so screen readers
 // announce a single "Open <project>" action per card.
-function ProjectCard({ project, onOpen }) {
+//
+// [Round-33] Card is now an accordion trigger — chevron on the right
+// flips between expanded/collapsed. The metadata header remains the
+// primary button for users who tab-navigate; the chevron is the visual
+// affordance.
+function ProjectCard({ project, isExpanded, onToggle }) {
   const parties = summarizeParties(project.parties);
   return (
     <div
       className="dpr-card"
-      style={{ padding: '0', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
+      style={{
+        padding: '0',
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        borderColor: isExpanded ? 'var(--blue, #0066FF)' : undefined,
+        boxShadow: isExpanded ? '0 0 0 1px var(--blue, #0066FF)' : undefined,
+      }}
     >
-      <button
-        type="button"
-        onClick={onOpen}
-        aria-label={`Open project ${project.name}`}
-        style={{
-          padding: '0.875rem 1rem',
-          display: 'flex', alignItems: 'flex-start', gap: '0.75rem',
-          background: 'white', border: 0, textAlign: 'left', cursor: 'pointer',
-          font: 'inherit', color: 'inherit', width: '100%',
-        }}
-      >
-        <div
-          aria-hidden="true"
+      <div style={{ display: 'flex', alignItems: 'stretch' }}>
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={isExpanded}
+          aria-controls={`projects-card-body-${project.id || project.name}`}
+          aria-label={`${isExpanded ? 'Collapse' : 'Expand'} project ${project.name}`}
           style={{
-            width: 40, height: 40, flexShrink: 0,
-            color: project.isRegistered ? 'var(--blue, #0066FF)' : 'var(--amber, #d97706)',
-            background: project.isRegistered ? 'rgba(0,102,255,0.08)' : 'rgba(217,119,6,0.08)',
-            borderRadius: 10,
+            padding: '0.875rem 1rem',
+            flex: 1,
+            display: 'flex', alignItems: 'flex-start', gap: '0.75rem',
+            background: 'white', border: 0, textAlign: 'left', cursor: 'pointer',
+            font: 'inherit', color: 'inherit',
+          }}
+        >
+          <div
+            aria-hidden="true"
+            style={{
+              width: 40, height: 40, flexShrink: 0,
+              color: project.isRegistered ? 'var(--blue, #0066FF)' : 'var(--amber, #d97706)',
+              background: project.isRegistered ? 'rgba(0,102,255,0.08)' : 'rgba(217,119,6,0.08)',
+              borderRadius: 10,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+          >
+            <BuildingIcon size={18} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <div
+                style={{
+                  fontFamily: "'Plus Jakarta Sans', sans-serif",
+                  fontWeight: 700, fontSize: '0.95rem',
+                  color: 'var(--navy, #0f172a)',
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  maxWidth: '100%',
+                }}
+              >
+                {project.name}
+              </div>
+              {project.code ? (
+                <span style={{
+                  fontSize: '0.7rem', fontWeight: 600,
+                  color: 'var(--steel, #64748b)',
+                  background: 'rgba(100,116,139,0.10)',
+                  padding: '1px 6px', borderRadius: 4,
+                }}>
+                  {project.code}
+                </span>
+              ) : null}
+              {!project.isRegistered ? (
+                <span style={{
+                  fontSize: '0.7rem', fontWeight: 600,
+                  color: 'var(--amber, #d97706)',
+                  background: 'rgba(217,119,6,0.10)',
+                  padding: '1px 6px', borderRadius: 4,
+                }}>
+                  Not registered
+                </span>
+              ) : !project.isActive ? (
+                <span style={{
+                  fontSize: '0.7rem', fontWeight: 600,
+                  color: 'var(--steel, #64748b)',
+                  background: 'rgba(100,116,139,0.10)',
+                  padding: '1px 6px', borderRadius: 4,
+                }}>
+                  Inactive
+                </span>
+              ) : null}
+            </div>
+            {(project.client || project.location) && (
+              <div style={{ fontSize: '0.78rem', color: 'var(--steel, #64748b)', marginTop: '0.2rem' }}>
+                {project.client ? <span>{project.client}</span> : null}
+                {project.location ? <span>{project.client ? ' · ' : ''}{project.location}</span> : null}
+              </div>
+            )}
+            {parties && (
+              <div style={{ fontSize: '0.72rem', color: 'var(--steel, #64748b)', marginTop: '0.2rem' }}>
+                {parties}
+              </div>
+            )}
+            <div
+              style={{
+                display: 'flex', gap: '0.75rem', alignItems: 'center',
+                marginTop: '0.5rem', flexWrap: 'wrap',
+                fontSize: '0.78rem', color: 'var(--steel, #64748b)',
+              }}
+            >
+              {project.contractValue != null && project.contractValue !== '' ? (
+                <span style={{ fontWeight: 600, color: 'var(--navy, #0f172a)' }}>
+                  {formatInr(project.contractValue)}
+                </span>
+              ) : null}
+              {project.startDate ? (
+                <span>Start: {formatShortDate(project.startDate)}</span>
+              ) : null}
+            </div>
+          </div>
+        </button>
+        {/* Chevron toggle button. Separated from the main button so the
+            click target is unambiguous and screen readers see a single
+            "Expand / Collapse" affordance. */}
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label={`${isExpanded ? 'Collapse' : 'Expand'} project ${project.name}`}
+          aria-expanded={isExpanded}
+          aria-controls={`projects-card-body-${project.id || project.name}`}
+          style={{
+            width: 44, flexShrink: 0,
+            background: 'white', border: 0, cursor: 'pointer',
+            borderLeft: '1px solid rgba(100,116,139,0.10)',
+            color: 'var(--steel, #64748b)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}
         >
-          <BuildingIcon size={18} />
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', flexWrap: 'wrap' }}>
-            <div
-              style={{
-                fontFamily: "'Plus Jakarta Sans', sans-serif",
-                fontWeight: 700, fontSize: '0.95rem',
-                color: 'var(--navy, #0f172a)',
-                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                maxWidth: '100%',
-              }}
-            >
-              {project.name}
-            </div>
-            {project.code ? (
-              <span style={{
-                fontSize: '0.7rem', fontWeight: 600,
-                color: 'var(--steel, #64748b)',
-                background: 'rgba(100,116,139,0.10)',
-                padding: '1px 6px', borderRadius: 4,
-              }}>
-                {project.code}
-              </span>
-            ) : null}
-            {!project.isRegistered ? (
-              <span style={{
-                fontSize: '0.7rem', fontWeight: 600,
-                color: 'var(--amber, #d97706)',
-                background: 'rgba(217,119,6,0.10)',
-                padding: '1px 6px', borderRadius: 4,
-              }}>
-                Not registered
-              </span>
-            ) : !project.isActive ? (
-              <span style={{
-                fontSize: '0.7rem', fontWeight: 600,
-                color: 'var(--steel, #64748b)',
-                background: 'rgba(100,116,139,0.10)',
-                padding: '1px 6px', borderRadius: 4,
-              }}>
-                Inactive
-              </span>
-            ) : null}
-          </div>
-          {(project.client || project.location) && (
-            <div style={{ fontSize: '0.78rem', color: 'var(--steel, #64748b)', marginTop: '0.2rem' }}>
-              {project.client ? <span>{project.client}</span> : null}
-              {project.location ? <span>{project.client ? ' · ' : ''}{project.location}</span> : null}
-            </div>
-          )}
-          {parties && (
-            <div style={{ fontSize: '0.72rem', color: 'var(--steel, #64748b)', marginTop: '0.2rem' }}>
-              {parties}
-            </div>
-          )}
-          <div
+          <span
+            aria-hidden="true"
             style={{
-              display: 'flex', gap: '0.75rem', alignItems: 'center',
-              marginTop: '0.5rem', flexWrap: 'wrap',
-              fontSize: '0.78rem', color: 'var(--steel, #64748b)',
+              display: 'inline-block',
+              transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
+              transition: 'transform 150ms ease',
+              fontSize: '1rem',
+              lineHeight: 1,
             }}
           >
-            {project.contractValue != null && project.contractValue !== '' ? (
-              <span style={{ fontWeight: 600, color: 'var(--navy, #0f172a)' }}>
-                {formatInr(project.contractValue)}
-              </span>
-            ) : null}
-            {project.startDate ? (
-              <span>Start: {formatShortDate(project.startDate)}</span>
-            ) : null}
-          </div>
-        </div>
-      </button>
+            ▾
+          </span>
+        </button>
+      </div>
     </div>
   );
 }
