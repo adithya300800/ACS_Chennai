@@ -264,19 +264,29 @@ router.use(requireAuth);
 // ─── GET /api/projects ──────────────────────────────────────────────────────
 // Lists curated projects (active only) PLUS names auto-discovered from
 // existing DPR.projectName values that have no Project row yet. The two
-// sets are merged so the PM dropdown shows everything they could click
-// on, regardless of whether an admin has formally registered the
-// project.
+// sets are returned separately — the frontend merges / scopes them.
 //
-// Round-28 scoping:
-//   ?scope=all    admin-only — full curated list + org-wide auto-discovered
-//                 names. Any other caller → 403.
-//   ?scope=mine   (default for non-admin) — full curated list + ONLY
-//                 auto-discovered names that this employee has personally
-//                 filed DPRs/Inspections against. Closes the data leak
-//                 where employees could see admin test rigs and contracts
-//                 they have no business knowing about.
-//   no param      legacy callers get the safe default (same as ?scope=mine).
+// Scopes:
+//   ?scope=all       admin-only — full curated list + org-wide auto-
+//                    discovered names. Any other caller → 403.
+//   ?scope=mine      (default for non-admin) — full curated list + ONLY
+//                    auto-discovered names that this employee has
+//                    personally filed DPRs/Inspections against. Closes
+//                    the data leak where employees could see admin test
+//                    rigs and contracts they have no business knowing
+//                    about.
+//   ?scope=assigned  employee-only — curated list narrowed to ONLY the
+//                    projects the employee has personally touched (filed
+//                    a DPR / Inspection / BoqItem / VariationOrder /
+//                    Drawing against), plus auto-discovered names from
+//                    the same set. Used by the employee-facing Drawings
+//                    picker so a field engineer only sees projects they
+//                    have actual context on, instead of the full
+//                    org-wide curated list. No ProjectMembership table
+//                    is needed — the join is derived from the existing
+//                    audit columns on the child rows.
+//   no param         legacy callers get the safe default (same as
+//                    ?scope=mine).
 //
 // Auth: any employee.
 router.get('/', asyncHandler(async (req, res) => {
@@ -286,8 +296,8 @@ router.get('/', asyncHandler(async (req, res) => {
   }
 
   const scope = (req.query.scope || 'mine').toString();
-  if (scope !== 'mine' && scope !== 'all') {
-    return res.status(400).json({ error: 'scope must be "mine" or "all"', code: 'INVALID_SCOPE' });
+  if (!['mine', 'all', 'assigned'].includes(scope)) {
+    return res.status(400).json({ error: 'scope must be "mine", "all", or "assigned"', code: 'INVALID_SCOPE' });
   }
   if (scope === 'all' && !req.isAdmin) {
     return res.status(403).json({ error: 'Admin access required', code: 'ADMIN_REQUIRED' });
@@ -296,11 +306,11 @@ router.get('/', asyncHandler(async (req, res) => {
   try {
     const [projects, dprNames, inspectionNames] = await Promise.all([
       prisma.project.findMany({
-        // Curated rows: every active project is visible to every employee.
-        // ProjectMembership (planned N+1) will narrow this; for now the
-        // curated set is org-wide metadata that the field teams need to
-        // see (locations, contract values) to do their jobs. The leak we
-        // closed was the auto-discovered names, not curated metadata.
+        // Curated rows: every active project is visible to every employee
+        // by default. The `?scope=assigned` branch below filters this set
+        // down to only the projects the requesting employee has personally
+        // touched via child records (DPR / Inspection / BoqItem /
+        // VariationOrder / Drawing).
         where: { isActive: true },
         orderBy: [{ name: 'asc' }],
         select: {
@@ -315,8 +325,17 @@ router.get('/', asyncHandler(async (req, res) => {
       }),
       // Auto-discovery: distinct project names that exist on DPR rows but
       // are NOT yet in the Project table. Scoped to the employee when
-      // scope=mine so admin test rigs / contract codes they never filed
-      // against don't surface in their dropdown.
+      // scope=mine/assigned so admin test rigs / contract codes they
+      // never filed against don't surface in their dropdown.
+      //
+      // [bugfix round-30] Earlier code filtered on `createdById` but
+      // `DPR` has no `createdById` column — the schema uses
+      // `submittedById` exclusively. Prisma 5.22 raised
+      // PrismaClientValidationError asynchronously on the unknown
+      // column, which the inline `.catch(() => [])` swallowed
+      // silently — meaning `?scope=mine` returned zero DPR-discovered
+      // names for every employee. The fix is to filter on the real
+      // column (`submittedById`).
       scope === 'all'
         ? prisma.dPR.findMany({
             distinct: ['projectName'],
@@ -331,11 +350,11 @@ router.get('/', asyncHandler(async (req, res) => {
           })
         : prisma.dPR.findMany({
             distinct: ['projectName'],
-            where: { createdById: req.employeeId },
+            where: { submittedById: req.employeeId },
             select: { projectName: true },
             orderBy: { projectName: 'asc' },
           }).catch((err) => {
-            console.warn('Projects list — DPR auto-discovery (mine) failed', {
+            console.warn('Projects list — DPR auto-discovery (mine/assigned) failed', {
               prismaCode: err.code,
               message: err.message?.split('\n')[0],
             });
@@ -360,7 +379,59 @@ router.get('/', asyncHandler(async (req, res) => {
           }).catch(() => []),
     ]);
 
-    const curatedNames = new Set(projects.map((p) => p.name));
+    // For ?scope=assigned, narrow the curated list to ONLY the projects
+    // this employee has personally touched via any child record OR
+    // created directly. We query five audit columns in parallel
+    // (DPR.submittedById, InspectionRecord.submittedById,
+    // BoqItem.createdById, VariationOrder.raisedById, Drawing.issuedById)
+    // and union the projectId sets — every project the employee filed
+    // against will surface, even if they used a different submission
+    // type. We additionally union `Project.createdById` (already on the
+    // row, no extra query needed) so projects the employee just created
+    // via the typeahead/resolveProject flow stay in their picker even
+    // before they file any child records against them.
+    let filteredProjects = projects;
+    if (scope === 'assigned') {
+      const [dprProj, inspProj, boqProj, voProj, drwProj] = await Promise.all([
+        prisma.dPR.findMany({
+          distinct: ['projectId'],
+          where: { submittedById: req.employeeId, projectId: { not: null } },
+          select: { projectId: true },
+        }).catch(() => []),
+        prisma.inspectionRecord.findMany({
+          distinct: ['projectId'],
+          where: { submittedById: req.employeeId, projectId: { not: null } },
+          select: { projectId: true },
+        }).catch(() => []),
+        prisma.boqItem.findMany({
+          distinct: ['projectId'],
+          where: { createdById: req.employeeId, projectId: { not: null } },
+          select: { projectId: true },
+        }).catch(() => []),
+        prisma.variationOrder.findMany({
+          distinct: ['projectId'],
+          where: { raisedById: req.employeeId },
+          select: { projectId: true },
+        }).catch(() => []),
+        prisma.drawing.findMany({
+          distinct: ['projectId'],
+          where: { issuedById: req.employeeId, projectId: { not: null } },
+          select: { projectId: true },
+        }).catch(() => []),
+      ]);
+      const touched = new Set([
+        ...dprProj.map((r) => r.projectId),
+        ...inspProj.map((r) => r.projectId),
+        ...boqProj.map((r) => r.projectId),
+        ...voProj.map((r) => r.projectId),
+        ...drwProj.map((r) => r.projectId),
+      ].filter(Boolean));
+      filteredProjects = projects.filter(
+        (p) => touched.has(p.id) || p.createdById === req.employeeId
+      );
+    }
+
+    const curatedNames = new Set(filteredProjects.map((p) => p.name));
     const discoveredNamesRaw = [
       ...dprNames.map((d) => d.projectName),
       ...inspectionNames.map((i) => i.projectName),
@@ -370,7 +441,7 @@ router.get('/', asyncHandler(async (req, res) => {
       .sort((a, b) => a.localeCompare(b));
 
     res.json({
-      projects: projects.map(serializeProject),
+      projects: filteredProjects.map(serializeProject),
       // Discovered entries are light-weight — name only — because they
       // have no metadata yet. The frontend renders them with a "not yet
       // registered" badge and a CTA to the admin to create the row.

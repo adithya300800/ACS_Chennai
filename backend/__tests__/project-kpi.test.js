@@ -166,16 +166,19 @@ function makePrisma(opts = {}) {
     },
     dPR: {
       findMany: jest.fn(async ({ where } = {}) => {
-        // Round-28 Bug 1+5: when scope=mine, the route filters by
-        // createdById=req.employeeId. Reflect that here so the
-        // contract test can prove the scoping works.
+        // [round-30 bugfix] The route filters on `submittedById` (the
+        // real column on the DPR model), NOT `createdById` — earlier
+        // code used `createdById`, which doesn't exist on DPR, and
+        // Prisma's async validation error was swallowed by the inline
+        // `.catch(() => [])`, silently returning zero DPR-discovered
+        // names for every employee.
         let rows = [
-          { projectName: 'T-Nagar', createdById: USER_ID },
-          { projectName: 'Anna Nagar', createdById: USER_ID },
-          { projectName: 'RESOLVE-TEST', createdById: 'admin-other' },
+          { projectName: 'T-Nagar', submittedById: USER_ID },
+          { projectName: 'Anna Nagar', submittedById: USER_ID },
+          { projectName: 'RESOLVE-TEST', submittedById: 'admin-other' },
         ];
-        if (where && where.createdById) {
-          rows = rows.filter((r) => r.createdById === where.createdById);
+        if (where && where.submittedById) {
+          rows = rows.filter((r) => r.submittedById === where.submittedById);
         }
         return rows.map((r) => ({ projectName: r.projectName }));
       }),

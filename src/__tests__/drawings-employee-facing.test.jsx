@@ -6,6 +6,15 @@
 // checks are deterministic and run in <1ms (mounting PortalLayout in
 // the jest sandbox exhausts memory — see App.test.jsx header for the
 // same constraint).
+//
+// [Round-30] Adds three new contracts for the typeahead picker:
+//   - The page calls api.getProjects with scope: 'assigned' (the new
+//     employee-narrowed scope, not the default ?scope=mine).
+//   - The page imports + uses api.resolveProject so an employee can
+//     type a fresh name and have it created.
+//   - The page renders a <input type="search"> typeahead, NOT a
+//     static <select>. The old <select id="drawings-browse-project">
+//     is gone.
 
 import { readFileSync } from 'fs';
 import { resolve as resolvePath } from 'path';
@@ -80,5 +89,54 @@ describe('N3-employee — Drawing Register employee-facing surface', () => {
     expect(detailCodeOnly).not.toMatch(/>\s*Edit\s*</);
     expect(detailCodeOnly).not.toMatch(/>\s*Supersede\s*</);
     expect(detailCodeOnly).not.toMatch(/>\s*Archive\s*</);
+  });
+
+  // ── Round-30: typeahead picker contracts ──────────────────────────────
+
+  test('DrawingsBrowse uses a <input type="search"> typeahead, NOT a static <select>', () => {
+    // The previous picker was a <select id="drawings-browse-project">;
+    // round-30 replaced it with a typeahead input. Pin both shapes:
+    //   1. The new <input type="search"> with id="drawings-browse-project"
+    //      is present.
+    //   2. The old <select> tag is gone (filter comments to avoid
+    //      header-comment false positives).
+    expect(browseSrc).toMatch(/<input[\s\S]{0,200}id=["']drawings-browse-project["']/);
+    expect(browseSrc).toMatch(/type=["']search["']/);
+    const browseCodeOnly = browseSrc
+      .split('\n')
+      .filter((line) => !/^\s*\/\//.test(line))
+      .join('\n');
+    expect(browseCodeOnly).not.toMatch(/<select/);
+  });
+
+  test('DrawingsBrowse calls api.getProjects with the assigned scope', () => {
+    // The picker narrows to projects the employee has personally
+    // touched or created via ?scope=assigned. Pin the call shape so
+    // a future refactor can't silently drop the scope and regress
+    // back to the org-wide default.
+    expect(browseSrc).toMatch(
+      /api\.getProjects\(\s*\{\s*scope:\s*['"]assigned['"]\s*\}\s*,\s*accessToken\s*\)/,
+    );
+  });
+
+  test('DrawingsBrowse imports + uses api.resolveProject for typed-name resolution', () => {
+    // The typeahead lets an employee type a project name that doesn't
+    // exist yet and have it created via POST /api/projects/resolve.
+    // Pin both the import AND the call site.
+    // Import: `api.resolveProject` is destructured from the api module.
+    expect(browseSrc).toMatch(/resolveProject/);
+    // Call site: handleResolveTyped awaits api.resolveProject(name, accessToken).
+    expect(browseSrc).toMatch(
+      /api\.resolveProject\(\s*name\s*,\s*accessToken\s*\)/,
+    );
+  });
+
+  test('DrawingsBrowse debounces the typed query into the URL (?q=)', () => {
+    // The user requested shareable typeahead state — pin the debounce
+    // + URL-sync code so a future refactor doesn't accidentally drop it.
+    expect(browseSrc).toMatch(/sp\.set\(\s*['"]q['"]\s*,\s*query\s*\)/);
+    // The 200ms timeout is hard-coded in the implementation; pin the
+    // literal so silent drift doesn't accumulate.
+    expect(browseSrc).toMatch(/,\s*200\s*\)/);
   });
 });
