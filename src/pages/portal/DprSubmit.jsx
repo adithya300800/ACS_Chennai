@@ -922,8 +922,8 @@ export default function DprSubmit() {
       <div className="dpr-card">
         <h1 className="dpr-page-title">Submit Daily Progress Report</h1>
         <p style={{ color: 'var(--steel)', fontSize: '0.9rem', marginBottom: '1rem' }}>
-          Daily narrative for the cover page. Detailed material receipts, cube
-          tests, NCRs, and safety records go on the
+          Daily narrative for the cover page. Detailed material receipts,
+          NCRs, and safety records go on the
           {' '}<Link to="/portal/inspection/submit">Inspection &amp; Compliance</Link> page.
         </p>
 

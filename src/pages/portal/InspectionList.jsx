@@ -175,7 +175,7 @@ export default function InspectionList() {
             No inspection records yet
           </h3>
           <p style={{ color: 'var(--steel)', marginBottom: '1rem' }}>
-            File a material receipt, cube test, NCR, or any other inspection record to see it here.
+            File a material receipt, NCR, or any other inspection record to see it here.
           </p>
           <Link to="/portal/inspection/submit" className="btn btn-primary btn-sm">
             + New Inspection Record

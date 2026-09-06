@@ -53,7 +53,7 @@ export default function VariationOrdersAdmin() {
 
   const [variations, setVariations] = useState([]);
   const [projects, setProjects] = useState([]);
-  const [rfis, setRfis] = useState([]);
+  // Round-29: rfis state REMOVED — RFI feature is gone.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState({
@@ -114,22 +114,7 @@ export default function VariationOrdersAdmin() {
     return () => { cancelled = true; };
   }, [accessToken]);
 
-  // RFI directory — needed for the referenceRfiId picker in the new-VO
-  // modal. We pull the full list once on mount and let the modal filter
-  // by project (the picker is scoped client-side too).
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const data = await api.getRfis({ limit: 100 }, accessToken);
-        if (cancelled) return;
-        setRfis(data.rfis || []);
-      } catch (_err) {
-        if (!cancelled) setRfis([]);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [accessToken]);
+  // Round-29: getRfis directory fetch REMOVED — RFI feature is gone.
 
   const handleFilterChange = (key, value) => {
     setFilter((f) => ({ ...f, [key]: value }));
@@ -329,17 +314,8 @@ export default function VariationOrdersAdmin() {
                   }}>
                     {formatRupees(v.deltaAmount)}
                   </span>
-                  {v.referenceRfi && (
-                    <Link
-                      to={`/portal/rfis/${v.referenceRfi.id}`}
-                      className="dpr-card-meta"
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', color: 'var(--blue)' }}
-                      title={`From RFI: ${v.referenceRfi.subject || v.referenceRfi.id}`}
-                    >
-                      <DocIcon size={13} />
-                      {v.referenceRfi.subject || 'RFI'}
-                    </Link>
-                  )}
+                  {/* Round-29: reference-RFI link REMOVED — RFI feature is
+                      gone; VOs are standalone work items now. */}
                 </div>
 
                 {v.description && (
@@ -370,7 +346,6 @@ export default function VariationOrdersAdmin() {
         onClose={() => setNewOpen(false)}
         onSaved={handleSaved}
         projects={projects}
-        rfis={rfis}
         accessToken={accessToken}
       />
     </div>

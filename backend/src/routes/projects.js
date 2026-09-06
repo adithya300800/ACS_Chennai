@@ -744,7 +744,6 @@ router.delete('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
 //     window: { from, to, days },
 //     dpr: { submittedCount, pendingReviewCount, approvedCount, rejectedCount, draftCount },
 //     inspections: { totalCount, openCount, byType: { ... } },
-//     cubeTests: { dueSoonCount, overdueCount, passedCount },
 //     boqVariance: { itemsCount, totalContractValue, totalExecutedValue, variancePercent },
 //     people: { onLeaveToday, pendingLeaveCount, overdueTrainingCount }
 //   }
@@ -873,58 +872,12 @@ async function kpiHandler(req, res) {
     warnings.push('inspections: ' + (err.message?.split('\n')[0] || 'unknown error'));
   }
 
-  // ─── CubeTest roll-up ────────────────────────────────────────────────────
-  // CubeTest.projectName is keyed via DPR.projectName (the cube test
-  // table has a dprId FK to DPR). So the join is: cube_test → dpr where
-  // dpr.projectName = ?. The `dueSoonCount` is the next-7-days bucket
-  // (after the window) — it's the canonical "tests that need attention
-  // now" signal.
-  let cubeTests = {
-    dueSoonCount: 0,
-    overdueCount: 0,
-    passedCount: 0,
-  };
-  try {
-    const today = new Date(Date.UTC(toDate.getUTCFullYear(), toDate.getUTCMonth(), toDate.getUTCDate()));
-    const inSevenDays = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000);
-
-    const cubeWhereByDpr = {
-      dpr: { projectName },
-    };
-    const [dueSoonCount, overdueCount, passedCount] = await Promise.all([
-      // Due in the next 7 days (inclusive of today) and not yet tested at 28d.
-      prisma.cubeTest.count({
-        where: {
-          ...cubeWhereByDpr,
-          twentyEightDayDueDate: { gte: today, lte: inSevenDays },
-          twentyEightDayResult: null,
-        },
-      }),
-      // Overdue: 28-day due date has passed AND not tested.
-      prisma.cubeTest.count({
-        where: {
-          ...cubeWhereByDpr,
-          twentyEightDayDueDate: { lt: today },
-          twentyEightDayResult: null,
-        },
-      }),
-      // Passed: 28-day result reported.
-      prisma.cubeTest.count({
-        where: {
-          ...cubeWhereByDpr,
-          twentyEightDayResult: { not: null },
-        },
-      }),
-    ]);
-    cubeTests = { dueSoonCount, overdueCount, passedCount };
-  } catch (err) {
-    console.warn('Projects KPI — CubeTest roll-up failed (tolerated)', {
-      projectName,
-      prismaCode: err.code,
-      message: err.message?.split('\n')[0],
-    });
-    warnings.push('cubeTests: ' + (err.message?.split('\n')[0] || 'unknown error'));
-  }
+  // ─── CubeTest roll-up (removed in Round-29) ──────────────────────────────
+  // The standalone CubeTest feature was removed; cube testing is now
+  // captured by the cube_casting / cube_testing InspectionRecord sub-types.
+  // The shape below is kept so the KPI response contract holds; the
+  // ProjectDashboard tile that consumed it was removed at the same time.
+  const cubeTests = { dueSoonCount: 0, overdueCount: 0, passedCount: 0 };
 
   // ─── BOQ variance roll-up ────────────────────────────────────────────────
   // BoqItem has direct projectName. "Variance" = (totalExecuted -
@@ -1022,7 +975,6 @@ async function kpiHandler(req, res) {
     },
     dpr,
     inspections,
-    cubeTests,
     boqVariance,
     people,
     ...(warnings.length ? { warnings } : {}),

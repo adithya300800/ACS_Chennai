@@ -796,7 +796,7 @@ export default function InspectionSubmit() {
       <div className="dpr-card">
         <h1 className="dpr-page-title">New Inspection / Compliance Record</h1>
         <p style={{ color: 'var(--steel)', marginBottom: '1rem', fontSize: '0.9rem' }}>
-          File a structured inspection record — material receipt, cube test, water
+          File a structured inspection record — material receipt, water
           quality, waterproofing, NCR, safety violation, etc. One record per submission.
         </p>
 

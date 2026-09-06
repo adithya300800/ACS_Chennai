@@ -44,28 +44,16 @@ export default function InspectionDetail() {
   const [error, setError] = useState('');
   // Round-28 #7: lightbox state. Null = closed. Number = open at index.
   const [lightboxIndex, setLightboxIndex] = useState(null);
-  // N5: linked cube tests for cube_casting inspections. Fetched after
-  // the record loads; non-cube-casting records leave this null so the
-  // conditional render below short-circuits cleanly.
-  const [linkedCubeTests, setLinkedCubeTests] = useState(null);
-
+  // Round-29: linkedCubeTests state REMOVED — the cube-test feature is
+  // gone. Cube testing is captured by the cube_casting / cube_testing
+  // InspectionRecord sub-types; no separate cube-test rows to link.
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
       const data = await api.getInspection(id, accessToken);
       setRecord(data);
-      // N5: only cube_casting inspections can have linked cube tests —
-      // the backend rejects non-cube-casting FKs at create time. Skip the
-      // round-trip for other inspection types. Failures are silent; the
-      // section just won't appear.
-      if (data?.inspectionType === 'cube_casting') {
-        api.getCubeTests({ castingRecordId: id, limit: '100' }, accessToken)
-          .then((res) => setLinkedCubeTests(res.tests || []))
-          .catch(() => setLinkedCubeTests([]));
-      } else {
-        setLinkedCubeTests(null);
-      }
+      // Round-29: cube-test linking REMOVED — feature is gone.
     } catch (err) {
       if (err.status === 404) setError('Inspection record not found.');
       else if (err.status === 403) setError('You do not have access to this record.');
@@ -283,34 +271,9 @@ export default function InspectionDetail() {
           </div>
         )}
 
-        {/* N5: linked cube tests for cube_casting inspections. Other
-            inspection types have no cube-test relationship so we hide
-            the section entirely. Empty array (no cubes yet) renders a
-            small helper line so the user knows cubes can be linked. */}
-        {record.inspectionType === 'cube_casting' && Array.isArray(linkedCubeTests) && (
-          <div style={{ marginBottom: '1.5rem' }}>
-            <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", fontSize: '1rem', marginBottom: '0.5rem', color: 'var(--navy)' }}>
-              Linked Cube Tests ({linkedCubeTests.length})
-            </h3>
-            {linkedCubeTests.length === 0 ? (
-              <div style={{ background: '#f8fafc', borderRadius: 6, padding: '0.625rem 0.875rem', fontSize: '0.85rem', color: 'var(--steel)', borderLeft: '3px solid var(--blue)' }}>
-                No cube tests have been linked to this casting record yet.
-              </div>
-            ) : (
-              <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-                {linkedCubeTests.map((ct) => (
-                  <li key={ct.id} style={{ fontSize: '0.9rem' }}>
-                    <Link to={`/portal/cube-tests/${ct.id}`}>
-                      {ct.concreteGrade} · {ct.pourLocation}
-                    </Link>
-                    {' · '}
-                    <span style={{ color: 'var(--steel)' }}>{ct.status.replace(/_/g, ' ').toLowerCase()}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
+        {/* Round-29: linked cube tests section REMOVED — the standalone
+            cube-test feature is gone. Cube testing is captured by the
+            cube_casting / cube_testing InspectionRecord sub-types. */}
 
         {/* Round-28 #7: full-screen lightbox with keyboard + swipe nav.
             Rendered unconditionally; it's a portal so it lives at <body>

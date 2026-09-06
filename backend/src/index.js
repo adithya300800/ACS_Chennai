@@ -25,11 +25,6 @@ const dprRoutes = require('./routes/dpr');
 // structured sub-work types formerly nested inside DPR.workEntries (material
 // receipt, cube test, water quality, waterproofing, NCR, safety, etc.).
 const inspectionRoutes = require('./routes/inspection');
-// N5 (round-29): cube-test integration — links the cube_casting inspection
-// to the parent concrete-pour DPR and tracks 7-day / 28-day compression-
-// test results. See backend/src/routes/cubeTest.js header for the auth
-// model and the status-lifecycle derivation rules.
-const cubeTestRoutes = require('./routes/cubeTest');
 // N17 (round-29): Project-level dashboard with KPI tiles. Lightweight
 // Project master (half-step to N1, which is XL and out of scope) plus a
 // single aggregated counts endpoint the PM dashboard hits per render.
@@ -58,18 +53,13 @@ const boqRoutes = require('./routes/boq');
 // rate limiter — the register is small per project (<= O(100) drawings
 // typical) and reads are gated by requireAuth inside the route.
 const drawingsRoutes = require('./routes/drawings');
-// N2 (Phase C): RFI (Request for Information) — contractor-raised design
-// queries against a project, with a target responder + optional due date.
-// Mounted at /api/rfis; the route file owns auth (requireAuth for reads,
-// requireAuth + ownership for response edits, requireFreshAdmin for
-// close + escalate-to-variation). See backend/src/routes/rfis.js.
-const rfiRoutes = require('./routes/rfis');
 // N2 (Phase C): Variation Order — change-of-scope rows with a monetary
-// delta, optionally linked to the source RFI. Lifecycle: DRAFT →
-// SUBMITTED → APPROVED | REJECTED. Mounted at /api/variations; auth gate
-// lives inside the route file (requireAuth for reads / create / DRAFT
-// edits, requireFreshAdmin for approve + reject). See
-// backend/src/routes/variations.js.
+// delta. Lifecycle: DRAFT → SUBMITTED → APPROVED | REJECTED. Mounted at
+// /api/variations; auth gate lives inside the route file (requireAuth for
+// reads / create / DRAFT edits, requireFreshAdmin for approve + reject).
+// See backend/src/routes/variations.js.
+// The RFI module that previously linked to this is gone — see Round-29
+// removal (plan file luminous-inventing-snowflake.md).
 const variationRoutes = require('./routes/variations');
 // DR-017: admin storage health — orphan-blob summary + on-demand sweep trigger.
 // Mounted at /api/admin/storage — the only admin-only ops surface left after
@@ -409,12 +399,6 @@ function createApp(deps = {}) {
   // material receipt) and can legitimately approach 1 MB.
   app.use('/api/inspection/sas-url', sasLimiter);
   app.use('/api/inspection', inspectionRoutes);
-  // N5 (round-29): cube-test integration — list / create / patch / due-soon
-  // / pour-summary. Reads are unthrottled; the cube-test row creation is
-  // rare (one per pour, not per photo) so no write-rate-limiter is
-  // mounted. Body payloads are tiny (location + grade + cast date), well
-  // under the global 1mb default.
-  app.use('/api/cube-tests', cubeTestRoutes);
   // N17 (round-29): Project-level dashboard with KPI tiles. Mounted at
   // /api/projects so the frontend PM dashboard can GET the curated list,
   // resolve a project by id or name, and fetch the aggregated KPI
@@ -439,11 +423,6 @@ function createApp(deps = {}) {
   // patch / soft-delete. Auth gate lives inside the route file
   // (requireAuth for reads, requireFreshAdmin for mutations).
   app.use('/api/drawings', drawingsRoutes);
-  // N2 (Phase C): RFIs — list / create / detail / response patch /
-  // admin close / escalate-to-variation. Auth gate lives inside the
-  // route file (requireAuth for reads, ownership-or-admin for response,
-  // requireFreshAdmin for escalate). No extra middleware at the mount.
-  app.use('/api/rfis', rfiRoutes);
   // N2 (Phase C): Variation Orders — list / create / detail / DRAFT
   // patch / submit / approve (admin) / reject (admin). Auth gate lives
   // inside the route file (requireAuth for reads + DRAFT edits,

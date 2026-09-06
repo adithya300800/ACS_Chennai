@@ -202,31 +202,17 @@ const CHART_ICON = (
     <line x1="18" y1="20" x2="18" y2="10" /><line x1="12" y1="20" x2="12" y2="4" /><line x1="6" y1="20" x2="6" y2="14" /><line x1="3" y1="20" x2="21" y2="20" />
   </svg>
 );
-// Round-29 (N5): cube-test icon. A simple "beaker" + drop combo stands in
-// for a cube mould without dragging in another library. Same 18x18
-// stroke style as the rest of the sidebar.
-const CUBE_ICON = (
-  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
-    <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z" />
-    <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
-    <line x1="12" y1="22.08" x2="12" y2="12" />
-  </svg>
-);
+// Round-29: cube-test icon REMOVED — cube testing is captured by the
+// cube_casting / cube_testing InspectionRecord sub-types. The standalone
+// feature (and its sidebar entry) is gone.
 // N17 — Project icon (building) + dashboard chart icon.
 const BUILDING_ICON = (
   <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
     <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" />
   </svg>
 );
-// Phase-D (N2): RFI (Request for Information) icon — chat-bubble shape
-// used as a quick semantic marker for "ask a question, get a response".
-// Distinct from DOC_ICON (DPR/Inspection) and CLIPBOARD_ICON (Inspection
-// records) so the sidebar stays scannable.
-const RFI_ICON = (
-  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
-    <path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z" />
-  </svg>
-);
+// Round-29: RFI icon REMOVED — the RFI feature is gone; VOs are now
+// standalone work items.
 // Phase-D (N2): Variation Order icon — a fork-and-node glyph echoing the
 // "scope change branching from the original contract" concept. Distinct
 // from CHART_ICON (BOQ variance bars) so admins don't conflate the two.
@@ -265,15 +251,11 @@ const navGroups = [
     items: [
       { to: '/portal/dpr/my', label: 'My Daily Reports', icon: DOC_ICON },
       { to: '/portal/inspection/my', label: 'My Inspection Records', icon: CLIPBOARD_ICON },
-      // Round-29 (N5): cube tests live alongside the other per-user
-      // filed records. The page hosts both the user's own cube tests
-      // and (for admins) a deep-link to the org-wide review queue.
-      { to: '/portal/cube-tests', label: 'My Cube Tests', icon: CUBE_ICON },
-      // Phase-D (N2): RFIs (Request for Information) — filed-records
-      // shape so they live alongside DPR / Inspection. Available to all
-      // auth'd users: employees raise + respond; admins get the same
-      // list plus an admin-only "All RFIs" cross-org view (see Records).
-      { to: '/portal/rfis', label: 'My RFIs', icon: RFI_ICON },
+      // Round-29: cube-test sidebar entry REMOVED. Cube testing is
+      // captured by the cube_casting / cube_testing InspectionRecord
+      // sub-types; no standalone cube-test page.
+      // Round-29: RFI sidebar entry REMOVED. VOs are standalone work
+      // items now; the RFI feature is gone.
       // N7: BOQ variance report — read-only contract-vs-executed view
       // scoped to one project. The page is useful to anyone who files
       // DPR / Inspection rows against a BOQ item, so it lives in the
@@ -295,10 +277,8 @@ const navGroups = [
         { to: '/portal/admin/inspection', label: 'Inspections Review', icon: GRID_ICON },
         { to: '/portal/admin/leave', label: 'Leave Approvals', icon: CHECKMARK_ICON },
         { to: '/portal/admin/training', label: 'Training Library', icon: GRADUATION_ICON },
-        // Round-29 (N5): cube-test review queue — 28-day tests due
-        // soon across the org. Sits next to the existing review
-        // queues so admins have one place for action-oriented items.
-        { to: '/portal/admin/cube-tests', label: 'Cube Tests Review', icon: CUBE_ICON },
+        // Round-29: cube-test review queue REMOVED — see My Reports
+        // comment above.
       ],
     },
     {
@@ -316,11 +296,7 @@ const navGroups = [
         // because PATCH/DELETE on boqItem is gated to creator-or-admin
         // server-side; employees read variance on the public page.
         { to: '/portal/admin/boq', label: 'BOQ Registry', icon: LIST_ICON },
-        // Phase-D (N2): admin cross-org RFI view. Distinct from the
-        // shared /portal/rfis because the server-side filter rules and
-        // per-row actions (escalate to variation) differ. Sits under
-        // Records as the cross-org browse surface it is.
-        { to: '/portal/admin/rfis', label: 'All RFIs', icon: RFI_ICON },
+        // Round-29: "All RFIs" admin entry REMOVED — RFI feature is gone.
         // Phase-D (N2): Variation Order admin list + detail (drill-in).
         // Also lives under Records because VOs are admin-curated and the
         // page is a cross-org browse with the same UI shape.

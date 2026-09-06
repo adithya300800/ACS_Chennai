@@ -125,10 +125,11 @@ export function BellIcon({ size = 14, style }) {
   );
 }
 
-// Phase-D (N2): UserIcon — used by RFI detail (raised by / responder)
-// and Variation detail (raised by / approved-by) so the "who" rows have
-// a consistent person glyph. Mirrors the line-icon style of the other
-// Icons (24x24 viewBox, stroke=2, currentColor).
+// Phase-D (N2): UserIcon — used by Variation detail (raised by /
+// approved-by) so the "who" rows have a consistent person glyph. Mirrors
+// the line-icon style of the other Icons (24x24 viewBox, stroke=2,
+// currentColor). (Round-29: the RFI detail page that also used this
+// icon was removed.)
 export function UserIcon({ size = 14, style }) {
   return (
     <svg width={size} height={size} {...ICON_BASE} style={style}>

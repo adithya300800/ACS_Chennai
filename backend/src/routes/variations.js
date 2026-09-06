@@ -157,7 +157,6 @@ router.get('/', asyncHandler(async (req, res) => {
       where,
       include: {
         project: { select: { id: true, name: true, code: true } },
-        referenceRfi: { select: { id: true, subject: true, status: true } },
         raisedBy: { select: { id: true, name: true, email: true } },
         approvedBy: { select: { id: true, name: true, email: true } },
       },
@@ -220,7 +219,7 @@ router.post('/', asyncHandler(async (req, res) => {
 
   const {
     projectId, title, description, deltaAmount,
-    clientApprovalRequired, referenceRfiId,
+    clientApprovalRequired,
   } = req.body || {};
 
   // typeof / required guards.
@@ -264,15 +263,10 @@ router.post('/', asyncHandler(async (req, res) => {
     resolvedClientApproval = clientApprovalRequired;
   }
 
-  // referenceRfiId: optional, must reference an existing RFI in the
-  // SAME project (cross-project RFI linkage is a data-integrity
-  // hazard — a variation on Project A should never point at an RFI
-  // filed under Project B).
-  if (referenceRfiId !== undefined && referenceRfiId !== null && referenceRfiId !== '') {
-    if (typeof referenceRfiId !== 'string' || !UUID_RE.test(referenceRfiId)) {
-      return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'INVALID_REFERENCE_RFI_ID', message: 'referenceRfiId must be a UUID' });
-    }
-  }
+  // (Round-29 — referenceRfiId is no longer accepted. The RFI feature was
+  // removed entirely; VOs are now standalone work items. Any stale
+  // referenceRfiId on the request is silently ignored to keep older
+  // client payloads from erroring.)
 
   try {
     // Project existence + active check.
@@ -287,32 +281,9 @@ router.post('/', asyncHandler(async (req, res) => {
       return res.status(400).json({ error: 'PROJECT_INACTIVE', code: 'PROJECT_INACTIVE', message: 'Linked project is archived' });
     }
 
-    // RFI cross-check (if provided).
-    if (referenceRfiId) {
-      const rfi = await prisma.rfi.findUnique({
-        where: { id: referenceRfiId },
-        select: { id: true, projectId: true },
-      });
-      if (!rfi) {
-        return res.status(400).json({ error: 'REFERENCE_RFI_NOT_FOUND', code: 'REFERENCE_RFI_NOT_FOUND', message: 'Reference RFI does not exist' });
-      }
-      // rfi.projectId is nullable; the RFI can be unfiled. If it IS
-      // filed, it must match this variation's project. If the RFI is
-      // unfiled (projectId=null), the linkage is still allowed (the
-      // contractor tagged the RFI to a project retroactively; admin
-      // can clean up later).
-      if (rfi.projectId && rfi.projectId !== projectId) {
-        return res.status(400).json({
-          error: 'Reference RFI belongs to a different project',
-          code: 'RFI_PROJECT_MISMATCH',
-        });
-      }
-    }
-
     const created = await prisma.variationOrder.create({
       data: {
         projectId,
-        referenceRfiId: (referenceRfiId && typeof referenceRfiId === 'string' && referenceRfiId.length > 0) ? referenceRfiId : null,
         title: title.trim(),
         description: (typeof description === 'string') ? description : null,
         deltaAmount: resolvedDelta,
@@ -322,7 +293,6 @@ router.post('/', asyncHandler(async (req, res) => {
       },
       include: {
         project: { select: { id: true, name: true, code: true } },
-        referenceRfi: { select: { id: true, subject: true, status: true } },
         raisedBy: { select: { id: true, name: true, email: true } },
         approvedBy: { select: { id: true, name: true, email: true } },
       },
@@ -367,12 +337,6 @@ router.get('/:id', asyncHandler(async (req, res) => {
       where: { id },
       include: {
         project: { select: { id: true, name: true, code: true } },
-        referenceRfi: {
-          select: {
-            id: true, subject: true, status: true,
-            raisedBy: { select: { id: true, name: true } },
-          },
-        },
         raisedBy: { select: { id: true, name: true, email: true } },
         approvedBy: { select: { id: true, name: true, email: true } },
       },
@@ -503,7 +467,6 @@ router.patch('/:id', asyncHandler(async (req, res) => {
       data: fields,
       include: {
         project: { select: { id: true, name: true, code: true } },
-        referenceRfi: { select: { id: true, subject: true, status: true } },
         raisedBy: { select: { id: true, name: true, email: true } },
         approvedBy: { select: { id: true, name: true, email: true } },
       },
@@ -571,7 +534,6 @@ router.post('/:id/submit', asyncHandler(async (req, res) => {
       },
       include: {
         project: { select: { id: true, name: true, code: true } },
-        referenceRfi: { select: { id: true, subject: true, status: true } },
         raisedBy: { select: { id: true, name: true, email: true } },
         approvedBy: { select: { id: true, name: true, email: true } },
       },
@@ -634,7 +596,6 @@ router.post('/:id/approve', requireFreshAdmin, asyncHandler(async (req, res) => 
       },
       include: {
         project: { select: { id: true, name: true, code: true } },
-        referenceRfi: { select: { id: true, subject: true, status: true } },
         raisedBy: { select: { id: true, name: true, email: true } },
         approvedBy: { select: { id: true, name: true, email: true } },
       },
@@ -705,7 +666,6 @@ router.post('/:id/reject', requireFreshAdmin, asyncHandler(async (req, res) => {
       },
       include: {
         project: { select: { id: true, name: true, code: true } },
-        referenceRfi: { select: { id: true, subject: true, status: true } },
         raisedBy: { select: { id: true, name: true, email: true } },
         approvedBy: { select: { id: true, name: true, email: true } },
       },

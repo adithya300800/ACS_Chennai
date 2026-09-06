@@ -30,10 +30,11 @@ export default function VariationFormModal({
   onClose,
   onSaved,
   projects,
-  rfis,
   accessToken,
   initialProjectId = '',
-  initialReferenceRfiId = '',
+  // Round-29: `rfis` + `initialReferenceRfiId` removed — the RFI feature
+  // is gone and VOs are now standalone work items. The previous
+  // Reference-RFI picker was deleted from the form body as well.
   editing = null,
 }) {
   const toast = useToast();
@@ -42,20 +43,18 @@ export default function VariationFormModal({
   const [description, setDescription] = useState('');
   const [deltaAmountRaw, setDeltaAmountRaw] = useState('');
   const [clientApprovalRequired, setClientApprovalRequired] = useState(true);
-  const [referenceRfiId, setReferenceRfiId] = useState(initialReferenceRfiId);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
 
-  // Lazy-load projects + same-project RFIs when the modal opens. The RFI
-  // dropdown is scoped to the selected project so the server-side
-  // RFI_PROJECT_MISMATCH check can't fire.
+  // Round-29: RFI dropdown + referenceRfiId state REMOVED — the RFI
+  // feature is gone and VOs are now standalone work items.
+
   useEffect(() => {
     if (!open) return;
     setFormError('');
   }, [open]);
 
-  // Reset on open + re-seed from props (initialXxx for the new-RFI-
-  // escalated-from-RFI flow, editing for the DRAFT-edit flow).
+  // Reset on open + re-seed from props (editing for the DRAFT-edit flow).
   useEffect(() => {
     if (!open) return;
     setProjectId(editing?.projectId || initialProjectId || '');
@@ -69,8 +68,7 @@ export default function VariationFormModal({
     setClientApprovalRequired(
       editing?.clientApprovalRequired == null ? true : !!editing.clientApprovalRequired
     );
-    setReferenceRfiId(editing?.referenceRfiId || initialReferenceRfiId || '');
-  }, [open, editing, initialProjectId, initialReferenceRfiId]);
+  }, [open, editing, initialProjectId]);
 
   const liveError = useMemo(() => {
     if (!projectId) return 'Project is required.';
@@ -84,23 +82,6 @@ export default function VariationFormModal({
     }
     return '';
   }, [projectId, title, description, deltaAmountRaw]);
-
-  // RFIs for the same project only — the backend rejects cross-project
-  // references with RFI_PROJECT_MISMATCH. Defensive client-side filter
-  // surfaces a clearer error than the bare 400.
-  const rfisForProject = useMemo(() => {
-    if (!projectId) return [];
-    return (rfis || []).filter((r) => r.projectId === projectId);
-  }, [rfis, projectId]);
-
-  // If the previously-selected reference RFI isn't in the current project's
-  // RFI list (project changed), clear it so the submit doesn't 400.
-  useEffect(() => {
-    if (!referenceRfiId) return;
-    if (!rfisForProject.find((r) => r.id === referenceRfiId)) {
-      setReferenceRfiId('');
-    }
-  }, [rfisForProject, referenceRfiId]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -119,7 +100,8 @@ export default function VariationFormModal({
         // shape; matches the wire contract for /api/variations POST/PATCH.
         deltaAmount: deltaAmountRaw === '' ? null : Number(deltaAmountRaw),
         clientApprovalRequired,
-        ...(referenceRfiId ? { referenceRfiId } : {}),
+        // Round-29: referenceRfiId removed from payload — the RFI feature
+        // is gone. VOs are standalone work items.
       };
       let result;
       if (editing?.id) {
@@ -245,30 +227,8 @@ export default function VariationFormModal({
           </div>
         </div>
 
-        <div className="form-group">
-          <label htmlFor="variation-form-rfi">
-            Reference RFI <span style={{ color: 'var(--steel)', fontSize: '0.8rem', fontWeight: 400 }}>(optional)</span>
-          </label>
-          <select
-            id="variation-form-rfi"
-            className="form-input"
-            value={referenceRfiId}
-            onChange={(e) => setReferenceRfiId(e.target.value)}
-            disabled={!projectId || rfisForProject.length === 0}
-          >
-            <option value="">No reference RFI</option>
-            {rfisForProject.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.subject || r.id}
-              </option>
-            ))}
-          </select>
-          {projectId && rfisForProject.length === 0 && (
-            <span style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
-              No RFIs have been raised against this project yet.
-            </span>
-          )}
-        </div>
+        {/* Round-29: Reference-RFI picker REMOVED. VOs are standalone
+            work items now (no escalation-from-RFI flow). */}
 
         {formError && (
           <div

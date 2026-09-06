@@ -584,38 +584,14 @@ export const api = {
   markTrainingComplete: (id, note, token) =>
     api.put(`/training/enrollments/${id}/complete`, note ? { note } : {}, token),
 
-  // Round-29 (N5): Cube-test integration with DPR & Inspection. The
-  // backend ships 6 endpoints under /api/cube-tests; see
-  // backend/src/routes/cubeTest.js for the full contract.
-  //   - getCubeTests            → list with filters (status / dprId /
-  //                               castingRecordId / dueBefore). 100-row cap.
-  //   - createCubeTest          → file a new cube test (requires
-  //                               ownership of the linked inspection/DPR
-  //                               unless admin).
-  //   - getCubeTest             → detail (submitter, DPR-submitter, or admin).
-  //   - updateCubeTest          → record 7d/28d results. Status is
-  //                               server-derived from result >= expected;
-  //                               sending `status` in the body is rejected.
-  //   - getCubeTestsDueSoon     → 28-day tests due in the next N days
-  //                               (default 7) — powers the admin review queue.
-  //   - getCubePourSummary      → pour-summary view per DPR (cast /
-  //                               passed / pending / failed / overdue +
-  //                               billingStatus).
-  getCubeTests: (params = {}, token) => {
-    const qs = new URLSearchParams(params).toString();
-    return api.get(`/cube-tests${qs ? '?' + qs : ''}`, token);
-  },
-  createCubeTest: (data, token) => api.post('/cube-tests', data, token),
-  getCubeTest: (id, token) => api.get(`/cube-tests/${id}`, token),
-  updateCubeTest: (id, data, token) => api.patch(`/cube-tests/${id}`, data, token),
-  getCubeTestsDueSoon: (days = 7, token) =>
-    api.get(`/cube-tests/due-soon?days=${days}`, token),
-  getCubePourSummary: (dprId, token) =>
-    api.get(`/cube-tests/pour-summary/${dprId}`, token),
+  // Round-29: cube-test endpoints REMOVED. The /api/cube-tests backend
+  // route is gone; cube testing is captured entirely by the cube_casting
+  // / cube_testing InspectionRecord sub-types. The frontend surfaces
+  // (DPR / Inspection detail panels) were scrubbed at the same time.
 
   // N17 — Project-level dashboard with KPI tiles. Lightweight project
   // master + a single KPI endpoint that aggregates DPR / Inspection /
-  // CubeTest / BOQ / People counts scoped to one project. `idOrName`
+  // BOQ / People counts scoped to one project. `idOrName`
   // accepts either a UUID or the project name (URL-decoded); the backend
   // resolves both.
   getProjects: (params, token) => {
@@ -691,44 +667,15 @@ export const api = {
   getBoqVariance: (projectName, token) =>
     api.get(`/boq/variance?projectName=${encodeURIComponent(projectName)}`, token),
 
-  // N2 (Phase C — ACS Portal): RFI (Request for Information) routes.
-  //
-  // Status lifecycle: OPEN → RESPONDED → CLOSED. OVERDUE is a presentation
-  // flag the backend derives server-side for OPEN rows past their due date
-  // (see backend/src/routes/rfis.js:deriveRfiStatus). The wire shape from
-  // the list + detail endpoints is:
-  //   { id, subject, question, response, status, displayStatus,
-  //     dueDate, createdAt, project, raisedBy, targetResponder,
-  //     responder, _count: { variations } }
-  //
-  // Filters: projectId, status (OPEN/RESPONDED/CLOSED/OVERDUE), myOnly,
-  // from/to on createdAt, cursor (keyset), limit (1..100, default 20).
-  getRfis: (params = {}, token) => {
-    const qs = new URLSearchParams(params).toString();
-    return api.get(`/rfis${qs ? '?' + qs : ''}`, token);
-  },
-  createRfi: (data, token, idempotencyKey) => api.post('/rfis', data, token, idempotencyKey),
-  getRfi: (id, token) => api.get(`/rfis/${id}`, token),
-  // PATCH is multi-purpose on the backend: setting `response` records the
-  // answer (status → RESPONDED), and adding `status: 'CLOSED'` in the
-  // same body closes the row (admin-only). We expose a thin `respondRfi`
-  // wrapper for the user-facing "Respond" button so callers don't have to
-  // know the inline-state-machine rules.
-  respondRfi: (id, { response, status }, token) =>
-    api.patch(`/rfis/${id}`, { response, ...(status ? { status } : {}) }, token),
-  // Admin close (no response required — CLOSED is the terminal state).
-  closeRfi: (id, token) => api.patch(`/rfis/${id}`, { status: 'CLOSED' }, token),
-  // Admin escalation: turns an RFI into a VariationOrder DRAFT. The
-  // backend returns the new variation row so we can navigate to it.
-  escalateRfiToVariation: (id, payload = {}, token) =>
-    api.post(`/rfis/${id}/escalate-to-variation`, payload || {}, token),
+  // Round-29: RFI endpoints REMOVED. /api/rfis is gone — VOs are now
+  // standalone work items (no escalation-from-RFI flow).
 
   // N2 (Phase C — ACS Portal): Variation Order routes.
   //
   // Status lifecycle: DRAFT → SUBMITTED → APPROVED | REJECTED.
   // Wire shape (list + detail):
   //   { id, title, description, deltaAmount (string|number),
-  //     status, clientApprovalRequired, project, referenceRfi,
+  //     status, clientApprovalRequired, project,
   //     raisedBy, approvedBy, createdAt }
   //
   // Filters: projectId, status, from/to on createdAt, cursor, limit.

@@ -13,10 +13,12 @@
  *   6. KPIs include Inspection counts grouped by projectName, with the
  *      OPEN-now tile sourced org-wide and the byType breakdown across
  *      the window
- *   7. KPIs tolerate a missing CubeTest model — when `prisma.cubeTest`
- *      throws, the response carries zeros for cubeTests + a warning
- *      string, but the other roll-ups still render. Same tolerance for
- *      prisma.boqItem.
+ *   7. KPIs tolerate a missing BoqItem model — when `prisma.boqItem`
+ *      throws, the response carries zeros for boqVariance + a warning
+ *      string, but the other roll-ups still render.
+ *      (Round-29: the CubeTest roll-up was removed — the standalone
+ *      cube_test feature is gone; cube testing is captured by the
+ *      cube_casting / cube_testing InspectionRecord sub-types.)
  *   8. The `days` query parameter correctly bounds the window (default
  *      30, capped at 365)
  *   9. DELETE /api/projects/:id soft-deletes (isActive=false) for admin;
@@ -105,9 +107,9 @@ const inspectionRows = [
 
 // ─── Prisma mock builder ────────────────────────────────────────────────────
 // The defaults exercise every roll-up path. Per-test overrides flip a
-// flag to simulate CubeTest / BoqItem throwing.
+// flag to simulate BoqItem throwing.
 function makePrisma(opts = {}) {
-  const { cubeTestThrows = false, boqItemThrows = false } = opts;
+  const { boqItemThrows = false } = opts;
 
   // Helper: filter DPR / Inspection rows by projectName + window predicate
   function filterRows(rows, where = {}) {
@@ -204,48 +206,7 @@ function makePrisma(opts = {}) {
         }));
       }),
     },
-    cubeTest: cubeTestThrows ? {
-      count: jest.fn(async () => { throw new Error('relation cube_test does not exist'); }),
-    } : {
-      count: jest.fn(async ({ where }) => {
-        // 3 cube tests: 1 due-soon (28d due in next 7d, untested), 1 overdue
-        // (28d due in past, untested), 1 passed (result reported).
-        const today = new Date('2026-09-05T00:00:00.000Z');
-        const inSeven = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000);
-        // Filter by dpr.projectName via the relation shape
-        let rows = [
-          { dpr: { projectName: 'T-Nagar' }, twentyEightDayDueDate: inSeven, twentyEightDayResult: null },
-          { dpr: { projectName: 'T-Nagar' }, twentyEightDayDueDate: new Date('2026-08-01T00:00:00.000Z'), twentyEightDayResult: null },
-          { dpr: { projectName: 'T-Nagar' }, twentyEightDayDueDate: new Date('2026-07-01T00:00:00.000Z'), twentyEightDayResult: 32.5 },
-          { dpr: { projectName: 'Anna Nagar' }, twentyEightDayDueDate: inSeven, twentyEightDayResult: null },
-        ];
-        if (where.dpr && where.dpr.projectName) {
-          rows = rows.filter((r) => r.dpr.projectName === where.dpr.projectName);
-        }
-        if (where.twentyEightDayDueDate) {
-          if (where.twentyEightDayDueDate.gte) {
-            const t = new Date(where.twentyEightDayDueDate.gte).getTime();
-            rows = rows.filter((r) => r.twentyEightDayDueDate.getTime() >= t);
-          }
-          if (where.twentyEightDayDueDate.lte) {
-            const t = new Date(where.twentyEightDayDueDate.lte).getTime();
-            rows = rows.filter((r) => r.twentyEightDayDueDate.getTime() <= t);
-          }
-          if (where.twentyEightDayDueDate.lt) {
-            const t = new Date(where.twentyEightDayDueDate.lt).getTime();
-            rows = rows.filter((r) => r.twentyEightDayDueDate.getTime() < t);
-          }
-        }
-        if (where.twentyEightDayResult !== undefined) {
-          if (where.twentyEightDayResult === null) {
-            rows = rows.filter((r) => r.twentyEightDayResult === null);
-          } else if (where.twentyEightDayResult && where.twentyEightDayResult.not === null) {
-            rows = rows.filter((r) => r.twentyEightDayResult !== null);
-          }
-        }
-        return rows.length;
-      }),
-    },
+    cubeTest: undefined, // Round-29: removed — see project-kpi.test.js header comment
     boqItem: boqItemThrows ? {
       findMany: jest.fn(async () => { throw new Error('relation boq_item does not exist'); }),
     } : {
@@ -442,29 +403,10 @@ describe('N17 — GET /api/projects/:idOrName/kpis', () => {
     });
   });
 
-  // 7. KPI: tolerates CubeTest / BoqItem throwing — returns zeros + warnings
-  it('7a. KPI endpoint returns zeros + warning when CubeTest table is missing', async () => {
-    const prisma = makePrisma({ cubeTestThrows: true });
-    const app = buildApp(prisma);
-    const res = await request(app)
-      .get(`/api/projects/${T_NAGAR_ID}/kpis`)
-      .set('Authorization', userJwt());
-    expect(res.status).toBe(200);
-    expect(res.body.cubeTests).toEqual({
-      dueSoonCount: 0,
-      overdueCount: 0,
-      passedCount: 0,
-    });
-    // Other roll-ups still populated
-    expect(res.body.dpr.approvedCount).toBe(2);
-    expect(res.body.inspections.openCount).toBe(3);
-    // Warning surfaces to the caller
-    expect(res.body.warnings).toEqual(
-      expect.arrayContaining([expect.stringMatching(/^cubeTests:/)])
-    );
-  });
-
-  it('7b. KPI endpoint returns zeros + warning when BoqItem table is missing', async () => {
+  // 7. KPI: tolerates BoqItem throwing — returns zeros + warnings
+  // (Round-29: removed the CubeTest roll-up; the cube-test feature
+  // is gone and the response no longer carries cubeTests.)
+  it('7. KPI endpoint returns zeros + warning when BoqItem table is missing', async () => {
     const prisma = makePrisma({ boqItemThrows: true });
     const app = buildApp(prisma);
     const res = await request(app)
@@ -512,23 +454,10 @@ describe('N17 — GET /api/projects/:idOrName/kpis', () => {
     expect(r4.body.window.days).toBe(1);
   });
 
-  // 9a. KPI: cubeTests when present — proves the roll-up isn't always zeros
-  it('9a. KPI cubeTests roll-up computes dueSoon / overdue / passed when present', async () => {
-    const prisma = makePrisma(); // defaults: cubeTest does NOT throw
-    const app = buildApp(prisma);
-    const res = await request(app)
-      .get(`/api/projects/${T_NAGAR_ID}/kpis`)
-      .set('Authorization', userJwt());
-    expect(res.status).toBe(200);
-    // From the makePrisma defaults: 1 due-soon (untested, due in next 7d),
-    // 1 overdue (untested, due in past), 1 passed (result reported) — all
-    // for T-Nagar. Anna Nagar row filtered out by the projectName FK.
-    expect(res.body.cubeTests).toEqual({
-      dueSoonCount: 1,
-      overdueCount: 1,
-      passedCount: 1,
-    });
-  });
+  // 9a. KPI: was the cubeTests roll-up — removed in Round-29
+  // (cube testing is now captured by InspectionRecord cube_casting /
+  // cube_testing sub-types; no standalone cubeTests field in the
+  // response anymore. Test intentionally omitted.)
 
   // 9b. KPI: BOQ variance calculation when present
   it('9b. KPI boqVariance roll-up computes contract / executed / variance', async () => {

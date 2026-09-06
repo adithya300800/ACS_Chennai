@@ -63,13 +63,9 @@ const ProjectForm = React.lazy(() => import('./pages/admin/ProjectForm.jsx'));
 // toggles + admin SMTP test button. Lazy-loaded so it doesn't bloat the
 // initial bundle (most users won't visit this page).
 const NotificationPreferences = React.lazy(() => import('./pages/portal/NotificationPreferences.jsx'));
-// Round-29 (N5): cube-test integration with DPR & Inspection. Three
-// routes — employee list, employee detail, and admin review queue.
-// Lazy-loaded alongside the rest of the portal pages to keep the
-// initial bundle small.
-const CubeTests = React.lazy(() => import('./pages/portal/CubeTests.jsx'));
-const CubeTestDetail = React.lazy(() => import('./pages/portal/CubeTestDetail.jsx'));
-const CubeTestDashboard = React.lazy(() => import('./pages/admin/CubeTestDashboard.jsx'));
+// Round-29 (N5): cube-test integration with DPR & Inspection was REMOVED.
+// Cube testing is captured entirely by the cube_casting / cube_testing
+// InspectionRecord sub-types — no separate standalone feature.
 // SOL-P2#18: portal-side 404 — keeps the portal chrome and gives the
 // user a familiar recovery path rather than dumping them on the public
 // site. Renders inside the protected /portal/* tree.
@@ -82,15 +78,8 @@ const PortalNotFound = React.lazy(() => import('./pages/portal/PortalNotFound.js
 // AdminOverview. Lazy-loaded so they don't bloat the initial bundle.
 const BoqAdmin = React.lazy(() => import('./pages/admin/BoqAdmin.jsx'));
 const BoqVariance = React.lazy(() => import('./pages/portal/BoqVariance.jsx'));
-// Phase-D (N2): RFI + Variation Order pages. Five routes — three
-// employee-facing (my RFIs, my RFI detail, new-RFI modal lives inside the
-// list page) and two admin-facing (cross-org RFIs, Variation Order
-// admin list, Variation Order detail). Literal-before-param ordering
-// applies: rfis before rfis/:id, admin/variations before admin/variations/:id
-// — same lesson as the training + project routes.
-const Rfis = React.lazy(() => import('./pages/Rfis.jsx'));
-const RfiDetail = React.lazy(() => import('./pages/RfiDetail.jsx'));
-const RfisAdmin = React.lazy(() => import('./pages/admin/RfisAdmin.jsx'));
+// Phase-D (N2): RFI feature was REMOVED in Round-29. Variation Orders
+// remain as standalone work items (no escalation-from-RFI flow).
 const VariationOrdersAdmin = React.lazy(() => import('./pages/admin/VariationOrdersAdmin.jsx'));
 const VariationOrderDetail = React.lazy(() => import('./pages/VariationOrderDetail.jsx'));
 // N3 (Phase F): Drawing Revision Register — admin list + detail. The
@@ -175,27 +164,16 @@ function App() {
           <Route path="training" element={<Training />} />
           <Route path="training/:id" element={<TrainingDetail />} />
           <Route path="admin/training" element={<TrainingDashboard />} />
-          {/* Round-29 (N5): cube-test routes. Literal /admin/cube-tests
-              must come before the param route /cube-tests/:id so
-              HashRouter matches "admin/cube-tests" instead of treating
-              "admin/cube-tests" as :id (same lesson as TrainingDetail). */}
-          <Route path="cube-tests" element={<CubeTests />} />
-          <Route path="cube-tests/:id" element={<CubeTestDetail />} />
-          <Route path="admin/cube-tests" element={<CubeTestDashboard />} />
+          {/* Round-29: cube-test routes REMOVED. Cube testing lives in
+              the InspectionRecord cube_casting / cube_testing sub-types. */}
           {/* N7 — BOQ variance report (employee) + admin registry. The
               variance report lives at /boq (root under /portal); the admin
               CRUD surface lives at /admin/boq. No literal-vs-param ordering
               concerns here since neither route takes a path param. */}
           <Route path="boq" element={<BoqVariance />} />
           <Route path="admin/boq" element={<BoqAdmin />} />
-          {/* Phase-D (N2): RFIs + Variation Orders. Literal-before-param:
-              /rfis must come before /rfis/:id, /admin/variations must
-              come before /admin/variations/:id (round-20 lesson). The
-              admin/rfis path is a separate literal — no ordering concern
-              with /admin/variations/* since they share no prefix. */}
-          <Route path="rfis" element={<Rfis />} />
-          <Route path="rfis/:id" element={<RfiDetail />} />
-          <Route path="admin/rfis" element={<RfisAdmin />} />
+          {/* Phase-D (N2): RFI routes REMOVED in Round-29. Variation
+              Orders remain as standalone work items. */}
           <Route path="admin/variations" element={<VariationOrdersAdmin />} />
           <Route path="admin/variations/:id" element={<VariationOrderDetail />} />
           {/* N3 (Phase F): Drawing Revision Register. Literal-before-param:

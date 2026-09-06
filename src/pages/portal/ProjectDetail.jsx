@@ -361,7 +361,8 @@ export default function ProjectDetail() {
             href={`/portal/admin/inspection?projectId=${encodeURIComponent(p.id || p.name)}`}
           />
         )}
-        {(activeTab === 'rfis' || activeTab === 'variations' || activeTab === 'drawings' || activeTab === 'documents' || activeTab === 'issues' || activeTab === 'team') && (
+        {/* Round-29: rfis tab branch REMOVED — RFI feature is gone. */}
+        {(activeTab === 'variations' || activeTab === 'drawings' || activeTab === 'documents' || activeTab === 'issues' || activeTab === 'team') && (
           <ComingSoonNotice label={TABS.find((t) => t.id === activeTab)?.label || activeTab} />
         )}
       </div>

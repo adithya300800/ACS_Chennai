@@ -90,7 +90,13 @@ function validateSizeBytes(sizeBytes) {
  * Mount /sas-url and /confirm-upload on the supplied router.
  *
  * Config:
- *   - allowedTypes: Content-Type allowlist (default: jpeg/png/webp)
+ *   - allowedTypes: Content-Type allowlist (default: jpeg/png/webp) —
+ *     used as the fallback for any container NOT listed in
+ *     `allowedTypesPerContainer`.
+ *   - allowedTypesPerContainer: per-container override map.
+ *     e.g. `{ 'dpr-documents': [...images, 'application/pdf'] }` lets
+ *     documents accept PDFs while keeping `dpr-photos` image-only.
+ *     Missing containers fall back to `allowedTypes` (defense in depth).
  *   - container: server-hardcoded container name (Inspection-style)
  *   - allowedContainers: array of containers the client may pick
  *     (DPR-style). Mutually exclusive with `container` — pass one
@@ -98,7 +104,8 @@ function validateSizeBytes(sizeBytes) {
  *
  * Both routes:
  *   - Require req.employeeId (mount the function AFTER your auth gate)
- *   - Validate contentType against allowedTypes
+ *   - Validate contentType against allowedTypesPerContainer[container]
+ *     ?? allowedTypes
  *   - Validate sizeBytes against MAX_PHOTO_SIZE
  *   - Use a per-employeeId ULID-scoped blob path
  *     (a leaked SAS cannot cross tenants)
@@ -109,9 +116,23 @@ function mountUploadRoutes(router, config = {}) {
   if (!router) throw new Error('mountUploadRoutes requires an Express router');
   const {
     allowedTypes = ['image/jpeg', 'image/png', 'image/webp'],
+    allowedTypesPerContainer = {},
     container: hardcodedContainer,
     allowedContainers,
   } = config;
+
+  // Per-route resolver: lookup the per-container allowlist if present,
+  // otherwise fall back to the default allowedTypes. A missing entry
+  // (rather than an empty array) means "use the default" — that's the
+  // defense-in-depth property: if a caller forgets to opt a new
+  // container into PDF support, the new container is image-only by
+  // default, not zero-allowlist.
+  const resolvedAllowedTypesFor = (container) => {
+    if (container && Object.prototype.hasOwnProperty.call(allowedTypesPerContainer, container)) {
+      return allowedTypesPerContainer[container];
+    }
+    return allowedTypes;
+  };
 
   if (!hardcodedContainer && (!allowedContainers || allowedContainers.length === 0)) {
     throw new Error('mountUploadRoutes requires either `container` (hardcoded) or `allowedContainers` (client-pick)');
@@ -157,8 +178,9 @@ function mountUploadRoutes(router, config = {}) {
     const container = pickContainer(req.body);
     if (!validateContainer(container, res)) return;
 
-    if (!allowedTypes.includes(contentType)) {
-      return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: `Only ${allowedTypes.join(', ')} allowed` });
+    const allowed = resolvedAllowedTypesFor(container);
+    if (!allowed.includes(contentType)) {
+      return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: `Only ${allowed.join(', ')} allowed for ${container}` });
     }
 
     const sizeErr = validateSizeBytes(sizeBytes);
@@ -249,8 +271,9 @@ function mountUploadRoutes(router, config = {}) {
     if (sizeBytes <= 0 || sizeBytes > MAX_PHOTO_SIZE) {
       return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `Photo must be 1 byte – ${MAX_PHOTO_SIZE} bytes` });
     }
-    if (!allowedTypes.includes(contentType)) {
-      return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: `Only ${allowedTypes.join(', ')} allowed` });
+    const allowed = resolvedAllowedTypesFor(container);
+    if (!allowed.includes(contentType)) {
+      return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: `Only ${allowed.join(', ')} allowed for ${container}` });
     }
 
     const pendingKey = `${req.employeeId}:${ulid}`;

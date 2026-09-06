@@ -97,9 +97,9 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
   // open the full-screen lightbox at that index; arrows / swipe / Esc
   // navigate inside the lightbox.
   const [lightboxIndex, setLightboxIndex] = useState(null);
-  // N5: cube-test pour summary — fetched in parallel with the DPR.
-  // Failures are silent so the rest of the modal still renders.
-  const [pourSummary, setPourSummary] = useState(null);
+  // Round-29: pourSummary state + getCubePourSummary call REMOVED —
+  // the cube-test feature is gone. Cube testing is captured by the
+  // cube_casting / cube_testing InspectionRecord sub-types.
 
   useEffect(() => {
     let cancelled = false;
@@ -116,9 +116,6 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
         setError(err.message || 'Failed to load DPR details');
         setLoading(false);
       });
-    api.getCubePourSummary(dprSummary.id, accessToken)
-      .then((summary) => { if (!cancelled) setPourSummary(summary); })
-      .catch(() => { if (!cancelled) setPourSummary(null); });
     return () => { cancelled = true; };
   }, [dprSummary.id, accessToken]);
 
@@ -307,45 +304,8 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
             </div>
           )}
 
-          {/* N5: cube-test pour summary — mirrors DprList. Admins viewing
-              a DPR across the org see the same pour-billing snapshot. */}
-          {pourSummary && (
-            <div style={{ marginBottom: '1rem' }}>
-              <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.5rem' }}>
-                Cube Tests ({pourSummary.counts.cast})
-              </div>
-              <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', fontSize: '0.85rem', marginBottom: '0.5rem' }}>
-                <span><strong style={{ color: 'var(--navy)' }}>{pourSummary.counts.passed}</strong> <span style={{ color: 'var(--steel)' }}>passed</span></span>
-                <span><strong style={{ color: 'var(--navy)' }}>{pourSummary.counts.pending}</strong> <span style={{ color: 'var(--steel)' }}>pending</span></span>
-                {pourSummary.counts.failed > 0 && (
-                  <span style={{ color: 'var(--danger, #dc2626)' }}>
-                    <strong>{pourSummary.counts.failed}</strong> failed
-                  </span>
-                )}
-                {pourSummary.counts.overdue > 0 && (
-                  <span style={{ color: 'var(--danger, #dc2626)' }}>
-                    <strong>{pourSummary.counts.overdue}</strong> overdue
-                  </span>
-                )}
-                <span style={{ marginLeft: 'auto', color: 'var(--steel)' }}>
-                  Billing: {pourSummary.billingStatus === 'READY' ? 'Ready' : 'In progress'}
-                </span>
-              </div>
-              {pourSummary.tests?.length > 0 && (
-                <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-                  {pourSummary.tests.map((ct) => (
-                    <li key={ct.id} style={{ fontSize: '0.9rem' }}>
-                      <Link to={`/portal/cube-tests/${ct.id}`}>
-                        {ct.concreteGrade} · {ct.pourLocation}
-                      </Link>
-                      {' · '}
-                      <span style={{ color: 'var(--steel)' }}>{ct.status.replace(/_/g, ' ').toLowerCase()}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
+          {/* Round-29: cube-test pour summary panel REMOVED — the
+              standalone cube-test feature is gone. */}
 
           {Array.isArray(dpr.photos) && dpr.photos.length > 0 && (
             <div>

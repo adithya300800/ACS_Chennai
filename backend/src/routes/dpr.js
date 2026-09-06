@@ -345,6 +345,16 @@ mountUploadRoutes(router, {
   // photos; inspection photos get their own bucket so a single leaky
   // SAS can't cross between the two record types.
   allowedContainers: ['dpr-photos', 'dpr-documents', 'inspection-photos'],
+  // Round-29: drawings upload to `dpr-documents` as PDFs (the previous
+  // image-only allowlist 400'd with INVALID_CONTENT_TYPE). `dpr-photos`
+  // and `inspection-photos` keep the image-only default — only
+  // `dpr-documents` widens. Per-container allowlist = defense in depth
+  // (forgotten container falls back to image-only).
+  allowedTypesPerContainer: {
+    'dpr-photos': ['image/jpeg', 'image/png', 'image/webp'],
+    'dpr-documents': ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'],
+    'inspection-photos': ['image/jpeg', 'image/png', 'image/webp'],
+  },
 });
 
 // ─── POST /api/dpr ────────────────────────────────────────────────────────────

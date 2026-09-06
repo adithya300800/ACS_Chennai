@@ -81,6 +81,13 @@ const CONTENT_TYPE_EXT = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
   'image/webp': 'webp',
+  // Round-29: drawings upload to `dpr-documents` as PDF. The
+  // mountUploadRoutes per-container allowlist gates the public surface;
+  // this map is what generateUploadSASUrl uses to derive the blob's
+  // extension (and is therefore what makes the SAS URL issuance itself
+  // succeed). Both halves of the allowlist must accept the new type,
+  // or the route 400s on INVALID_CONTENT_TYPE before reaching here.
+  'application/pdf': 'pdf',
 };
 
 /**

@@ -43,7 +43,9 @@ const DEFAULT_STATUS_MAP = {
   SEVEN_DAY_FAILED: 'dpr-status-rejected',
   TWENTY_EIGHT_DAY_PASSED: 'dpr-status-approved',
   TWENTY_EIGHT_DAY_FAILED: 'dpr-status-rejected',
-  CUBE_PENDING: 'dpr-status-review',
+  // Round-29: CUBE_PENDING removed — the standalone cube-test feature
+  // is gone. Cube testing is captured by the cube_casting / cube_testing
+  // InspectionRecord sub-types, which use the InspectionStatus enum.
 };
 
 export default function StatusBadge({ status, map, className = '' }) {

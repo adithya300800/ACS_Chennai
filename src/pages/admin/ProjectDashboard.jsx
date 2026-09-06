@@ -201,12 +201,9 @@ const ICONS = {
       <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
     </svg>
   ),
-  cube: (
-    <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z" />
-      <polyline points="3.27 6.96 12 12.01 20.73 6.96" /><line x1="12" y1="22.08" x2="12" y2="12" />
-    </svg>
-  ),
+  // Round-29: ICONS.cube REMOVED — the standalone cube-test feature is
+  // gone; cube testing is captured by the cube_casting / cube_testing
+  // InspectionRecord sub-types.
   // Variants below tone-shift their chip background in subtle ways so a
   // reader can scan the column by row colour rather than reading every
   // number.
@@ -835,39 +832,9 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
         </div>
       </TileSection>
 
-      <TileSection title="Cube Tests">
-        <StatTile
-          icon={ICONS.cube}
-          number={kpis.cubeTests?.dueSoonCount ?? 0}
-          label="Due Soon"
-          tone={(kpis.cubeTests?.dueSoonCount ?? 0) > 0 ? 'warning' : 'neutral'}
-          sub="28-day tests in next 7 days"
-        />
-        <StatTile
-          icon={ICONS.pending}
-          number={kpis.cubeTests?.overdueCount ?? 0}
-          label="Overdue"
-          tone={(kpis.cubeTests?.overdueCount ?? 0) > 0 ? 'critical' : 'neutral'}
-        />
-        <StatTile
-          icon={ICONS.check}
-          number={kpis.cubeTests?.passedCount ?? 0}
-          label="Passed"
-          tone={(kpis.cubeTests?.passedCount ?? 0) > 0 ? 'good' : 'neutral'}
-          sub="28-day result reported"
-        />
-        {/* Empty-state sub-line when N5 (CubeTest) hasn't shipped yet —
-          the backend's defensive catch returns zeros, so we can't
-          distinguish "no tests" from "feature not yet present". Pin a
-          gentle hint either way. */}
-        {(kpis.cubeTests?.dueSoonCount ?? 0) === 0
-          && (kpis.cubeTests?.overdueCount ?? 0) === 0
-          && (kpis.cubeTests?.passedCount ?? 0) === 0 ? (
-          <div className="dpr-card" style={{ padding: '0.75rem 1rem', gridColumn: '1 / -1', fontSize: '0.82rem', color: 'var(--steel, #64748b)' }}>
-            No cube tests recorded for this project yet.
-          </div>
-        ) : null}
-      </TileSection>
+      {/* Round-29: Cube Tests TileSection REMOVED — the standalone
+          cube-test feature is gone; cube testing is captured by the
+          cube_casting / cube_testing InspectionRecord sub-types. */}
 
       <TileSection
         title="BOQ Variance"

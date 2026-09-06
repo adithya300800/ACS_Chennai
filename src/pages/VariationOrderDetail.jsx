@@ -220,17 +220,8 @@ export default function VariationOrderDetail() {
           </section>
         )}
 
-        {variation.referenceRfi && (
-          <section style={{ marginBottom: '1.25rem' }}>
-            <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", fontSize: '0.95rem', margin: '0 0 0.5rem', color: 'var(--navy)' }}>
-              Reference RFI
-            </h3>
-            <Link to={`/portal/rfis/${variation.referenceRfi.id}`} className="dpr-card" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', textDecoration: 'none', padding: '0.5rem 0.875rem', color: 'var(--navy)', fontSize: '0.9rem' }}>
-              <DocIcon size={14} />
-              {variation.referenceRfi.subject || 'View RFI'}
-            </Link>
-          </section>
-        )}
+        {/* Round-29: Reference RFI section REMOVED — RFI feature is gone;
+            VOs are standalone work items now. */}
 
         {/* Approval workflow timeline. Surfaces the canonical events so
             the reviewer can see WHO did WHAT WHEN without leaving the

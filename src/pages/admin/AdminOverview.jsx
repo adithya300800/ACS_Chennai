@@ -119,7 +119,7 @@ export default function AdminOverview() {
       icon: ICONS.inspection,
       title: 'Inspections to Review',
       sub: 'Compliance records queue',
-      desc: 'Review inspection & compliance records — material receipts, cube tests, NCRs, safety violations.',
+      desc: 'Review inspection & compliance records — material receipts, NCRs, safety violations.',
       badge: counts.inspection,
       badgeLabel: 'open',
     },
@@ -158,7 +158,7 @@ export default function AdminOverview() {
       icon: ICONS.project,
       title: 'Project Dashboards',
       sub: 'KPI overview per project',
-      desc: 'See DPR/Inspection/Cube-test/BOQ-variance counts per project.',
+      desc: 'See DPR/Inspection/BOQ-variance counts per project.',
     },
   ];
 
