@@ -9,19 +9,35 @@
 // browse/preview surface for field engineers.
 //
 // [Round-30] Project picker narrowed to /api/projects?scope=assigned
-// (the employee's touched set + their created set) instead of the
-// org-wide `?scope=mine`. Originally rendered as a typeahead input so
-// employees could type a name and resolve new projects inline.
+// (the employee's touched set) instead of the org-wide `?scope=mine`.
+// Originally rendered as a typeahead input so employees could type a
+// name and resolve new projects inline.
 //
 // [Round-32] Reverted the typeahead to a real <select> dropdown at
 // the user's request — they found the typeahead hard to scan, and
 // the picker only ever holds a small employee-scoped list (a handful
 // of project names at most). The "create new project" affordance is
-// now a sentinel <option value="__create__"> at the bottom of the
+// a sentinel <option value="__create__"> at the bottom of the
 // dropdown; picking it swaps the picker for an inline name input
-// + Create / Cancel pair that calls the same /api/projects/resolve
-// endpoint the old typeahead used. The select stays visible (disabled)
-// while in create-mode so the user can always see where they are.
+// + Create / Cancel pair that calls /api/projects/resolve.
+//
+// [Round-32.1 bugfix] Two dropdown correctness fixes from live user
+// feedback:
+//   1. Auto-discovered names from `data.discovered` (DPR/Inspection
+//      projectName values with no Project row) are now merged into
+//      the dropdown — earlier the picker only took `data.projects`,
+//      so every DPR a field engineer filed with projectName instead
+//      of projectId was silently missing from their picker.
+//   2. `Project.createdById === req.employeeId` was dropped from the
+//      backend `?scope=assigned` union — projects the employee
+//      merely created (often test artifacts from the typeahead/resolve
+//      flow) leaked into the picker even though they had no child
+//      records. The dropdown now reflects actual work history.
+//
+// Discovered entries render with `· not registered` suffix and use
+// a sentinel value `__disc__:${name}`. Picking one flips into
+// create-mode with the name pre-filled, so the engineer can register
+// the Project row in one step.
 //
 // URL shape:
 //   ?projectId=<uuid>    selected project (existing — still honored for
@@ -32,8 +48,9 @@
 //   - No "Supersede" / "Archive" per-card actions (curation stays admin-only).
 //   - Status filter is locked to ACTIVE (employees don't curate history).
 //   - Project picker reads from /api/projects?scope=assigned (curated
-//     list narrowed to the employee's touched set + their created set,
-//     plus a "+ Create new project…" sentinel option at the bottom).
+//     list narrowed to the employee's touched set, PLUS auto-discovered
+//     names from the same set, PLUS a "+ Create new project…" sentinel
+//     option at the bottom).
 //
 // [Round-31] "+ Add drawing" CTA on the page header + empty state.
 // POST /api/drawings was loosened to requireAuth so a field engineer can
@@ -112,25 +129,58 @@ export default function DrawingsBrowse() {
   const [creating, setCreating] = useState(false);
 
   // Load curated (active) projects on mount, scoped to the employee's
-  // touched/created set. The previous default `?scope=mine` returned
-  // the full org-wide curated list — switching to `?scope=assigned`
-  // (round-30) narrows the picker to projects the employee actually
-  // has context on.
+  // touched set. The previous default `?scope=mine` returned the full
+  // org-wide curated list — switching to `?scope=assigned` (round-30)
+  // narrows the picker to projects the employee actually has child
+  // records against.
+  //
+  // [Round-32.1 bugfix] We also merge `data.discovered` — the auto-
+  // discovered project names that come from DPR/Inspection rows where
+  // the legacy `projectName` string was used but no Project row exists
+  // yet. Without this merge, employees whose DPRs were filed with
+  // projectName instead of projectId saw the dropdown missing every
+  // project they actually worked on (the user's "not showing all the
+  // projects name that the employee has DPRs" complaint). Discovered
+  // entries render with `isRegistered: false` and a "· not registered"
+  // suffix in the dropdown; picking one flips into create-mode with
+  // the name pre-filled so the user can register the Project row.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const data = await api.getProjects({ scope: 'assigned' }, accessToken);
         if (cancelled) return;
-        const list = (data?.projects || []).filter((p) => p.isActive);
-        setProjects(list);
+        const curated = (data?.projects || [])
+          .filter((p) => p.isActive)
+          .map((p) => ({ ...p, isRegistered: true }));
+        // Discovered names only have a `name` and `isRegistered: false`.
+        // Synthesize a null id so they can coexist with curated rows in
+        // the same array — the dropdown keys on `id ?? name` and the
+        // select sentinel is `__disc__:${name}`.
+        const discovered = (data?.discovered || []).map((d) => ({
+          id: null,
+          name: d.name,
+          code: null,
+          client: null,
+          location: null,
+          isActive: true,
+          isRegistered: false,
+        }));
+        // Dedupe by name (case-insensitive) so an auto-discovered name
+        // that was registered between two fetches doesn't appear twice.
+        const seen = new Set(curated.map((p) => (p.name || '').toLowerCase()));
+        const merged = [
+          ...curated,
+          ...discovered.filter((d) => !seen.has((d.name || '').toLowerCase())),
+        ];
+        setProjects(merged);
         // Pick a default project: URL-supplied first, else the first
         // active one. This keeps the page non-empty for any employee
         // who has at least one assigned project.
         setProjectId((prev) => {
-          if (prev && list.some((p) => p.id === prev)) return prev;
-          const fromUrl = list.some((p) => p.id === urlProjectId) ? urlProjectId : '';
-          return fromUrl || (list.length > 0 ? list[0].id : '');
+          if (prev && merged.some((p) => p.id === prev)) return prev;
+          const fromUrl = merged.some((p) => p.id === urlProjectId) ? urlProjectId : '';
+          return fromUrl || (merged.length > 0 && merged[0].id ? merged[0].id : '');
         });
       } catch (err) {
         if (!cancelled) setProjectsError(err?.message || 'Failed to load projects');
@@ -278,14 +328,14 @@ export default function DrawingsBrowse() {
       </div>
 
       {/* Filter toolbar — <select> dropdown picker, employee-scoped.
-          Round-32 reverted the round-30 typeahead back to a real <select>
-          + an inline "create new project" affordance for scannability —
-          the assigned scope only ever holds a small handful of project
-          names. Picking the sentinel "__create__" option swaps the picker
-          for an inline name input + Create / Cancel pair (rendered to the
-          right of the disabled select so the user always sees where they
-          are in the flow). The select stays disabled while in create
-          mode so the user can't double-fire the resolver. */}
+          Renders curated projects + auto-discovered names + a sentinel
+          "+ Create new project…" option. Picking the "__create__"
+          sentinel opens an inline name input. Picking a discovered
+          entry (sentinel value "__disc__:<name>") opens the same
+          inline form with the name pre-filled — the engineer can
+          register the Project row in one step. The select stays
+          disabled while in create mode so the user can't double-fire
+          the resolver. */}
       <div className="dpr-card" style={{ marginBottom: '1rem' }}>
         <div className="form-row" style={{ alignItems: 'flex-start' }}>
           <div className="form-group" style={{ flex: 2 }}>
@@ -294,12 +344,25 @@ export default function DrawingsBrowse() {
               id="drawings-browse-project"
               name="projectId"
               className="form-input"
+              // While in create-mode the select shows the "+ Create new
+              // project…" sentinel. Outside create-mode, projectId is
+              // either a real id or empty (when only discovered entries
+              // exist — the dropdown can show them but projectId stays
+              // empty until the user registers one).
               value={createMode ? '__create__' : (projectId || '')}
               onChange={(e) => {
                 const val = e.target.value;
                 if (val === '__create__') {
                   setCreateMode(true);
                   setNewProjectName('');
+                  setResolveError('');
+                } else if (val.startsWith('__disc__:')) {
+                  // Picked a discovered name — flip into create-mode
+                  // with the name pre-filled so the engineer can
+                  // register the Project row in one step.
+                  const name = val.slice('__disc__:'.length);
+                  setCreateMode(true);
+                  setNewProjectName(name);
                   setResolveError('');
                 } else {
                   handleSelectProject(val);
@@ -310,8 +373,12 @@ export default function DrawingsBrowse() {
             >
               <option value="">— Select project —</option>
               {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}{p.code ? ` (${p.code})` : ''}
+                <option
+                  key={p.id ?? `__disc__:${p.name}`}
+                  value={p.id ?? `__disc__:${p.name}`}
+                  disabled={!p.id && !p.isRegistered}
+                >
+                  {p.name}{p.code ? ` (${p.code})` : ''}{!p.isRegistered ? ' · not registered' : ''}
                 </option>
               ))}
               <option value="__create__">+ Create new project…</option>

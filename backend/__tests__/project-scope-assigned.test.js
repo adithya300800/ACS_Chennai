@@ -204,7 +204,7 @@ function buildApp(prisma) {
 
 // ─── 1. ?scope=assigned narrows curated list ────────────────────────────────
 describe('Round-30 — GET /api/projects?scope=assigned', () => {
-  it('1. ?scope=assigned returns ONLY curated projects the employee touched (not all)', async () => {
+  it('1. ?scope=assigned returns ONLY curated projects the employee touched via child records (not all)', async () => {
     const prisma = makePrisma();
     const app = buildApp(prisma);
     const res = await request(app)
@@ -214,10 +214,14 @@ describe('Round-30 — GET /api/projects?scope=assigned', () => {
     expect(res.body.scope).toBe('assigned');
     const names = res.body.projects.map((p) => p.name).sort();
     // USER filed against Alpha (DPR) and Beta (Inspection + Boq) via
-    // child records, AND created Delta via the typeahead. Gamma was
-    // never touched and was created by the admin → must NOT appear.
-    expect(names).toEqual(['Alpha Tower', 'Beta Mall', 'Delta Self-Created']);
+    // child records. Delta was merely created by USER (createdById)
+    // without any child record against it — Round-32.1 dropped
+    // createdById from the assigned union so it must NOT appear.
+    // Gamma was never touched and was created by the admin → must
+    // NOT appear.
+    expect(names).toEqual(['Alpha Tower', 'Beta Mall']);
     expect(names).not.toContain('Gamma HQ');
+    expect(names).not.toContain('Delta Self-Created');
   });
 
   it('2. ?scope=assigned unions touched projects across all 5 child queries', async () => {
@@ -343,12 +347,51 @@ describe('Round-30 — scope validator', () => {
       .get('/api/projects?scope=assigned')
       .set('Authorization', adminJwt());
     expect(res.status).toBe(200);
-    // Admin hasn't filed any child records but DID create Alpha/Beta/
-    // Gamma (createdById=ADMIN_ID) → those surface via the createdById
-    // branch. Delta (createdById=USER_ID) does NOT appear — proves the
-    // scoping still pins to the requesting employee's id.
+    // Admin has no child records (the mock returns [] for DPR/
+    // Inspection/Boq/VO/Drawing against the admin id) AND admin's
+    // createdById=ADMIN_ID projects no longer surface via the
+    // createdById branch (Round-32.1 dropped that). Result: empty
+    // curated list. Delta (createdById=USER_ID) also does not
+    // appear — proves the scoping pins to the requesting employee.
     const names = res.body.projects.map((p) => p.name).sort();
-    expect(names).toEqual(['Alpha Tower', 'Beta Mall', 'Gamma HQ']);
+    expect(names).toEqual([]);
+  });
+});
+
+// ─── 5. Round-32.1 bugfix — createdById alone does NOT include a project ────
+//
+// Live user feedback: "the drop down menu is not showing all thew projects
+// name that the emplyee has DPRs. And there is also a project name mentioned
+// which not from his dpr shown in that drop down which is another bug."
+// The second clause was the spurious-entry bug — the typeahead /
+// resolveProject flow had created test projects (createdById = req.employeeId)
+// that leaked into the dropdown even though the employee had no child
+// records against them. Drop `createdById` from the union; the dropdown
+// now reflects actual work history.
+describe('Round-32.1 — ?scope=assigned excludes projects merely created (no child records)', () => {
+  it('7. project created by user (createdById only) is excluded from the curated list', async () => {
+    const prisma = makePrisma();
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .get('/api/projects?scope=assigned')
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    const ids = res.body.projects.map((p) => p.id);
+    expect(ids).not.toContain(CREATED_BY_USER);
+    const names = res.body.projects.map((p) => p.name);
     expect(names).not.toContain('Delta Self-Created');
+  });
+
+  it('8. project the user touched via DPR still appears (regression guard)', async () => {
+    // Sanity check that the bugfix didn't drop the legitimate touch path.
+    const prisma = makePrisma();
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .get('/api/projects?scope=assigned')
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    const ids = res.body.projects.map((p) => p.id);
+    expect(ids).toContain(TOUCHED_A);
+    expect(ids).toContain(TOUCHED_B);
   });
 });

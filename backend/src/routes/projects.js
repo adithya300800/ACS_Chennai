@@ -285,6 +285,12 @@ router.use(requireAuth);
 //                    org-wide curated list. No ProjectMembership table
 //                    is needed — the join is derived from the existing
 //                    audit columns on the child rows.
+//
+//                    [Round-32.1 bugfix] Projects the employee merely
+//                    created (Project.createdById === req.employeeId)
+//                    are NOT included unless they also filed a child
+//                    record against them. The dropdown should reflect
+//                    actual work history, not create-side activity.
 //   no param         legacy callers get the safe default (same as
 //                    ?scope=mine).
 //
@@ -380,16 +386,23 @@ router.get('/', asyncHandler(async (req, res) => {
     ]);
 
     // For ?scope=assigned, narrow the curated list to ONLY the projects
-    // this employee has personally touched via any child record OR
-    // created directly. We query five audit columns in parallel
-    // (DPR.submittedById, InspectionRecord.submittedById,
-    // BoqItem.createdById, VariationOrder.raisedById, Drawing.issuedById)
-    // and union the projectId sets — every project the employee filed
-    // against will surface, even if they used a different submission
-    // type. We additionally union `Project.createdById` (already on the
-    // row, no extra query needed) so projects the employee just created
-    // via the typeahead/resolveProject flow stay in their picker even
-    // before they file any child records against them.
+    // this employee has personally touched via any child record. We
+    // query five audit columns in parallel (DPR.submittedById,
+    // InspectionRecord.submittedById, BoqItem.createdById,
+    // VariationOrder.raisedById, Drawing.issuedById) and union the
+    // projectId sets — every project the employee filed against will
+    // surface, even if they used a different submission type.
+    //
+    // [Round-32.1 bugfix] The earlier implementation also matched
+    // `Project.createdById === req.employeeId`, which leaked
+    // projects the employee merely created (often as test artifacts)
+    // into the dropdown even when they had no child records against
+    // them. User feedback (R32.1): "a project name mentioned which
+    // not from his dpr shown in that drop down" — the dropdown
+    // should reflect actual work history, not create-side activity.
+    // Projects created via the resolveProject flow now register the
+    // new project's id and the employee files a child record against
+    // it (DPR/Inspection/etc.) before it lands in their picker.
     let filteredProjects = projects;
     if (scope === 'assigned') {
       const [dprProj, inspProj, boqProj, voProj, drwProj] = await Promise.all([
@@ -426,9 +439,7 @@ router.get('/', asyncHandler(async (req, res) => {
         ...voProj.map((r) => r.projectId),
         ...drwProj.map((r) => r.projectId),
       ].filter(Boolean));
-      filteredProjects = projects.filter(
-        (p) => touched.has(p.id) || p.createdById === req.employeeId
-      );
+      filteredProjects = projects.filter((p) => touched.has(p.id));
     }
 
     const curatedNames = new Set(filteredProjects.map((p) => p.name));

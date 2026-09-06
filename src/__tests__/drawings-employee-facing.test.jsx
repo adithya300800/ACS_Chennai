@@ -230,4 +230,43 @@ describe('N3-employee — Drawing Register employee-facing surface', () => {
     // user gets; without it the modal closing is easy to miss.
     expect(browseSrc).toMatch(/toast\.push\(\s*['"]Drawing added\.[^'"]*['"]\s*,\s*['"]success['"]\s*\)/);
   });
+
+  // ── Round-32.1 bugfix contracts ───────────────────────────────────────
+  //
+  // Live user feedback: the dropdown was missing project names the
+  // employee had filed DPRs against (because all of employee1's DPRs
+  // use legacy projectName with projectId=NULL — they only live in
+  // `data.discovered`, which the picker previously ignored), and a
+  // project the employee had merely created (createdById) was leaking
+  // in. Two paired contracts pin the fix:
+  //   1. Dropdown merges `data.discovered` into the projects list so
+  //      employee-filed DPR projectNames surface in the picker.
+  //   2. Backend `?scope=assigned` excludes createdById-only matches
+  //      (covered in backend/__tests__/project-scope-assigned.test.js
+  //      round-32.1 suite).
+
+  test('DrawingsBrowse merges data.discovered into the dropdown (auto-discovered DPR/Inspection names)', () => {
+    // The earlier implementation only took `data.projects`. Pin the
+    // merge — without it, every DPR a field engineer filed with the
+    // legacy projectName string (no Project row) is silently missing
+    // from their picker.
+    expect(browseSrc).toMatch(/data\?\.discovered/);
+    // Discovered entries are tagged with isRegistered: false so the
+    // dropdown can render the "· not registered" suffix.
+    expect(browseSrc).toMatch(/isRegistered:\s*false/);
+    expect(browseSrc).toMatch(/isRegistered:\s*true/);
+    // The dropdown renders the suffix on the discovered entries.
+    expect(browseSrc).toMatch(/not\s*registered/);
+  });
+
+  test('DrawingsBrowse handles the __disc__:<name> sentinel for discovered entries', () => {
+    // Picked value "__disc__:<name>" flips into create-mode with the
+    // name pre-filled. Pin the sentinel shape + the prefill behavior
+    // so a future refactor can't silently drop the registration flow.
+    expect(browseSrc).toMatch(/__disc__:/);
+    // The onChange handler must strip the sentinel prefix and seed
+    // newProjectName with the bare name.
+    expect(browseSrc).toMatch(/val\.startsWith\(\s*['"]__disc__:['"]\s*\)/);
+    expect(browseSrc).toMatch(/setNewProjectName\(\s*name\s*\)/);
+  });
 });
