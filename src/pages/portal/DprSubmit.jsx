@@ -220,6 +220,14 @@ export default function DprSubmit() {
   // `projectName` to the backend.
   const [projects, setProjects] = useState([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
+  // [R34] Inline create-new-project flow. Same shape as DrawingsBrowse
+  // (Round-32): pick the `__create__` sentinel → name input + Create
+  // button → calls api.resolveProject → merges the new Project into
+  // the picker and selects it. Replaces the previous "submit a DPR and
+  // hope the backend auto-creates" round-trip with a visible affordance.
+  const [createMode, setCreateMode] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [resolveError, setResolveError] = useState('');
   // [Bug fix] True while POST /api/projects/resolve is in flight after
   // the user picks a discovered (name-only) project row. Disables the
   // picker + shows a "Registering…" hint so the user can't double-click
@@ -451,7 +459,15 @@ export default function DprSubmit() {
     let cancelled = false;
     (async () => {
       try {
-        const data = await api.getProjects(accessToken);
+        // [R34] Scope the project picker to projects the employee has
+        // actually touched via DPR / Inspection / BoqItem / VariationOrder
+        // / Drawing audit columns. Without `?scope=assigned` the backend
+        // defaults to `?scope=mine` and returns every active project in
+        // the org — which leaks admin test rigs (NEW-TYPED-PROJECT-XYZ,
+        // R32-DROPDOWN-PROBE, RESOLVE-TEST-PROJECT-NEW) into the dropdown
+        // of every field engineer. Matches My Projects (Round-31) +
+        // My Drawings (Round-30 + 32.1).
+        const data = await api.getProjects({ scope: 'assigned' }, accessToken);
         if (cancelled) return;
         const registered = (data.projects || []).map((p) => ({
           id: p.id, name: p.name, code: p.code || '', isRegistered: true,
@@ -529,6 +545,18 @@ export default function DprSubmit() {
     const value = e.target.value;
     if (!value) {
       setForm((f) => ({ ...f, projectId: '', projectName: '', boqItemId: '', drawingId: '', drawingRev: '' }));
+      setCreateMode(false);
+      setNewProjectName('');
+      setResolveError('');
+      return;
+    }
+    // [R34] "+ Create new project…" sentinel — flip into create-mode
+    // and let the user type a fresh name. Resolution happens in
+    // handleCreateProject, not here.
+    if (value === '__create__') {
+      setCreateMode(true);
+      setNewProjectName('');
+      setResolveError('');
       return;
     }
     const match = projects.find((p) => (p.id || p.name) === value);
@@ -583,6 +611,47 @@ export default function DprSubmit() {
     } catch (err) {
       console.warn('Project resolve failed', { message: err?.message?.split('\n')[0] });
       toast.push('Could not register project name; submit will retry', 'warning');
+    } finally {
+      setResolvingProject(false);
+    }
+  };
+
+  // [R34] Inline create-new-project flow. Triggered by the Create button
+  // in the inline name input that appears after the user picks the
+  // `__create__` sentinel from the project picker. Mirrors
+  // DrawingsBrowse.jsx#handleCreateProject: POST /api/projects/resolve
+  // returns the existing Project (case-insensitive lookup) or creates
+  // one with createdById=req.employeeId. On success: merge the row into
+  // the picker + select it as the form's project. On error: surface a
+  // friendly message (including PROJECT_INACTIVE for archived names).
+  const handleCreateProject = async () => {
+    const name = newProjectName.trim();
+    if (!name || resolvingProject) return;
+    setResolvingProject(true);
+    setResolveError('');
+    try {
+      const proj = await api.resolveProject(name, accessToken);
+      // Merge into the projects list so the picker shows the new project
+      // for the rest of the session. resolveProject returns the row
+      // normalized via serializeProject (id, name, code, isActive…).
+      setProjects((prev) => (prev.some((p) => p.id === proj.id) ? prev : [...prev, proj]));
+      setForm((f) => ({
+        ...f,
+        projectId: proj.id,
+        projectName: proj.name,
+        boqItemId: '',
+        drawingId: '',
+        drawingRev: '',
+      }));
+      setCreateMode(false);
+      setNewProjectName('');
+    } catch (err) {
+      const code = err?.code;
+      if (code === 'PROJECT_INACTIVE') {
+        setResolveError(`"${name}" is archived. Ask an admin to reactivate it.`);
+      } else {
+        setResolveError(err?.message || `Couldn't find or create "${name}".`);
+      }
     } finally {
       setResolvingProject(false);
     }
@@ -1015,8 +1084,11 @@ export default function DprSubmit() {
                   // represents "no pick yet". We resolve the current
                   // form's projectId to the dropdown's value so legacy
                   // drafts (which only have projectName) still highlight
-                  // the right option.
-                  value={(() => {
+                  // the right option. [R34] When in create-mode the
+                  // select shows the `__create__` sentinel so the user
+                  // sees where they are after picking "+ Create new
+                  // project…".
+                  value={createMode ? '__create__' : (() => {
                     if (form.projectId) return form.projectId;
                     if (form.projectName) {
                       const match = projects.find((p) => p.name === form.projectName);
@@ -1025,6 +1097,7 @@ export default function DprSubmit() {
                     return '';
                   })()}
                   onChange={handleProjectChange}
+                  aria-busy={resolvingProject}
                 >
                   <option value="">— Select a project —</option>
                   {projects.map((p) => (
@@ -1032,6 +1105,13 @@ export default function DprSubmit() {
                       {p.name}{p.code ? ` (${p.code})` : ''}{!p.isRegistered ? ' · auto-discovered' : ''}
                     </option>
                   ))}
+                  {/* [R34] Sentinel + create-mode affordance — mirrors
+                      DrawingsBrowse.jsx. The option is always visible
+                      (after the real projects) so a field engineer with
+                      zero curated projects can still file a DPR against
+                      a brand-new site name without dropping to a "type
+                      it in and submit anyway" workaround. */}
+                  <option value="__create__">+ Create new project…</option>
                 </select>
               )}
               {/* [Bug fix] Distinguish the in-flight resolve from the
@@ -1048,6 +1128,81 @@ export default function DprSubmit() {
                   })()}
                 </span>
               ) : null}
+              {/* [R34] Inline create-new-project form. Mirrors
+                  DrawingsBrowse.jsx:409-466 — name input + Create/Cancel
+                  buttons that call api.resolveProject via
+                  handleCreateProject. Escape cancels, Enter submits. */}
+              {createMode && (
+                <div
+                  className="dpr-create-project"
+                  role="group"
+                  aria-label="Create new project"
+                  style={{
+                    marginTop: '0.5rem',
+                    display: 'flex',
+                    gap: '0.5rem',
+                    alignItems: 'flex-end',
+                  }}
+                >
+                  <div style={{ flex: 1 }}>
+                    <label
+                      htmlFor="dpr-new-project-name"
+                      style={{ fontSize: '0.8rem', color: 'var(--steel)' }}
+                    >
+                      New project name
+                    </label>
+                    <input
+                      id="dpr-new-project-name"
+                      type="text"
+                      className="form-input"
+                      value={newProjectName}
+                      onChange={(e) => { setNewProjectName(e.target.value); setResolveError(''); }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleCreateProject();
+                        } else if (e.key === 'Escape') {
+                          setCreateMode(false);
+                          setNewProjectName('');
+                          setResolveError('');
+                        }
+                      }}
+                      disabled={resolvingProject}
+                      placeholder="e.g. New Site — Chennai ECR"
+                      aria-label="New project name"
+                      autoFocus
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={handleCreateProject}
+                    disabled={resolvingProject || !newProjectName.trim()}
+                  >
+                    {resolvingProject ? 'Creating…' : 'Create'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => {
+                      setCreateMode(false);
+                      setNewProjectName('');
+                      setResolveError('');
+                    }}
+                    disabled={resolvingProject}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+              {resolveError && (
+                <div
+                  role="alert"
+                  style={{ fontSize: '0.85rem', color: 'var(--danger, #c0392b)', marginTop: '0.25rem' }}
+                >
+                  {resolveError}
+                </div>
+              )}
             </div>
             <div className="form-group" style={{ flex: 1 }}>
               <label htmlFor="reportDate">Report Date</label>
