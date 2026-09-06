@@ -256,6 +256,12 @@ const navGroups = [
       // sub-types; no standalone cube-test page.
       // Round-29: RFI sidebar entry REMOVED. VOs are standalone work
       // items now; the RFI feature is gone.
+      // N3-employee: read-only employee browse of the Drawing Revision
+      // Register. The admin "Drawings" entry (under Records) keeps the
+      // curation surface; this "My Drawings" entry is the read-only
+      // mirror field engineers use to find a revision to stamp a DPR or
+      // Inspection against.
+      { to: '/portal/drawings', label: 'My Drawings', icon: DRAWING_ICON },
       // N7: BOQ variance report — read-only contract-vs-executed view
       // scoped to one project. The page is useful to anyone who files
       // DPR / Inspection rows against a BOQ item, so it lives in the

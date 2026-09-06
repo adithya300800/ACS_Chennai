@@ -87,6 +87,12 @@ const VariationOrderDetail = React.lazy(() => import('./pages/VariationOrderDeta
 // hosts the read-SAS PDF preview + the cross-record stamp panels.
 const DrawingsAdmin = React.lazy(() => import('./pages/admin/DrawingsAdmin.jsx'));
 const DrawingDetail = React.lazy(() => import('./pages/admin/DrawingDetail.jsx'));
+// N3-employee: read-only employee browse surface for the same drawing
+// register. The list page is filtered to ACTIVE only; the detail page
+// renders the PDF + chain without the Edit / Supersede / Archive
+// actions. Mirrors DprList / InspectionList's "My …" naming pattern.
+const DrawingsBrowse = React.lazy(() => import('./pages/portal/DrawingsBrowse.jsx'));
+const DrawingBrowseDetail = React.lazy(() => import('./pages/portal/DrawingBrowseDetail.jsx'));
 
 function App() {
   const location = useLocation();
@@ -183,6 +189,11 @@ function App() {
               routes above). */}
           <Route path="admin/drawings" element={<DrawingsAdmin />} />
           <Route path="admin/drawings/:id" element={<DrawingDetail />} />
+          {/* N3-employee: read-only employee browse of the same drawing
+              register. ACTIVE-only list + chain + PDF preview, no curation
+              actions. Same literal-before-param ordering lesson. */}
+          <Route path="drawings" element={<DrawingsBrowse />} />
+          <Route path="drawings/:id" element={<DrawingBrowseDetail />} />
           {/* [N1 Phase B] My Projects list + anchor detail. Literal
               /projects MUST come before /projects/:id so HashRouter
               matches the literal "projects" instead of treating it as

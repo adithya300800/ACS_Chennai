@@ -29,13 +29,16 @@ const TABS = [
   { id: 'boq',       label: 'BOQ',         Icon: BookIcon,         always: true  },
   { id: 'dprs',      label: 'DPRs',        Icon: DocIcon,          always: true  },
   { id: 'inspections', label: 'Inspections', Icon: ClipboardIcon,   always: true  },
-  // Round-28 Bug 3: RFIs / Variations / Drawings tabs were hidden because
-  // they 404'd for employees. They've since shipped as admin-only modules
-  // (/portal/admin/rfis, /portal/admin/variations, /portal/admin/drawings)
-  // but no employee-scoped page exists yet. Rather than carry dead tabs
-  // in the strip, hide them and surface a single "Coming soon" badge
-  // in the page header so employees know the modules exist but aren't
-  // surfacing broken links. Reintroduce when employee-scoped views ship.
+  // N3-employee: Drawing tab. Routes to the employee-facing
+  // DrawingsBrowse page with `?projectId=` so the list lands
+  // pre-scoped to this project. The admin register at
+  // /portal/admin/drawings is the curation surface; this tab is for
+  // field engineers who need to find a revision to stamp against.
+  { id: 'drawings',  label: 'Drawings',    Icon: MapPinIcon,       always: true  },
+  // Round-28 Bug 3: RFIs / Variations tabs stay hidden — both were
+  // removed in Round-29 (RFI feature gone; Variations remain admin-only
+  // with no employee-scoped browse view). Reintroduce when the
+  // employee-scoped pages ship.
 ];
 
 const inrFormatter = new Intl.NumberFormat('en-IN', {
@@ -127,6 +130,13 @@ export default function ProjectDetail() {
         break;
       case 'inspections':
         navigate(`/portal/inspection/all?projectId=${pid}`);
+        break;
+      case 'drawings':
+        // N3-employee: jump to the employee browse view, pre-scoped
+        // to this project. The page also surfaces the project's
+        // drawingNumber + rev in each card so the engineer can spot
+        // the right revision quickly.
+        navigate(`/portal/drawings?projectId=${pid}`);
         break;
       case 'overview':
       default:
