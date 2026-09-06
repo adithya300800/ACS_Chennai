@@ -139,4 +139,18 @@ describe('N3-employee — Drawing Register employee-facing surface', () => {
     // literal so silent drift doesn't accumulate.
     expect(browseSrc).toMatch(/,\s*200\s*\)/);
   });
+
+  test('DrawingsBrowse declares `filtered` BEFORE the keyboard handler (TDZ guard)', () => {
+    // Regression guard for the round-30 TDZ crash. The
+    // handleQueryKeyDown useCallback had `filtered` in its dependency
+    // array, but `filtered` was declared further down the function body.
+    // useCallback evaluates its dep array at call time → "Cannot access
+    // 'filtered' before initialization" → ErrorBoundary on Render.
+    // The fix hoists the `const filtered = ...` line above the handler.
+    const filteredIdx = browseSrc.search(/const\s+filtered\s*=/);
+    const keyDownIdx = browseSrc.search(/handleQueryKeyDown\s*=\s*useCallback/);
+    expect(filteredIdx).toBeGreaterThan(0);
+    expect(keyDownIdx).toBeGreaterThan(0);
+    expect(filteredIdx).toBeLessThan(keyDownIdx);
+  });
 });

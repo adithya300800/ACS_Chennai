@@ -147,6 +147,26 @@ export default function DrawingsBrowse() {
     };
   }, [query, searchParams, setSearchParams]);
 
+  // ── Filter logic — typeahead ─────────────────────────────────────────
+  // Hoisted BEFORE the keyboard handler so its dependency array
+  // ([query, filtered, ...]) can read `filtered` at useCallback-call
+  // time. (Earlier order put the handler first and crashed at render
+  // with a temporal-dead-zone error: "Cannot access 'filtered' before
+  // initialization".)
+  const allProjects = [...projects, ...extraProjects];
+  const trimmed = query.trim();
+  const filtered = trimmed.length > 0
+    ? allProjects.filter((p) => {
+        const name = (p.name || '').toLowerCase();
+        const code = (p.code || '').toLowerCase();
+        const q = trimmed.toLowerCase();
+        return name.includes(q) || code.includes(q);
+      })
+    : allProjects;
+  const exactMatch = trimmed.length > 0 && allProjects.some(
+    (p) => (p.name || '').toLowerCase() === trimmed.toLowerCase()
+  );
+
   // ── Selection handler — click on a typeahead result ──────────────────
   const handleSelectProject = useCallback((next) => {
     setProjectId(next);
@@ -210,21 +230,6 @@ export default function DrawingsBrowse() {
       setResolveError('');
     }
   }, [query, filtered, handleSelectProject, handleResolveTyped]);
-
-  // ── Filter logic — typeahead ─────────────────────────────────────────
-  const allProjects = [...projects, ...extraProjects];
-  const trimmed = query.trim();
-  const filtered = trimmed.length > 0
-    ? allProjects.filter((p) => {
-        const name = (p.name || '').toLowerCase();
-        const code = (p.code || '').toLowerCase();
-        const q = trimmed.toLowerCase();
-        return name.includes(q) || code.includes(q);
-      })
-    : allProjects;
-  const exactMatch = trimmed.length > 0 && allProjects.some(
-    (p) => (p.name || '').toLowerCase() === trimmed.toLowerCase()
-  );
 
   // Show the results panel whenever the user is typing OR when they
   // have no assigned projects yet (so we can render the empty-state
