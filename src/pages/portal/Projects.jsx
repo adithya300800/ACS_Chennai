@@ -73,7 +73,13 @@ export default function Projects() {
     setLoading(true);
     setError('');
     try {
-      const data = await api.getProjects(accessToken);
+      // [Round-31] Scope the curated list to projects the employee has
+      // personally touched or created (DPR/Inspection/Boq/Variation/Drawing
+      // audit columns + Project.createdById). Without this, the page
+      // returned every active project org-wide — leaking admin test rigs
+      // / contracts the employee has no context on. Mirrors the
+      // DrawingsBrowse typeahead (commit 94b0235).
+      const data = await api.getProjects({ scope: 'assigned' }, accessToken);
       if (!mountedRef.current) return;
       const registered = (data.projects || []).map((p) => ({ ...p, isRegistered: true }));
       const registeredNames = new Set(registered.map((p) => p.name));
