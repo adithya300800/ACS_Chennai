@@ -30,8 +30,7 @@
 //   ?q=<typed query>     shareable search state (debounced 200ms)
 //
 // Differences from DrawingsAdmin:
-//   - No "+ New drawing" button (admin-curated only).
-//   - No "Supersede" / "Archive" per-card actions.
+//   - No "Supersede" / "Archive" per-card actions (curation stays admin-only).
 //   - Status filter is locked to ACTIVE (employees don't curate history).
 //   - Project picker reads from /api/projects?scope=assigned (curated
 //     list narrowed to the employee's touched set + their created set).
@@ -39,8 +38,16 @@
 //     create '<name>'" affordance that surfaces when the typed name
 //     isn't an exact match for any existing project.
 //
-// Auth: backend GET /api/drawings is requireAuth (all employees) so
-// no client-side gating is needed beyond the ProtectedRoute wrapper.
+// [Round-31] "+ Add drawing" CTA on the page header + empty state.
+// POST /api/drawings was loosened to requireAuth so a field engineer can
+// register a fresh revision without bouncing to an admin. The CTA is
+// disabled when no project is picked; the modal's project dropdown is
+// pre-filled and locked to the current ?projectId= so the engineer
+// can't accidentally upload against a different project.
+//
+// Auth: backend GET /api/drawings + POST /api/drawings are both
+// requireAuth (all employees) so no client-side gating is needed beyond
+// the ProtectedRoute wrapper.
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -49,6 +56,7 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import StatusBadge from '../../components/StatusBadge.jsx';
+import DrawingFormModal from '../../components/DrawingFormModal.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { formatShortDate } from '../../lib/format.js';
 
@@ -99,6 +107,16 @@ export default function DrawingsBrowse() {
   const [error, setError] = useState('');
   const [nextCursor, setNextCursor] = useState(null);
   const [loadingMore, setLoadingMore] = useState(false);
+
+  // ── Add-drawing modal state (Round-31) ─────────────────────────────────
+  // `formOpen` toggles the modal. `creating` mirrors the modal's submit
+  // state so the header button can show a "Saving…" affordance. The
+  // modal owns the per-field + server-error display via DrawingFormModal's
+  // own internal state — errors thrown from handleSave are caught inside
+  // DrawingFormModal.submit and rendered inline, so no parent mirror is
+  // needed.
+  const [formOpen, setFormOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   // Load curated (active) projects on mount, scoped to the employee's
   // touched/created set. The previous default `?scope=mine` returned
@@ -265,6 +283,33 @@ export default function DrawingsBrowse() {
     fetchDrawings();
   }, [fetchDrawings]);
 
+  // ── Round-31: handleSave from DrawingFormModal ──────────────────────────
+  // Called when the modal's submit succeeds and DrawingFormModal's
+  // onSave fires. We POST /api/drawings via api.createDrawing, then
+  // refresh the grid so the new revision shows up without a page reload.
+  // Errors thrown from createDrawing bubble up to DrawingFormModal's
+  // own submit() catch (lines 233-239 of DrawingFormModal.jsx), which
+  // renders the server message inline — the toast is reserved for the
+  // success case so the engineer gets one clear signal per outcome.
+  const handleSave = useCallback(async (payload) => {
+    setCreating(true);
+    try {
+      await api.createDrawing(payload, accessToken);
+      setFormOpen(false);
+      toast.push('Drawing added.', 'success');
+      // Refresh the grid. The fetchDrawings closure captures the current
+      // projectId, so the new row will appear in the active list.
+      await fetchDrawings();
+    } catch (err) {
+      // Re-throw so DrawingFormModal's own submit() catch renders the
+      // message inside the modal. Setting creating=false here would
+      // unmount before the user sees the error.
+      throw err;
+    } finally {
+      setCreating(false);
+    }
+  }, [accessToken, fetchDrawings, toast]);
+
   const selectedProject = allProjects.find((p) => p.id === projectId);
 
   return (
@@ -283,6 +328,21 @@ export default function DrawingsBrowse() {
             and see the supersedes chain.
           </p>
         </div>
+        {/* [Round-31] + Add drawing. Disabled when no project is picked
+            because the modal pre-fills + locks the projectId from the
+            current selection — opening it with no project would render
+            an empty form and force the user back to the picker. */}
+        <button
+          type="button"
+          className="btn btn-primary btn-sm"
+          onClick={() => setFormOpen(true)}
+          disabled={!projectId || creating}
+          aria-label="Add drawing"
+          aria-disabled={!projectId || creating}
+          title={!projectId ? 'Pick a project first' : 'Add a new drawing revision'}
+        >
+          {creating ? 'Saving…' : '+ Add drawing'}
+        </button>
       </div>
 
       {/* Filter toolbar — typeahead picker, employee-scoped */}
@@ -422,16 +482,24 @@ export default function DrawingsBrowse() {
           Loading drawings…
         </div>
       ) : drawings.length === 0 ? (
-        <div className="dpr-list-empty">
+        <div className="dpr-list-empty" style={{ textAlign: 'center', padding: '3rem 1rem' }}>
           <div style={{ marginBottom: '1rem', color: 'var(--steel)', fontSize: '2rem' }}>📐</div>
           <h3 style={{ color: 'var(--navy)', marginBottom: '0.5rem' }}>
-            No active drawings for this project
+            No active drawings for {selectedProject?.name || 'this project'} yet
           </h3>
-          <p style={{ color: 'var(--steel)', maxWidth: 420, margin: '0 auto' }}>
-            Once an admin uploads a drawing revision, it'll show up here.
-            Ask your project manager to add one if you need a reference
-            to stamp your DPR or Inspection record against.
+          <p style={{ color: 'var(--steel)', maxWidth: 460, margin: '0 auto 1.25rem' }}>
+            Be the first to add a revision — it'll show up here as the
+            stamp target on your DPR and Inspection records.
           </p>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => setFormOpen(true)}
+            disabled={creating}
+            aria-label="Add drawing"
+          >
+            {creating ? 'Saving…' : '+ Add drawing'}
+          </button>
         </div>
       ) : (
         <>
@@ -496,6 +564,21 @@ export default function DrawingsBrowse() {
           )}
         </>
       )}
+
+      {/* Round-31: add-drawing modal. Project is pre-filled and locked
+          via initialProjectId so the engineer can't upload against a
+          different project than the one they have loaded. Errors thrown
+          from handleSave are caught inside DrawingFormModal's submit
+          (line 233-239) and rendered inline via the modal's own
+          serverError state — we don't need to forward them. */}
+      <DrawingFormModal
+        open={formOpen}
+        onClose={() => { if (!creating) setFormOpen(false); }}
+        onSave={handleSave}
+        accessToken={accessToken}
+        projects={allProjects}
+        initialProjectId={projectId}
+      />
     </div>
   );
 }

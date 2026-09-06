@@ -71,6 +71,13 @@ export default function DrawingFormModal({
   onSave,
   accessToken,
   projects = [],
+  // [Round-31] When set, the project <select> is pre-filled AND
+  // disabled — used by DrawingsBrowse's "+ Add drawing" CTA where
+  // the project is already determined by the URL ?projectId=. This
+  // is cheaper than building a separate modal mode because the
+  // underlying form state machine (validate / submit / onSave) is
+  // identical to the admin create flow.
+  initialProjectId = '',
   // When present, opens the modal in "supersede" mode. The modal
   // pre-fills the project + drawingNumber + title from the
   // predecessor and surfaces a banner explaining the atomic flip.
@@ -139,13 +146,20 @@ export default function DrawingFormModal({
   }, [open, supersedes, isSupersede, editOf, isEdit]);
 
   // Auto-select the only/first project if there is exactly one — saves
-  // an admin click when they have a single-site account.
+  // an admin click when they have a single-site account. When the parent
+  // passes `initialProjectId` (Round-31 DrawingsBrowse "+ Add drawing" CTA)
+  // we prefer that explicit seed — it reflects the URL ?projectId the user
+  // already picked, not the auto-detected single-project convenience.
   useEffect(() => {
     if (!open || isSupersede) return;
-    if (!form.projectId && projects.length === 1) {
-      setForm((f) => ({ ...f, projectId: projects[0].id }));
+    if (!form.projectId) {
+      if (initialProjectId) {
+        setForm((f) => ({ ...f, projectId: initialProjectId }));
+      } else if (projects.length === 1) {
+        setForm((f) => ({ ...f, projectId: projects[0].id }));
+      }
     }
-  }, [open, isSupersede, projects, form.projectId]);
+  }, [open, isSupersede, projects, form.projectId, initialProjectId]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -291,7 +305,7 @@ export default function DrawingFormModal({
               value={form.projectId}
               onChange={handleChange}
               required
-              disabled={isSupersede || isEdit || submitting}
+              disabled={isSupersede || isEdit || submitting || !!initialProjectId}
               aria-invalid={errors.projectId ? 'true' : 'false'}
             >
               <option value="">— Select project —</option>

@@ -153,4 +153,63 @@ describe('N3-employee — Drawing Register employee-facing surface', () => {
     expect(keyDownIdx).toBeGreaterThan(0);
     expect(filteredIdx).toBeLessThan(keyDownIdx);
   });
+
+  // ── Round-31: "+ Add drawing" UX contracts ────────────────────────────
+  //
+  // Round-31 wires POST /api/drawings (now requireAuth) into the
+  // employee browse page via a header button + an empty-state CTA +
+  // a DrawingFormModal mount. The CTA is disabled when no project is
+  // picked; the modal's project dropdown is pre-filled + locked to the
+  // URL ?projectId= so the engineer can't upload against a different
+  // project. handleSave calls api.createDrawing + refreshes the grid.
+
+  test('DrawingsBrowse imports DrawingFormModal (Round-31 + Add drawing CTA)', () => {
+    // The modal is the only way an employee can register a new drawing
+    // revision without leaving the page. Pin the import so a tree-shake
+    // accident or a wrong-path refactor doesn't silently break the
+    // employee upload flow.
+    expect(browseSrc).toMatch(/import\s+DrawingFormModal\s+from\s+['"]\.\.\/\.\.\/components\/DrawingFormModal\.jsx['"]/);
+  });
+
+  test('DrawingsBrowse renders a `+ Add drawing` button with the correct a11y + disabled-when-no-project shape', () => {
+    // Two renders of the same button (header + empty state), each must:
+    //   - carry aria-label="Add drawing" for screen readers
+    //   - be disabled when !projectId OR creating
+    // The `disabled={!projectId || creating}` shape is what keeps the
+    // button from being clickable before a project is picked — the
+    // modal pre-fills the project from the URL, so opening it with no
+    // project would render a form with an empty locked dropdown.
+    expect(browseSrc).toMatch(/aria-label=["']Add drawing["']/);
+    expect(browseSrc).toMatch(/disabled=\{!projectId\s*\|\|\s*creating\}/);
+    // Title attribute is the cheap-and-cheerful hover hint that explains
+    // why the button is disabled.
+    expect(browseSrc).toMatch(/Pick a project first/);
+  });
+
+  test('DrawingsBrowse mounts DrawingFormModal with the correct props (projects + initialProjectId + onSave)', () => {
+    // The modal must receive:
+    //   - projects = allProjects (the merged list — curated + extra from
+    //     resolveProject). Passing projects=projects would lose the
+    //     freshly-resolved project for the rest of the session.
+    //   - initialProjectId = projectId (locks the dropdown to the URL
+    //     ?projectId= so the engineer can't change it).
+    //   - onSave = handleSave (the function that calls createDrawing +
+    //     refreshes).
+    expect(browseSrc).toMatch(/projects=\{allProjects\}/);
+    expect(browseSrc).toMatch(/initialProjectId=\{projectId\}/);
+    expect(browseSrc).toMatch(/onSave=\{handleSave\}/);
+  });
+
+  test('DrawingsBrowse handleSave calls api.createDrawing and refreshes the grid (no full page reload)', () => {
+    // The Round-30 handler refresh pattern was a `setLoading(true)` +
+    // re-fetch. Pin both halves of the new handleSave so a future
+    // refactor doesn't accidentally drop the auto-refresh — leaving the
+    // user on a stale grid where their new drawing doesn't show until
+    // they manually refresh.
+    expect(browseSrc).toMatch(/api\.createDrawing\(\s*payload\s*,\s*accessToken\s*\)/);
+    expect(browseSrc).toMatch(/await\s+fetchDrawings\(\)/);
+    // The success toast — "Drawing added." — is the one clear signal the
+    // user gets; without it the modal closing is easy to miss.
+    expect(browseSrc).toMatch(/toast\.push\(\s*['"]Drawing added\.[^'"]*['"]\s*,\s*['"]success['"]\s*\)/);
+  });
 });
