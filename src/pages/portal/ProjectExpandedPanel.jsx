@@ -615,7 +615,11 @@ const th = { padding: '0.4rem 0.6rem', textAlign: 'left', fontWeight: 600, color
 const td = { padding: '0.4rem 0.6rem', color: 'var(--navy, #0f172a)' };
 
 // DPR — tile per row, click to expand for the full body. The expanded
-// body shows summary text + photo count.
+// body shows the workType, the 5 PMC daily fields (Round-12), notes,
+// contractor, weather, photos count, and the audit trail (submitted /
+// approved). Rather than guessing which subset of fields is populated,
+// DprBody renders every populated, non-internal field via FieldGrid —
+// future schema additions surface automatically without code changes.
 function DprSection({ dprs, expandedId, onToggle }) {
   if (dprs.status === 'loading') return <LoadingHint>Loading DPRs…</LoadingHint>;
   if (dprs.status === 'error') return <ErrorHint>{dprs.error}</ErrorHint>;
@@ -630,52 +634,112 @@ function DprSection({ dprs, expandedId, onToggle }) {
           isExpanded={expandedId === d.id}
           onToggle={() => onToggle(d.id)}
           primary={d.reportDate ? formatShortDate(d.reportDate) : '—'}
-          secondary={d.location || d.weather || ''}
+          secondary={d.workType ? prettyWorkType(d.workType) : (d.location || '')}
           badges={<StatusBadge status={d.status} map={DPR_STATUS_MAP} />}
-          extra={(d.photos?.length || d.photoCount) ? `${d.photos?.length || d.photoCount} photo${(d.photos?.length || d.photoCount) === 1 ? '' : 's'}` : null}
-          expandedBody={
-            <DprBody d={d} />
+          extra={
+            (d.photos?.length || d.photoCount)
+              ? `${d.photos?.length || d.photoCount} photo${(d.photos?.length || d.photoCount) === 1 ? '' : 's'}`
+              : null
           }
+          expandedBody={<DprBody d={d} />}
         />
       ))}
     </div>
   );
 }
 
+// Convert the workType enum to a friendlier label (MATERIAL_RECEIPT →
+// "Material receipt"). Falls back to the raw enum if unknown.
+const WORK_TYPE_LABELS = {
+  MATERIAL_RECEIPT: 'Material receipt',
+  WORK_EXECUTION: 'Work execution',
+  DAY_ACTIVITY: 'Day activity',
+  SAFETY_INCIDENT: 'Safety incident',
+  QUALITY_ISSUE: 'Quality issue',
+  PROGRESS_UPDATE: 'Progress update',
+};
+function prettyWorkType(t) {
+  if (!t) return '';
+  return WORK_TYPE_LABELS[t] || t.replace(/_/g, ' ').toLowerCase();
+}
+
 function DprBody({ d }) {
-  const summary = d.summary || d.workSummary || d.workDone || d.description;
-  const contractor = d.contractorName || d.contractor;
+  // Inline rows (single field = single value, e.g. Contractor, Weather).
+  const inlineRows = [];
+  if (d.location) inlineRows.push(['Location', d.location]);
+  if (d.contractor || d.contractorName) inlineRows.push(['Contractor', d.contractor || d.contractorName]);
+  if (d.weather) {
+    inlineRows.push(['Weather', d.temperature ? `${d.weather} · ${d.temperature}` : d.weather]);
+  }
+  if (d.boqItem?.description || d.boqItemId) {
+    inlineRows.push(['BOQ item', d.boqItem?.description || `BOQ #${d.boqItemId}`]);
+  }
+  if (d.drawing?.drawingNumber || d.drawingId) {
+    inlineRows.push([
+      'Drawing',
+      d.drawing?.drawingNumber ? `${d.drawing.drawingNumber} Rev ${d.drawingRev || '—'}` : `Drawing ${d.drawingId}`,
+    ]);
+  }
+
+  // Block rows (longer text — needs whitespace wrap). These are the
+  // five Round-12 PMC daily fields + the canonical free-form `notes`.
+  const blockRows = [];
+  if (d.notes) blockRows.push(['Notes', d.notes]);
+  if (d.workExecutedToday) blockRows.push(['Work executed today', d.workExecutedToday]);
+  if (d.workLocation) blockRows.push(['Work location', d.workLocation]);
+  if (d.manpowerSummary) blockRows.push(['Manpower', d.manpowerSummary]);
+  if (d.risksHindrances) blockRows.push(['Risks / hindrances', d.risksHindrances]);
+  if (d.materialsReceivedSummary) blockRows.push(['Materials received', d.materialsReceivedSummary]);
+  if (d.workEntries?.length) {
+    blockRows.push(['Work entries', d.workEntries.map((w) => formatWorkEntry(w)).filter(Boolean).join('\n')]);
+  }
+  if (d.customSections?.length) {
+    blockRows.push(['Custom sections', d.customSections.map((s) => formatCustomSection(s)).filter(Boolean).join('\n\n')]);
+  }
+
+  // Admin / audit trail.
+  const auditRows = [];
+  if (d.submittedBy?.name) auditRows.push(['Submitted by', formatAuditTime(d.submittedBy, d.submittedAt)]);
+  if (d.reviewedBy?.name) auditRows.push(['Reviewed by', formatAuditTime(d.reviewedBy, d.reviewedAt)]);
+  if (d.approvedBy?.name) auditRows.push(['Approved by', formatAuditTime(d.approvedBy, d.approvedAt)]);
+  if (d.rejectionReason) auditRows.push(['Rejection reason', d.rejectionReason]);
+  if (d.adminNotes) auditRows.push(['Admin notes', d.adminNotes]);
+
+  const photos = d.photos?.length || d.photoCount || 0;
+
   return (
-    <div style={{ padding: '0.5rem 0', display: 'grid', gap: '0.4rem', fontSize: '0.82rem' }}>
-      {contractor && (
-        <div>
-          <span style={{ color: 'var(--steel, #64748b)', marginRight: '0.4rem' }}>Contractor:</span>
-          <span style={{ color: 'var(--navy, #0f172a)' }}>{contractor}</span>
+    <div style={{ padding: '0.6rem 0', display: 'grid', gap: '0.6rem', fontSize: '0.82rem' }}>
+      {inlineRows.length > 0 && (
+        <FieldGrid rows={inlineRows} />
+      )}
+      {blockRows.map(([label, value]) => (
+        <BlockField key={label} label={label} value={value} />
+      ))}
+      {photos > 0 && (
+        <div style={{ fontSize: '0.78rem', color: 'var(--steel, #64748b)' }}>
+          📎 {photos} photo{photos === 1 ? '' : 's'} attached (open the full report to view)
         </div>
       )}
-      {d.weather && (
-        <div>
-          <span style={{ color: 'var(--steel, #64748b)', marginRight: '0.4rem' }}>Weather:</span>
-          <span style={{ color: 'var(--navy, #0f172a)' }}>{d.weather}{d.temperature ? ` · ${d.temperature}` : ''}</span>
-        </div>
-      )}
-      {summary && (
-        <div>
-          <div style={{ color: 'var(--steel, #64748b)', marginBottom: '0.2rem' }}>Summary</div>
-          <div style={{ whiteSpace: 'pre-wrap', color: 'var(--navy, #0f172a)' }}>{summary}</div>
-        </div>
-      )}
-      {(d.rejectionReason || d.adminNotes) && (
-        <div>
-          <div style={{ color: 'var(--steel, #64748b)', marginBottom: '0.2rem' }}>{d.rejectionReason ? 'Rejection reason' : 'Admin notes'}</div>
-          <div style={{ whiteSpace: 'pre-wrap', color: 'var(--navy, #0f172a)' }}>{d.rejectionReason || d.adminNotes}</div>
+      {auditRows.length > 0 && (
+        <div
+          style={{
+            borderTop: '1px solid #f1f5f9',
+            paddingTop: '0.5rem',
+            marginTop: '0.2rem',
+          }}
+        >
+          <FieldGrid rows={auditRows} compact />
         </div>
       )}
     </div>
   );
 }
 
-// Inspection — same tile pattern as DPR.
+// Inspection — same tile pattern as DPR. Inspection data lives in a
+// nested `data` JSONB (inspectedBy, observations, checklistItems, etc.)
+// plus top-level contractor / location / severity. InspectionBody
+// renders every populated field — top-level first, then the `data`
+// sub-object's populated fields.
 function InspectionSection({ inspections, expandedId, onToggle }) {
   if (inspections.status === 'loading') return <LoadingHint>Loading inspections…</LoadingHint>;
   if (inspections.status === 'error') return <ErrorHint>{inspections.error}</ErrorHint>;
@@ -690,7 +754,7 @@ function InspectionSection({ inspections, expandedId, onToggle }) {
           isExpanded={expandedId === i.id}
           onToggle={() => onToggle(i.id)}
           primary={i.reportDate ? formatShortDate(i.reportDate) : '—'}
-          secondary={i.inspectionType || i.location || ''}
+          secondary={i.inspectionType ? prettyInspectionType(i.inspectionType) : (i.location || '')}
           badges={<StatusBadge status={i.status} map={INSPECTION_STATUS_MAP} />}
           extra={i.severity ? `Severity: ${i.severity}` : null}
           expandedBody={<InspectionBody i={i} />}
@@ -700,32 +764,89 @@ function InspectionSection({ inspections, expandedId, onToggle }) {
   );
 }
 
+const INSPECTION_TYPE_LABELS = {
+  villa_inspection: 'Villa inspection',
+  day_activity_inspection: 'Day activity inspection',
+  safety_inspection: 'Safety inspection',
+  quality_inspection: 'Quality inspection',
+  compliance_inspection: 'Compliance inspection',
+};
+function prettyInspectionType(t) {
+  if (!t) return '';
+  return INSPECTION_TYPE_LABELS[t] || t.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function InspectionBody({ i }) {
-  const summary = i.summary || i.findings || i.description;
+  // Top-level inline rows.
+  const inlineRows = [];
+  if (i.location) inlineRows.push(['Location', i.location]);
+  if (i.contractor) inlineRows.push(['Contractor', i.contractor]);
+  if (i.severity) inlineRows.push(['Severity', i.severity]);
+  if (i.dprId) inlineRows.push(['Linked DPR', `#${i.dprId.slice(0, 8)}`]);
+  if (i.boqItem?.description || i.boqItemId) {
+    inlineRows.push(['BOQ item', i.boqItem?.description || `BOQ #${i.boqItemId}`]);
+  }
+  if (i.drawing?.drawingNumber || i.drawingId) {
+    inlineRows.push([
+      'Drawing',
+      i.drawing?.drawingNumber ? `${i.drawing.drawingNumber} Rev ${i.drawingRev || '—'}` : `Drawing ${i.drawingId}`,
+    ]);
+  }
+
+  // The `data` JSONB holds the form-specific fields. Render them all.
+  const dataBlockRows = [];
+  const dObj = i.data && typeof i.data === 'object' ? i.data : {};
+  for (const [key, value] of Object.entries(dObj)) {
+    if (INSPECTION_DATA_INTERNAL.has(key)) continue;
+    if (value == null || value === '') continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    const label = INSPECTION_DATA_LABELS[key] || prettyCamel(key);
+    if (Array.isArray(value)) {
+      dataBlockRows.push([label, value.map((item) => formatListItem(item)).join('\n')]);
+    } else {
+      dataBlockRows.push([label, String(value)]);
+    }
+  }
+
+  // Top-level block rows (rare — most rich content is in `data`).
+  const blockRows = [];
+  if (i.notes) blockRows.push(['Notes', i.notes]);
+  if (i.findings) blockRows.push(['Findings', i.findings]);
+  if (i.summary) blockRows.push(['Summary', i.summary]);
+
+  // Audit trail.
+  const auditRows = [];
+  if (i.submittedBy?.name) auditRows.push(['Submitted by', formatAuditTime(i.submittedBy, i.createdAt)]);
+  if (i.reviewedBy?.name) auditRows.push(['Reviewed by', formatAuditTime(i.reviewedBy, i.reviewedAt)]);
+  if (i.approvedBy?.name) auditRows.push(['Approved by', formatAuditTime(i.approvedBy, i.approvedAt)]);
+  if (i.rejectionReason) auditRows.push(['Rejection reason', i.rejectionReason]);
+  if (i.adminNotes) auditRows.push(['Admin notes', i.adminNotes]);
+
+  const photos = i.photos?.length || i.photoCount || 0;
+
   return (
-    <div style={{ padding: '0.5rem 0', display: 'grid', gap: '0.4rem', fontSize: '0.82rem' }}>
-      {i.location && (
-        <div>
-          <span style={{ color: 'var(--steel, #64748b)', marginRight: '0.4rem' }}>Location:</span>
-          <span style={{ color: 'var(--navy, #0f172a)' }}>{i.location}</span>
+    <div style={{ padding: '0.6rem 0', display: 'grid', gap: '0.6rem', fontSize: '0.82rem' }}>
+      {inlineRows.length > 0 && <FieldGrid rows={inlineRows} />}
+      {dataBlockRows.map(([label, value]) => (
+        <BlockField key={label} label={label} value={value} />
+      ))}
+      {blockRows.map(([label, value]) => (
+        <BlockField key={label} label={label} value={value} />
+      ))}
+      {photos > 0 && (
+        <div style={{ fontSize: '0.78rem', color: 'var(--steel, #64748b)' }}>
+          📎 {photos} photo{photos === 1 ? '' : 's'} attached (open the full report to view)
         </div>
       )}
-      {i.severity && (
-        <div>
-          <span style={{ color: 'var(--steel, #64748b)', marginRight: '0.4rem' }}>Severity:</span>
-          <span style={{ color: 'var(--navy, #0f172a)' }}>{i.severity}</span>
-        </div>
-      )}
-      {summary && (
-        <div>
-          <div style={{ color: 'var(--steel, #64748b)', marginBottom: '0.2rem' }}>Findings</div>
-          <div style={{ whiteSpace: 'pre-wrap', color: 'var(--navy, #0f172a)' }}>{summary}</div>
-        </div>
-      )}
-      {(i.rejectionReason || i.adminNotes) && (
-        <div>
-          <div style={{ color: 'var(--steel, #64748b)', marginBottom: '0.2rem' }}>{i.rejectionReason ? 'Rejection reason' : 'Admin notes'}</div>
-          <div style={{ whiteSpace: 'pre-wrap', color: 'var(--navy, #0f172a)' }}>{i.rejectionReason || i.adminNotes}</div>
+      {auditRows.length > 0 && (
+        <div
+          style={{
+            borderTop: '1px solid #f1f5f9',
+            paddingTop: '0.5rem',
+            marginTop: '0.2rem',
+          }}
+        >
+          <FieldGrid rows={auditRows} compact />
         </div>
       )}
     </div>
@@ -784,6 +905,174 @@ function DrawingSection({ drawings, isRegistered, projectKey }) {
       ))}
     </div>
   );
+}
+
+// ── Field renderers ──────────────────────────────────────────────────
+//
+// Two layouts:
+//   - FieldGrid  — compact two-column label / value pairs (Contractor,
+//                 Location, Weather, Severity, audit trail). Renders
+//                 up to 3 columns at wide widths, collapses to one.
+//   - BlockField — full-width row with a label header + multi-line body
+//                 (Notes, Observations, Checklist, PMC fields).
+//
+// Both skip empty rows so a DPR with no weather doesn't render an
+// "Weather: —" placeholder.
+
+function FieldGrid({ rows, compact = false }) {
+  if (!rows || rows.length === 0) return null;
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: compact
+          ? 'repeat(auto-fit, minmax(180px, 1fr))'
+          : 'repeat(auto-fit, minmax(160px, 1fr))',
+        gap: compact ? '0.3rem 0.8rem' : '0.45rem 1rem',
+        fontSize: compact ? '0.78rem' : '0.82rem',
+      }}
+    >
+      {rows.map(([label, value]) => (
+        <div key={label}>
+          <div
+            style={{
+              fontSize: '0.62rem',
+              color: 'var(--steel, #64748b)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+              marginBottom: '0.1rem',
+              fontWeight: 600,
+            }}
+          >
+            {label}
+          </div>
+          <div style={{ color: 'var(--navy, #0f172a)' }}>{value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BlockField({ label, value }) {
+  if (value == null || value === '') return null;
+  return (
+    <div>
+      <div
+        style={{
+          fontSize: '0.62rem',
+          color: 'var(--steel, #64748b)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.05em',
+          marginBottom: '0.25rem',
+          fontWeight: 600,
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          whiteSpace: 'pre-wrap',
+          color: 'var(--navy, #0f172a)',
+          fontSize: '0.82rem',
+          lineHeight: 1.45,
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+// camelCase → "Pretty case" (inspectedBy → "Inspected By").
+function prettyCamel(s) {
+  return String(s)
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/^./, (c) => c.toUpperCase())
+    .trim();
+}
+
+// Friendly labels for known inspection `data` JSONB keys. Anything
+// unknown falls through to prettyCamel. Add new entries here when
+// the inspection form gains a new field — keeps the visible UI
+// readable without forcing a code change to the renderer.
+const INSPECTION_DATA_LABELS = {
+  // villa_inspection form
+  inspectedBy: 'Inspected by',
+  observations: 'Observations',
+  villaUnitNumber: 'Villa / unit',
+  complianceStatus: 'Compliance status',
+  activitiesInspected: 'Activities inspected',
+  stageOfConstruction: 'Stage of construction',
+  // day_activity_inspection form
+  remarks: 'Remarks',
+  activityType: 'Activity type',
+  overallStatus: 'Overall status',
+  checklistItems: 'Checklist',
+  // shared
+  location: 'Location',
+  notes: 'Notes',
+  findings: 'Findings',
+  summary: 'Summary',
+  severity: 'Severity',
+  contractor: 'Contractor',
+};
+
+// Internal `data` keys we never surface (schema-internal flags /
+// duplicates of top-level fields we already render).
+const INSPECTION_DATA_INTERNAL = new Set([
+  '__typename',
+  'id',
+  'inspectionId',
+]);
+
+// Format a work entry (Round-12 DPR schema) — usually a { description,
+// quantity, unit } object. Returns a one-line "Description (qty unit)"
+// or just the description if structure is unknown.
+function formatWorkEntry(w) {
+  if (!w) return '';
+  if (typeof w === 'string') return `• ${w}`;
+  const desc = w.description || w.work || w.item || '';
+  const qty = w.quantity != null ? w.quantity : w.qty;
+  const unit = w.unit || '';
+  if (!desc) return JSON.stringify(w);
+  if (qty != null && unit) return `• ${desc} — ${qty} ${unit}`;
+  if (qty != null) return `• ${desc} — ${qty}`;
+  return `• ${desc}`;
+}
+
+// Format a custom DPR section — Round-12 user-added sections are
+// { title, body } objects.
+function formatCustomSection(s) {
+  if (!s) return '';
+  if (typeof s === 'string') return s;
+  const title = s.title || s.heading || '';
+  const body = s.body || s.content || '';
+  if (title && body) return `${title}\n${body}`;
+  return title || body || JSON.stringify(s);
+}
+
+// Format a single audit-row actor with optional timestamp.
+function formatAuditTime(by, at) {
+  if (!by) return '';
+  const name = by.name || by.email || by.id || '—';
+  if (!at) return name;
+  const t = typeof at === 'string' ? at : (at instanceof Date ? at.toISOString() : '');
+  if (!t) return name;
+  return `${name} · ${formatShortDate(t)}`;
+}
+
+// Format a checklist / array item — objects become "label: value" lines,
+// primitives become bullet points.
+function formatListItem(item) {
+  if (item == null) return '';
+  if (typeof item === 'string') return `• ${item}`;
+  if (typeof item === 'object') {
+    const label = item.label || item.name || item.item || '';
+    const value = item.value || item.checked != null ? (item.checked ? '✓' : '☐') : '';
+    if (label && value) return `• ${label}: ${value}`;
+    return `• ${label || JSON.stringify(item)}`;
+  }
+  return `• ${String(item)}`;
 }
 
 // A single clickable tile that expands to reveal its body. Used by

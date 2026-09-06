@@ -111,6 +111,57 @@ describe('Round-33 — My Projects accordion expansion', () => {
     expect(panelSrc).toMatch(/aria-expanded=\{isExpanded\}/);
   });
 
+  test('ProjectExpandedPanel DPR body renders the real DPR content fields (notes + 5 PMC + workType)', () => {
+    // Round-12 split DPRs into 15 sub-work-types; the persistent fields
+    // are notes + workExecutedToday + workLocation + manpowerSummary +
+    // risksHindrances + materialsReceivedSummary + workType + workEntries
+    // + customSections. The original body only checked summary /
+    // workSummary / workDone / description — none of which exist on
+    // real DPRs — so expanded tiles showed an empty body. Pin the real
+    // field names so the bug can't silently regress.
+    expect(panelSrc).toMatch(/d\.notes/);
+    expect(panelSrc).toMatch(/d\.workExecutedToday/);
+    expect(panelSrc).toMatch(/d\.workLocation/);
+    expect(panelSrc).toMatch(/d\.manpowerSummary/);
+    expect(panelSrc).toMatch(/d\.risksHindrances/);
+    expect(panelSrc).toMatch(/d\.materialsReceivedSummary/);
+    expect(panelSrc).toMatch(/d\.workType/);
+    expect(panelSrc).toMatch(/d\.workEntries/);
+    expect(panelSrc).toMatch(/d\.customSections/);
+  });
+
+  test('ProjectExpandedPanel Inspection body renders nested data JSONB fields', () => {
+    // Inspection rich content lives in `data: { inspectedBy,
+    // observations, checklistItems[], ... }`. The original body only
+    // checked summary / findings / description — none of which exist
+    // on real inspections. Pin that the body iterates over the
+    // data object's entries.
+    expect(panelSrc).toMatch(/const\s+dObj\s*=\s*i\.data\s*&&\s*typeof\s+i\.data\s*===\s*['"]object['"]\s*\?\s*i\.data\s*:\s*\{\}/);
+    expect(panelSrc).toMatch(/for\s*\(\s*const\s*\[\s*key\s*,\s*value\s*\]\s*of\s*Object\.entries\(\s*dObj\s*\)/);
+    // Known inspection data fields get friendly labels.
+    expect(panelSrc).toMatch(/inspectedBy:\s*['"]Inspected by['"]/);
+    expect(panelSrc).toMatch(/observations:\s*['"]Observations['"]/);
+    expect(panelSrc).toMatch(/checklistItems:\s*['"]Checklist['"]/);
+    expect(panelSrc).toMatch(/complianceStatus:\s*['"]Compliance status['"]/);
+    expect(panelSrc).toMatch(/activitiesInspected:\s*['"]Activities inspected['"]/);
+    expect(panelSrc).toMatch(/stageOfConstruction:\s*['"]Stage of construction['"]/);
+    expect(panelSrc).toMatch(/overallStatus:\s*['"]Overall status['"]/);
+    expect(panelSrc).toMatch(/activityType:\s*['"]Activity type['"]/);
+    expect(panelSrc).toMatch(/villaUnitNumber:\s*['"]Villa \/ unit['"]/);
+  });
+
+  test('ProjectExpandedPanel has generic FieldGrid + BlockField renderers used by DPR + Inspection', () => {
+    // The renderers consume [label, value] tuples and render label /
+    // value pairs. FieldGrid handles compact two-up rows (Contractor,
+    // Location, audit); BlockField handles long-form text (Notes,
+    // Observations, Checklist). Pin both so the design is locked.
+    expect(panelSrc).toMatch(/function\s+FieldGrid\s*\(/);
+    expect(panelSrc).toMatch(/function\s+BlockField\s*\(/);
+    expect(panelSrc).toMatch(/<FieldGrid\s+rows=\{inlineRows\}/);
+    expect(panelSrc).toMatch(/<FieldGrid\s+rows=\{auditRows\}\s+compact/);
+    expect(panelSrc).toMatch(/<BlockField\s+key=\{label\}/);
+  });
+
   test('ProjectExpandedPanel a11y: role="region" + aria-label on the panel + section body', () => {
     // The whole panel is a landmark so SR users can jump to it. Each
     // section body is also a labeled region so the user knows what
