@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -67,6 +67,18 @@ export default function DprDashboard() {
   const [rejectReason, setRejectReason] = useState('');
   const [actionLoading, setActionLoading] = useState('');
   const [filter, setFilter] = useState('SUBMITTED');
+  // Round-28 Bug 2b: read ?projectId= from the URL so a tile click on
+  // the ProjectDashboard drills straight into a project-scoped queue.
+  // The filter dropdown also reflects this so the admin can see the
+  // scope they entered with.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlProjectId = searchParams.get('projectId') || '';
+  const [projectFilter, setProjectFilter] = useState(urlProjectId);
+  // Keep state in sync with the URL — when the admin clicks a different
+  // project tile, the URL changes and we mirror it.
+  useEffect(() => {
+    setProjectFilter(urlProjectId);
+  }, [urlProjectId]);
   // DR-029 (round-20): stats now come from /api/dpr/stats — a single
   // request that returns six explicit aggregate counts against the indexed
   // reportDate / status / approvedAt / reviewedAt columns. Replaces the
@@ -108,9 +120,11 @@ export default function DprDashboard() {
     selectableIds.every((id) => selectedIds.has(id));
 
   const loadDprs = useCallback(async () => {
-    const data = await api.getDprs({ status: filter }, accessToken);
+    const params = { status: filter };
+    if (projectFilter) params.projectId = projectFilter;
+    const data = await api.getDprs(params, accessToken);
     return data.dprs || [];
-  }, [accessToken, filter]);
+  }, [accessToken, filter, projectFilter]);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -149,11 +163,11 @@ export default function DprDashboard() {
     } finally {
       setLoading(false);
     }
-  }, [accessToken, filter, loadDprs, toast]);
+  }, [accessToken, filter, projectFilter, loadDprs, toast]);
 
   useEffect(() => {
     loadAll();
-  }, [filter, loadAll]);
+  }, [filter, projectFilter, loadAll]);
 
   // When the filter changes, the previously selected IDs may no longer be
   // visible — clear them so the floating action bar doesn't show "3 selected"
@@ -397,6 +411,44 @@ export default function DprDashboard() {
           )}
         </div>
       </div>
+
+      {/* Round-28 Bug 2b: when the URL carries ?projectId=, show a
+          visible scope banner + a clear-filter link. The page title
+          becomes "Daily Reports · <project name>" so the admin never
+          loses context that they're looking at one project's queue. */}
+      {projectFilter && (
+        <div
+          className="dpr-card"
+          style={{
+            marginBottom: '0.75rem',
+            padding: '0.5rem 0.75rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            fontSize: '0.85rem',
+            background: 'rgba(0,102,255,0.04)',
+            borderLeft: '3px solid var(--blue, #0066FF)',
+          }}
+        >
+          <span style={{ color: 'var(--steel, #64748b)' }}>Filtered to project:</span>
+          <strong style={{ color: 'var(--navy, #0f172a)' }}>{projectFilter}</strong>
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            style={{ marginLeft: 'auto' }}
+            onClick={() => {
+              setProjectFilter('');
+              setSearchParams((p) => {
+                const next = new URLSearchParams(p);
+                next.delete('projectId');
+                return next;
+              });
+            }}
+          >
+            Show all projects
+          </button>
+        </div>
+      )}
 
       <div className="dpr-dashboard-stats">
         {/* DR-029 (round-20): labels now match the backend aggregate.

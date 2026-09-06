@@ -82,7 +82,7 @@ function prettyInspectionType(slug) {
 // One KPI tile — large number + label + optional sub-line. The icon is
 // a small SVG bubble that mirrors AdminOverview's icon chip aesthetic
 // (44×44, 10px radius, blue tint background).
-function StatTile({ icon, number, label, tone = 'neutral', sub }) {
+function StatTile({ icon, number, label, tone = 'neutral', sub, to }) {
   // tone ∈ 'neutral' | 'good' | 'warning' | 'critical' — maps to the
   // status palette. Icons stay in the blue brand colour regardless of
   // tone — only the NUMBER shifts colour so a red "Overdue" tile reads
@@ -94,17 +94,12 @@ function StatTile({ icon, number, label, tone = 'neutral', sub }) {
     critical: 'var(--red, #dc2626)',
   };
   const numColor = colorMap[tone] || colorMap.neutral;
-  return (
-    <div
-      className="dpr-card"
-      style={{
-        padding: '1rem',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '0.5rem',
-        minHeight: 110,
-      }}
-    >
+  // Round-28 Bug 2b: when `to` is given, wrap the tile in a <Link> so
+  // clicking drills through to the filtered admin queue. The card
+  // hover/focus treatment is identical for both branches — only the
+  // underlying element changes.
+  const inner = (
+    <>
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.625rem' }}>
         <div
           aria-hidden="true"
@@ -143,6 +138,31 @@ function StatTile({ icon, number, label, tone = 'neutral', sub }) {
       {sub ? (
         <div style={{ fontSize: '0.78rem', color: 'var(--steel, #64748b)' }}>{sub}</div>
       ) : null}
+    </>
+  );
+
+  const cardStyle = {
+    padding: '1rem',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem',
+    minHeight: 110,
+  };
+
+  if (to) {
+    return (
+      <Link
+        to={to}
+        className="dpr-card dpr-tile-link"
+        style={{ ...cardStyle, textDecoration: 'none', color: 'inherit' }}
+      >
+        {inner}
+      </Link>
+    );
+  }
+  return (
+    <div className="dpr-card" style={cardStyle}>
+      {inner}
     </div>
   );
 }
@@ -258,7 +278,7 @@ export default function ProjectDashboard() {
   const loadProjects = useCallback(async () => {
     setLoadingProjects(true);
     try {
-      const data = await api.getProjects(accessToken);
+      const data = await api.getProjects({ scope: 'all' }, accessToken);
       if (!mountedRef.current) return;
       const list = data.projects || [];
       const disc = data.discovered || [];
@@ -708,13 +728,21 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
 
       {/* Five KPI sections. Each one matches the AdminOverview
           TileSection aesthetic (uppercase section label + auto-fill
-          tile grid) so the visual language stays consistent. */}
-      <TileSection title="Daily Reports">
+          tile grid) so the visual language stays consistent. Round-28
+          Bug 2b: each TileSection now carries a drill-through `to`
+          pointing at the project-filtered admin queue; individual
+          StatTiles also carry `to` for the most actionable counts
+          (Pending Review, Open, Due Soon, Overdue, Variance). */}
+      <TileSection
+        title="Daily Reports"
+        to={`/portal/admin/dpr?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
+      >
         <StatTile
           icon={ICONS.dpr}
           number={kpis.dpr?.submittedCount ?? 0}
           label="Submitted"
           sub={`${kpis.dpr?.pendingReviewCount ?? 0} awaiting review`}
+          to={`/portal/admin/dpr?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
         />
         <StatTile
           icon={ICONS.pending}
@@ -722,18 +750,21 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
           label="Pending Review"
           tone={(kpis.dpr?.pendingReviewCount ?? 0) > 0 ? 'warning' : 'neutral'}
           sub="Submitted + Under Review"
+          to={`/portal/admin/dpr?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
         />
         <StatTile
           icon={ICONS.check}
           number={kpis.dpr?.approvedCount ?? 0}
           label="Approved"
           tone={(kpis.dpr?.approvedCount ?? 0) > 0 ? 'good' : 'neutral'}
+          to={`/portal/admin/dpr?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}&status=APPROVED`}
         />
         <StatTile
           icon={ICONS.reject}
           number={kpis.dpr?.rejectedCount ?? 0}
           label="Rejected"
           tone={(kpis.dpr?.rejectedCount ?? 0) > 0 ? 'critical' : 'neutral'}
+          to={`/portal/admin/dpr?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}&status=REJECTED`}
         />
         <StatTile
           icon={ICONS.draft}
@@ -743,12 +774,16 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
         />
       </TileSection>
 
-      <TileSection title="Inspections">
+      <TileSection
+        title="Inspections"
+        to={`/portal/admin/inspection?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
+      >
         <StatTile
           icon={ICONS.inspection}
           number={kpis.inspections?.totalCount ?? 0}
           label="Total (window)"
           sub={`${kpis.inspections?.openCount ?? 0} currently open`}
+          to={`/portal/admin/inspection?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
         />
         <StatTile
           icon={ICONS.pending}
@@ -756,6 +791,7 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
           label="Open"
           tone={(kpis.inspections?.openCount ?? 0) > 0 ? 'warning' : 'neutral'}
           sub="Across all of this project"
+          to={`/portal/admin/inspection?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}&status=OPEN`}
         />
         {/* Breakdown by inspection type — small chips, one per type. We
             pin this as a full-width tile (not the 320px minmax grid)
@@ -833,22 +869,28 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
         ) : null}
       </TileSection>
 
-      <TileSection title="BOQ Variance">
+      <TileSection
+        title="BOQ Variance"
+        to={`/portal/admin/boq?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
+      >
         <StatTile
           icon={ICONS.cube}
           number={kpis.boqVariance?.itemsCount ?? 0}
           label="Items"
           sub="Active line items in BOQ"
+          to={`/portal/admin/boq?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
         />
         <StatTile
           icon={ICONS.money}
           number={`₹${formatINR(kpis.boqVariance?.totalContractValue ?? 0)}`}
           label="Contract Value"
+          to={`/portal/admin/boq?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
         />
         <StatTile
           icon={ICONS.money}
           number={`₹${formatINR(kpis.boqVariance?.totalExecutedValue ?? 0)}`}
           label="Executed Value"
+          to={`/portal/admin/boq?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
         />
         <StatTile
           icon={ICONS.money}
@@ -865,6 +907,7 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
           // Override the stat-tile colour to use the diverging pair.
           // countColor/varianceColor share the same reservation so this
           // is consistent with the tile-level tones.
+          to={`/portal/admin/boq?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
         />
         {(kpis.boqVariance?.itemsCount ?? 0) === 0 ? (
           <div className="dpr-card" style={{ padding: '0.75rem 1rem', gridColumn: '1 / -1', fontSize: '0.82rem', color: 'var(--steel, #64748b)' }}>
@@ -908,8 +951,11 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
 
 // TileSection — same uppercase label + auto-fill grid pattern used by
 // AdminOverview. Keeps the visual language consistent across the
-// admin pages.
-function TileSection({ title, children }) {
+// admin pages. Round-28 Bug 2b: when `to` is given, the title becomes
+// a Link to the filtered admin queue/registry so the whole section
+// has a clear drill-through path even on viewports where individual
+// tiles are too dense to click reliably.
+function TileSection({ title, to, children }) {
   return (
     <section>
       <h2
@@ -921,9 +967,22 @@ function TileSection({ title, children }) {
           textTransform: 'uppercase',
           letterSpacing: '0.06em',
           margin: '0 0 0.6rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.5rem',
         }}
       >
-        {title}
+        {to ? (
+          <Link
+            to={to}
+            style={{ color: 'inherit', textDecoration: 'none' }}
+          >
+            {title}
+            <span style={{ marginLeft: '0.5rem', color: 'var(--blue, #0066FF)', fontSize: '0.85em' }}>→</span>
+          </Link>
+        ) : (
+          title
+        )}
       </h2>
       <div
         style={{

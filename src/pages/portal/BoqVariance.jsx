@@ -16,7 +16,7 @@
 // employees get the same view.
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -56,9 +56,14 @@ export default function BoqVariance() {
   useDocumentTitle('BOQ Variance');
   const { accessToken, employee } = useAuth();
   const toast = useToast();
+  // Round-28 Bug 2a: when navigated from a ProjectDetail tab the URL
+  // carries ?projectName=; pre-fill the input + auto-apply so the
+  // employee lands on results, not the empty state.
+  const [searchParams] = useSearchParams();
+  const initialProjectName = searchParams.get('projectName') || '';
 
-  const [projectName, setProjectName] = useState('');
-  const [appliedProject, setAppliedProject] = useState('');
+  const [projectName, setProjectName] = useState(initialProjectName);
+  const [appliedProject, setAppliedProject] = useState(initialProjectName);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');

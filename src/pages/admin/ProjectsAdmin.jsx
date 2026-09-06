@@ -63,7 +63,7 @@ export default function ProjectsAdmin() {
     setLoading(true);
     setError('');
     try {
-      const data = await api.getProjects(accessToken);
+      const data = await api.getProjects({ scope: 'all' }, accessToken);
       if (!mountedRef.current) return;
       setProjects(data.projects || []);
       setDiscovered(data.discovered || []);

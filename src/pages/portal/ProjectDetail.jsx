@@ -5,7 +5,7 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
-import { BuildingIcon, ClipboardIcon, CameraIcon, MapPinIcon, DocIcon, BookIcon, BellIcon } from '../../components/Icons.jsx';
+import { BuildingIcon, ClipboardIcon, CameraIcon, MapPinIcon, DocIcon, BookIcon } from '../../components/Icons.jsx';
 import { formatShortDate } from '../../lib/format.js';
 
 // [N1 Phase B] Project detail — the anchor page at /portal/projects/:id.
@@ -29,13 +29,13 @@ const TABS = [
   { id: 'boq',       label: 'BOQ',         Icon: BookIcon,         always: true  },
   { id: 'dprs',      label: 'DPRs',        Icon: DocIcon,          always: true  },
   { id: 'inspections', label: 'Inspections', Icon: ClipboardIcon,   always: true  },
-  // [N1 Phase D / F] RFIs + Variations + Drawings land in their own
-  // sub-agents. We surface the slot now so the tab strip is stable; the
-  // body shows a small "coming soon" notice so the user knows the link
-  // is real-but-pending rather than missing.
-  { id: 'rfis',      label: 'RFIs',         Icon: BellIcon,         comingSoon: true },
-  { id: 'variations', label: 'Variations',  Icon: DocIcon,          comingSoon: true },
-  { id: 'drawings',  label: 'Drawings',    Icon: CameraIcon,       comingSoon: true },
+  // Round-28 Bug 3: RFIs / Variations / Drawings tabs were hidden because
+  // they 404'd for employees. They've since shipped as admin-only modules
+  // (/portal/admin/rfis, /portal/admin/variations, /portal/admin/drawings)
+  // but no employee-scoped page exists yet. Rather than carry dead tabs
+  // in the strip, hide them and surface a single "Coming soon" badge
+  // in the page header so employees know the modules exist but aren't
+  // surfacing broken links. Reintroduce when employee-scoped views ship.
 ];
 
 const inrFormatter = new Intl.NumberFormat('en-IN', {
@@ -52,7 +52,7 @@ function formatInr(value) {
 export default function ProjectDetail() {
   const { id: idOrName } = useParams();
   const navigate = useNavigate();
-  const { accessToken } = useAuth();
+  const { accessToken, employee } = useAuth();
   const toast = useToast();
   const mountedRef = useRef(true);
 
@@ -105,28 +105,31 @@ export default function ProjectDetail() {
   // for useDocumentTitle (see src/hooks/useDocumentTitle.js).
   useDocumentTitle(project?.name ? `${project.name} · Project` : 'Project');
 
-  // Tab click handler. For the live tabs we navigate to the admin page
-  // with a `?projectId=<uuid-or-name>` URL param. The admin pages pick
-  // it up via FILTER_PARAM_KEYS + useSearchParams (see DprAll /
-  // InspectionAll / BoqAdmin). For the coming-soon tabs we just toggle
-  // the local "active" pill — no navigation.
+  // Tab click handler. Round-28 Bug 2a: route to the EMPLOYEE browse
+  // pages (not the admin pages) so employees aren't bounced to the
+  // admin guard. The browse pages accept ?projectId= as a filter
+  // (DprAll, InspectionAll). For BOQ, BoqVariance takes a free-text
+  // projectName — we pass the project name through ?projectName= and
+  // also pre-populate the input via the URL hash so the page renders
+  // results without the user having to click "Show variance".
   const handleTabClick = useCallback((tab) => {
     setActiveTab(tab.id);
     if (tab.comingSoon) return;
     const pid = encodeURIComponent(project?.id || idOrName);
+    const projectName = encodeURIComponent(project?.name || idOrName);
     switch (tab.id) {
       case 'boq':
-        navigate(`/portal/admin/boq?projectName=${pid}`);
+        // BoqVariance pre-fills via ?projectName= and applies on mount.
+        navigate(`/portal/boq?projectName=${projectName}`);
         break;
       case 'dprs':
-        navigate(`/portal/admin/dpr?projectId=${pid}`);
+        navigate(`/portal/dpr/all?projectId=${pid}`);
         break;
       case 'inspections':
-        navigate(`/portal/admin/inspection?projectId=${pid}`);
+        navigate(`/portal/inspection/all?projectId=${pid}`);
         break;
       case 'overview':
       default:
-        // Anchor-style: just scroll to the metadata block.
         document.getElementById('project-overview')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         break;
     }
@@ -226,18 +229,60 @@ export default function ProjectDetail() {
           ) : null}
         </div>
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-          <Link to={`/portal/dpr/submit?projectName=${encodeURIComponent(p.name || '')}`} className="btn btn-secondary btn-sm">
-            + New DPR
-          </Link>
-          <Link to={`/portal/inspection/submit?projectName=${encodeURIComponent(p.name || '')}`} className="btn btn-secondary btn-sm">
-            + New Inspection
-          </Link>
+          {/* Round-28 Bug 8: only surface "+ New DPR/Inspection" to
+              non-admin employees. Admins triage via the admin queue
+              rather than authoring; showing them author buttons
+              invites accidental submissions and clutters the page. */}
+          {!employee?.isAdmin && (
+            <>
+              <Link to={`/portal/dpr/submit?projectName=${encodeURIComponent(p.name || '')}`} className="btn btn-secondary btn-sm">
+                + New DPR
+              </Link>
+              <Link to={`/portal/inspection/submit?projectName=${encodeURIComponent(p.name || '')}`} className="btn btn-secondary btn-sm">
+                + New Inspection
+              </Link>
+            </>
+          )}
         </div>
       </div>
 
+      {/* Round-28 Bug 6: a single auto-discovered banner above the tab
+          strip so the user lands with the context ("this isn't a real
+          project row yet") rather than discovering it on the Overview
+          tab. Admin sees an extra "Register this project" CTA. */}
+      {!isRegistered && (
+        <div
+          className="dpr-card"
+          style={{
+            padding: '0.625rem 0.875rem',
+            marginBottom: '0.75rem',
+            background: 'rgba(245, 158, 11, 0.06)',
+            borderLeft: '3px solid var(--amber, #d97706)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            flexWrap: 'wrap',
+          }}
+        >
+          <span style={{ fontSize: '1.05rem' }} aria-hidden="true">🛈</span>
+          <span style={{ fontSize: '0.85rem', color: 'var(--navy, #0f172a)' }}>
+            <strong>Auto-discovered project.</strong> No client, location, or
+            contract details yet. An admin needs to formally register it.
+          </span>
+          {employee?.isAdmin && (
+            <Link
+              to={`/portal/admin/projects/new?name=${encodeURIComponent(p.name || '')}`}
+              className="btn btn-secondary btn-sm"
+              style={{ marginLeft: 'auto' }}
+            >
+              Register this project →
+            </Link>
+          )}
+        </div>
+      )}
+
       {/* Tab strip. The BOQ / DPRs / Inspections tabs are live links to
-          the existing admin pages with a projectId URL param. RFI /
-          Variation / Drawing are marked coming-soon (Phase D / F). */}
+          the existing admin pages with a projectId URL param. */}
       <div
         className="dpr-card"
         style={{
@@ -316,8 +361,8 @@ export default function ProjectDetail() {
             href={`/portal/admin/inspection?projectId=${encodeURIComponent(p.id || p.name)}`}
           />
         )}
-        {(activeTab === 'rfis' || activeTab === 'variations' || activeTab === 'drawings') && (
-          <ComingSoonNotice label={TABS.find((t) => t.id === activeTab)?.label} />
+        {(activeTab === 'rfis' || activeTab === 'variations' || activeTab === 'drawings' || activeTab === 'documents' || activeTab === 'issues' || activeTab === 'team') && (
+          <ComingSoonNotice label={TABS.find((t) => t.id === activeTab)?.label || activeTab} />
         )}
       </div>
     </div>

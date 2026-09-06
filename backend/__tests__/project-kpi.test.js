@@ -163,13 +163,34 @@ function makePrisma(opts = {}) {
       }),
     },
     dPR: {
-      findMany: jest.fn(async () => [
-        { projectName: 'T-Nagar' },
-        { projectName: 'Anna Nagar' },
-      ]),
+      findMany: jest.fn(async ({ where } = {}) => {
+        // Round-28 Bug 1+5: when scope=mine, the route filters by
+        // createdById=req.employeeId. Reflect that here so the
+        // contract test can prove the scoping works.
+        let rows = [
+          { projectName: 'T-Nagar', createdById: USER_ID },
+          { projectName: 'Anna Nagar', createdById: USER_ID },
+          { projectName: 'RESOLVE-TEST', createdById: 'admin-other' },
+        ];
+        if (where && where.createdById) {
+          rows = rows.filter((r) => r.createdById === where.createdById);
+        }
+        return rows.map((r) => ({ projectName: r.projectName }));
+      }),
       count: jest.fn(async ({ where }) => filterRows(dprRows, where).length),
     },
     inspectionRecord: {
+      // Same scoping pattern as DPR — findMany uses submittedById.
+      findMany: jest.fn(async ({ where } = {}) => {
+        let rows = [
+          { projectName: 'Anna Nagar', submittedById: USER_ID },
+          { projectName: 'R17 Bulk Test', submittedById: 'admin-other' },
+        ];
+        if (where && where.submittedById) {
+          rows = rows.filter((r) => r.submittedById === where.submittedById);
+        }
+        return rows.map((r) => ({ projectName: r.projectName }));
+      }),
       count: jest.fn(async ({ where }) => filterRows(inspectionRows, where).length),
       groupBy: jest.fn(async ({ where }) => {
         const filtered = filterRows(inspectionRows, where);
@@ -335,9 +356,48 @@ describe('N17 — GET /api/projects', () => {
     expect(res.status).toBe(200);
     // Curated: T-Nagar registered
     expect(res.body.projects.map((p) => p.name)).toEqual(['T-Nagar']);
-    // Discovered: Anna Nagar appears in DPR rows but is NOT in projectRows
+    // Default scope for non-admin is "mine" — only names the user filed
+    // themselves appear in the discovered list.
+    expect(res.body.scope).toBe('mine');
     const discoveredNames = res.body.discovered.map((d) => d.name);
     expect(discoveredNames).toEqual(['Anna Nagar']);
+  });
+
+  // Round-28 Bug 1+5 contract: admin can request ?scope=all to see
+  // org-wide auto-discovered names (not just their own). Employee
+  // requesting ?scope=all gets 403 ADMIN_REQUIRED.
+  it('4a. admin ?scope=all returns org-wide discovered names', async () => {
+    const prisma = makePrisma();
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .get('/api/projects?scope=all')
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.scope).toBe('all');
+    const discoveredNames = res.body.discovered.map((d) => d.name).sort();
+    // Both the user's own and other people's project names should appear
+    // because scope=all skips the createdById/submittedById filter.
+    expect(discoveredNames).toEqual(['Anna Nagar', 'R17 Bulk Test', 'RESOLVE-TEST']);
+  });
+
+  it('4b. non-admin ?scope=all returns 403 ADMIN_REQUIRED', async () => {
+    const prisma = makePrisma();
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .get('/api/projects?scope=all')
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ADMIN_REQUIRED');
+  });
+
+  it('4c. invalid ?scope= value returns 400 INVALID_SCOPE', async () => {
+    const prisma = makePrisma();
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .get('/api/projects?scope=banana')
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_SCOPE');
   });
 });
 

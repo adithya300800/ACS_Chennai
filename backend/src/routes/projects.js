@@ -268,6 +268,16 @@ router.use(requireAuth);
 // on, regardless of whether an admin has formally registered the
 // project.
 //
+// Round-28 scoping:
+//   ?scope=all    admin-only — full curated list + org-wide auto-discovered
+//                 names. Any other caller → 403.
+//   ?scope=mine   (default for non-admin) — full curated list + ONLY
+//                 auto-discovered names that this employee has personally
+//                 filed DPRs/Inspections against. Closes the data leak
+//                 where employees could see admin test rigs and contracts
+//                 they have no business knowing about.
+//   no param      legacy callers get the safe default (same as ?scope=mine).
+//
 // Auth: any employee.
 router.get('/', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
@@ -275,9 +285,22 @@ router.get('/', asyncHandler(async (req, res) => {
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
   }
 
+  const scope = (req.query.scope || 'mine').toString();
+  if (scope !== 'mine' && scope !== 'all') {
+    return res.status(400).json({ error: 'scope must be "mine" or "all"', code: 'INVALID_SCOPE' });
+  }
+  if (scope === 'all' && !req.isAdmin) {
+    return res.status(403).json({ error: 'Admin access required', code: 'ADMIN_REQUIRED' });
+  }
+
   try {
-    const [projects, dprNames] = await Promise.all([
+    const [projects, dprNames, inspectionNames] = await Promise.all([
       prisma.project.findMany({
+        // Curated rows: every active project is visible to every employee.
+        // ProjectMembership (planned N+1) will narrow this; for now the
+        // curated set is org-wide metadata that the field teams need to
+        // see (locations, contract values) to do their jobs. The leak we
+        // closed was the auto-discovered names, not curated metadata.
         where: { isActive: true },
         orderBy: [{ name: 'asc' }],
         select: {
@@ -291,25 +314,60 @@ router.get('/', asyncHandler(async (req, res) => {
         },
       }),
       // Auto-discovery: distinct project names that exist on DPR rows but
-      // are NOT yet in the Project table. Defensive — if DPR.projectName
-      // somehow errors, we still return curated rows.
-      prisma.dPR.findMany({
-        distinct: ['projectName'],
-        select: { projectName: true },
-        orderBy: { projectName: 'asc' },
-      }).catch((err) => {
-        console.warn('Projects list — DPR auto-discovery failed', {
-          prismaCode: err.code,
-          message: err.message?.split('\n')[0],
-        });
-        return [];
-      }),
+      // are NOT yet in the Project table. Scoped to the employee when
+      // scope=mine so admin test rigs / contract codes they never filed
+      // against don't surface in their dropdown.
+      scope === 'all'
+        ? prisma.dPR.findMany({
+            distinct: ['projectName'],
+            select: { projectName: true },
+            orderBy: { projectName: 'asc' },
+          }).catch((err) => {
+            console.warn('Projects list — DPR auto-discovery failed', {
+              prismaCode: err.code,
+              message: err.message?.split('\n')[0],
+            });
+            return [];
+          })
+        : prisma.dPR.findMany({
+            distinct: ['projectName'],
+            where: { createdById: req.employeeId },
+            select: { projectName: true },
+            orderBy: { projectName: 'asc' },
+          }).catch((err) => {
+            console.warn('Projects list — DPR auto-discovery (mine) failed', {
+              prismaCode: err.code,
+              message: err.message?.split('\n')[0],
+            });
+            return [];
+          }),
+      // Same scoping for InspectionRecord.projectName — an employee who
+      // only ever filed inspections against "RESOLVE-TEST-PROJECT-NEW"
+      // should see that name in their dropdown, even if they never filed
+      // a DPR against it. Scope=all ALSO pulls org-wide inspection names
+      // so admins see a complete org-wide discovered list.
+      scope === 'all'
+        ? prisma.inspectionRecord.findMany({
+            distinct: ['projectName'],
+            select: { projectName: true },
+            orderBy: { projectName: 'asc' },
+          }).catch(() => [])
+        : prisma.inspectionRecord.findMany({
+            distinct: ['projectName'],
+            where: { submittedById: req.employeeId },
+            select: { projectName: true },
+            orderBy: { projectName: 'asc' },
+          }).catch(() => []),
     ]);
 
     const curatedNames = new Set(projects.map((p) => p.name));
-    const discoveredNames = dprNames
-      .map((d) => d.projectName)
-      .filter((n) => n && !curatedNames.has(n));
+    const discoveredNamesRaw = [
+      ...dprNames.map((d) => d.projectName),
+      ...inspectionNames.map((i) => i.projectName),
+    ];
+    const discoveredNames = Array.from(new Set(discoveredNamesRaw))
+      .filter((n) => n && !curatedNames.has(n))
+      .sort((a, b) => a.localeCompare(b));
 
     res.json({
       projects: projects.map(serializeProject),
@@ -320,6 +378,7 @@ router.get('/', asyncHandler(async (req, res) => {
         name,
         isRegistered: false,
       })),
+      scope,
     });
   } catch (err) {
     console.error('Projects list error', {

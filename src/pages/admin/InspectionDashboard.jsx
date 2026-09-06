@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
@@ -63,6 +64,15 @@ export default function InspectionDashboard() {
   const [filterType, setFilterType] = useState('');
   const [filterFrom, setFilterFrom] = useState('');
   const [filterTo, setFilterTo] = useState('');
+  // Round-28 Bug 2b: ?projectId= on the URL scopes the queue to one
+  // project (drill-through from ProjectDashboard tiles). Mirrors the
+  // DprDashboard pattern.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlProjectId = searchParams.get('projectId') || '';
+  const [projectFilter, setProjectFilter] = useState(urlProjectId);
+  useEffect(() => {
+    setProjectFilter(urlProjectId);
+  }, [urlProjectId]);
   // DR-029 (round-20): stats now come from /api/inspection/stats — a
   // single request that returns six explicit aggregate counts. Replaces the
   // previous "fetch limit=1 paginated lists, use response.length" pattern
@@ -143,9 +153,10 @@ export default function InspectionDashboard() {
     if (filterType) params.inspectionType = filterType;
     if (filterFrom) params.from = filterFrom;
     if (filterTo) params.to = filterTo;
+    if (projectFilter) params.projectId = projectFilter;
     const data = await api.getInspections(params, accessToken);
     return data;
-  }, [accessToken, filterStatus, filterType, filterFrom, filterTo]);
+  }, [accessToken, filterStatus, filterType, filterFrom, filterTo, projectFilter]);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -184,14 +195,14 @@ export default function InspectionDashboard() {
   useEffect(() => {
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterStatus, filterType, filterFrom, filterTo, accessToken]);
+  }, [filterStatus, filterType, filterFrom, filterTo, projectFilter, accessToken]);
 
   // Round-17 B-06: when filters change, the previously selected IDs may no
   // longer be visible — clear them so the floating action bar doesn't show
   // "3 selected" for rows the admin can't see anymore.
   useEffect(() => {
     setSelectedIds(new Set());
-  }, [filterStatus, filterType, filterFrom, filterTo]);
+  }, [filterStatus, filterType, filterFrom, filterTo, projectFilter]);
 
   const toggleSelected = (id) => {
     setSelectedIds((prev) => {
@@ -405,6 +416,42 @@ export default function InspectionDashboard() {
               onClick={() => { setFilterStatus('OPEN'); setFilterType(''); setFilterFrom(''); setFilterTo(''); }}
             >
               Clear filters
+            </button>
+          </div>
+        )}
+        {/* Round-28 Bug 2b: when the URL carries ?projectId=, show a
+            visible scope banner so the admin never loses context that
+            they're viewing one project's queue. */}
+        {projectFilter && (
+          <div
+            className="dpr-card"
+            style={{
+              marginTop: '0.75rem',
+              padding: '0.5rem 0.75rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              fontSize: '0.85rem',
+              background: 'rgba(0,102,255,0.04)',
+              borderLeft: '3px solid var(--blue, #0066FF)',
+            }}
+          >
+            <span style={{ color: 'var(--steel, #64748b)' }}>Filtered to project:</span>
+            <strong style={{ color: 'var(--navy, #0f172a)' }}>{projectFilter}</strong>
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => {
+                setProjectFilter('');
+                setSearchParams((p) => {
+                  const next = new URLSearchParams(p);
+                  next.delete('projectId');
+                  return next;
+                });
+              }}
+            >
+              Show all projects
             </button>
           </div>
         )}

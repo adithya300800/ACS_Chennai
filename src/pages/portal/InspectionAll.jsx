@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -63,6 +63,11 @@ export default function InspectionAll() {
   const [inspections, setInspections] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // Round-28 Bug 2a: when navigated from a ProjectDetail tab the URL
+  // carries ?projectId= — pre-populate the filter so the employee lands
+  // on the project-scoped view rather than the org-wide default.
+  const [searchParams] = useSearchParams();
+  const urlProjectId = searchParams.get('projectId') || '';
 
   // Round-27: filter state for the admin browse view. Backend accepts
   // `month`, `status`, `inspectionType`, `severity`, `from`, `to`. The
@@ -76,9 +81,16 @@ export default function InspectionAll() {
     severity: '',
     from: '',
     to: '',
-    projectId: '',
+    projectId: urlProjectId,
   }));
   const [showFilters, setShowFilters] = useState(false);
+  // Keep state in sync if the URL changes (e.g. drill-in via a
+  // different ProjectDetail tab in the same session).
+  useEffect(() => {
+    if (urlProjectId) {
+      setFilter((f) => (f.projectId === urlProjectId ? f : { ...f, projectId: urlProjectId }));
+    }
+  }, [urlProjectId]);
 
   const load = useCallback(async () => {
     setLoading(true);
