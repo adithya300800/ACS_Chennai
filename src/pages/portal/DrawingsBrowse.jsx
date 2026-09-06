@@ -376,7 +376,6 @@ export default function DrawingsBrowse() {
                 <option
                   key={p.id ?? `__disc__:${p.name}`}
                   value={p.id ?? `__disc__:${p.name}`}
-                  disabled={!p.id && !p.isRegistered}
                 >
                   {p.name}{p.code ? ` (${p.code})` : ''}{!p.isRegistered ? ' · not registered' : ''}
                 </option>

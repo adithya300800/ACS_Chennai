@@ -257,6 +257,13 @@ describe('N3-employee — Drawing Register employee-facing surface', () => {
     expect(browseSrc).toMatch(/isRegistered:\s*true/);
     // The dropdown renders the suffix on the discovered entries.
     expect(browseSrc).toMatch(/not\s*registered/);
+    // Anti-regression: discovered <option>s must NOT be disabled.
+    // Disabling them would block the user from picking a discovered
+    // name to register it — defeating the whole point of the
+    // __disc__:<name> sentinel flow. Earlier Round-32.1 shipped
+    // `disabled={!p.id && !p.isRegistered}` which made them irrelevant;
+    // the live check failed for that exact reason.
+    expect(browseSrc).not.toMatch(/disabled=\{!p\.id\s*&&\s*!p\.isRegistered\}/);
   });
 
   test('DrawingsBrowse handles the __disc__:<name> sentinel for discovered entries', () => {
