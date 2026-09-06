@@ -7,14 +7,26 @@
 // the jest sandbox exhausts memory — see App.test.jsx header for the
 // same constraint).
 //
-// [Round-30] Adds three new contracts for the typeahead picker:
+// [Round-30] Adds three new contracts for the picker:
 //   - The page calls api.getProjects with scope: 'assigned' (the new
 //     employee-narrowed scope, not the default ?scope=mine).
-//   - The page imports + uses api.resolveProject so an employee can
-//     type a fresh name and have it created.
-//   - The page renders a <input type="search"> typeahead, NOT a
-//     static <select>. The old <select id="drawings-browse-project">
-//     is gone.
+//   - The page imports + uses api.resolveProject for inline create.
+//   - The page renders a <input type="search"> typeahead (replaced in
+//     Round-32 by a real <select>; the typeahead-only contracts are
+//     gone — see "Round-32: <select> dropdown contracts" below).
+//
+// [Round-32] Reverts the typeahead back to a <select> dropdown at the
+// user's request — they found the typeahead hard to scan, and the
+// picker only ever holds a small employee-scoped list. The new
+// contracts pin:
+//   - The page renders a <select id="drawings-browse-project"> (the
+//     typeahead <input type="search"> is gone).
+//   - The select contains a sentinel "+ Create new project…" option
+//     that triggers an inline name input + Create/Cancel pair.
+//   - The inline form submits via api.resolveProject(name, accessToken)
+//     and adds the resolved project to the dropdown on success.
+//   - The debounce + TDZ contracts from the typeahead are gone (no
+//     query state, no debounced URL ?q=).
 
 import { readFileSync } from 'fs';
 import { resolve as resolvePath } from 'path';
@@ -91,23 +103,7 @@ describe('N3-employee — Drawing Register employee-facing surface', () => {
     expect(detailCodeOnly).not.toMatch(/>\s*Archive\s*</);
   });
 
-  // ── Round-30: typeahead picker contracts ──────────────────────────────
-
-  test('DrawingsBrowse uses a <input type="search"> typeahead, NOT a static <select>', () => {
-    // The previous picker was a <select id="drawings-browse-project">;
-    // round-30 replaced it with a typeahead input. Pin both shapes:
-    //   1. The new <input type="search"> with id="drawings-browse-project"
-    //      is present.
-    //   2. The old <select> tag is gone (filter comments to avoid
-    //      header-comment false positives).
-    expect(browseSrc).toMatch(/<input[\s\S]{0,200}id=["']drawings-browse-project["']/);
-    expect(browseSrc).toMatch(/type=["']search["']/);
-    const browseCodeOnly = browseSrc
-      .split('\n')
-      .filter((line) => !/^\s*\/\//.test(line))
-      .join('\n');
-    expect(browseCodeOnly).not.toMatch(/<select/);
-  });
+  // ── Round-30: picker scope + resolveProject contracts ─────────────────
 
   test('DrawingsBrowse calls api.getProjects with the assigned scope', () => {
     // The picker narrows to projects the employee has personally
@@ -119,39 +115,60 @@ describe('N3-employee — Drawing Register employee-facing surface', () => {
     );
   });
 
-  test('DrawingsBrowse imports + uses api.resolveProject for typed-name resolution', () => {
-    // The typeahead lets an employee type a project name that doesn't
-    // exist yet and have it created via POST /api/projects/resolve.
-    // Pin both the import AND the call site.
+  test('DrawingsBrowse imports + uses api.resolveProject for the inline create-project form', () => {
+    // The "+ Create new project…" affordance calls api.resolveProject
+    // so an employee can spin up a fresh project on the spot without
+    // bouncing to an admin. Pin both the import AND the call site.
     // Import: `api.resolveProject` is destructured from the api module.
     expect(browseSrc).toMatch(/resolveProject/);
-    // Call site: handleResolveTyped awaits api.resolveProject(name, accessToken).
+    // Call site: handleCreateProject awaits api.resolveProject(name, accessToken).
     expect(browseSrc).toMatch(
       /api\.resolveProject\(\s*name\s*,\s*accessToken\s*\)/,
     );
   });
 
-  test('DrawingsBrowse debounces the typed query into the URL (?q=)', () => {
-    // The user requested shareable typeahead state — pin the debounce
-    // + URL-sync code so a future refactor doesn't accidentally drop it.
-    expect(browseSrc).toMatch(/sp\.set\(\s*['"]q['"]\s*,\s*query\s*\)/);
-    // The 200ms timeout is hard-coded in the implementation; pin the
-    // literal so silent drift doesn't accumulate.
-    expect(browseSrc).toMatch(/,\s*200\s*\)/);
+  // ── Round-32: <select> dropdown picker contracts ──────────────────────
+  //
+  // Replaces the round-30 typeahead. The new picker is a real <select>
+  // because the assigned scope only ever holds a small handful of project
+  // names — a typeahead was overkill. The "create new project" affordance
+  // is a sentinel <option value="__create__"> that flips the picker into
+  // an inline name input + Create/Cancel pair.
+
+  test('DrawingsBrowse uses a <select> dropdown for the project picker (no typeahead)', () => {
+    // The round-32 picker is a <select id="drawings-browse-project">.
+    // The round-30 typeahead was an <input type="search"> with the same
+    // id; pin both halves so a future refactor can't silently flip back.
+    expect(browseSrc).toMatch(/<select[\s\S]{0,400}id=["']drawings-browse-project["']/);
+    // The typeahead input must be gone (filter comments to avoid false
+    // positives from the file-header paragraph that describes the
+    // round-30 typeahead in past tense).
+    const browseCodeOnly = browseSrc
+      .split('\n')
+      .filter((line) => !/^\s*\/\//.test(line))
+      .join('\n');
+    expect(browseCodeOnly).not.toMatch(/<input[\s\S]{0,200}id=["']drawings-browse-project["']/);
+    expect(browseCodeOnly).not.toMatch(/type=["']search["']/);
   });
 
-  test('DrawingsBrowse declares `filtered` BEFORE the keyboard handler (TDZ guard)', () => {
-    // Regression guard for the round-30 TDZ crash. The
-    // handleQueryKeyDown useCallback had `filtered` in its dependency
-    // array, but `filtered` was declared further down the function body.
-    // useCallback evaluates its dep array at call time → "Cannot access
-    // 'filtered' before initialization" → ErrorBoundary on Render.
-    // The fix hoists the `const filtered = ...` line above the handler.
-    const filteredIdx = browseSrc.search(/const\s+filtered\s*=/);
-    const keyDownIdx = browseSrc.search(/handleQueryKeyDown\s*=\s*useCallback/);
-    expect(filteredIdx).toBeGreaterThan(0);
-    expect(keyDownIdx).toBeGreaterThan(0);
-    expect(filteredIdx).toBeLessThan(keyDownIdx);
+  test('DrawingsBrowse <select> has a + Create new project… sentinel option', () => {
+    // The sentinel value="__create__" triggers the inline create-mode
+    // form; pin both the value and the visible label so a future
+    // refactor can't silently drop the affordance.
+    expect(browseSrc).toMatch(/value=["']__create__["']/);
+    expect(browseSrc).toMatch(/\+\s*Create new project/);
+  });
+
+  test('DrawingsBrowse inline create form: name input + Create + Cancel', () => {
+    // createMode renders an inline name input + Create/Cancel pair.
+    // Pin the affordance shapes:
+    //   - the new-project-name input id,
+    //   - the Enter key handler that fires handleCreateProject,
+    //   - a Create button that calls handleCreateProject,
+    //   - a Cancel button that flips createMode off.
+    expect(browseSrc).toMatch(/id=["']drawings-browse-new-project["']/);
+    expect(browseSrc).toMatch(/handleCreateProject\(\)/);
+    expect(browseSrc).toMatch(/setCreateMode\(false\)/);
   });
 
   // ── Round-31: "+ Add drawing" UX contracts ────────────────────────────
@@ -188,14 +205,15 @@ describe('N3-employee — Drawing Register employee-facing surface', () => {
 
   test('DrawingsBrowse mounts DrawingFormModal with the correct props (projects + initialProjectId + onSave)', () => {
     // The modal must receive:
-    //   - projects = allProjects (the merged list — curated + extra from
-    //     resolveProject). Passing projects=projects would lose the
-    //     freshly-resolved project for the rest of the session.
+    //   - projects = projects (the curated list + any project the
+    //     employee just created via handleCreateProject's
+    //     setProjects([...prev, proj])). Passing a snapshot would lose
+    //     the freshly-resolved project for the rest of the session.
     //   - initialProjectId = projectId (locks the dropdown to the URL
     //     ?projectId= so the engineer can't change it).
     //   - onSave = handleSave (the function that calls createDrawing +
     //     refreshes).
-    expect(browseSrc).toMatch(/projects=\{allProjects\}/);
+    expect(browseSrc).toMatch(/projects=\{projects\}/);
     expect(browseSrc).toMatch(/initialProjectId=\{projectId\}/);
     expect(browseSrc).toMatch(/onSave=\{handleSave\}/);
   });

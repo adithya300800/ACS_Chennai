@@ -8,35 +8,32 @@
 // at /portal/admin/drawings — this page is the lightweight
 // browse/preview surface for field engineers.
 //
-// [Round-30] Project picker changed from a static <select> to a
-// typeahead input. Two reasons:
-//   1. Scope narrowing — the picker now reads /api/projects?scope=assigned
-//      so a field engineer only sees projects they've personally touched
-//      (filed a DPR/Inspection/BoqItem/Variation/Drawing against) or
-//      created. The previous default `?scope=mine` returned the full
-//      org-wide curated list, exposing admin test rigs / contracts the
-//      employee has no business knowing about.
-//   2. Typed-name entry — the input lets the employee type a project
-//      name to find it, and resolves unknown names via the existing
-//      /api/projects/resolve endpoint (same auto-discovery flow
-//      DprSubmit/InspectionSubmit already use). If the typed name
-//      doesn't exist yet, a new Project row is created with
-//      createdById=req.employeeId, so it stays in their picker on next
-//      load (the assigned scope includes createdById matches).
+// [Round-30] Project picker narrowed to /api/projects?scope=assigned
+// (the employee's touched set + their created set) instead of the
+// org-wide `?scope=mine`. Originally rendered as a typeahead input so
+// employees could type a name and resolve new projects inline.
+//
+// [Round-32] Reverted the typeahead to a real <select> dropdown at
+// the user's request — they found the typeahead hard to scan, and
+// the picker only ever holds a small employee-scoped list (a handful
+// of project names at most). The "create new project" affordance is
+// now a sentinel <option value="__create__"> at the bottom of the
+// dropdown; picking it swaps the picker for an inline name input
+// + Create / Cancel pair that calls the same /api/projects/resolve
+// endpoint the old typeahead used. The select stays visible (disabled)
+// while in create-mode so the user can always see where they are.
 //
 // URL shape:
 //   ?projectId=<uuid>    selected project (existing — still honored for
 //                        deep links from ProjectDetail's Drawings tab)
-//   ?q=<typed query>     shareable search state (debounced 200ms)
+//   (no ?q= — the typeahead's URL state is gone with the input)
 //
 // Differences from DrawingsAdmin:
 //   - No "Supersede" / "Archive" per-card actions (curation stays admin-only).
 //   - Status filter is locked to ACTIVE (employees don't curate history).
 //   - Project picker reads from /api/projects?scope=assigned (curated
-//     list narrowed to the employee's touched set + their created set).
-//   - No static <select> — typeahead input instead, with a "Find or
-//     create '<name>'" affordance that surfaces when the typed name
-//     isn't an exact match for any existing project.
+//     list narrowed to the employee's touched set + their created set,
+//     plus a "+ Create new project…" sentinel option at the bottom).
 //
 // [Round-31] "+ Add drawing" CTA on the page header + empty state.
 // POST /api/drawings was loosened to requireAuth so a field engineer can
@@ -49,7 +46,7 @@
 // requireAuth (all employees) so no client-side gating is needed beyond
 // the ProtectedRoute wrapper.
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
@@ -88,19 +85,15 @@ export default function DrawingsBrowse() {
   const urlProjectId = searchParams.get('projectId') || '';
   const [projectId, setProjectId] = useState(urlProjectId);
 
-  // ── Typeahead state ───────────────────────────────────────────────────
-  // `query` mirrors the input. We debounce 200ms before writing to the
-  // URL so the history doesn't churn while the user is typing.
-  const urlQuery = searchParams.get('q') || '';
-  const [query, setQuery] = useState(urlQuery);
+  // ── Create-new-project state (Round-32) ────────────────────────────────
+  // `createMode` flips when the user picks the "+ Create new project…"
+  // sentinel option; an inline name input + Create/Cancel pair renders
+  // below the (disabled) select. `resolveBusy` gates the create button +
+  // the input while the POST /api/projects/resolve round-trip is in flight.
+  const [createMode, setCreateMode] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
   const [resolveBusy, setResolveBusy] = useState(false);
   const [resolveError, setResolveError] = useState('');
-  // Projects added by resolveProject that weren't in the initial
-  // /scope=assigned fetch (e.g. brand-new projects the employee just
-  // created). Keep them in local state so the picker remembers them
-  // for the rest of the session.
-  const [extraProjects, setExtraProjects] = useState([]);
-  const queryDebounceRef = useRef(null);
 
   const [drawings, setDrawings] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -148,74 +141,39 @@ export default function DrawingsBrowse() {
     return () => { cancelled = true; };
   }, [accessToken, urlProjectId]);
 
-  // Sync the typed query to the URL (debounced 200ms) so the picker
-  // state is shareable like ?projectId= already is.
-  useEffect(() => {
-    if (queryDebounceRef.current) clearTimeout(queryDebounceRef.current);
-    queryDebounceRef.current = setTimeout(() => {
-      const sp = new URLSearchParams(searchParams);
-      if (query) sp.set('q', query); else sp.delete('q');
-      const currentQ = searchParams.get('q') || '';
-      if (currentQ !== query) {
-        setSearchParams(sp, { replace: true });
-      }
-    }, 200);
-    return () => {
-      if (queryDebounceRef.current) clearTimeout(queryDebounceRef.current);
-    };
-  }, [query, searchParams, setSearchParams]);
-
-  // ── Filter logic — typeahead ─────────────────────────────────────────
-  // Hoisted BEFORE the keyboard handler so its dependency array
-  // ([query, filtered, ...]) can read `filtered` at useCallback-call
-  // time. (Earlier order put the handler first and crashed at render
-  // with a temporal-dead-zone error: "Cannot access 'filtered' before
-  // initialization".)
-  const allProjects = [...projects, ...extraProjects];
-  const trimmed = query.trim();
-  const filtered = trimmed.length > 0
-    ? allProjects.filter((p) => {
-        const name = (p.name || '').toLowerCase();
-        const code = (p.code || '').toLowerCase();
-        const q = trimmed.toLowerCase();
-        return name.includes(q) || code.includes(q);
-      })
-    : allProjects;
-  const exactMatch = trimmed.length > 0 && allProjects.some(
-    (p) => (p.name || '').toLowerCase() === trimmed.toLowerCase()
-  );
-
-  // ── Selection handler — click on a typeahead result ──────────────────
+  // ── Selection handler — <select> change ───────────────────────────────
+  // Drives both `projectId` (local state) and the URL ?projectId= so
+  // ProjectDetail's Drawings tab and shared links still work.
   const handleSelectProject = useCallback((next) => {
     setProjectId(next);
-    setQuery('');
-    setResolveError('');
     const sp = new URLSearchParams(searchParams);
     if (next) sp.set('projectId', next); else sp.delete('projectId');
-    sp.delete('q');
     setSearchParams(sp, { replace: true });
+    // Picking a real project always closes any open create-mode form.
+    setCreateMode(false);
+    setNewProjectName('');
+    setResolveError('');
   }, [searchParams, setSearchParams]);
 
-  // ── Resolve a typed name to a real Project row ───────────────────────
+  // ── Create a new project from the inline form ────────────────────────
   // Calls POST /api/projects/resolve: returns the existing Project if
   // the name matches (case-insensitive), or creates one with
-  // createdById=req.employeeId. 409 PROJECT_INACTIVE if archived.
-  const handleResolveTyped = useCallback(async () => {
-    const name = query.trim();
+  // createdById=req.employeeId. 409 PROJECT_INACTIVE if the typed name
+  // matches an archived project.
+  const handleCreateProject = useCallback(async () => {
+    const name = newProjectName.trim();
     if (!name || resolveBusy) return;
     setResolveBusy(true);
     setResolveError('');
     try {
       const proj = await api.resolveProject(name, accessToken);
-      // Add to local state so the picker remembers this project for
-      // the rest of the session (the next /scope=assigned fetch
-      // won't return it until the employee files a child record
-      // against it — but Project.createdById=req.employeeId will
-      // include it from then on).
-      setExtraProjects((prev) => {
-        if (prev.some((p) => p.id === proj.id)) return prev;
-        return [...prev, proj];
-      });
+      // Add to the projects list so it shows up in the dropdown for the
+      // rest of the session — the next /scope=assigned fetch won't
+      // return it until the employee files a child record against it,
+      // but Project.createdById=req.employeeId includes it from then on.
+      setProjects((prev) => (prev.some((p) => p.id === proj.id) ? prev : [...prev, proj]));
+      setCreateMode(false);
+      setNewProjectName('');
       handleSelectProject(proj.id);
     } catch (err) {
       const code = err?.code;
@@ -227,33 +185,7 @@ export default function DrawingsBrowse() {
     } finally {
       setResolveBusy(false);
     }
-  }, [query, resolveBusy, accessToken, handleSelectProject]);
-
-  // ── Keyboard handler on the input ────────────────────────────────────
-  // Enter: pick the first filtered match, OR fall back to resolve.
-  // Escape: clear the query.
-  const handleQueryKeyDown = useCallback((e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      const trimmed = query.trim();
-      if (!trimmed) return;
-      const matches = filtered;
-      if (matches.length > 0) {
-        handleSelectProject(matches[0].id);
-      } else {
-        handleResolveTyped();
-      }
-    } else if (e.key === 'Escape') {
-      setQuery('');
-      setResolveError('');
-    }
-  }, [query, filtered, handleSelectProject, handleResolveTyped]);
-
-  // Show the results panel whenever the user is typing OR when they
-  // have no assigned projects yet (so we can render the empty-state
-  // hint inside the panel itself).
-  const showPanel = trimmed.length > 0
-    || (!projectsLoading && allProjects.length === 0 && !projectsError);
+  }, [newProjectName, resolveBusy, accessToken, handleSelectProject]);
 
   // Fetch drawings (cursor-paginated). ACTIVE-only — employees browse
   // the active set, not the supersede history.
@@ -310,7 +242,7 @@ export default function DrawingsBrowse() {
     }
   }, [accessToken, fetchDrawings, toast]);
 
-  const selectedProject = allProjects.find((p) => p.id === projectId);
+  const selectedProject = projects.find((p) => p.id === projectId);
 
   return (
     <div className="dpr-page">
@@ -323,9 +255,9 @@ export default function DrawingsBrowse() {
           />
           <h1 className="dpr-page-title">My Drawings</h1>
           <p style={{ color: 'var(--steel)', fontSize: '0.9rem', margin: 0 }}>
-            Active drawing revisions for your projects. Type a project
-            name to find or create one; click a card to preview the PDF
-            and see the supersedes chain.
+            Active drawing revisions for your projects. Pick a project
+            from your assigned list — or create a new one — then click a
+            card to preview the PDF and see the supersedes chain.
           </p>
         </div>
         {/* [Round-31] + Add drawing. Disabled when no project is picked
@@ -345,35 +277,56 @@ export default function DrawingsBrowse() {
         </button>
       </div>
 
-      {/* Filter toolbar — typeahead picker, employee-scoped */}
+      {/* Filter toolbar — <select> dropdown picker, employee-scoped.
+          Round-32 reverted the round-30 typeahead back to a real <select>
+          + an inline "create new project" affordance for scannability —
+          the assigned scope only ever holds a small handful of project
+          names. Picking the sentinel "__create__" option swaps the picker
+          for an inline name input + Create / Cancel pair (rendered to the
+          right of the disabled select so the user always sees where they
+          are in the flow). The select stays disabled while in create
+          mode so the user can't double-fire the resolver. */}
       <div className="dpr-card" style={{ marginBottom: '1rem' }}>
-        <div className="form-row" style={{ alignItems: 'flex-end' }}>
-          <div className="form-group" style={{ flex: 2, position: 'relative' }}>
+        <div className="form-row" style={{ alignItems: 'flex-start' }}>
+          <div className="form-group" style={{ flex: 2 }}>
             <label htmlFor="drawings-browse-project">Project *</label>
-            <input
+            <select
               id="drawings-browse-project"
-              type="search"
+              name="projectId"
               className="form-input"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder={
-                projectsLoading
-                  ? 'Finding projects…'
-                  : (selectedProject ? selectedProject.name : 'Type a project name…')
-              }
-              value={query}
-              onChange={(e) => { setQuery(e.target.value); setResolveError(''); }}
-              onKeyDown={handleQueryKeyDown}
+              value={createMode ? '__create__' : (projectId || '')}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === '__create__') {
+                  setCreateMode(true);
+                  setNewProjectName('');
+                  setResolveError('');
+                } else {
+                  handleSelectProject(val);
+                }
+              }}
               disabled={projectsLoading || resolveBusy}
               aria-busy={projectsLoading || resolveBusy}
-              aria-autocomplete="list"
-              aria-expanded={showPanel}
-              aria-controls="drawings-browse-project-results"
-            />
-            {selectedProject && query === '' && (
+            >
+              <option value="">— Select project —</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}{p.code ? ` (${p.code})` : ''}
+                </option>
+              ))}
+              <option value="__create__">+ Create new project…</option>
+            </select>
+            {selectedProject && !createMode && (
               <div style={{ fontSize: '0.85rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
                 Showing drawings for: <strong style={{ color: 'var(--navy)' }}>{selectedProject.name}</strong>
                 {selectedProject.code ? ` (${selectedProject.code})` : ''}
+              </div>
+            )}
+            {!projectsLoading && projects.length === 0 && !createMode && (
+              <div style={{ fontSize: '0.85rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
+                You haven't filed a DPR, Inspection, or BoqItem against any
+                project yet. Pick <strong>+ Create new project…</strong>{' '}
+                above to start one.
               </div>
             )}
             {projectsError && (
@@ -386,87 +339,65 @@ export default function DrawingsBrowse() {
                 {resolveError}
               </div>
             )}
-            {showPanel && (
-              <ul
-                id="drawings-browse-project-results"
-                role="listbox"
-                style={{
-                  listStyle: 'none',
-                  margin: '0.25rem 0 0',
-                  padding: '0.25rem 0',
-                  border: '1px solid var(--border, #e0e0e0)',
-                  borderRadius: 4,
-                  background: 'white',
-                  maxHeight: 240,
-                  overflowY: 'auto',
-                  position: 'absolute',
-                  zIndex: 10,
-                  width: '100%',
-                  boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
-                }}
-              >
-                {projectsLoading && (
-                  <li style={{ padding: '0.5rem 0.75rem', color: 'var(--steel)', fontSize: '0.9rem' }}>
-                    Finding projects…
-                  </li>
-                )}
-                {!projectsLoading && allProjects.length === 0 && trimmed.length === 0 && (
-                  <li style={{ padding: '0.5rem 0.75rem', color: 'var(--steel)', fontSize: '0.9rem' }}>
-                    You haven't filed a DPR, Inspection, or BoqItem yet.
-                    Type a project name above — it'll be created if it
-                    doesn't exist.
-                  </li>
-                )}
-                {!projectsLoading && filtered.length === 0 && trimmed.length > 0 && (
-                  <li
-                    role="option"
-                    aria-selected="false"
-                    onClick={handleResolveTyped}
-                    style={{
-                      padding: '0.5rem 0.75rem',
-                      cursor: resolveBusy ? 'wait' : 'pointer',
-                      background: 'var(--soft-bg, #f4f6f9)',
-                      fontSize: '0.9rem',
-                    }}
-                  >
-                    {resolveBusy ? 'Finding / creating…' : `Find or create "${trimmed}"`}
-                  </li>
-                )}
-                {filtered.map((p) => (
-                  <li
-                    key={p.id}
-                    role="option"
-                    aria-selected={p.id === projectId}
-                    onClick={() => handleSelectProject(p.id)}
-                    style={{
-                      padding: '0.5rem 0.75rem',
-                      cursor: 'pointer',
-                      background: p.id === projectId ? 'var(--soft-bg, #f4f6f9)' : 'transparent',
-                      fontSize: '0.9rem',
-                    }}
-                  >
-                    {p.name}{p.code ? ` (${p.code})` : ''}
-                  </li>
-                ))}
-                {!exactMatch && trimmed.length > 0 && filtered.length > 0 && (
-                  <li
-                    role="option"
-                    aria-selected="false"
-                    onClick={handleResolveTyped}
-                    style={{
-                      padding: '0.5rem 0.75rem',
-                      cursor: resolveBusy ? 'wait' : 'pointer',
-                      borderTop: '1px solid var(--border, #e0e0e0)',
-                      background: 'var(--soft-bg, #f4f6f9)',
-                      fontSize: '0.9rem',
-                    }}
-                  >
-                    {resolveBusy ? 'Finding / creating…' : `Find or create "${trimmed}"`}
-                  </li>
-                )}
-              </ul>
-            )}
           </div>
+          {createMode && (
+            <div
+              className="form-group"
+              style={{ flex: 3, display: 'flex', gap: '0.5rem', alignItems: 'flex-end', marginBottom: 0 }}
+              role="group"
+              aria-label="Create new project"
+            >
+              <div style={{ flex: 1 }}>
+                <label
+                  htmlFor="drawings-browse-new-project"
+                  style={{ fontSize: '0.8rem', color: 'var(--steel)' }}
+                >
+                  New project name
+                </label>
+                <input
+                  id="drawings-browse-new-project"
+                  type="text"
+                  className="form-input"
+                  value={newProjectName}
+                  onChange={(e) => { setNewProjectName(e.target.value); setResolveError(''); }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleCreateProject();
+                    } else if (e.key === 'Escape') {
+                      setCreateMode(false);
+                      setNewProjectName('');
+                      setResolveError('');
+                    }
+                  }}
+                  disabled={resolveBusy}
+                  placeholder="e.g. New Project Name"
+                  aria-label="New project name"
+                  autoFocus
+                />
+              </div>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                onClick={handleCreateProject}
+                disabled={resolveBusy || !newProjectName.trim()}
+              >
+                {resolveBusy ? 'Creating…' : 'Create'}
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  setCreateMode(false);
+                  setNewProjectName('');
+                  setResolveError('');
+                }}
+                disabled={resolveBusy}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -576,7 +507,7 @@ export default function DrawingsBrowse() {
         onClose={() => { if (!creating) setFormOpen(false); }}
         onSave={handleSave}
         accessToken={accessToken}
-        projects={allProjects}
+        projects={projects}
         initialProjectId={projectId}
       />
     </div>
