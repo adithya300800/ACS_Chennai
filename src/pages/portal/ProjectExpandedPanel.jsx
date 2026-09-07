@@ -1188,7 +1188,7 @@ function ReportSection({
       setUploadProgress(0);
       setUploadFile(null);
       setUploadTitle('');
-      if (toast) toast.success('Report uploaded');
+      if (toast) toast.push('Report uploaded', 'success');
       onUploaded && onUploaded();
     } catch (err) {
       setUploadPhase('idle');
@@ -1198,7 +1198,7 @@ function ReportSection({
           ? err.message
           : (err?.message || 'Upload failed');
       setUploadError(message);
-      if (toast) toast.error(message);
+      if (toast) toast.push(message, 'error');
     }
   }
 
@@ -1213,7 +1213,7 @@ function ReportSection({
       window.open(sasUrl, '_blank', 'noopener,noreferrer');
     } catch (err) {
       const message = err?.message || 'Could not open file';
-      if (toast) toast.error(message);
+      if (toast) toast.push(message, 'error');
     }
   }
 
@@ -1223,11 +1223,11 @@ function ReportSection({
     }
     try {
       await api.deleteProjectAttachment(projectKey, att.id, accessToken);
-      if (toast) toast.success('Report deleted');
+      if (toast) toast.push('Report deleted', 'success');
       onDeleted && onDeleted();
     } catch (err) {
       const message = err?.message || 'Could not delete report';
-      if (toast) toast.error(message);
+      if (toast) toast.push(message, 'error');
     }
   }
 
