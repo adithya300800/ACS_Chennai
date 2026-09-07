@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -112,6 +112,12 @@ export default function DprList() {
   const toast = useToast();
   const navigate = useNavigate();
   const isAdmin = !!employee?.isAdmin;
+  // DR-016 mirror: filter state lives in the URL so refresh / back /
+  // share-link / email-CTA all land on the same filtered view. The URL
+  // is the single source of truth — `filter` is initialized from URL
+  // params on every change, and writing a filter pushes it back to
+  // the URL.
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [dprs, setDprs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -132,15 +138,79 @@ export default function DprList() {
   // `from`/`to` on the backend (400 MONTH_AND_RANGE_CONFLICT); when
   // `month` is set we send it instead of the manual range. Setting
   // `month` to '' opts into "all-time" (rare for employees). The Clear
-  // filters action snaps month back to the current month — same as
-  // DprAll's "snap-to-current" pattern.
-  const [filter, setFilter] = useState({
+  // filters action snaps month to '' (All-time) so admins can reach the
+  // unbounded view; "Current month" is a quick reset shortcut back to
+  // the default.
+  //
+  // URL sync: keys are ['status', 'myOnly', 'from', 'to', 'month']. On
+  // read, `myOnly` is parsed via `v === 'true'` (URL is string-only);
+  // on write, `myOnly` is stringified via String(v) so the URL carries
+  // 'true' / 'false'. The implicit current-month default is normalized
+  // to '' on both sides so a default-value filter never triggers a URL
+  // write on cold load.
+  const FILTER_PARAM_KEYS = ['status', 'myOnly', 'from', 'to', 'month'];
+  const defaultFilter = () => ({
     status: '',
     myOnly: true,
     from: '',
     to: '',
     month: getCurrentIstMonth(),
   });
+  const [filter, setFilter] = useState(() => {
+    const initial = defaultFilter();
+    for (const k of FILTER_PARAM_KEYS) {
+      const v = searchParams.get(k);
+      if (v === null) continue;
+      initial[k] = (k === 'myOnly') ? (v === 'true') : v;
+    }
+    return initial;
+  });
+  // URL -> filter sync (handles back/forward + share links). We only
+  // re-derive when a key that we own changed in the URL — this avoids
+  // an infinite loop with the filter->URL sync below and keeps any
+  // unrelated query params (e.g. deep-link `?id=`) untouched.
+  const filterFromUrl = FILTER_PARAM_KEYS.some((k) => searchParams.has(k));
+  useEffect(() => {
+    if (!filterFromUrl) return;
+    const next = defaultFilter();
+    for (const k of FILTER_PARAM_KEYS) {
+      const v = searchParams.get(k);
+      if (v === null) continue;
+      next[k] = (k === 'myOnly') ? (v === 'true') : v;
+    }
+    setFilter(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterFromUrl]);
+  // Filter -> URL sync (handles refresh + share-link). Only fires when
+  // filter actually diverges from the URL — prevents an infinite loop
+  // with the URL->filter sync above. The "value" computed for
+  // comparison normalizes the implicit current-month default to '' and
+  // stringifies booleans so a default-value filter looks identical to
+  // "no URL param" and doesn't trigger an unnecessary URL write on
+  // cold load.
+  const currentMonth = getCurrentIstMonth();
+  const normalize = (k, v) => {
+    if (k === 'month' && v === currentMonth) return '';
+    if (k === 'myOnly') return v ? 'true' : '';
+    return v == null ? '' : String(v);
+  };
+  const filterKey = FILTER_PARAM_KEYS.map((k) => `${k}=${normalize(k, filter[k])}`).join('|');
+  useEffect(() => {
+    const current = FILTER_PARAM_KEYS.map((k) => `${k}=${normalize(k, searchParams.get(k))}`).join('|');
+    if (current === filterKey) return;
+    const next = new URLSearchParams(searchParams);
+    for (const k of FILTER_PARAM_KEYS) {
+      const v = filter[k];
+      const normalized = normalize(k, v);
+      if (normalized !== '') {
+        next.set(k, normalized);
+      } else {
+        next.delete(k);
+      }
+    }
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey]);
   const [showFilters, setShowFilters] = useState(false);
   // P0 fix (round-10): clicking a row previously navigated to the same
   // route with location.state.selectedDpr — nothing read that state, so
@@ -223,7 +293,20 @@ export default function DprList() {
   }, [filter, accessToken]);
 
   const handleFilterChange = (key, value) => {
-    setFilter(f => ({ ...f, [key]: value }));
+    setFilter((f) => {
+      // R7a: backend refuses `month` combined with `from`/`to`. Clearing
+      // the date-range half when a month is picked keeps the FE honest
+      // with the wire contract — the user reselects a range explicitly
+      // if they want one. Mirror of DprAll.jsx canonical guard so both
+      // pages behave identically.
+      if (key === 'month' && value && (f.from || f.to)) {
+        return { ...f, month: value, from: '', to: '' };
+      }
+      if ((key === 'from' || key === 'to') && value && f.month) {
+        return { ...f, month: '', [key]: value };
+      }
+      return { ...f, [key]: value };
+    });
   };
 
   const handleLoadMore = () => {
@@ -379,7 +462,7 @@ export default function DprList() {
               below) always snap back to the current month. */}
           <MonthStepper
             value={filter.month}
-            onChange={(v) => setFilter((f) => ({ ...f, month: v }))}
+            onChange={(v) => handleFilterChange('month', v)}
           />
           <button className="btn btn-secondary btn-sm" onClick={() => setShowFilters(s => !s)}>
             <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 3H2l8 9.46V19l4 2V12.46z"/></svg>
@@ -452,15 +535,20 @@ export default function DprList() {
               )}
             </div>
           </div>
-          {/* Live-R7a: the reset pills also snap `month` back to the
-              current month — the header MonthStepper owns the time
-              scope on this page, so any "reset" action has to align
-              with it. "Clear filters" resets `month` to current
-              (matches DprAll's snap-to-current pattern) and clears
-              status; "All-time" is the only path that drops month
-              to '' (left to the user's discretion via a future
-              enhancement — not surfaced today). */}
-          {(filter.status || filter.from || filter.to || (filter.month && filter.month !== getCurrentIstMonth())) && (
+          {/* Live-R7a: the reset pills align the page state with the
+              header MonthStepper.
+                - "Current month" is a quick reset shortcut that snaps
+                  month back to the current IST month and clears any
+                  from/to so the bounded view returns.
+                - "Clear filters" drops month to '' (All-time) so admins
+                  can actually reach the unbounded view; status resets
+                  to ''; myOnly preserves the user's preference.
+              The pills are visible only when at least one filter
+              diverges from the default — see hasNonDefaultMyOnly below. */}
+          {(() => {
+            const hasNonDefaultMyOnly = filter.myOnly === false;
+            return (filter.status || filter.from || filter.to || (filter.month && filter.month !== getCurrentIstMonth()) || hasNonDefaultMyOnly);
+          })() && (
             <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
               <button
                 type="button"
@@ -473,7 +561,7 @@ export default function DprList() {
               <button
                 type="button"
                 className="btn btn-ghost btn-sm"
-                onClick={() => setFilter((f) => ({ ...f, status: '', from: '', to: '', month: getCurrentIstMonth() }))}
+                onClick={() => setFilter((f) => ({ ...f, status: '', from: '', to: '', month: '', myOnly: f.myOnly }))}
               >
                 Clear filters
               </button>
@@ -496,7 +584,12 @@ export default function DprList() {
           </div>
           <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", color: 'var(--navy)', marginBottom: '0.5rem' }}>No DPRs found</h3>
           <p style={{ color: 'var(--steel)', marginBottom: '1.5rem' }}>
-            {filter.status || filter.myOnly || filter.from || filter.to
+            {/* R7a: include `filter.month` (when scrolled off the current
+                month) so a user looking at a past month with zero rows
+                gets the right copy — "match your filters", not "you
+                haven't submitted any DPRs yet". */}
+            {filter.status || filter.myOnly || filter.from || filter.to ||
+             (filter.month && filter.month !== getCurrentIstMonth())
               ? 'No DPRs match your current filters.'
               : "You haven't submitted any DPRs yet."}
           </p>

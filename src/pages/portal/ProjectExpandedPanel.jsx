@@ -27,6 +27,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../../lib/api.js';
 import { formatShortDate } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
+import DrawingFormModal from '../../components/DrawingFormModal.jsx';
 
 // Status maps for the per-row badges. Mirrors DprList / InspectionList
 // so the colors match the user's existing mental model.
@@ -81,6 +82,12 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
   // section, or null. Keeps the panel tidy when one DPR is open at a
   // time (mirrors the single-accordion pattern at the project level).
   const [expandedRow, setExpandedRow] = useState({ dprs: null, inspections: null, drawings: null });
+
+  // [Round-33+] Inline "+ Add drawing" modal. DrawingFormModal pre-fills +
+  // locks the project dropdown via initialProjectId, then re-fetches the
+  // drawings sub-section on success by bumping drawingsRefreshKey.
+  const [drawingFormOpen, setDrawingFormOpen] = useState(false);
+  const [drawingsRefreshKey, setDrawingsRefreshKey] = useState(0);
 
   const projectKey = project.id || project.name;
   const isRegistered = !!project.id;
@@ -174,6 +181,26 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
 
     Promise.allSettled(tasks);
   }, [projectKey, isRegistered, projectName, accessToken]);
+
+  // [Round-33+] Re-fetch only the drawings sub-section when the user
+  // saves a new drawing via the inline "+ Add drawing" modal. We skip
+  // the initial mount (key === 0) because the loader above already
+  // fetched drawings — bumping only on user-triggered saves keeps the
+  // panel snappy and avoids double-fetching on first paint.
+  useEffect(() => {
+    if (drawingsRefreshKey === 0) return;
+    if (!isRegistered || !projectKey) return;
+    api.getDrawings({ projectId: projectKey, status: 'ACTIVE', limit: 25 }, accessToken)
+      .then((resp) => {
+        if (!mountedRef.current) return;
+        const rows = resp?.drawings || resp?.items || (Array.isArray(resp) ? resp : []);
+        setDrawings({ status: 'ready', data: rows });
+      })
+      .catch((err) => {
+        if (!mountedRef.current) return;
+        setDrawings({ status: 'error', error: err?.message || 'Failed to load' });
+      });
+  }, [drawingsRefreshKey, isRegistered, projectKey, accessToken]);
 
   const toggleSection = useCallback((id) => {
     setOpenSections((s) => ({ ...s, [id]: !s[id] }));
@@ -319,16 +346,34 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
           isOpen={openSections.drawings}
           onToggle={() => toggleSection('drawings')}
           count={counts.drawings}
-          emptyState={drawings.status === 'ready' && (drawings.data || []).length === 0}
-          emptyHint={
-            isRegistered
-              ? 'No active drawing revisions for this project yet.'
-              : 'Register this project first to start tracking drawing revisions.'
-          }
+          emptyState={false}
         >
-          <DrawingSection drawings={drawings} isRegistered={isRegistered} projectKey={projectKey} />
+          <DrawingSection
+            drawings={drawings}
+            isRegistered={isRegistered}
+            projectKey={projectKey}
+            onAddDrawing={() => setDrawingFormOpen(true)}
+          />
         </Section>
       </div>
+
+      {/* [Round-33+] Inline "+ Add drawing" modal. Project is pre-filled
+          AND locked via initialProjectId so the user can't switch it
+          inside the modal — the project context comes from the open
+          accordion card. On save we close + bump drawingsRefreshKey so
+          the focused refetch effect repopulates the drawings sub-section. */}
+      <DrawingFormModal
+        open={drawingFormOpen}
+        onClose={() => setDrawingFormOpen(false)}
+        onSave={async (payload) => {
+          await api.createDrawing(payload, accessToken);
+          setDrawingFormOpen(false);
+          setDrawingsRefreshKey((k) => k + 1);
+        }}
+        accessToken={accessToken}
+        projects={[{ id: projectKey, name: project.name || projectKey }]}
+        initialProjectId={projectKey}
+      />
     </div>
   );
 }
@@ -854,8 +899,9 @@ function InspectionBody({ i }) {
 }
 
 // Drawings — tiles link to the drawing detail page since drawings need
-// a full PDF preview surface.
-function DrawingSection({ drawings, isRegistered, projectKey }) {
+// a full PDF preview surface. The "+ Add drawing" CTA opens the inline
+// DrawingFormModal with the project pre-filled + locked.
+function DrawingSection({ drawings, isRegistered, projectKey, onAddDrawing }) {
   if (!isRegistered) {
     return (
       <div style={{ padding: '0.5rem 0', fontSize: '0.85rem', color: 'var(--steel, #64748b)' }}>
@@ -866,43 +912,68 @@ function DrawingSection({ drawings, isRegistered, projectKey }) {
   if (drawings.status === 'loading') return <LoadingHint>Loading drawings…</LoadingHint>;
   if (drawings.status === 'error') return <ErrorHint>{drawings.error}</ErrorHint>;
   const rows = drawings.data || [];
-  if (rows.length === 0) return null;
   return (
     <div style={{ display: 'grid', gap: '0.4rem', padding: '0.5rem 0' }}>
-      {rows.map((d) => (
+      {onAddDrawing && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={onAddDrawing}
+            aria-label="Add drawing"
+            title="Add a new drawing revision"
+          >
+            + Add drawing
+          </button>
+        </div>
+      )}
+      {rows.length === 0 ? (
         <div
-          key={d.id}
           style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.6rem',
-            padding: '0.5rem 0.75rem',
-            background: '#f8fafc',
-            border: '1px solid #e2e8f0',
-            borderRadius: 6,
+            padding: '0.875rem 0',
             fontSize: '0.85rem',
-            flexWrap: 'wrap',
+            color: 'var(--steel, #64748b)',
+            fontStyle: 'italic',
           }}
         >
-          <span style={{ fontWeight: 700, color: 'var(--navy, #0f172a)' }}>
-            {d.drawingNumber || '—'}
-          </span>
-          <span style={{ color: 'var(--steel, #64748b)' }}>
-            Rev {d.revision || '—'}
-          </span>
-          <span style={{ color: 'var(--navy, #0f172a)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {d.title || d.description || ''}
-          </span>
-          <StatusBadge status={d.status} map={DRAWING_STATUS_MAP} />
-          <Link
-            to={`/portal/drawings/${d.id}`}
-            className="btn btn-ghost btn-sm"
-            style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
-          >
-            View →
-          </Link>
+          No active drawing revisions for this project yet.
         </div>
-      ))}
+      ) : (
+        rows.map((d) => (
+          <div
+            key={d.id}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.6rem',
+              padding: '0.5rem 0.75rem',
+              background: '#f8fafc',
+              border: '1px solid #e2e8f0',
+              borderRadius: 6,
+              fontSize: '0.85rem',
+              flexWrap: 'wrap',
+            }}
+          >
+            <span style={{ fontWeight: 700, color: 'var(--navy, #0f172a)' }}>
+              {d.drawingNumber || '—'}
+            </span>
+            <span style={{ color: 'var(--steel, #64748b)' }}>
+              Rev {d.revision || '—'}
+            </span>
+            <span style={{ color: 'var(--navy, #0f172a)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {d.title || d.description || ''}
+            </span>
+            <StatusBadge status={d.status} map={DRAWING_STATUS_MAP} />
+            <Link
+              to={`/portal/drawings/${d.id}`}
+              className="btn btn-ghost btn-sm"
+              style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+            >
+              View →
+            </Link>
+          </div>
+        ))
+      )}
     </div>
   );
 }
