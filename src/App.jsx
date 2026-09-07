@@ -100,6 +100,11 @@ const ReportsAdmin = React.lazy(() => import('./pages/admin/ReportsAdmin.jsx'));
 // on every route, so a 403 here means the JWT is stale or the demoted-
 // admin claim needs refreshing (round-20 / DR-005).
 const BillingCertificationsAdmin = React.lazy(() => import('./pages/admin/BillingCertificationsAdmin.jsx'));
+// R37.1: Employee-facing read-only view of the same COP register,
+// scoped via ?scope=assigned to projects the employee has personal
+// context on (filed DPR/Inspection/BOQ/VO/Drawing). Mounted at
+// /portal/certifications alongside the other "My X" reports.
+const MyCertifications = React.lazy(() => import('./pages/portal/MyCertifications.jsx'));
 // N3-employee: read-only employee browse surface for the same drawing
 // register. The list page is filtered to ACTIVE only; the detail page
 // renders the PDF + chain without the Edit / Supersede / Archive
@@ -215,6 +220,14 @@ function App() {
               before-param ordering needed here since the path takes no
               `:id` segment. */}
           <Route path="admin/billing-certifications" element={<BillingCertificationsAdmin />} />
+          {/* R37.1: Employee read-only mirror of the same register, scoped
+              via ?scope=assigned. Sits at /portal/certifications so the
+              My Reports sidebar entry has a stable hash. No admin gate
+              at the route level — the backend's read endpoints are
+              requireAuth + ?scope=assigned; the write endpoints
+              (POST/PATCH/DELETE/certify/dispute) stay requireFreshAdmin
+              server-side. */}
+          <Route path="certifications" element={<MyCertifications />} />
           {/* N3-employee: read-only employee browse of the same drawing
               register. ACTIVE-only list + chain + PDF preview, no curation
               actions. Same literal-before-param ordering lesson. */}

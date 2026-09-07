@@ -90,6 +90,13 @@ function buildApp({
   adminIsAdmin = true,
   userIsAdmin = false,
   employeeExists = true,
+  // ?scope=assigned derivation — what projects does this user have
+  // personal context on (filed DPR/Inspection/BOQ item/VO/Drawing)?
+  // Default = empty array (admin sees everything, no narrowing).
+  // R37.1 employee tests pass `{ dpr: [PROJECT_A] }` etc. to simulate a
+  // site engineer assigned to one project. Mirrors the R30 projects.js
+  // ?scope=assigned union of audit columns.
+  assignment = { dpr: [], inspection: [], boq: [], variation: [], drawing: [] },
 } = {}) {
   const app = express();
   app.use(express.json());
@@ -98,6 +105,27 @@ function buildApp({
   const projectRows = new Map();
   projectRows.set(PROJECT_A, { id: PROJECT_A, name: 'Alpha Site', code: 'ALPHA', isActive: true });
   projectRows.set(PROJECT_B, { id: PROJECT_B, name: 'Bravo Site', code: 'BRAVO', isActive: true });
+
+  // R37.1: build a fast look-up the route's `getAssignedProjectIds`
+  // helper can hit. Each model exposes `findMany({ where: { submittedById,
+  // ... }, select: { projectId } })`. We map the per-model "field the
+  // route uses" (submittedById / createdById / raisedById / issuedById)
+  // to whatever seed the test provides.
+  const buildAssignedScopeFindMany = (rows) => jest.fn(async ({ where }) => {
+    if (!where || !where.submittedById && !where.createdById && !where.raisedById && !where.issuedById) {
+      return [];
+    }
+    const empId = where.submittedById || where.createdById || where.raisedById || where.issuedById;
+    if (empId !== USER_ID) return [];
+    // Tests may pass `assignment: { dpr: [...] }` and omit the other
+    // model keys — those come back as undefined. Guard with `|| []` so
+    // the union survives a partial seed instead of throwing a TypeError
+    // that gets swallowed by the route's .catch(() => []) and silently
+    // yields an empty scope.
+    return (rows || [])
+      .filter((r) => r.projectId != null)
+      .map((r) => ({ projectId: r.projectId }));
+  });
 
   const prisma = {
     project: {
@@ -110,11 +138,38 @@ function buildApp({
         return ids.map((id) => projectRows.get(id)).filter(Boolean);
       }),
     },
+    // R37.1: the five audit-column sources the route's
+    // getAssignedProjectIds() union queries against. The default
+    // `assignment` is empty; tests pass `{ dpr: [{ projectId: ... }] }`
+    // etc. to seed "this user has filed against project X". submittedById
+    // is the audit column for DPR/Inspection; createdById for BOQ;
+    // raisedById for VariationOrder; issuedById for Drawing.
+    dPR: {
+      findMany: buildAssignedScopeFindMany(assignment.dpr),
+    },
+    inspectionRecord: {
+      findMany: buildAssignedScopeFindMany(assignment.inspection),
+    },
+    boqItem: {
+      findMany: buildAssignedScopeFindMany(assignment.boq),
+    },
+    variationOrder: {
+      findMany: buildAssignedScopeFindMany(assignment.variation),
+    },
+    drawing: {
+      findMany: buildAssignedScopeFindMany(assignment.drawing),
+    },
     billingCertification: {
       findMany: jest.fn(async ({ where = {}, orderBy, take, include } = {}) => {
         let rows = Array.from(certRows.values()).filter((r) => {
           if (where.deletedAt === null && r.deletedAt) return false;
-          if (where.projectId && r.projectId !== where.projectId) return false;
+          // `where.projectId` may be a plain UUID string OR
+          // `{ in: [...] }` (when R37.1's ?scope=assigned narrows the
+          // list to the requesting employee's assigned project set).
+          if (where.projectId) {
+            if (typeof where.projectId === 'string' && r.projectId !== where.projectId) return false;
+            if (where.projectId.in && !where.projectId.in.includes(r.projectId)) return false;
+          }
           if (where.status && r.status !== where.status) return false;
           if (where.contractorName?.equals &&
               typeof r.contractorName === 'string' &&
@@ -194,7 +249,12 @@ function buildApp({
       count: jest.fn(async ({ where = {} } = {}) => {
         return Array.from(certRows.values()).filter((r) => {
           if (where.deletedAt === null && r.deletedAt) return false;
-          if (where.projectId && r.projectId !== where.projectId) return false;
+          // Mirror the findMany `projectId` shape handling — string OR
+          // `{ in: [...] }` for the R37.1 ?scope=assigned narrowing.
+          if (where.projectId) {
+            if (typeof where.projectId === 'string' && r.projectId !== where.projectId) return false;
+            if (where.projectId.in && !where.projectId.in.includes(r.projectId)) return false;
+          }
           if (where.status && r.status !== where.status) return false;
           return true;
         }).length;
@@ -202,7 +262,10 @@ function buildApp({
       groupBy: jest.fn(async ({ where = {}, by, _count, _sum } = {}) => {
         let rows = Array.from(certRows.values()).filter((r) => {
           if (where.deletedAt === null && r.deletedAt) return false;
-          if (where.projectId && r.projectId !== where.projectId) return false;
+          if (where.projectId) {
+            if (typeof where.projectId === 'string' && r.projectId !== where.projectId) return false;
+            if (where.projectId.in && !where.projectId.in.includes(r.projectId)) return false;
+          }
           if (where.billDate) {
             const { gte, lte } = where.billDate;
             const ts = r.billDate instanceof Date ? r.billDate.getTime() : new Date(r.billDate).getTime();
@@ -328,15 +391,30 @@ describe('R37 — Billing Certifications: auth gates', () => {
     expect(res.status).toBe(403);
   });
 
-  it('3. requireFreshAdmin re-reads isAdmin — stale-JWT bypass rejected', async () => {
+  it('3. requireFreshAdmin re-reads isAdmin — stale-JWT bypass rejected on writes', async () => {
     // The JWT says isAdmin:true but the DB row says isAdmin:false. The
-    // route's requireFreshAdmin gate re-reads Employee.isAdmin from the
-    // DB on every request, so the stale claim can't carry forward
-    // (round-20 / DR-005 invariant).
+    // write handlers (POST/PATCH/DELETE/certify/dispute) still mount
+    // requireFreshAdmin, which re-reads Employee.isAdmin from the DB on
+    // every request — so the stale claim can't carry forward
+    // (round-20 / DR-005 invariant). The stale admin gets 403 on their
+    // very next mutating request.
+    //
+    // R37.1: GET handlers were loosened to requireAuth-only so employees
+    // can read their assigned projects' COPs. This test now points at a
+    // write endpoint to verify the fresh-admin gate still applies where
+    // it matters (mutations).
     const { app } = buildApp({ adminIsAdmin: false });
     const res = await request(app)
-      .get('/api/billing-certifications')
-      .set('Authorization', adminJwt());
+      .post('/api/billing-certifications')
+      .set('Authorization', adminJwt())
+      .send({
+        projectId: PROJECT_A,
+        contractorName: 'X',
+        billNumber: 'RAB-STALE-01',
+        billDate: '2026-09-05',
+        claimedAmount: 1,
+        certifiedAmount: 1,
+      });
     expect(res.status).toBe(403);
   });
 });
@@ -580,5 +658,207 @@ describe('R37 — Billing Certifications: soft-delete + reads', () => {
     expect(res.body.project.id).toBe(PROJECT_A);
     expect(res.body.recordedBy).toBeTruthy();
     expect(res.body.certifiedBy.id).toBe(ADMIN_ID);
+  });
+});
+
+// ─── R37.1 — Billing Certifications: employee read access ──────────────────
+// Read endpoints (GET /, GET /:id, GET /:id/read-sas, GET /aggregates) are
+// open to any authenticated employee. The list + aggregates honour
+// ?scope=assigned so an employee only sees COPs against projects they
+// have personal context on (filed DPR/Inspection/BOQ/VO/Drawing). Detail +
+// read-sas auto-scope on the row's projectId — an employee can't access a
+// COP for a project they're not on, and the response is 404 (not 403)
+// so we don't leak the row's existence.
+//
+// Mutations (POST/PATCH/DELETE/certify/dispute) still mount
+// requireFreshAdmin — site engineers can READ but never WRITE the COP
+// register.
+describe('R37.1 — Billing Certifications: employee read access', () => {
+  it('19. employee GET list with ?scope=assigned returns only assigned projects\' COPs', async () => {
+    const { app, certRows } = buildApp({
+      userIsAdmin: false,
+      // Site engineer has filed one DPR on PROJECT_A and one BOQ item on
+      // PROJECT_A — assignment union includes PROJECT_A only.
+      assignment: { dpr: [{ projectId: PROJECT_A }], boq: [{ projectId: PROJECT_A }] },
+    });
+    certRows.set(CERT_A1, seed({ id: CERT_A1, projectId: PROJECT_A }));
+    certRows.set(CERT_B1, seed({
+      id: CERT_B1, projectId: PROJECT_B,
+      billDate: new Date('2026-09-06'),
+    }));
+    const res = await request(app)
+      .get('/api/billing-certifications?scope=assigned')
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.certifications).toHaveLength(1);
+    expect(res.body.certifications[0].projectId).toBe(PROJECT_A);
+    expect(res.body.total).toBe(1);
+    // Summary aggregates must respect the same scope.
+    expect(res.body.summary.byStatus.DRAFT.count).toBe(1);
+    expect(res.body.summary.byStatus.CERTIFIED.count).toBe(0);
+    expect(res.body.summary.byStatus.DISPUTED.count).toBe(0);
+  });
+
+  it('20. employee without any assigned projects gets total: 0 (forced-empty)', async () => {
+    const { app, certRows } = buildApp({
+      userIsAdmin: false,
+      assignment: { dpr: [], inspection: [], boq: [], variation: [], drawing: [] },
+    });
+    certRows.set(CERT_A1, seed({ id: CERT_A1, projectId: PROJECT_A }));
+    certRows.set(CERT_B1, seed({ id: CERT_B1, projectId: PROJECT_B }));
+    const res = await request(app)
+      .get('/api/billing-certifications?scope=assigned')
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.certifications).toHaveLength(0);
+    expect(res.body.total).toBe(0);
+    expect(res.body.summary.byStatus.DRAFT.count).toBe(0);
+  });
+
+  it('21. invalid scope value returns 400 INVALID_SCOPE', async () => {
+    const { app } = buildApp({ userIsAdmin: false });
+    const res = await request(app)
+      .get('/api/billing-certifications?scope=all')
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_SCOPE');
+    expect(res.body.message).toMatch(/assigned/);
+  });
+
+  it('22. employee can GET detail of COP for an assigned project (200)', async () => {
+    const { app, certRows } = buildApp({
+      userIsAdmin: false,
+      assignment: { inspection: [{ projectId: PROJECT_A }] },
+    });
+    certRows.set(CERT_A1, seed({ id: CERT_A1, projectId: PROJECT_A }));
+    const res = await request(app)
+      .get(`/api/billing-certifications/${CERT_A1}`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(CERT_A1);
+  });
+
+  // The detail endpoint hides rows from employees who aren't on the
+  // project's site. The response is 404 — not 403 — so we don't leak the
+  // row's existence (an attacker probing IDs gets no signal that the
+  // row exists but is out of scope).
+  it('23. employee can\'t GET detail of COP for a non-assigned project (404)', async () => {
+    const { app, certRows } = buildApp({
+      userIsAdmin: false,
+      assignment: { dpr: [{ projectId: PROJECT_A }] },
+    });
+    certRows.set(CERT_B1, seed({ id: CERT_B1, projectId: PROJECT_B }));
+    const res = await request(app)
+      .get(`/api/billing-certifications/${CERT_B1}`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('CERTIFICATION_NOT_FOUND');
+  });
+
+  // Same scope guard on the read-sas endpoint — an employee who guesses
+  // a COP id for an unassigned project must NOT be able to mint a SAS
+  // for the underlying PDF blob.
+  it('24. employee can\'t mint read-sas for a non-assigned project\'s COP (404)', async () => {
+    const { app, certRows } = buildApp({
+      userIsAdmin: false,
+      assignment: { dpr: [{ projectId: PROJECT_A }] },
+    });
+    certRows.set(CERT_B1, seed({
+      id: CERT_B1, projectId: PROJECT_B,
+      blobPath: 'billing/01HQX/test.pdf',
+    }));
+    const res = await request(app)
+      .get(`/api/billing-certifications/${CERT_B1}/read-sas`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('CERTIFICATION_NOT_FOUND');
+  });
+
+  // The five mutation endpoints (POST/PATCH/DELETE/certify/dispute) still
+  // gate on requireFreshAdmin — site engineers have READ-only access to
+  // the COP register. Even an employee with admin scope on the row
+  // (PROJECT_A in the assignment) can't write.
+  it('25. employee POST/PATCH/DELETE/certify/dispute all 403 (write endpoints stay admin-only)', async () => {
+    const { app, certRows } = buildApp({
+      userIsAdmin: false,
+      assignment: { dpr: [{ projectId: PROJECT_A }] },
+    });
+    certRows.set(CERT_A1, seed({ id: CERT_A1, projectId: PROJECT_A, status: 'DRAFT' }));
+
+    const auth = () => userJwt();
+
+    const post = await request(app)
+      .post('/api/billing-certifications')
+      .set('Authorization', auth())
+      .send({
+        projectId: PROJECT_A,
+        contractorName: 'X',
+        billNumber: 'RAB-EMP-01',
+        billDate: '2026-09-05',
+        claimedAmount: 1,
+        certifiedAmount: 1,
+      });
+    expect(post.status).toBe(403);
+
+    const patch = await request(app)
+      .patch(`/api/billing-certifications/${CERT_A1}`)
+      .set('Authorization', auth())
+      .send({ remarks: 'employee trying to edit' });
+    expect(patch.status).toBe(403);
+
+    const certify = await request(app)
+      .post(`/api/billing-certifications/${CERT_A1}/certify`)
+      .set('Authorization', auth())
+      .send({});
+    expect(certify.status).toBe(403);
+
+    const dispute = await request(app)
+      .post(`/api/billing-certifications/${CERT_A1}/dispute`)
+      .set('Authorization', auth())
+      .send({ reason: 'employee trying to dispute' });
+    expect(dispute.status).toBe(403);
+
+    const del = await request(app)
+      .delete(`/api/billing-certifications/${CERT_A1}`)
+      .set('Authorization', auth());
+    expect(del.status).toBe(403);
+  });
+
+  // Admins ignore ?scope=assigned — they continue to see the cross-
+  // project registry, same behaviour as the existing /api/projects
+  // ?scope=assigned contract. This is the difference between the admin
+  // Records-group "Billing Certifications" entry and the employee My
+  // Reports-group "My Certifications" entry.
+  it('26. admin GET list with ?scope=assigned ignores the param and returns all', async () => {
+    const { app, certRows } = buildApp({ adminIsAdmin: true });
+    certRows.set(CERT_A1, seed({ id: CERT_A1, projectId: PROJECT_A }));
+    certRows.set(CERT_B1, seed({ id: CERT_B1, projectId: PROJECT_B }));
+    const res = await request(app)
+      .get('/api/billing-certifications?scope=assigned')
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.certifications).toHaveLength(2);
+    expect(res.body.total).toBe(2);
+  });
+
+  // The /aggregates endpoint must honour the same scope — an employee
+  // should not see OTHER projects' COPs rolled up in the totals.
+  it('27. employee GET /aggregates with ?scope=assigned returns only assigned projects', async () => {
+    const { app, certRows } = buildApp({
+      userIsAdmin: false,
+      assignment: { dpr: [{ projectId: PROJECT_A }] },
+    });
+    certRows.set(CERT_A1, seed({ id: CERT_A1, projectId: PROJECT_A }));
+    certRows.set(CERT_B1, seed({
+      id: CERT_B1, projectId: PROJECT_B,
+      billDate: new Date('2026-09-06'),
+    }));
+    const res = await request(app)
+      .get('/api/billing-certifications/aggregates?scope=assigned')
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    const ids = res.body.projects.map((p) => p.projectId);
+    expect(ids).toContain(PROJECT_A);
+    expect(ids).not.toContain(PROJECT_B);
   });
 });

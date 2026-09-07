@@ -223,11 +223,102 @@ function serializeBillingCertification(row) {
   };
 }
 
-// All routes are admin-only. requireFreshAdmin re-reads Employee.isAdmin
-// from the DB on every request so a stale JWT can't carry a revoked
-// admin claim forward (round-20 / DR-005).
+// RBAC model (round-37.1):
+//   - requireAuth on every route — both employees and admins can hit the
+//     API surface (with no token, 401; with a valid token, 403-or-200 based
+//     on the per-handler guard below).
+//   - requireFreshAdmin ONLY on the write endpoints (POST, PATCH, DELETE,
+//     POST /:id/certify, POST /:id/dispute). Read endpoints (GET list,
+//     GET /:id, GET /:id/read-sas, GET /aggregates) are open to any
+//     authenticated employee, but the LIST honours `?scope=assigned` so
+//     employees can only see COPs against projects they have actual
+//     context on (filed DPRs/Inspections/BOQ items/VOs/Drawings against).
+//
+// Why this shape:
+//   - The COP register is admin-curated only — site engineers don't
+//     create, certify, dispute or soft-delete rows. They DO need read
+//     access so they can see what was certified against the projects
+//     they're working on (proof of payment, dispute context, balance
+//     remaining against the PO). Without this, the field engineer has no
+//     in-portal record of what's been billed and certified for the site
+//     they're standing on.
+//   - `?scope=assigned` reuses the R30 pattern (Projects.js scope filter)
+//     so the same union of audit columns gates visibility — a project
+//     the employee merely created (without filing a child record) does
+//     NOT leak into their list.
 router.use(requireAuth);
-router.use(requireFreshAdmin);
+
+// ─── Scope filter ────────────────────────────────────────────────────────
+// `?scope=assigned` narrows list/detail/aggregate results to projects the
+// requesting employee has personally filed against. Admins ignore the
+// param (they see everything by default, matching the cross-project
+// registry use case).
+//
+// Same five-audit-column union as R30 projects.js?scope=assigned — no new
+// ProjectMembership table is needed; the join is derived from existing
+// child rows.
+async function getAssignedProjectIds(prisma, employeeId) {
+  const [dprProj, inspProj, boqProj, voProj, drwProj] = await Promise.all([
+    prisma.dPR.findMany({
+      distinct: ['projectId'],
+      where: { submittedById: employeeId, projectId: { not: null } },
+      select: { projectId: true },
+    }).catch(() => []),
+    prisma.inspectionRecord.findMany({
+      distinct: ['projectId'],
+      where: { submittedById: employeeId, projectId: { not: null } },
+      select: { projectId: true },
+    }).catch(() => []),
+    prisma.boqItem.findMany({
+      distinct: ['projectId'],
+      where: { createdById: employeeId, projectId: { not: null } },
+      select: { projectId: true },
+    }).catch(() => []),
+    prisma.variationOrder.findMany({
+      distinct: ['projectId'],
+      where: { raisedById: employeeId, projectId: { not: null } },
+      select: { projectId: true },
+    }).catch(() => []),
+    prisma.drawing.findMany({
+      distinct: ['projectId'],
+      where: { issuedById: employeeId, projectId: { not: null } },
+      select: { projectId: true },
+    }).catch(() => []),
+  ]);
+  return Array.from(new Set([
+    ...dprProj.map((r) => r.projectId),
+    ...inspProj.map((r) => r.projectId),
+    ...boqProj.map((r) => r.projectId),
+    ...voProj.map((r) => r.projectId),
+    ...drwProj.map((r) => r.projectId),
+  ].filter(Boolean)));
+}
+
+async function applyScopeFilter(where, { scope, prisma, employeeId, isAdmin }) {
+  if (scope !== 'assigned' || isAdmin) return where;
+  // Employee + scope=assigned → narrow to their assigned projects.
+  // An employee with no filed child records returns an empty list, not
+  // the org-wide registry.
+  const ids = await getAssignedProjectIds(prisma, employeeId);
+  if (ids.length === 0) {
+    // Force-empty result by matching an impossible projectId. Using
+    // `id: '__none__'` avoids injecting SQL; the OR-on-empty trick (e.g.
+    // `{ projectId: { in: [] } }`) is well-supported by Prisma but we
+    // prefer an explicit impossible UUID so the EXPLAIN is the same as
+    // a regular equality lookup.
+    return { ...where, projectId: '__none__' };
+  }
+  return { ...where, projectId: { in: ids } };
+}
+
+function resolveScope(rawScope) {
+  if (rawScope === undefined || rawScope === '') return null;
+  const v = String(rawScope).toLowerCase();
+  if (v !== 'assigned') {
+    return { error: 'scope must be "assigned"' };
+  }
+  return { scope: v };
+}
 
 // ─── GET /api/billing-certifications ────────────────────────────────────────
 // Admin cross-project list with filters + cursor pagination.
@@ -256,6 +347,18 @@ router.get('/', asyncHandler(async (req, res) => {
       error: 'VALIDATION_ERROR',
       code: 'INVALID_PROJECT',
       message: 'projectId must be a UUID',
+    });
+  }
+
+  // ?scope=assigned — employee-only read filter. Admins ignore the param
+  // and see the cross-project registry (same behaviour as ?scope=all on
+  // /api/projects). Invalid scope → 400 so callers can't silently bypass.
+  const scopeCheck = resolveScope(req.query.scope);
+  if (scopeCheck?.error) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      code: 'INVALID_SCOPE',
+      message: scopeCheck.error,
     });
   }
   if (status && !VALID_STATUS.has(status)) {
@@ -330,10 +433,20 @@ router.get('/', asyncHandler(async (req, res) => {
     ...(cursorPredicate || {}),
   };
 
+  // Apply ?scope=assigned on top of the explicit filters. Both the row
+  // list AND the summary aggregates must respect the same scope — an
+  // employee should never see totals derived from other projects' COPs.
+  const scopedWhere = await applyScopeFilter(where, {
+    scope: scopeCheck?.scope,
+    prisma,
+    employeeId: req.employeeId,
+    isAdmin: !!req.isAdmin,
+  });
+
   try {
     const [rows, total, totalsByStatus] = await Promise.all([
       prisma.billingCertification.findMany({
-        where,
+        where: scopedWhere,
         take: take + 1,
         orderBy: [{ billDate: 'desc' }, { id: 'desc' }],
         include: {
@@ -342,9 +455,9 @@ router.get('/', asyncHandler(async (req, res) => {
           certifiedBy: { select: { id: true, name: true, designation: true } },
         },
       }),
-      prisma.billingCertification.count({ where }),
+      prisma.billingCertification.count({ where: scopedWhere }),
       prisma.billingCertification.groupBy({
-        where: { deletedAt: null },
+        where: scopedWhere,
         by: ['status'],
         _count: { _all: true },
         _sum: { certifiedAmount: true, claimedAmount: true, deductedAmount: true },
@@ -450,13 +563,32 @@ router.get('/aggregates', asyncHandler(async (req, res) => {
     } : {}),
   };
 
+  // ?scope=assigned narrows the per-project aggregates to the requesting
+  // employee's project set. Without this an employee would see OTHER
+  // projects' COPs rolled up in the totals — a commercial-confidentiality
+  // leak. Admins ignore the param.
+  const scopeCheck = resolveScope(req.query.scope);
+  if (scopeCheck?.error) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      code: 'INVALID_SCOPE',
+      message: scopeCheck.error,
+    });
+  }
+  const scopedWhere = await applyScopeFilter(where, {
+    scope: scopeCheck?.scope,
+    prisma,
+    employeeId: req.employeeId,
+    isAdmin: !!req.isAdmin,
+  });
+
   try {
     // Single groupBy across (projectId, status). Postgres can satisfy
     // this from the (projectId, status, deletedAt) index. We then fold
     // the per-(project, status) rows into a per-project shape client-side
     // so the UI doesn't have to do the join.
     const grouped = await prisma.billingCertification.groupBy({
-      where,
+      where: scopedWhere,
       by: ['projectId', 'status'],
       _count: { _all: true },
       _sum: { certifiedAmount: true, claimedAmount: true, deductedAmount: true },
@@ -547,6 +679,16 @@ router.get('/:id', asyncHandler(async (req, res) => {
     if (!row || row.deletedAt) {
       return res.status(404).json({ error: 'CERTIFICATION_NOT_FOUND', code: 'CERTIFICATION_NOT_FOUND', message: 'Billing certification not found' });
     }
+    // R37.1: employees can only see COPs against projects they have
+    // personal context on. The detail endpoint hides a row the same way
+    // the list does — 404, not 403, so we don't leak the row's existence
+    // to an employee who's not on that project's site.
+    if (!req.isAdmin) {
+      const assigned = await getAssignedProjectIds(prisma, req.employeeId);
+      if (!assigned.includes(row.projectId)) {
+        return res.status(404).json({ error: 'CERTIFICATION_NOT_FOUND', code: 'CERTIFICATION_NOT_FOUND', message: 'Billing certification not found' });
+      }
+    }
     res.json(serializeBillingCertification(row));
   } catch (err) {
     console.error('[billing-certifications] detail failed', {
@@ -570,7 +712,7 @@ router.get('/:id', asyncHandler(async (req, res) => {
 //
 // Auth: requireFreshAdmin (admin-only). No "on-behalf" semantics —
 // recordedById is auto-stamped to req.employeeId.
-router.post('/', asyncHandler(async (req, res) => {
+router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma) {
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
@@ -739,7 +881,7 @@ router.post('/', asyncHandler(async (req, res) => {
 // billNumber) is immutable once the row exists — to "rename" a bill, soft-
 // delete the row and create a new one. Status transitions route through
 // /certify /dispute /undispute.
-router.patch('/:id', asyncHandler(async (req, res) => {
+router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma) {
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
@@ -915,7 +1057,7 @@ router.patch('/:id', asyncHandler(async (req, res) => {
 
 // ─── POST /api/billing-certifications/:id/certify ──────────────────────────
 // DRAFT | DISPUTED → CERTIFIED. Stamps certifiedById + certifiedAt.
-router.post('/:id/certify', asyncHandler(async (req, res) => {
+router.post('/:id/certify', requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma) {
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
@@ -980,7 +1122,7 @@ router.post('/:id/certify', asyncHandler(async (req, res) => {
 
 // ─── POST /api/billing-certifications/:id/dispute ──────────────────────────
 // CERTIFIED → DISPUTED. Requires reason.
-router.post('/:id/dispute', asyncHandler(async (req, res) => {
+router.post('/:id/dispute', requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma) {
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
@@ -1053,7 +1195,7 @@ router.post('/:id/dispute', asyncHandler(async (req, res) => {
 // Soft-delete via deletedAt. Idempotent on already-deleted rows — 200 with
 // the row as-is (mirrors drawings.js DELETE idempotency on already-
 // SUPERSEDED rows; soft-delete matches ProjectAttachment's contract).
-router.delete('/:id', asyncHandler(async (req, res) => {
+router.delete('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma) {
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
@@ -1105,7 +1247,7 @@ router.get('/:id/read-sas', asyncHandler(async (req, res) => {
   try {
     const row = await prisma.billingCertification.findUnique({
       where: { id },
-      select: { blobPath: true, deletedAt: true },
+      select: { projectId: true, blobPath: true, deletedAt: true },
     });
     if (!row || row.deletedAt) {
       return res.status(404).json({
@@ -1113,6 +1255,20 @@ router.get('/:id/read-sas', asyncHandler(async (req, res) => {
         code: 'CERTIFICATION_NOT_FOUND',
         message: 'Billing certification not found',
       });
+    }
+    // R37.1: employees can only mint a SAS for COPs against projects
+    // they have personal context on. Same 404-not-403 logic as the
+    // detail endpoint — don't leak the row's existence to an employee
+    // who's not on that project's site.
+    if (!req.isAdmin) {
+      const assigned = await getAssignedProjectIds(prisma, req.employeeId);
+      if (!assigned.includes(row.projectId)) {
+        return res.status(404).json({
+          error: 'CERTIFICATION_NOT_FOUND',
+          code: 'CERTIFICATION_NOT_FOUND',
+          message: 'Billing certification not found',
+        });
+      }
     }
     if (!row.blobPath) {
       return res.status(400).json({

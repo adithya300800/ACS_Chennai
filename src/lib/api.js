@@ -845,13 +845,23 @@ export const api = {
     return api.get(`/admin/reports${qs ? '?' + qs : ''}`, token);
   },
 
-  // R37: COP / Billing Certification Register — internal-only ledger
-  // of contractor RA-bill (COP) certifications per project. Mounted at
-  // /api/billing-certifications with requireAuth + requireFreshAdmin on
-  // every route (admin-only by design — the register is a management
-  // view, not a contractor surface). The 4-step upload pipeline is the
-  // same one Drawing + Project Report use, with the `billing/` blob
-  // path prefix:
+  // R37 / R37.1: COP / Billing Certification Register — ledger of
+  // contractor RA-bill (COP) certifications per project. Mounted at
+  // /api/billing-certifications.
+  //
+  //   - Read endpoints (GET list, GET /:id, GET /:id/read-sas,
+  //     GET /aggregates) are requireAuth-only. Employees can read
+  //     their assigned projects' COPs by passing
+  //     `scope: 'assigned'` in the params object — the backend's
+  //     getAssignedProjectIds() helper narrows the result set to the
+  //     union of audit columns (DPR/Inspection/BOQ/VO/Drawing) the
+  //     employee has personal context on. Admins ignore the param.
+  //   - Write endpoints (POST, PATCH, DELETE, /certify, /dispute)
+  //     still gate on requireFreshAdmin — site engineers never write
+  //     to the COP register.
+  //
+  // The 4-step upload pipeline is the same one Drawing + Project
+  // Report use, with the `billing/` blob path prefix:
   //   1. POST /api/dpr/sas-url                    → get SAS URL + blobPath
   //   2. PUT  <sasUrl>                            → upload bytes to R2
   //   3. POST /api/dpr/confirm-upload             → register the upload intent

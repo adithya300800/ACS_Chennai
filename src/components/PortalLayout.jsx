@@ -293,6 +293,14 @@ const navGroups = [
       // (which lives under Records). Same icon (BUILDING_ICON) so the
       // visual language stays consistent.
       { to: '/portal/projects', label: 'My Projects', icon: BUILDING_ICON },
+      // R37.1: Employee-facing read-only mirror of the COP / Billing
+      // Certification Register. Scoped via ?scope=assigned so each
+      // field engineer only sees the projects they have personal
+      // context on (filed DPR/Inspection/BOQ/VO/Drawing). The full
+      // cross-project admin registry stays at
+      // /portal/admin/billing-certifications (Records group). Same
+      // BILLING_ICON so the two entries feel like siblings.
+      { to: '/portal/certifications', label: 'My Certifications', icon: BILLING_ICON },
     ],
   },
   ...(employee?.isAdmin ? [
