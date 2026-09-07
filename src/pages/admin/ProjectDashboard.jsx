@@ -19,16 +19,18 @@ import StatusBadge from '../../components/StatusBadge.jsx';
 //   getBoqItems    — /boq        ?projectName=&projectId=&limit=
 //   getVariations  — /variations ?projectId=&status=&limit=
 //
-// We prefer `projectId` (canonical FK, fast indexed PK lookup) for
-// registered projects and fall back to `projectName` for discovered
-// ones — the KPI endpoint uses projectName for both shapes too, so
-// the drill rows always line up with the KPI counts. Discovered
-// projects in the KPI roll-up come back as `name:<x>` sentinel but
-// the bare `projectName` slot is the canonical discovery fallback.
+// We prefer `projectName` over `projectId` for the drill loader. The
+// N1 migration left legacy DPR rows with `projectId = null` but a
+// populated `projectName`, so a FK filter returns zero rows for those
+// (live regression: KPI tile shows 2 submitted, but drill panel
+// showed 0). The KPI endpoint itself counts by projectName, so the
+// drill rows must use the same filter to line up. Inspection / BOQ
+// rows have populated FKs so `projectName` still matches them; we
+// stay consistent across buckets so the loader is one branch.
 function projectFilters(p) {
   if (!p) return {};
-  if (p.id) return { projectId: p.id };
   if (p.name) return { projectName: p.name };
+  if (p.id) return { projectId: p.id };
   return {};
 }
 const TILE_META = {
