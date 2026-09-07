@@ -2503,6 +2503,23 @@ footer {
   flex: 1 1 auto;
 }
 
+/* BUG-7 round-37 (root cause): the badge wrapper is the SECOND flex child
+   in `.dpr-card-header`. The first-child rule above gives the title side
+   `flex: 1 1 auto` so the title can shrink, but leaves the badge wrapper
+   with the default `flex: 0 1 auto` — which lets it SHRINK below its
+   content width when the title takes space. The wrapper has
+   `display: flex; flex-direction: column; align-items: flex-end` and
+   `overflow: hidden auto` (initial), so once it shrinks below the
+   badge's intrinsic 138px ("Acknowledged"), the wrapper's overflow
+   clips the overflowing badge horizontally — "ACKNOWLEDGED" rendered
+   as "LEDGEI". Locking the badge side to `flex-shrink: 0` lets the
+   badge keep its full content width; the title div (with
+   `flex: 1 1 auto` + `min-width: 0`) then gives way and ellipsizes
+   correctly via `.dpr-card-title { overflow: hidden }`. */
+.dpr-card-header > div:last-child {
+  flex-shrink: 0;
+}
+
 .dpr-card-title {
   font-weight: 600;
   font-size: 1rem;
