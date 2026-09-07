@@ -119,3 +119,22 @@ export const TRAINING_PRIORITIES = {
 // via X-Frame-Options, so the UI shows an "Open course" button instead
 // and the employee must click Mark Complete manually.
 export const TRACKABLE_PROVIDERS = new Set(['YOUTUBE', 'VIMEO']);
+
+// R37: COP / Billing Certification Register — status enum mirrors
+// backend BillingCertificationStatus. The minimal 3-state machine
+// (DRAFT → CERTIFIED → DISPUTED → CERTIFIED) was chosen to match the
+// email-evidenced workflow: a COP is drafted offline in Excel, an admin
+// signs it (CERTIFIED), and a client/contractor may later raise a
+// dispute (DISPUTED). The "create + immediately certify" path keeps
+// both DRAFT and CERTIFIED valid initial states so the wire contract
+// doesn't force two round-trips for the common case.
+export const BILLING_CERTIFICATION_STATUSES = {
+  DRAFT: 'DRAFT',
+  CERTIFIED: 'CERTIFIED',
+  DISPUTED: 'DISPUTED',
+};
+export const BILLING_CERTIFICATION_STATUS_LABELS = {
+  DRAFT: { label: 'Draft', tone: 'muted' },
+  CERTIFIED: { label: 'Certified', tone: 'success' },
+  DISPUTED: { label: 'Disputed', tone: 'danger' },
+};

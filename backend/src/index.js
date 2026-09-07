@@ -446,6 +446,16 @@ function createApp(deps = {}) {
   // (Drawings / BOQ / Variations).
   const adminReportsRoutes = require('./routes/adminReports');
   app.use('/api/admin/reports', adminReportsRoutes);
+  // R37: COP / Billing Certification Register — internal ledger of
+  // contractor RA-bill (COP) certifications per project. Sits next to
+  // /api/admin/reports because both are cross-org admin registries
+  // with the same envelope (requireAuth + requireFreshAdmin enforced
+  // inside the route file; no extra middleware on the mount). The page
+  // it powers lives at /portal/admin/billing-certifications and the
+  // route file pins every status/state transition so the wire contract
+  // stays self-contained.
+  const billingCertificationRoutes = require('./routes/billingCertifications');
+  app.use('/api/billing-certifications', billingCertificationRoutes);
   // Round-25: per-employee notification preferences + admin-only test send.
   app.use('/api/notifications', notificationsRoutes);
   // N7 (round-28): BOQ items — registry CRUD + variance report. Auth

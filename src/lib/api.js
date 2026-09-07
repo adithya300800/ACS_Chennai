@@ -844,4 +844,55 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return api.get(`/admin/reports${qs ? '?' + qs : ''}`, token);
   },
+
+  // R37: COP / Billing Certification Register — internal-only ledger
+  // of contractor RA-bill (COP) certifications per project. Mounted at
+  // /api/billing-certifications with requireAuth + requireFreshAdmin on
+  // every route (admin-only by design — the register is a management
+  // view, not a contractor surface). The 4-step upload pipeline is the
+  // same one Drawing + Project Report use, with the `billing/` blob
+  // path prefix:
+  //   1. POST /api/dpr/sas-url                    → get SAS URL + blobPath
+  //   2. PUT  <sasUrl>                            → upload bytes to R2
+  //   3. POST /api/dpr/confirm-upload             → register the upload intent
+  //   4. POST /api/billing-certifications         → insert the row
+  // The backend enforces blobPath.startsWith('billing/') so the
+  // bucket-wide listing still distinguishes COP blobs from drawing /
+  // report blobs that share the dpr-documents container.
+  getBillingCertSasUrl: (filename, contentType, token) =>
+    api.post('/dpr/sas-url', {
+      filename: `billing/${filename}`,
+      contentType,
+      container: 'dpr-documents',
+    }, token),
+  confirmBillingCertUpload: (ulid, filename, contentType, sizeBytes, token) =>
+    api.post('/dpr/confirm-upload', {
+      ulid,
+      container: 'dpr-documents',
+      filename: `billing/${filename}`,
+      contentType,
+      sizeBytes,
+    }, token),
+  getBillingCertifications: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/billing-certifications${qs ? '?' + qs : ''}`, token);
+  },
+  getBillingCertificationAggregates: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/billing-certifications/aggregates${qs ? '?' + qs : ''}`, token);
+  },
+  getBillingCertification: (id, token) =>
+    api.get(`/billing-certifications/${id}`, token),
+  createBillingCertification: (payload, token) =>
+    api.post('/billing-certifications', payload, token),
+  updateBillingCertification: (id, payload, token) =>
+    api.patch(`/billing-certifications/${id}`, payload, token),
+  certifyBillingCertification: (id, token) =>
+    api.post(`/billing-certifications/${id}/certify`, {}, token),
+  disputeBillingCertification: (id, reason, token) =>
+    api.post(`/billing-certifications/${id}/dispute`, { reason }, token),
+  deleteBillingCertification: (id, token) =>
+    api.delete(`/billing-certifications/${id}`, token),
+  getBillingCertificationReadSas: (id, token) =>
+    api.get(`/billing-certifications/${id}/read-sas`, token),
 };

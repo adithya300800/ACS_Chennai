@@ -92,6 +92,14 @@ const DrawingDetail = React.lazy(() => import('./pages/admin/DrawingDetail.jsx')
 // quality / other). Mirrors the Drawings / BOQ / Variations registry
 // pattern; sits in the Records sidebar group next to "Drawings".
 const ReportsAdmin = React.lazy(() => import('./pages/admin/ReportsAdmin.jsx'));
+// R37: COP / Billing Certification Register — admin-only internal ledger
+// of contractor RA-bill (COP) certifications per project. Mirrors the
+// ReportsAdmin shape (cards + filters + cursor pagination) and the
+// Drawings/Variations registry patterns. Backend lives at
+// /api/billing-certifications and is admin-gated by requireFreshAdmin
+// on every route, so a 403 here means the JWT is stale or the demoted-
+// admin claim needs refreshing (round-20 / DR-005).
+const BillingCertificationsAdmin = React.lazy(() => import('./pages/admin/BillingCertificationsAdmin.jsx'));
 // N3-employee: read-only employee browse surface for the same drawing
 // register. The list page is filtered to ACTIVE only; the detail page
 // renders the PDF + chain without the Edit / Supersede / Archive
@@ -201,6 +209,12 @@ function App() {
               download/delete endpoints needed — the response includes
               projectId, which is what those helpers take). */}
           <Route path="admin/reports" element={<ReportsAdmin />} />
+          {/* R37: COP / Billing Certification Register. Admin-only — sits
+              next to the ReportsAdmin route. Both routes are unscoped
+              cross-project registries with the same shape. No literal-
+              before-param ordering needed here since the path takes no
+              `:id` segment. */}
+          <Route path="admin/billing-certifications" element={<BillingCertificationsAdmin />} />
           {/* N3-employee: read-only employee browse of the same drawing
               register. ACTIVE-only list + chain + PDF preview, no curation
               actions. Same literal-before-param ordering lesson. */}

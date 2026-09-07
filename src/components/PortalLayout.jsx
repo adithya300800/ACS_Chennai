@@ -245,6 +245,16 @@ const REPORT_ICON = (
     <path d="M9 13l2 2 5-5" />
   </svg>
 );
+// R37: Billing Certification icon — receipt with rupee / currency mark.
+// Visually distinct from REPORT_ICON (clipboard-with-tick) and from the
+// other Records entries so the sidebar still telegraphs "this is a
+// money / certification register" rather than another document bucket.
+const BILLING_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M6 2h12v20l-3-2-3 2-3-2-3 2V2z" />
+    <path d="M9 7h6M9 11h6M9 15h4" />
+  </svg>
+);
 
 const navGroups = [
   {
@@ -330,6 +340,11 @@ const navGroups = [
         // per-project ReportSection, downloads/deletes reuse the
         // existing /api/projects/:projectId/attachments helpers.
         { to: '/portal/admin/reports', label: 'Project Reports', icon: REPORT_ICON },
+        // R37: COP / Billing Certification Register — admin-only ledger of
+        // contractor RA-bill (COP) certifications per project. Internal-only;
+        // employees don't see this surface. Mirrors the other Records
+        // registry entries (cards + filters + cursor pagination).
+        { to: '/portal/admin/billing-certifications', label: 'Billing Certifications', icon: BILLING_ICON },
       ],
     },
     {

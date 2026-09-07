@@ -88,6 +88,15 @@ model Employee {
   boqsCreated                BoqItem[]               @relation("BoqCreator")
   variationsRaised           VariationOrder[]        @relation("VariationRaiser")
   variationsApproved         VariationOrder[]        @relation("VariationApprover")
+  // [R37] COP / Billing Certification Register. Two named relations:
+  // - BillingCertRecorder: the employee who CREATED the row (RESTRICT FK —
+  //   deleting the employee is a business operation, not a silent cascade;
+  //   mirrors BoqItem.createdById).
+  // - BillingCertCertifier: the admin who flipped the row to CERTIFIED or
+  //   DISPUTED (SetNull on FK — audit trail, must not cascade; mirrors
+  //   VariationOrder.approvedById).
+  billingCertsRecorded       BillingCertification[]  @relation("BillingCertRecorder")
+  billingCertsCertified      BillingCertification[]  @relation("BillingCertCertifier")
   // [Project Assignments] back-relations for the project_assignment join
   // table. Two named relations because an employee appears in two roles
   // on the join: the one being assigned (employeeId), and the one who
@@ -1033,6 +1042,10 @@ model Project {
   // attachment side — un-registering a project sweeps its attachments
   // (same as Drawing; metadata, not history).
   projectAttachments ProjectAttachment[]
+  // [R37] Back-relation for the COP / Billing Certification register.
+  // Cascade on the certification side — a COP IS the project record,
+  // same contract as VariationOrder (see Phase C / N2 header above).
+  billingCertifications BillingCertification[]
   // [Project Assignments] back-relation for the project_assignment join
   // table. Cascade-deletes are handled by the FK on project_assignment
   // (CASCADE) — when a Project row is hard-deleted (rare; the soft-delete
@@ -1264,6 +1277,147 @@ model ProjectAttachment {
   @@index([projectId, type, deletedAt])
   @@index([uploadedById])
   @@map("project_attachment")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R37: COP / Billing Certification Register.
+//
+// Internal-only ledger that records the certification result of contractor
+// RA-bill (COP) submissions per project. The portal does NOT compute the
+// bill — engineers compute that offline (Excel-based) and enter the result
+// here so we have a single in-portal history of "what was certified for whom,
+// on what date, against which PO". Field choices were validated against the
+// actual ACS RA-bill email archive (LEVIM / PONNI CONSTRUCTIONS COPs):
+//   - Contractor names come as free-text ("Levim", "Ponni Constructions")
+//     — no Contractor/Vendor master exists, so contractorName is a
+//     non-nullable String matching the DPR.contractor / InspectionRecord.
+//     contractor pattern. Picking free-text over a new Contractor model
+//     keeps this round at one new model + one new enum + minimum blast
+//     radius (per the round-37 design contract).
+//   - billNumber is the contractor's reference ("RAB 05", "RAB-05/COP",
+//     "RA Bill 03"). Free-text (60 chars) — same shape as Drawing.
+//     drawingNumber — gives us an audit key without a Contractor master.
+//   - billDate is the certification / invoice date. @db.Date matches
+//     DPR.reportDate / Drawing.issuedDate — calendar-day precision is
+//     what every other operational model uses.
+//   - claimedAmount is what the contractor claimed (excl GST by default).
+//     certifiedAmount is what we actually certified — the audit value.
+//     deductedAmount captures the quality/safety non-compliance deductions
+//     seen in the actual emails (e.g. "deduction for non compliance in
+//     quality and safety for an amount of Rs 9,58,950").
+//   - gstAmount is optional — the COP PDFs frequently show the incl-GST
+//     figure alongside the excl-GST figure, and not every contractor
+//     includes GST. Nullable so a non-GST bill doesn't force a 0.
+//   - poValue / balanceValue are OPTIONAL context fields the PM fills in
+//     when the COP carries them. Nullable — the register doesn't require
+//     them to certify, they're reference data.
+//
+// Status enum (BillingCertificationStatus):
+//   DRAFT     — admin saved the row but hasn't certified yet (default).
+//   CERTIFIED — admin finalised the certification result (audit timestamp
+//               + certifiedById populated).
+//   DISPUTED  — admin flagged a dispute (disputedAt + disputeReason
+//               populated). Loosely mirrors the email-evidence workflow
+//               where a COP is contested before final payment.
+//
+// Why embedded attachment fields instead of a separate table?
+//   - Per the round-37 design contract, ONE PDF (the COP) per record. A
+//     separate table inflates the blast radius for no functional gain.
+//   - blobPath / filename / contentType / sizeBytes mirror the per-row
+//     fields on Drawing (Drawing.pdfBlobPath is itself a single blob
+//     ref), so the wiring is consistent with the existing file-attach
+//     contract.
+//
+// Upload flow:
+//   - Mirrors Drawing / ProjectAttachment. The frontend POSTs to
+//     /api/dpr/sas-url with `billing/` blob-path prefix + container
+//     'dpr-documents', PUTs the bytes directly to R2, then POSTs the
+//     resulting blobPath back here in one shot. Re-uses the same R2
+//     bucket — no new bucket needed. The 25 MB cap + the dpr-documents
+//     MIME allowlist already cover COPs (PDF / image / Office / text).
+//
+// FK semantics:
+//   - projectId    → project    CASCADE   (a COP IS a project record;
+//                                       same contract as VariationOrder).
+//   - recordedById → employees  RESTRICT  (deleting an employee who
+//                                       recorded a COP is a business
+//                                       operation, not a silent cascade;
+//                                       mirrors BoqItem.createdById).
+//   - certifiedById→ employees  SET NULL  (audit trail, must not cascade;
+//                                       mirrors VariationOrder.
+//                                       approvedById).
+//
+// Why deletedAt instead of a status flip?
+//   - Same rationale as ProjectAttachment (round-35). The lifecycle is
+//     "exists / archived" — no revision semantics, no supersede. A
+//     timestamp preserves the audit trail of WHEN the deletion happened.
+// ─────────────────────────────────────────────────────────────────────────────
+enum BillingCertificationStatus {
+  DRAFT
+  CERTIFIED
+  DISPUTED
+}
+
+model BillingCertification {
+  id              String                     @id @default(uuid())
+  projectId       String                     @map("project_id")
+  // Free-text contractor name — mirrors DPR.contractor / InspectionRecord.
+  // contractor. No Contractor master exists today (intentional — see the
+  // design header); if one ships later, add an optional contractorId FK
+  // without removing this column (back-compat for legacy rows).
+  contractorName  String                     @map("contractor_name") @db.VarChar(160)
+  // Contractor bill reference (e.g. "RAB 05", "RA Bill 03 - Civil").
+  // Required so duplicate-RA-bill detection is meaningful at the
+  // (projectId, contractorName, billNumber) level.
+  billNumber      String                     @map("bill_number") @db.VarChar(60)
+  billDate        DateTime                   @map("bill_date") @db.Date
+  invoiceNo       String?                    @map("invoice_no") @db.VarChar(60)
+  poContractRef   String?                    @map("po_contract_ref") @db.VarChar(120)
+  claimedAmount   Decimal                    @map("claimed_amount") @db.Decimal(15, 2)
+  deductedAmount  Decimal                    @default(0) @map("deducted_amount") @db.Decimal(15, 2)
+  certifiedAmount Decimal                    @map("certified_amount") @db.Decimal(15, 2)
+  gstAmount       Decimal?                   @map("gst_amount") @db.Decimal(15, 2)
+  poValue         Decimal?                   @map("po_value") @db.Decimal(15, 2)
+  balanceValue    Decimal?                   @map("balance_value") @db.Decimal(15, 2)
+  remarks         String?                    @map("remarks")
+  status          BillingCertificationStatus @default(DRAFT)
+  // Audit timestamps — every state transition gets its own column. Mirrors
+  // the DPR / VariationOrder convention so reports can GROUP BY any one
+  // of them without parsing `updatedAt` timestamps.
+  recordedById    String                     @map("recorded_by_id")
+  certifiedById   String?                    @map("certified_by_id")
+  certifiedAt     DateTime?                  @map("certified_at")
+  disputedAt      DateTime?                  @map("disputed_at")
+  disputeReason   String?                    @map("dispute_reason")
+  // Single-file attachment — same shape as Drawing.pdfBlobPath but with
+  // the full ProjectAttachment-style metadata kept inline so the row
+  // carries the file context without a join. R2 lives under the existing
+  // `dpr-documents` bucket with a `billing/` blob-path prefix (the
+  // prefix is server-enforced by the upload pipeline).
+  filename        String?                    @map("filename") @db.VarChar(512)
+  contentType     String?                    @map("content_type") @db.VarChar(120)
+  sizeBytes       Int?                       @map("size_bytes")
+  blobPath        String?                    @map("blob_path") @db.VarChar(1024)
+  uploadedAt      DateTime?                  @map("uploaded_at")
+  // First `deletedAt` use outside ProjectAttachment — same audit
+  // rationale (the lifecycle is exists / archived, no revision semantics).
+  deletedAt       DateTime?                  @map("deleted_at")
+  createdAt       DateTime                   @default(now()) @map("created_at")
+  updatedAt       DateTime                   @updatedAt @map("updated_at")
+
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  recordedBy  Employee  @relation("BillingCertRecorder", fields: [recordedById], references: [id], onDelete: Restrict)
+  certifiedBy Employee? @relation("BillingCertCertifier", fields: [certifiedById], references: [id], onDelete: SetNull)
+
+  // Hot reads: per-project timeline (newest first), admin registry by
+  // (projectId, status, deletedAt) for the filter combo, and the
+  // "scoped contractor" view for a "show me all COPs from Levim"
+  // audit query.
+  @@index([projectId, status, deletedAt])
+  @@index([projectId, billDate])
+  @@index([contractorName])
+  @@index([status, deletedAt])
+  @@map("billing_certification")
 }
 
 model VariationOrder {

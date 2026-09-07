@@ -288,3 +288,23 @@ export function formatBytes(n) {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+// R37: formatINR — Indian-locale currency formatter for the COP / Billing
+// Certification register. Uses Intl.NumberFormat('en-IN') so the output
+// matches the lakh/crore grouping already used in the source Excel
+// workbooks (e.g. 7,03,93,869.00 not 70,393,869.00). The amount column on
+// the backend is DECIMAL(15,2) (≈ 1e13) so a JSON number never loses
+// precision for any realistic construction-services RA-bill value. Returns
+// '—' for null / undefined so the SPA can render empty cells without
+// per-call null guards.
+export function formatINR(value) {
+  if (value == null) return '—';
+  const n = typeof value === 'string' ? Number(value) : value;
+  if (!Number.isFinite(n)) return '—';
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 2,
+  }).format(n);
+}
