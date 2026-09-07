@@ -346,14 +346,38 @@ mountUploadRoutes(router, {
   // SAS can't cross between the two record types.
   allowedContainers: ['dpr-photos', 'dpr-documents', 'inspection-photos'],
   // Round-29: drawings upload to `dpr-documents` as PDFs (the previous
-  // image-only allowlist 400'd with INVALID_CONTENT_TYPE). `dpr-photos`
-  // and `inspection-photos` keep the image-only default — only
-  // `dpr-documents` widens. Per-container allowlist = defense in depth
-  // (forgotten container falls back to image-only).
+  // image-only allowlist 400'd with INVALID_CONTENT_TYPE). Round-35:
+  // project reports extend `dpr-documents` to also accept HEIC photos
+  // + every Office / PDF / text format the SAS-layer CONTENT_TYPE_EXT
+  // map (lib/blobStorage.js:80) can mint a presigned URL for. The map
+  // and the per-container allowlist must agree — adding a new type
+  // requires editing BOTH halves. `dpr-photos` and `inspection-photos`
+  // keep the image-only default. Per-container allowlist = defense in
+  // depth (forgotten container falls back to image-only).
   allowedTypesPerContainer: {
     'dpr-photos': ['image/jpeg', 'image/png', 'image/webp'],
-    'dpr-documents': ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'],
+    'dpr-documents': [
+      'image/jpeg', 'image/png', 'image/webp', 'image/heic',
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-powerpoint',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'text/plain', 'text/csv',
+    ],
     'inspection-photos': ['image/jpeg', 'image/png', 'image/webp'],
+  },
+  // Round-35: per-container byte cap. Office docs + HEIC site photos
+  // routinely exceed the 10 MB photo default, so `dpr-documents` widens
+  // to 25 MB. The photos containers stay at 10 MB — same default, no
+  // regression. Missing entries fall back to MAX_PHOTO_SIZE (defense
+  // in depth — same shape as allowedTypesPerContainer).
+  maxSizeBytesPerContainer: {
+    'dpr-photos': 10 * 1024 * 1024,
+    'dpr-documents': 25 * 1024 * 1024,
+    'inspection-photos': 10 * 1024 * 1024,
   },
 });
 

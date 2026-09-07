@@ -31,6 +31,15 @@ const inspectionRoutes = require('./routes/inspection');
 // The route file owns its own auth gates — requireAuth for reads,
 // requireFreshAdmin for mutations.
 const projectRoutes = require('./routes/projects');
+// R35: Project Reports — file attachments per project (weekly / monthly /
+// due-diligence / quality / other). The four routes inside own their
+// auth gates (requireAuth + requireProjectScope on every route; admin OR
+// uploader on DELETE). Mounted under /api/projects/:projectId/attachments
+// with mergeParams: true so :projectId reaches the inner router from the
+// prefix path. Reuses the existing `dpr-documents` R2 bucket — the
+// allowlist in routes/dpr.js was widened to accept Office / photo /
+// text types and `maxSizeBytesPerContainer` bumps it to 25 MB.
+const projectAttachmentRoutes = require('./routes/projectAttachments');
 // Round-13: Leave Request workflow (employee submit / admin approve-reject).
 const leaveRoutes = require('./routes/leave');
 // Round-14: Employee Training — admin assigns external courses (LinkedIn,
@@ -405,6 +414,12 @@ function createApp(deps = {}) {
   // payload in one round trip. No extra middleware — the route file owns
   // its own auth + rate-limit decisions.
   app.use('/api/projects', projectRoutes);
+  // R35: Project Reports — attachment CRUD nested under /api/projects.
+  // 25 MB body limit is the document cap; the SAS mint happens upstream
+  // (POST /api/dpr/sas-url with container: 'dpr-documents') and bytes go
+  // direct-to-R2, so the JSON body here is metadata only and well under
+  // the global 1 MB default — no per-route override needed.
+  app.use('/api/projects/:projectId/attachments', projectAttachmentRoutes);
   app.use('/api/contact', contactLimiter, contactRoutes);
   // DR-017: admin storage health — orphan counts + on-demand sweep trigger.
   // Routes inside use requireAuth + requireFreshAdmin; the mount itself has
