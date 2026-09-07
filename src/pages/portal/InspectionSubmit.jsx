@@ -1215,15 +1215,20 @@ export default function InspectionSubmit() {
               const trimmedProject = (form.projectName || '').trim();
               if (!trimmedProject) {
                 return (
-                  <select id="boqItemId" className="form-input" disabled>
-                    <option>Name a project first to see BOQ items</option>
+                  <select id="boqItemId" className="form-input" disabled aria-disabled="true">
+                    {/* BUG-3 (round-37): placeholder-as-real-value. `value=""`
+                        makes the option truly empty (no fake "name a
+                        project" string in the wire payload); `disabled`
+                        greys it out so a real BOQ item can't re-select
+                        the placeholder. */}
+                    <option value="" disabled>Name a project first to see BOQ items</option>
                   </select>
                 );
               }
               if (!boqItemsLoaded) {
                 return (
-                  <select id="boqItemId" className="form-input" disabled>
-                    <option>Loading BOQ items for {trimmedProject}…</option>
+                  <select id="boqItemId" className="form-input" disabled aria-disabled="true" aria-busy="true">
+                    <option value="" disabled>Loading BOQ items…</option>
                   </select>
                 );
               }

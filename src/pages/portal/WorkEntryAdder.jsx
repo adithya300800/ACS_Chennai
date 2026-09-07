@@ -66,7 +66,21 @@ export default function WorkEntryAdder({ onAdd, sectionLabel = 'Add Work Entry',
               >
                 <span className="work-section-icon">{section.icon}</span>
                 <span className="work-section-label">{section.label}</span>
-                <span className="work-section-count">{section.workTypes.length} types</span>
+                {/* Tier-1 #7 (round-37): surface the actual type names
+                    instead of the unhelpful "{n} types" count. The
+                    engineer can see at a glance whether their target
+                    sub-type (e.g. NCR, Waterproofing, Cube Testing)
+                    lives inside the section — no click-and-bounce
+                    required to discover that. The list is pulled from
+                    SUB_WORK_TYPE_OPTIONS so adding a new sub-type
+                    auto-updates the tile. */}
+                <ul className="work-section-types">
+                  {SUB_WORK_TYPE_OPTIONS
+                    .filter((s) => s.section === key)
+                    .map((s) => (
+                      <li key={s.value}>{s.label}</li>
+                    ))}
+                </ul>
               </button>
             ))}
           </div>

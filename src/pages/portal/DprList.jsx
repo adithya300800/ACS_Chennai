@@ -321,7 +321,7 @@ export default function DprList() {
     setExpandedDpr({ ...dpr, photos: [] });
     setExpandedError('');
     setExpandedLoading(true);
-    setPourSummary(null);
+    // Round-29: setPourSummary call REMOVED — cube-test state is gone.
     try {
       const full = await api.getDpr(dpr.id, accessToken);
       setExpandedDpr(full);

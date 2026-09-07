@@ -96,16 +96,28 @@ export default function DrawingPicker({
       <select
         className="form-input"
         disabled
+        aria-disabled="true"
         aria-label="Drawing (pick a project first)"
       >
-        <option>Pick a project first to see drawings</option>
+        {/* BUG-3 (round-37): placeholder option had no `value=""` and no
+            `disabled` — so the literal text "Pick a project first…" was
+            being treated as the select's value. `value=""` makes it a
+            true empty option; `disabled` greys it out so it can't be
+            re-selected after a real drawing is chosen. */}
+        <option value="" disabled>Pick a project first to see drawings</option>
       </select>
     );
   }
   if (loading) {
     return (
-      <select className="form-input" disabled aria-busy="true" aria-label="Loading drawings">
-        <option>Loading drawings…</option>
+      <select
+        className="form-input"
+        disabled
+        aria-disabled="true"
+        aria-busy="true"
+        aria-label="Loading drawings"
+      >
+        <option value="" disabled>Loading drawings…</option>
       </select>
     );
   }

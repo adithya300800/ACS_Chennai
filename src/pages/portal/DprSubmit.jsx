@@ -198,7 +198,10 @@ export default function DprSubmit() {
     projectName: '',
     location: '',
     reportDate: getLocalDate(),
-    weather: 'Sunny',
+    // BUG-2 (round-37): was 'Sunny' — silently biased the dataset so the
+    // vast majority of historical DPRs report Sunny regardless of site.
+    // Engineers now have to pick weather (or confirm Sunny) themselves.
+    weather: '',
     temperature: '',
     contractor: '',
     workType: 'SITE_INSPECTION',
@@ -327,7 +330,10 @@ export default function DprSubmit() {
           // server still returns an ISO datetime, strip the time suffix
           // so the date input keeps its value.
           reportDate: normalizeReportDate(d.reportDate),
-          weather: d.weather || 'Sunny',
+          // BUG-2 (round-37): preserve server value verbatim (including
+          // legacy rows the engineer picked 'Sunny' on) but do NOT
+          // synthesize a 'Sunny' default when the field is empty.
+          weather: d.weather || '',
           temperature: d.temperature || '',
           contractor: d.contractor || '',
           workType: d.workType || 'SITE_INSPECTION',
@@ -400,7 +406,8 @@ export default function DprSubmit() {
         projectName: '',
         location: '',
         reportDate: getLocalDate(),
-        weather: 'Sunny',
+        // BUG-2 (round-37): empty default; see comment at line 201.
+        weather: '',
         temperature: '',
         contractor: '',
         workType: 'SITE_INSPECTION',
@@ -961,7 +968,8 @@ export default function DprSubmit() {
       projectName: '',
       location: '',
       reportDate: getLocalDate(),
-      weather: 'Sunny',
+      // BUG-2 (round-37): empty default; see comment at line 201.
+      weather: '',
       temperature: '',
       contractor: '',
       workType: 'SITE_INSPECTION',
@@ -1227,6 +1235,11 @@ export default function DprSubmit() {
             <div className="form-group">
               <label htmlFor="weather">Weather</label>
               <select id="weather" name="weather" className="form-input" value={form.weather} onChange={handleChange}>
+                {/* BUG-2 (round-37): explicit empty option so the engineer
+                    actively picks weather rather than silently inheriting
+                    a Sunny default. Hidden by the standard 'required'
+                    validation when finalising as SUBMITTED. */}
+                <option value="" disabled>(no selection — pick or confirm)</option>
                 {WEATHER_OPTIONS.map((w) => <option key={w} value={w}>{w}</option>)}
               </select>
             </div>
@@ -1276,15 +1289,20 @@ export default function DprSubmit() {
               const trimmedProject = (form.projectName || '').trim();
               if (!trimmedProject) {
                 return (
-                  <select id="boqItemId" className="form-input" disabled>
-                    <option>Name a project first to see BOQ items</option>
+                  <select id="boqItemId" className="form-input" disabled aria-disabled="true">
+                    {/* BUG-3 (round-37): placeholder-as-real-value. `value=""`
+                        makes the option truly empty (so no fake "name a
+                        project" string ever lands in the wire payload);
+                        `disabled` greys it out so a real BOQ item can't
+                        accidentally re-select the placeholder. */}
+                    <option value="" disabled>Name a project first to see BOQ items</option>
                   </select>
                 );
               }
               if (!boqItemsLoaded) {
                 return (
-                  <select id="boqItemId" className="form-input" disabled>
-                    <option>Loading BOQ items for {trimmedProject}…</option>
+                  <select id="boqItemId" className="form-input" disabled aria-disabled="true" aria-busy="true">
+                    <option value="" disabled>Loading BOQ items…</option>
                   </select>
                 );
               }

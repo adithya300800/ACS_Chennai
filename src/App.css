@@ -2546,7 +2546,20 @@ footer {
      full-width; let the title flex-shrink instead. */
   white-space: nowrap;
   flex-shrink: 0;
-  max-width: 100%;
+  /* BUG-7 (round-37): `max-width: 100%` interacted badly with
+     `flex-basis: auto` in narrow flex containers — at 375px the
+     `.dpr-card-header` had only ~280px and the badge was being
+     resolved to 68px (text needs ~102px), then clipped mid-word
+     ("ACKN…"). `max-content` lets the badge always size to fit its
+     own text; the title container's existing `min-width: 0` then
+     ellipsizes correctly. The badge still has `flex-shrink: 0` so it
+     can't be compressed by the layout algorithm either. */
+  max-width: max-content;
+  /* Belt-and-suspenders: the cascade resolved `overflow: hidden auto`
+     from ancestor `.dpr-card` / `.portal-content` onto the badge, which
+     clipped the overflowing text. Make sure the badge itself lets the
+     pill background reach its full content width. */
+  overflow: visible;
 }
 /* SOL-P1#10: badges were 3.32-3.73:1 against their pastel backgrounds.
    Darken text colors to ≥4.5:1 (WCAG AA normal text) and bump font
@@ -3683,6 +3696,27 @@ footer {
 .work-section-count {
   font-size: 0.7rem;
   color: var(--steel);
+}
+
+/* Tier-1 #7 (round-37): list the actual sub-type names inside each
+   section tile so the engineer can confirm whether their target type
+   (NCR, Waterproofing, Cube Testing, etc.) lives in this section
+   before clicking — replaces the old "{n} types" count which forced a
+   click-and-bounce to discover that. Text-align matches the parent
+   tile (center); list-style is bullet-less because the labels are
+   self-describing. */
+.work-section-types {
+  list-style: none;
+  padding: 0;
+  margin: 0.25rem 0 0 0;
+  text-align: center;
+  font-size: 0.7rem;
+  color: var(--steel);
+  line-height: 1.35;
+  width: 100%;
+}
+.work-section-types li {
+  padding: 0.05rem 0;
 }
 
 .sub-type-picker {
@@ -5456,7 +5490,14 @@ footer {
 .draft-banner > span {
   flex: 1 1 200px;                                /* min width before the buttons wrap below */
   min-width: 0;                                    /* allow word-wrap inside a flex item */
-  overflow-wrap: anywhere;
+  /* BUG-7 (round-37): was `overflow-wrap: anywhere` which combined with
+     `flex-shrink: 1` + `min-width: 0` made the text shrink to a 1-char
+     wide column and wrap every letter individually at 375px (e.g.
+     "Restored unsaved draft" rendered as one letter per line). Switch to
+     `break-word` so wrap happens only at word boundaries; if a single
+     word still overflows it gets broken (not each character). */
+  overflow-wrap: break-word;
+  word-break: normal;
   line-height: 1.35;
 }
 .draft-banner > button {
@@ -5532,16 +5573,29 @@ footer {
   opacity: 0.85;
 }
 @media (max-width: 480px) {
+  /* BUG-6+7 (round-37): at 375px the badge's `right: 8px` sat inside the
+     card's `border-radius: 12px` curve and was visually clipped —
+     "3 PENDING" rendered as "3 PEN…". Push the badge further inward
+     (right: 14px clears the corner curve) AND stack the number over
+     the label so the pill is shorter horizontally. The card itself
+     uses `overflow: hidden auto`, so any badge content that crosses
+     the rounded corner vanishes without this clearance. */
   .admin-overview-badge {
-    top: 8px;
-    right: 8px;
-    padding: 0.15rem 0.45rem;
+    top: 10px;
+    right: 14px;
+    padding: 0.15rem 0.5rem;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    line-height: 1.1;
   }
   .admin-overview-badge-number {
     font-size: 0.78rem;
+    line-height: 1.1;
   }
   .admin-overview-badge-label {
-    font-size: 0.6rem;
+    font-size: 0.58rem;
+    line-height: 1.1;
   }
 }
 
