@@ -1,8 +1,8 @@
 // [Round-33] Inline expansion panel for a single project on /portal/projects.
 //
-// Renders five sub-sections (Overview, BOQ, DPRs, Inspections, Drawings)
-// directly below the chosen project card. The user never leaves the
-// My Projects page. Sub-section rows are themselves clickable tiles
+// Renders six sub-sections (Overview, BOQ, DPRs, Inspections, Drawings,
+// Reports) directly below the chosen project card. The user never leaves
+// the My Projects page. Sub-section rows are themselves clickable tiles
 // that expand to show full details — keeping the surface scannable
 // when a project has dozens of DPRs.
 //
@@ -26,6 +26,15 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api.js';
 import { formatShortDate } from '../../lib/format.js';
+import {
+  MAX_REPORT_BYTES,
+  ACCEPTED_REPORT_TYPES,
+  PROJECT_REPORT_TYPE_LABELS,
+  PROJECT_REPORT_TYPES,
+} from '../../lib/constants.js';
+import { uploadBlob, BlobUploadError } from '../../lib/blobUpload.js';
+import { useAuth } from '../../contexts/AuthContext.jsx';
+import { useToast } from '../../contexts/ToastContext.jsx';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import DrawingFormModal from '../../components/DrawingFormModal.jsx';
 
@@ -53,12 +62,19 @@ const DRAWING_STATUS_MAP = {
 };
 
 // Section identifiers — used both for the tab UI and as the keys in
-// `openSections`. All five sections are open by default; the user can
+// `openSections`. All six sections are open by default; the user can
 // fold any of them.
-const SECTION_IDS = ['overview', 'boq', 'dprs', 'inspections', 'drawings'];
+const SECTION_IDS = ['overview', 'boq', 'dprs', 'inspections', 'drawings', 'reports'];
 
 export default function ProjectExpandedPanel({ project, accessToken, onClose, onOpenProjectDetail }) {
   const mountedRef = useRef(true);
+  // R35: Reports upload needs the current employee id (delete-perm gate)
+  // and an admin flag (admin can delete any row). Both come from
+  // useAuth(). Toast for the upload-progress UX.
+  const { employee } = useAuth();
+  const toast = useToast();
+  const isAdmin = !!employee?.isAdmin;
+  const currentEmployeeId = employee?.id || null;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -77,6 +93,9 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
   const [inspections, setInspections] = useState({ status: 'idle' });
   const [drawings, setDrawings] = useState({ status: 'idle' });
   const [boq, setBoq] = useState({ status: 'idle' });
+  // R35: Project Reports attachment list. Same 5-state payload slot as the
+  // other sections so the Section header can render count/empty-state.
+  const [reports, setReports] = useState({ status: 'idle' });
 
   // Tile-expansion state — id of the row currently expanded within a
   // section, or null. Keeps the panel tidy when one DPR is open at a
@@ -88,12 +107,15 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
   // drawings sub-section on success by bumping drawingsRefreshKey.
   const [drawingFormOpen, setDrawingFormOpen] = useState(false);
   const [drawingsRefreshKey, setDrawingsRefreshKey] = useState(0);
+  // R35: bump to force a refetch of the reports sub-section after
+  // upload / delete (mirrors drawingsRefreshKey's role).
+  const [reportsRefreshKey, setReportsRefreshKey] = useState(0);
 
   const projectKey = project.id || project.name;
   const isRegistered = !!project.id;
   const projectName = project.name;
 
-  // Lazy-load all five payloads on mount (or when the project key
+  // Lazy-load all six payloads on mount (or when the project key
   // changes). Each section's failure is isolated so one bad endpoint
   // doesn't blank the whole panel.
   useEffect(() => {
@@ -103,6 +125,7 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
     setInspections({ status: 'loading' });
     setDrawings({ status: 'loading' });
     setBoq({ status: 'loading' });
+    setReports({ status: 'loading' });
 
     const tasks = [];
 
@@ -179,6 +202,23 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
       setBoq({ status: 'ready', data: [] });
     }
 
+    // R35: Reports — attachments list. Backend requires projectId (FK
+    // constraint), so discovered rows get an empty list rather than a
+    // 400. Mirrors the DrawingSection empty-state pattern.
+    if (isRegistered) {
+      tasks.push(
+        api.getProjectAttachments(projectKey, { limit: 50 }, accessToken)
+          .then((resp) => {
+            if (!mountedRef.current) return;
+            const rows = resp?.attachments || resp?.items || (Array.isArray(resp) ? resp : []);
+            setReports({ status: 'ready', data: rows });
+          })
+          .catch((err) => mountedRef.current && setReports({ status: 'error', error: err?.message || 'Failed to load' })),
+      );
+    } else {
+      setReports({ status: 'ready', data: [] });
+    }
+
     Promise.allSettled(tasks);
   }, [projectKey, isRegistered, projectName, accessToken]);
 
@@ -202,6 +242,24 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
       });
   }, [drawingsRefreshKey, isRegistered, projectKey, accessToken]);
 
+  // R35: Re-fetch only the reports sub-section after upload / delete.
+  // Same shape as the drawings effect — skip the initial mount, only
+  // refetch when the user-triggered key bumps.
+  useEffect(() => {
+    if (reportsRefreshKey === 0) return;
+    if (!isRegistered || !projectKey) return;
+    api.getProjectAttachments(projectKey, { limit: 50 }, accessToken)
+      .then((resp) => {
+        if (!mountedRef.current) return;
+        const rows = resp?.attachments || resp?.items || (Array.isArray(resp) ? resp : []);
+        setReports({ status: 'ready', data: rows });
+      })
+      .catch((err) => {
+        if (!mountedRef.current) return;
+        setReports({ status: 'error', error: err?.message || 'Failed to load' });
+      });
+  }, [reportsRefreshKey, isRegistered, projectKey, accessToken]);
+
   const toggleSection = useCallback((id) => {
     setOpenSections((s) => ({ ...s, [id]: !s[id] }));
   }, []);
@@ -216,7 +274,8 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
     dprs: dprs.status === 'ready' ? (dprs.data || []).length : null,
     inspections: inspections.status === 'ready' ? (inspections.data || []).length : null,
     drawings: drawings.status === 'ready' ? (drawings.data || []).length : null,
-  }), [boq, dprs, inspections, drawings]);
+    reports: reports.status === 'ready' ? (reports.data || []).length : null,
+  }), [boq, dprs, inspections, drawings, reports]);
 
   return (
     <div
@@ -353,6 +412,27 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
             isRegistered={isRegistered}
             projectKey={projectKey}
             onAddDrawing={() => setDrawingFormOpen(true)}
+          />
+        </Section>
+
+        <Section
+          id="reports"
+          title="Reports"
+          isOpen={openSections.reports}
+          onToggle={() => toggleSection('reports')}
+          count={counts.reports}
+          emptyState={false}
+        >
+          <ReportSection
+            reports={reports}
+            isRegistered={isRegistered}
+            projectKey={projectKey}
+            accessToken={accessToken}
+            currentEmployeeId={currentEmployeeId}
+            isAdmin={isAdmin}
+            toast={toast}
+            onUploaded={() => setReportsRefreshKey((k) => k + 1)}
+            onDeleted={() => setReportsRefreshKey((k) => k + 1)}
           />
         </Section>
       </div>
@@ -976,6 +1056,433 @@ function DrawingSection({ drawings, isRegistered, projectKey, onAddDrawing }) {
       )}
     </div>
   );
+}
+
+// R35: Reports — file attachments per project (weekly / monthly /
+// due-diligence / quality / other documents). Six sub-section of the
+// accordion panel.
+//
+// UX:
+//   - Type-filter chips (single-select "All" + 5 enum values).
+//   - Inline upload form: select type, pick file, click Upload. Mirrors
+//     the 3-step Drawing PDF upload (sas → put → confirm → insert row)
+//     using the SAME /api/dpr/sas-url + /confirm-upload endpoints the
+//     drawings use, but with `report/` blob-path prefix instead of
+//     `drawing/`.
+//   - List shows each uploaded report with type badge, filename, size,
+//     uploader, upload date. Download button mints a 1h read-sas URL and
+//     opens in a new tab. Delete button visible only to uploader or
+//     admin (matches BoqItem ownership model).
+//
+// The list auto-refreshes via `onUploaded` / `onDeleted` callbacks that
+// bump `reportsRefreshKey` on the parent — same pattern as the
+// drawings refresh hook above.
+function ReportSection({
+  reports, isRegistered, projectKey, accessToken,
+  currentEmployeeId, isAdmin, toast, onUploaded, onDeleted,
+}) {
+  // Local filter state — chip selection. `null` = show all.
+  const [filterType, setFilterType] = useState(null);
+
+  // Upload form state. The 3-step state machine mirrors DPR/Inspection
+  // photo uploads: 'idle' → 'sas' → 'uploading' → 'confirming' → 'idle'.
+  // A single `phase` field drives button labels + progress bar render.
+  const [uploadType, setUploadType] = useState(PROJECT_REPORT_TYPES[0]);
+  const [uploadFile, setUploadFile] = useState(null);
+  const [uploadTitle, setUploadTitle] = useState('');
+  const [uploadPhase, setUploadPhase] = useState('idle'); // idle | sas | uploading | confirming
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadError, setUploadError] = useState(null);
+
+  // Reset upload form when the project changes so a half-typed file
+  // from a previous accordion card doesn't leak across.
+  useEffect(() => {
+    setUploadType(PROJECT_REPORT_TYPES[0]);
+    setUploadFile(null);
+    setUploadTitle('');
+    setUploadPhase('idle');
+    setUploadProgress(0);
+    setUploadError(null);
+    setFilterType(null);
+  }, [projectKey]);
+
+  if (!isRegistered) {
+    return (
+      <div style={{ padding: '0.5rem 0', fontSize: '0.85rem', color: 'var(--steel, #64748b)' }}>
+        Register this project first to start uploading reports.
+      </div>
+    );
+  }
+
+  if (reports.status === 'loading') return <LoadingHint>Loading reports…</LoadingHint>;
+  if (reports.status === 'error') return <ErrorHint>{reports.error}</ErrorHint>;
+
+  const rows = reports.data || [];
+  const filtered = filterType ? rows.filter((r) => r.type === filterType) : rows;
+
+  // ─── Upload validation ─────────────────────────────────────────────────
+  // Client-side gate that mirrors the backend POST validation. The
+  // server re-validates — this is purely UX feedback.
+  function validateFile(file) {
+    if (!file) return 'Please pick a file first.';
+    if (file.size > MAX_REPORT_BYTES) {
+      return `File too large. Max ${(MAX_REPORT_BYTES / (1024 * 1024))} MB.`;
+    }
+    if (!ACCEPTED_REPORT_TYPES.includes(file.type)) {
+      return `File type "${file.type || 'unknown'}" not supported. Use PDF, Office, photo, text, or CSV.`;
+    }
+    return null;
+  }
+
+  async function handleUpload() {
+    const errMsg = validateFile(uploadFile);
+    if (errMsg) {
+      setUploadError(errMsg);
+      return;
+    }
+    setUploadError(null);
+    try {
+      // Step 1: mint a presigned PUT URL from the existing dpr-documents
+      // SAS endpoint. The server prepends `${employeeId}/` to the
+      // `report/${filename}` path we send so a leaked SAS can't cross
+      // tenants.
+      setUploadPhase('sas');
+      const { sasUrl, ulid, blobPath } = await api.getReportSasUrl(
+        uploadFile.name, uploadFile.type, accessToken,
+      );
+
+      // Step 2: PUT bytes direct-to-R2 with progress + 60s timeout.
+      setUploadPhase('uploading');
+      setUploadProgress(0);
+      await uploadBlob(sasUrl, uploadFile, {
+        contentType: uploadFile.type,
+        onProgress: (pct) => setUploadProgress(pct),
+      });
+
+      // Step 3: confirm-upload — tells the server the bytes landed
+      // (and updates the durable UploadIntent row from PENDING →
+      // CONFIRMED so the orphan sweeper won't evict our bytes).
+      setUploadPhase('confirming');
+      await api.confirmReportUpload(
+        ulid, uploadFile.name, uploadFile.type, uploadFile.size, accessToken,
+      );
+
+      // Step 4: insert the ProjectAttachment row that binds the blob
+      // path to the project + uploader.
+      await api.createProjectAttachment(projectKey, {
+        type: uploadType,
+        title: uploadTitle.trim() || null,
+        filename: uploadFile.name,
+        contentType: uploadFile.type,
+        sizeBytes: uploadFile.size,
+        blobPath,
+      }, accessToken);
+
+      // Reset + refresh.
+      setUploadPhase('idle');
+      setUploadProgress(0);
+      setUploadFile(null);
+      setUploadTitle('');
+      if (toast) toast.success('Report uploaded');
+      onUploaded && onUploaded();
+    } catch (err) {
+      setUploadPhase('idle');
+      setUploadProgress(0);
+      const message =
+        err instanceof BlobUploadError
+          ? err.message
+          : (err?.message || 'Upload failed');
+      setUploadError(message);
+      if (toast) toast.error(message);
+    }
+  }
+
+  async function handleDownload(att) {
+    try {
+      const { sasUrl } = await api.getProjectAttachmentReadSas(
+        projectKey, att.id, accessToken,
+      );
+      // Open in a new tab so the user doesn't lose their place in the
+      // accordion. Some file types (e.g. text/csv) will preview inline
+      // rather than download — that's the browser's call.
+      window.open(sasUrl, '_blank', 'noopener,noreferrer');
+    } catch (err) {
+      const message = err?.message || 'Could not open file';
+      if (toast) toast.error(message);
+    }
+  }
+
+  async function handleDelete(att) {
+    if (!window.confirm(`Delete "${att.filename}"? This can be undone only by an admin restoring the row.`)) {
+      return;
+    }
+    try {
+      await api.deleteProjectAttachment(projectKey, att.id, accessToken);
+      if (toast) toast.success('Report deleted');
+      onDeleted && onDeleted();
+    } catch (err) {
+      const message = err?.message || 'Could not delete report';
+      if (toast) toast.error(message);
+    }
+  }
+
+  // Build the file-accept string for the <input type="file"> from the
+  // ACCEPTED_REPORT_TYPES list. Use the type/* pattern where possible;
+  // fall back to specific extensions for legacy Office types.
+  const fileAccept = ACCEPTED_REPORT_TYPES.map((t) => {
+    if (t.startsWith('image/')) return t;
+    if (t === 'text/plain') return '.txt';
+    if (t === 'text/csv') return '.csv';
+    if (t === 'application/pdf') return '.pdf';
+    if (t === 'application/msword') return '.doc';
+    if (t.includes('wordprocessingml')) return '.docx';
+    if (t === 'application/vnd.ms-excel') return '.xls';
+    if (t.includes('spreadsheetml')) return '.xlsx';
+    if (t === 'application/vnd.ms-powerpoint') return '.ppt';
+    if (t.includes('presentationml')) return '.pptx';
+    return t;
+  }).join(',');
+
+  const isUploading = uploadPhase !== 'idle';
+
+  return (
+    <div style={{ display: 'grid', gap: '0.5rem', padding: '0.5rem 0' }}>
+      {/* ─── Upload form ──────────────────────────────────────────────── */}
+      <div
+        style={{
+          padding: '0.6rem 0.75rem',
+          background: '#f8fafc',
+          border: '1px solid #e2e8f0',
+          borderRadius: 6,
+          display: 'grid',
+          gap: '0.4rem',
+        }}
+      >
+        <div
+          style={{
+            fontSize: '0.78rem',
+            fontWeight: 600,
+            color: 'var(--navy, #0f172a)',
+          }}
+        >
+          Upload a report
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', fontSize: '0.75rem' }}>
+            <span style={{ color: 'var(--steel, #64748b)' }}>Type</span>
+            <select
+              value={uploadType}
+              onChange={(e) => setUploadType(e.target.value)}
+              disabled={isUploading}
+              style={{ fontSize: '0.82rem', padding: '0.3rem 0.4rem', borderRadius: 4, border: '1px solid #cbd5e1' }}
+            >
+              {PROJECT_REPORT_TYPES.map((t) => (
+                <option key={t} value={t}>{PROJECT_REPORT_TYPE_LABELS[t]?.label || t}</option>
+              ))}
+            </select>
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', fontSize: '0.75rem', flex: 1, minWidth: 180 }}>
+            <span style={{ color: 'var(--steel, #64748b)' }}>Title (optional)</span>
+            <input
+              type="text"
+              value={uploadTitle}
+              onChange={(e) => setUploadTitle(e.target.value)}
+              disabled={isUploading}
+              placeholder="e.g. March 2026 monthly"
+              style={{ fontSize: '0.82rem', padding: '0.3rem 0.4rem', borderRadius: 4, border: '1px solid #cbd5e1' }}
+            />
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', fontSize: '0.75rem', flex: 2, minWidth: 220 }}>
+            <span style={{ color: 'var(--steel, #64748b)' }}>File (PDF, Word, Excel, PPT, photo, text, CSV — max 25 MB)</span>
+            <input
+              type="file"
+              accept={fileAccept}
+              onChange={(e) => {
+                setUploadFile(e.target.files?.[0] || null);
+                setUploadError(null);
+              }}
+              disabled={isUploading}
+              style={{ fontSize: '0.78rem' }}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={handleUpload}
+            disabled={isUploading || !uploadFile}
+            style={{ alignSelf: 'flex-end' }}
+          >
+            {uploadPhase === 'sas' && 'Preparing…'}
+            {uploadPhase === 'uploading' && `Uploading ${uploadProgress}%`}
+            {uploadPhase === 'confirming' && 'Finalizing…'}
+            {uploadPhase === 'idle' && 'Upload report'}
+          </button>
+        </div>
+        {isUploading && (
+          <div
+            style={{
+              height: 4,
+              background: '#e2e8f0',
+              borderRadius: 2,
+              overflow: 'hidden',
+            }}
+            aria-label="Upload progress"
+            role="progressbar"
+            aria-valuenow={uploadProgress}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
+            <div
+              style={{
+                width: `${uploadProgress}%`,
+                height: '100%',
+                background: 'var(--brand, #0066ff)',
+                transition: 'width 120ms ease',
+              }}
+            />
+          </div>
+        )}
+        {uploadError && (
+          <div
+            role="alert"
+            style={{ fontSize: '0.78rem', color: '#b91c1c', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 4, padding: '0.3rem 0.5rem' }}
+          >
+            {uploadError}
+          </div>
+        )}
+      </div>
+
+      {/* ─── Type filter chips ─────────────────────────────────────────── */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center' }}>
+        <FilterChip
+          label="All"
+          active={filterType === null}
+          onClick={() => setFilterType(null)}
+        />
+        {PROJECT_REPORT_TYPES.map((t) => (
+          <FilterChip
+            key={t}
+            label={PROJECT_REPORT_TYPE_LABELS[t]?.short || t}
+            active={filterType === t}
+            onClick={() => setFilterType(filterType === t ? null : t)}
+          />
+        ))}
+      </div>
+
+      {/* ─── List of uploaded reports ──────────────────────────────────── */}
+      {filtered.length === 0 ? (
+        <div
+          style={{
+            padding: '0.875rem 0',
+            fontSize: '0.85rem',
+            color: 'var(--steel, #64748b)',
+            fontStyle: 'italic',
+          }}
+        >
+          {rows.length === 0
+            ? 'No reports yet for this project. Upload your first weekly or monthly report above.'
+            : `No ${PROJECT_REPORT_TYPE_LABELS[filterType]?.label || filterType} reports for this project.`}
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gap: '0.3rem' }}>
+          {filtered.map((att) => {
+            const canDelete = isAdmin || (currentEmployeeId && att.uploadedById === currentEmployeeId);
+            return (
+              <div
+                key={att.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.6rem',
+                  padding: '0.5rem 0.75rem',
+                  background: '#f8fafc',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: 6,
+                  fontSize: '0.85rem',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: '0.65rem',
+                    fontWeight: 700,
+                    color: 'var(--navy, #0f172a)',
+                    background: '#e0f2fe',
+                    padding: '1px 7px',
+                    borderRadius: 999,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.04em',
+                  }}
+                >
+                  {PROJECT_REPORT_TYPE_LABELS[att.type]?.short || att.type}
+                </span>
+                <span style={{ color: 'var(--navy, #0f172a)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {att.title || att.filename}
+                </span>
+                <span style={{ fontSize: '0.75rem', color: 'var(--steel, #64748b)' }}>
+                  {formatBytes(att.sizeBytes)}
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--steel, #64748b)' }}>
+                  {formatShortDate(att.uploadedAt)}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => handleDownload(att)}
+                  style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+                >
+                  Download
+                </button>
+                {canDelete && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => handleDelete(att)}
+                    style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem', color: '#b91c1c' }}
+                  >
+                    Delete
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Tiny chip used by the type-filter row + future inline filters.
+function FilterChip({ label, active, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      style={{
+        fontSize: '0.72rem',
+        fontWeight: 600,
+        padding: '0.2rem 0.6rem',
+        borderRadius: 999,
+        border: '1px solid ' + (active ? 'var(--brand, #0066ff)' : '#cbd5e1'),
+        background: active ? 'rgba(0, 102, 255, 0.08)' : 'white',
+        color: active ? 'var(--brand, #0066ff)' : 'var(--steel, #64748b)',
+        cursor: 'pointer',
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+// Compact file size formatter (bytes → KB/MB). Keeps the reports list
+// scannable without adding a new helper to lib/format.js for a single
+// consumer.
+function formatBytes(n) {
+  if (n == null) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // ── Field renderers ──────────────────────────────────────────────────

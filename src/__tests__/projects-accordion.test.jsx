@@ -85,10 +85,12 @@ describe('Round-33 — My Projects accordion expansion', () => {
     expect(panelSrc).toMatch(/api\.getBoqItems\(\{\s*projectName/);
   });
 
-  test('ProjectExpandedPanel renders all five sub-section toggles (Overview / BOQ / DPRs / Inspections / Drawings)', () => {
+  test('ProjectExpandedPanel renders all six sub-section toggles (Overview / BOQ / DPRs / Inspections / Drawings / Reports)', () => {
     // Each section is a collapsible button with aria-expanded; the
-    // SECTION_IDS list is the canonical source.
-    expect(panelSrc).toMatch(/SECTION_IDS\s*=\s*\['overview',\s*'boq',\s*'dprs',\s*'inspections',\s*'drawings'\]/);
+    // SECTION_IDS list is the canonical source. R35 added 'reports' as
+    // the 6th sub-section — file attachments per project (weekly /
+    // monthly / due-diligence / quality / other documents).
+    expect(panelSrc).toMatch(/SECTION_IDS\s*=\s*\['overview',\s*'boq',\s*'dprs',\s*'inspections',\s*'drawings',\s*'reports'\]/);
     // The Section component builds its testid + aria-controls from the
     // `id` prop (template literal). Pin the pattern so a future
     // refactor can't silently rename it.
