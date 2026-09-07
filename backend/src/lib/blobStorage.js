@@ -81,13 +81,29 @@ const CONTENT_TYPE_EXT = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
   'image/webp': 'webp',
-  // Round-29: drawings upload to `dpr-documents` as PDF. The
-  // mountUploadRoutes per-container allowlist gates the public surface;
-  // this map is what generateUploadSASUrl uses to derive the blob's
-  // extension (and is therefore what makes the SAS URL issuance itself
-  // succeed). Both halves of the allowlist must accept the new type,
-  // or the route 400s on INVALID_CONTENT_TYPE before reaching here.
+  // Round-35: HEIC photos from iOS site cameras. The mountUploadRoutes
+  // per-container allowlist gates the public surface; this map is what
+  // generateUploadSASUrl uses to derive the blob's extension (and is
+  // therefore what makes the SAS URL issuance itself succeed). Both
+  // halves of the allowlist must accept the new type, or the route
+  // 400s on INVALID_CONTENT_TYPE before reaching here.
+  'image/heic': 'heic',
+  // Round-29: drawings upload to `dpr-documents` as PDF.
   'application/pdf': 'pdf',
+  // Round-35: project reports — weekly / monthly / due-diligence /
+  // quality documents can be any Office / PDF / photo / plain-text
+  // attachment. The dpr-documents allowlist (see routes/dpr.js)
+  // decides which of these are actually accepted; this map is the
+  // SAS-layer half so a presigned PUT succeeds for whichever types
+  // make it through.
+  'application/msword': 'doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.ms-excel': 'xls',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.ms-powerpoint': 'ppt',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+  'text/plain': 'txt',
+  'text/csv': 'csv',
 };
 
 /**

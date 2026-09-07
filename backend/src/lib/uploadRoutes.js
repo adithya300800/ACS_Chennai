@@ -75,13 +75,19 @@ async function sweepPendingUpload({ employeeId, ulid, container, blobName }) {
 // Validate a client-declared sizeBytes. Returns null if OK, or an
 // Express response object to send. Used by /sas-url (the gate that
 // rejects oversized declarations BEFORE issuing the SAS URL — DR-003).
-function validateSizeBytes(sizeBytes) {
+//
+// Round-35: the cap is now parameterized so a single shared helper can
+// serve both the 10 MB photo cap (dpr-photos / inspection-photos) and
+// the new 25 MB document cap (dpr-documents). All existing callers pass
+// the implicit default — backward-compatible. The new `mountUploadRoutes`
+// caller passes a per-container cap via `resolvedMaxBytes(container)`.
+function validateSizeBytes(sizeBytes, maxBytes = MAX_PHOTO_SIZE) {
   if (sizeBytes === undefined) return null;
   if (typeof sizeBytes !== 'number' || !Number.isFinite(sizeBytes) || sizeBytes <= 0) {
     return { status: 400, body: { error: 'INVALID_SIZE', message: 'sizeBytes must be a positive number' } };
   }
-  if (sizeBytes > MAX_PHOTO_SIZE) {
-    return { status: 413, body: { error: 'PHOTO_TOO_LARGE', message: `Photo must be 1 byte – ${MAX_PHOTO_SIZE} bytes` } };
+  if (sizeBytes > maxBytes) {
+    return { status: 413, body: { error: 'PHOTO_TOO_LARGE', message: `Photo must be 1 byte – ${maxBytes} bytes` } };
   }
   return null;
 }
@@ -106,7 +112,8 @@ function validateSizeBytes(sizeBytes) {
  *   - Require req.employeeId (mount the function AFTER your auth gate)
  *   - Validate contentType against allowedTypesPerContainer[container]
  *     ?? allowedTypes
- *   - Validate sizeBytes against MAX_PHOTO_SIZE
+ *   - Validate sizeBytes against maxSizeBytesPerContainer[container]
+ *     ?? MAX_PHOTO_SIZE (Round-35: per-container cap; default 10 MB)
  *   - Use a per-employeeId ULID-scoped blob path
  *     (a leaked SAS cannot cross tenants)
  *   - Sweep orphaned blobs at PENDING_TTL_MS if /confirm-upload
@@ -119,6 +126,10 @@ function mountUploadRoutes(router, config = {}) {
     allowedTypesPerContainer = {},
     container: hardcodedContainer,
     allowedContainers,
+    // Round-35: per-container byte cap. e.g. dpr-photos=10 MB,
+    // dpr-documents=25 MB. Missing entries fall back to MAX_PHOTO_SIZE
+    // (defense in depth — same pattern as allowedTypesPerContainer).
+    maxSizeBytesPerContainer = {},
   } = config;
 
   // Per-route resolver: lookup the per-container allowlist if present,
@@ -132,6 +143,18 @@ function mountUploadRoutes(router, config = {}) {
       return allowedTypesPerContainer[container];
     }
     return allowedTypes;
+  };
+
+  // Round-35: per-container size cap. Same defense-in-depth shape as
+  // resolvedAllowedTypesFor — missing entry means "use the global
+  // default" (MAX_PHOTO_SIZE), not zero-cap. The dpr-documents
+  // container is opted into 25 MB by routes/dpr.js; dpr-photos and
+  // inspection-photos stay at the 10 MB photo default.
+  const resolvedMaxBytes = (container) => {
+    if (container && Object.prototype.hasOwnProperty.call(maxSizeBytesPerContainer, container)) {
+      return maxSizeBytesPerContainer[container];
+    }
+    return MAX_PHOTO_SIZE;
   };
 
   if (!hardcodedContainer && (!allowedContainers || allowedContainers.length === 0)) {
@@ -183,7 +206,7 @@ function mountUploadRoutes(router, config = {}) {
       return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: `Only ${allowed.join(', ')} allowed for ${container}` });
     }
 
-    const sizeErr = validateSizeBytes(sizeBytes);
+    const sizeErr = validateSizeBytes(sizeBytes, resolvedMaxBytes(container));
     if (sizeErr) return res.status(sizeErr.status).json(sizeErr.body);
 
     const ulid = generateULID();
@@ -268,8 +291,8 @@ function mountUploadRoutes(router, config = {}) {
     const container = pickContainer(req.body);
     if (!validateContainer(container, res)) return;
 
-    if (sizeBytes <= 0 || sizeBytes > MAX_PHOTO_SIZE) {
-      return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `Photo must be 1 byte – ${MAX_PHOTO_SIZE} bytes` });
+    if (sizeBytes <= 0 || sizeBytes > resolvedMaxBytes(container)) {
+      return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `Photo must be 1 byte – ${resolvedMaxBytes(container)} bytes` });
     }
     const allowed = resolvedAllowedTypesFor(container);
     if (!allowed.includes(contentType)) {
