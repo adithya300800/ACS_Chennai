@@ -14,52 +14,62 @@ import StatusBadge from '../../components/StatusBadge.jsx';
 // still navigates to the full admin queue so admins can drill deeper.
 //
 // Endpoint contract (per api.js):
-//   getDprs          — /dpr  ?projectId=&status=&limit=
-//   getInspections   — /inspection ?projectId=&status=&limit=
-//   getBoqItems      — /boq ?projectId=&varianceOnly=&limit=
-//   getVariations    — /variations ?projectId=&status=&limit=
-// We resolve the project reference with `p.id || p.name` so a
-// discovered (unregistered) project still flows through; api.js accepts
-// either shape.
+//   getDprs        — /dpr        ?projectName=&projectId=&status=&limit=
+//   getInspections — /inspection ?projectName=&projectId=&status=&limit=
+//   getBoqItems    — /boq        ?projectName=&projectId=&limit=
+//   getVariations  — /variations ?projectId=&status=&limit=
+//
+// We prefer `projectId` (canonical FK, fast indexed PK lookup) for
+// registered projects and fall back to `projectName` for discovered
+// ones — the KPI endpoint uses projectName for both shapes too, so
+// the drill rows always line up with the KPI counts. Discovered
+// projects in the KPI roll-up come back as `name:<x>` sentinel but
+// the bare `projectName` slot is the canonical discovery fallback.
+function projectFilters(p) {
+  if (!p) return {};
+  if (p.id) return { projectId: p.id };
+  if (p.name) return { projectName: p.name };
+  return {};
+}
 const TILE_META = {
   'dpr.submitted': {
     label: 'Submitted DPRs',
-    loader: (p, t) => api.getDprs({ projectId: p.id || p.name, status: 'SUBMITTED', limit: 10 }, t).then((d) => d.dprs || []),
+    loader: (p, t) => api.getDprs({ ...projectFilters(p), status: 'SUBMITTED', limit: 10 }, t).then((d) => d.dprs || []),
     viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
   },
   'dpr.pendingReview': {
     label: 'DPRs Pending Review',
-    loader: (p, t) => api.getDprs({ projectId: p.id || p.name, status: 'REVIEW', limit: 10 }, t).then((d) => d.dprs || []),
+    loader: (p, t) => api.getDprs({ ...projectFilters(p), status: 'UNDER_REVIEW', limit: 10 }, t).then((d) => d.dprs || []),
     viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
   },
   'dpr.approved': {
     label: 'Approved DPRs',
-    loader: (p, t) => api.getDprs({ projectId: p.id || p.name, status: 'APPROVED', limit: 10 }, t).then((d) => d.dprs || []),
+    loader: (p, t) => api.getDprs({ ...projectFilters(p), status: 'APPROVED', limit: 10 }, t).then((d) => d.dprs || []),
     viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}&status=APPROVED`,
   },
   'dpr.rejected': {
     label: 'Rejected DPRs',
-    loader: (p, t) => api.getDprs({ projectId: p.id || p.name, status: 'REJECTED', limit: 10 }, t).then((d) => d.dprs || []),
+    loader: (p, t) => api.getDprs({ ...projectFilters(p), status: 'REJECTED', limit: 10 }, t).then((d) => d.dprs || []),
     viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}&status=REJECTED`,
   },
   'inspection.total': {
     label: 'Inspections',
-    loader: (p, t) => api.getInspections({ projectId: p.id || p.name, limit: 10 }, t).then((d) => d.inspections || d.records || []),
+    loader: (p, t) => api.getInspections({ ...projectFilters(p), limit: 10 }, t).then((d) => d.inspections || d.records || []),
     viewAll: (p) => `/portal/admin/inspection?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
   },
   'inspection.open': {
     label: 'Open Inspections',
-    loader: (p, t) => api.getInspections({ projectId: p.id || p.name, status: 'OPEN', limit: 10 }, t).then((d) => d.inspections || d.records || []),
+    loader: (p, t) => api.getInspections({ ...projectFilters(p), status: 'OPEN', limit: 10 }, t).then((d) => d.inspections || d.records || []),
     viewAll: (p) => `/portal/admin/inspection?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}&status=OPEN`,
   },
   'boq.items': {
     label: 'BOQ Items',
-    loader: (p, t) => api.getBoqItems({ projectId: p.id || p.name, limit: 10 }, t).then((d) => d.items || d.boq || []),
+    loader: (p, t) => api.getBoqItems({ ...projectFilters(p), limit: 10 }, t).then((d) => d.items || d.boq || []),
     viewAll: (p) => `/portal/admin/boq?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
   },
   'boq.variance': {
     label: 'BOQ Variance Items',
-    loader: (p, t) => api.getBoqItems({ projectId: p.id || p.name, varianceOnly: true, limit: 10 }, t).then((d) => d.items || d.boq || []),
+    loader: (p, t) => api.getBoqItems({ ...projectFilters(p), varianceOnly: true, limit: 10 }, t).then((d) => d.items || d.boq || []),
     viewAll: (p) => `/portal/admin/boq?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
   },
 };
