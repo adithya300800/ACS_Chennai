@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -64,6 +64,25 @@ export default function VariationOrdersAdmin() {
   });
   const [showFilters, setShowFilters] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
+
+  // Round-34 Feature 4: read ?projectId= from the URL so an admin
+  // landing here from ProjectDashboard's "View all →" link sees a
+  // project-scoped queue on first paint. Discovered projects land
+  // here as `name:<x>` which the variations endpoint does not
+  // accept — those fall through to no-filter rather than 400, so
+  // the page stays usable.
+  const [searchParams] = useSearchParams();
+  const urlProjectId = searchParams.get('projectId') || '';
+  const [urlSeeded, setUrlSeeded] = useState(false);
+  useEffect(() => {
+    if (urlSeeded || !urlProjectId) return;
+    if (urlProjectId.startsWith('name:')) {
+      // Discovered — backend would 400; clear it (admin can search via UI).
+      return;
+    }
+    setFilter((prev) => (prev.projectId ? prev : { ...prev, projectId: urlProjectId }));
+    setUrlSeeded(true);
+  }, [urlProjectId, urlSeeded]);
 
   // Counts for the header stat tiles. All computed client-side; v1 doesn't
   // ship an aggregate `/api/variations/stats` endpoint so the cards mirror

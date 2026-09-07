@@ -1,10 +1,68 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatShortDate } from '../../lib/format.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import StatusBadge from '../../components/StatusBadge.jsx';
+
+// Tile-key → endpoint loader + label + "View all" link. Round-34
+// Feature 4 turned each StatTile into an accordion button: clicking
+// expands an InlineDrillPanel below the section, showing ≤10 rows of
+// the matching bucket scoped to the selected project. "View all →"
+// still navigates to the full admin queue so admins can drill deeper.
+//
+// Endpoint contract (per api.js):
+//   getDprs          — /dpr  ?projectId=&status=&limit=
+//   getInspections   — /inspection ?projectId=&status=&limit=
+//   getBoqItems      — /boq ?projectId=&varianceOnly=&limit=
+//   getVariations    — /variations ?projectId=&status=&limit=
+// We resolve the project reference with `p.id || p.name` so a
+// discovered (unregistered) project still flows through; api.js accepts
+// either shape.
+const TILE_META = {
+  'dpr.submitted': {
+    label: 'Submitted DPRs',
+    loader: (p, t) => api.getDprs({ projectId: p.id || p.name, status: 'SUBMITTED', limit: 10 }, t).then((d) => d.dprs || []),
+    viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
+  },
+  'dpr.pendingReview': {
+    label: 'DPRs Pending Review',
+    loader: (p, t) => api.getDprs({ projectId: p.id || p.name, status: 'REVIEW', limit: 10 }, t).then((d) => d.dprs || []),
+    viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
+  },
+  'dpr.approved': {
+    label: 'Approved DPRs',
+    loader: (p, t) => api.getDprs({ projectId: p.id || p.name, status: 'APPROVED', limit: 10 }, t).then((d) => d.dprs || []),
+    viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}&status=APPROVED`,
+  },
+  'dpr.rejected': {
+    label: 'Rejected DPRs',
+    loader: (p, t) => api.getDprs({ projectId: p.id || p.name, status: 'REJECTED', limit: 10 }, t).then((d) => d.dprs || []),
+    viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}&status=REJECTED`,
+  },
+  'inspection.total': {
+    label: 'Inspections',
+    loader: (p, t) => api.getInspections({ projectId: p.id || p.name, limit: 10 }, t).then((d) => d.inspections || d.records || []),
+    viewAll: (p) => `/portal/admin/inspection?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
+  },
+  'inspection.open': {
+    label: 'Open Inspections',
+    loader: (p, t) => api.getInspections({ projectId: p.id || p.name, status: 'OPEN', limit: 10 }, t).then((d) => d.inspections || d.records || []),
+    viewAll: (p) => `/portal/admin/inspection?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}&status=OPEN`,
+  },
+  'boq.items': {
+    label: 'BOQ Items',
+    loader: (p, t) => api.getBoqItems({ projectId: p.id || p.name, limit: 10 }, t).then((d) => d.items || d.boq || []),
+    viewAll: (p) => `/portal/admin/boq?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
+  },
+  'boq.variance': {
+    label: 'BOQ Variance Items',
+    loader: (p, t) => api.getBoqItems({ projectId: p.id || p.name, varianceOnly: true, limit: 10 }, t).then((d) => d.items || d.boq || []),
+    viewAll: (p) => `/portal/admin/boq?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
+  },
+};
 
 // N17 (Project-level dashboard with KPI tiles): PM's daily landing page.
 //
@@ -82,7 +140,13 @@ function prettyInspectionType(slug) {
 // One KPI tile — large number + label + optional sub-line. The icon is
 // a small SVG bubble that mirrors AdminOverview's icon chip aesthetic
 // (44×44, 10px radius, blue tint background).
-function StatTile({ icon, number, label, tone = 'neutral', sub, to }) {
+//
+// Round-34 Feature 4: this used to be a `<Link>` that drilled through
+// to the filtered admin queue. The user wants the data inline instead
+// — so every actionable tile is now an accordion `<button>` that
+// toggles `expandedTile` and renders an InlineDrillPanel below the
+// section. `to` is gone; the in-page navigation is the new affordance.
+function StatTile({ icon, number, label, tone = 'neutral', sub, tileKey, isExpanded, onToggle }) {
   // tone ∈ 'neutral' | 'good' | 'warning' | 'critical' — maps to the
   // status palette. Icons stay in the blue brand colour regardless of
   // tone — only the NUMBER shifts colour so a red "Overdue" tile reads
@@ -94,10 +158,6 @@ function StatTile({ icon, number, label, tone = 'neutral', sub, to }) {
     critical: 'var(--red, #dc2626)',
   };
   const numColor = colorMap[tone] || colorMap.neutral;
-  // Round-28 Bug 2b: when `to` is given, wrap the tile in a <Link> so
-  // clicking drills through to the filtered admin queue. The card
-  // hover/focus treatment is identical for both branches — only the
-  // underlying element changes.
   const inner = (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.625rem' }}>
@@ -131,9 +191,18 @@ function StatTile({ icon, number, label, tone = 'neutral', sub, to }) {
           fontWeight: 600,
           fontSize: '0.85rem',
           color: 'var(--navy, #0f172a)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem',
         }}
       >
-        {label}
+        <span>{label}</span>
+        {tileKey ? (
+          <span aria-hidden="true" style={{
+            fontSize: '0.78rem',
+            color: 'var(--blue, #0066FF)',
+            transform: isExpanded ? 'rotate(180deg)' : 'none',
+            transition: 'transform 0.15s ease',
+          }}>▾</span>
+        ) : null}
       </div>
       {sub ? (
         <div style={{ fontSize: '0.78rem', color: 'var(--steel, #64748b)' }}>{sub}</div>
@@ -147,17 +216,26 @@ function StatTile({ icon, number, label, tone = 'neutral', sub, to }) {
     flexDirection: 'column',
     gap: '0.5rem',
     minHeight: 110,
+    textAlign: 'left',
+    cursor: tileKey ? 'pointer' : 'default',
+    background: 'white',
   };
 
-  if (to) {
+  // Accordion toggle — only when tileKey is provided. Without it we
+  // render the passive `<div>` (Drafts / On Leave Today are not
+  // actionable enough to merit an inline panel).
+  if (tileKey) {
     return (
-      <Link
-        to={to}
+      <button
+        type="button"
+        onClick={() => onToggle(tileKey)}
+        aria-expanded={!!isExpanded}
+        aria-controls={`drill-${tileKey}`}
         className="dpr-card dpr-tile-link"
-        style={{ ...cardStyle, textDecoration: 'none', color: 'inherit' }}
+        style={{ ...cardStyle, textDecoration: 'none', color: 'inherit', border: 'none' }}
       >
         {inner}
-      </Link>
+      </button>
     );
   }
   return (
@@ -261,6 +339,32 @@ export default function ProjectDashboard() {
   // Lookback window in days. 30 = default. "all" is sent as 365 — the
   // backend clamps to 365 and we surface that in the window sub-line.
   const [days, setDays] = useState(30);
+
+  // Round-34 Feature 4: inline drill-down accordion state. Single-open
+  // — only one tile can be expanded at a time across the whole
+  // dashboard. Mirrors the Round-33 Projects.jsx `expandedKey` pattern
+  // so the mental model is consistent.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlTile = searchParams.get('tile') || '';
+  const [expandedTile, setExpandedTile] = useState(urlTile || null);
+  // Mirror URL → state when the user lands on a tile=… link or
+  // back-navigates to one. Same pattern as DprDashboard.jsx:70-81.
+  useEffect(() => {
+    if (urlTile !== expandedTile) setExpandedTile(urlTile || null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlTile]);
+  // Mirror state → URL on every expansion change so the panel is
+  // shareable / bookmark-able. Guard against the echo from the URL→
+  // state effect above so we don't churn history on mount.
+  useEffect(() => {
+    const current = searchParams.get('tile') || '';
+    if ((expandedTile || '') === current) return;
+    const next = new URLSearchParams(searchParams);
+    if (expandedTile) next.set('tile', expandedTile);
+    else next.delete('tile');
+    setSearchParams(next, { replace: true });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expandedTile]);
 
   // Mounted-ref guard so a fast project-switch (click-select-click) can't
   // fire two KPI calls and let a stale response overwrite the fresh one.
@@ -486,6 +590,9 @@ export default function ProjectDashboard() {
           loading={loadingKpis}
           selectedProject={selectedProject}
           days={days}
+          expandedTile={expandedTile}
+          setExpandedTile={setExpandedTile}
+          accessToken={accessToken}
         />
       )}
     </div>
@@ -618,7 +725,12 @@ function ErrorState({ message, onRetry }) {
 // Renders once `kpis` is loaded. Each section has its own grid that
 // collapses to a single column on mobile (the auto-fill minmax below
 // already collapses — single tile row fits 1 card on a 320px viewport).
-function ProjectKpiView({ kpis, loading, selectedProject, days }) {
+//
+// Round-34 Feature 4: receives `expandedTile` / `setExpandedTile` so
+// each tile is an accordion toggle. TileSection also gets the
+// `tileKeys` array it owns so the InlineDrillPanel only renders
+// inside the matching section.
+function ProjectKpiView({ kpis, loading, selectedProject, days, expandedTile, setExpandedTile, accessToken }) {
   if (loading && !kpis) {
     return (
       <div className="dpr-card" style={{ padding: '2rem', textAlign: 'center', color: 'var(--steel, #64748b)' }}>
@@ -628,8 +740,18 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
   }
   if (!kpis) return null;
 
-  const project = kpis.project || {};
+  const project = kpis.project || { name: selectedProject.name, isRegistered: selectedProject.isRegistered };
   const isDiscovered = project.isRegistered === false;
+  // Each section owns a list of tile keys so the InlineDrillPanel
+  // renders in the correct one when expanded. Drafts / people tiles
+  // are not actionable (no list endpoint to drill into), so they
+  // stay passive.
+  const dprTileKeys = ['dpr.submitted', 'dpr.pendingReview', 'dpr.approved', 'dpr.rejected'];
+  const inspectionTileKeys = ['inspection.total', 'inspection.open'];
+  const boqTileKeys = ['boq.items', 'boq.variance'];
+  const toggle = useCallback((key) => {
+    setExpandedTile((curr) => (curr === key ? null : key));
+  }, [setExpandedTile]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
@@ -723,23 +845,22 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
         ) : null}
       </div>
 
-      {/* Five KPI sections. Each one matches the AdminOverview
-          TileSection aesthetic (uppercase section label + auto-fill
-          tile grid) so the visual language stays consistent. Round-28
-          Bug 2b: each TileSection now carries a drill-through `to`
-          pointing at the project-filtered admin queue; individual
-          StatTiles also carry `to` for the most actionable counts
-          (Pending Review, Open, Due Soon, Overdue, Variance). */}
       <TileSection
         title="Daily Reports"
-        to={`/portal/admin/dpr?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
+        tileKeys={dprTileKeys}
+        expandedTile={expandedTile}
+        setExpandedTile={setExpandedTile}
+        project={project}
+        accessToken={accessToken}
       >
         <StatTile
           icon={ICONS.dpr}
           number={kpis.dpr?.submittedCount ?? 0}
           label="Submitted"
           sub={`${kpis.dpr?.pendingReviewCount ?? 0} awaiting review`}
-          to={`/portal/admin/dpr?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
+          tileKey="dpr.submitted"
+          isExpanded={expandedTile === 'dpr.submitted'}
+          onToggle={toggle}
         />
         <StatTile
           icon={ICONS.pending}
@@ -747,21 +868,27 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
           label="Pending Review"
           tone={(kpis.dpr?.pendingReviewCount ?? 0) > 0 ? 'warning' : 'neutral'}
           sub="Submitted + Under Review"
-          to={`/portal/admin/dpr?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
+          tileKey="dpr.pendingReview"
+          isExpanded={expandedTile === 'dpr.pendingReview'}
+          onToggle={toggle}
         />
         <StatTile
           icon={ICONS.check}
           number={kpis.dpr?.approvedCount ?? 0}
           label="Approved"
           tone={(kpis.dpr?.approvedCount ?? 0) > 0 ? 'good' : 'neutral'}
-          to={`/portal/admin/dpr?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}&status=APPROVED`}
+          tileKey="dpr.approved"
+          isExpanded={expandedTile === 'dpr.approved'}
+          onToggle={toggle}
         />
         <StatTile
           icon={ICONS.reject}
           number={kpis.dpr?.rejectedCount ?? 0}
           label="Rejected"
           tone={(kpis.dpr?.rejectedCount ?? 0) > 0 ? 'critical' : 'neutral'}
-          to={`/portal/admin/dpr?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}&status=REJECTED`}
+          tileKey="dpr.rejected"
+          isExpanded={expandedTile === 'dpr.rejected'}
+          onToggle={toggle}
         />
         <StatTile
           icon={ICONS.draft}
@@ -773,14 +900,20 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
 
       <TileSection
         title="Inspections"
-        to={`/portal/admin/inspection?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
+        tileKeys={inspectionTileKeys}
+        expandedTile={expandedTile}
+        setExpandedTile={setExpandedTile}
+        project={project}
+        accessToken={accessToken}
       >
         <StatTile
           icon={ICONS.inspection}
           number={kpis.inspections?.totalCount ?? 0}
           label="Total (window)"
           sub={`${kpis.inspections?.openCount ?? 0} currently open`}
-          to={`/portal/admin/inspection?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
+          tileKey="inspection.total"
+          isExpanded={expandedTile === 'inspection.total'}
+          onToggle={toggle}
         />
         <StatTile
           icon={ICONS.pending}
@@ -788,7 +921,9 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
           label="Open"
           tone={(kpis.inspections?.openCount ?? 0) > 0 ? 'warning' : 'neutral'}
           sub="Across all of this project"
-          to={`/portal/admin/inspection?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}&status=OPEN`}
+          tileKey="inspection.open"
+          isExpanded={expandedTile === 'inspection.open'}
+          onToggle={toggle}
         />
         {/* Breakdown by inspection type — small chips, one per type. We
             pin this as a full-width tile (not the 320px minmax grid)
@@ -838,26 +973,30 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
 
       <TileSection
         title="BOQ Variance"
-        to={`/portal/admin/boq?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
+        tileKeys={boqTileKeys}
+        expandedTile={expandedTile}
+        setExpandedTile={setExpandedTile}
+        project={project}
+        accessToken={accessToken}
       >
         <StatTile
           icon={ICONS.cube}
           number={kpis.boqVariance?.itemsCount ?? 0}
           label="Items"
           sub="Active line items in BOQ"
-          to={`/portal/admin/boq?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
+          tileKey="boq.items"
+          isExpanded={expandedTile === 'boq.items'}
+          onToggle={toggle}
         />
         <StatTile
           icon={ICONS.money}
           number={`₹${formatINR(kpis.boqVariance?.totalContractValue ?? 0)}`}
           label="Contract Value"
-          to={`/portal/admin/boq?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
         />
         <StatTile
           icon={ICONS.money}
           number={`₹${formatINR(kpis.boqVariance?.totalExecutedValue ?? 0)}`}
           label="Executed Value"
-          to={`/portal/admin/boq?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
         />
         <StatTile
           icon={ICONS.money}
@@ -871,10 +1010,9 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
               : 'neutral'
           }
           sub="Negative = under contract (good)"
-          // Override the stat-tile colour to use the diverging pair.
-          // countColor/varianceColor share the same reservation so this
-          // is consistent with the tile-level tones.
-          to={`/portal/admin/boq?projectId=${encodeURIComponent(project.id || `name:${project.name}`)}`}
+          tileKey="boq.variance"
+          isExpanded={expandedTile === 'boq.variance'}
+          onToggle={toggle}
         />
         {(kpis.boqVariance?.itemsCount ?? 0) === 0 ? (
           <div className="dpr-card" style={{ padding: '0.75rem 1rem', gridColumn: '1 / -1', fontSize: '0.82rem', color: 'var(--steel, #64748b)' }}>
@@ -918,11 +1056,17 @@ function ProjectKpiView({ kpis, loading, selectedProject, days }) {
 
 // TileSection — same uppercase label + auto-fill grid pattern used by
 // AdminOverview. Keeps the visual language consistent across the
-// admin pages. Round-28 Bug 2b: when `to` is given, the title becomes
-// a Link to the filtered admin queue/registry so the whole section
-// has a clear drill-through path even on viewports where individual
-// tiles are too dense to click reliably.
-function TileSection({ title, to, children }) {
+// admin pages.
+//
+// Round-34 Feature 4: `to` is gone (was a section-level drill Link).
+// Each tile is now its own accordion toggle; this container just
+// renders the grid + an InlineDrillPanel as a full-width child when
+// one of its `tileKeys` matches the parent's `expandedTile`.
+//
+// `tileKeys` is the list of accordion keys this section owns —
+// required so a single expandedTile only renders in one section.
+function TileSection({ title, tileKeys, expandedTile, setExpandedTile, project, accessToken, children }) {
+  const expandedInSection = expandedTile && tileKeys && tileKeys.includes(expandedTile);
   return (
     <section>
       <h2
@@ -939,17 +1083,27 @@ function TileSection({ title, to, children }) {
           gap: '0.5rem',
         }}
       >
-        {to ? (
-          <Link
-            to={to}
-            style={{ color: 'inherit', textDecoration: 'none' }}
+        {title}
+        {expandedInSection ? (
+          <button
+            type="button"
+            onClick={() => setExpandedTile(null)}
+            aria-label={`Close ${title} panel`}
+            style={{
+              marginLeft: 'auto',
+              fontSize: '0.78rem',
+              color: 'var(--blue, #0066FF)',
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              textTransform: 'none',
+              letterSpacing: 'normal',
+              fontWeight: 600,
+            }}
           >
-            {title}
-            <span style={{ marginLeft: '0.5rem', color: 'var(--blue, #0066FF)', fontSize: '0.85em' }}>→</span>
-          </Link>
-        ) : (
-          title
-        )}
+            Close ✕
+          </button>
+        ) : null}
       </h2>
       <div
         style={{
@@ -959,7 +1113,174 @@ function TileSection({ title, to, children }) {
         }}
       >
         {children}
+        {expandedInSection ? (
+          <div style={{ gridColumn: '1 / -1' }} key={`drill-wrap-${expandedTile}`}>
+            <InlineDrillPanel
+              tileKey={expandedTile}
+              project={project}
+              accessToken={accessToken}
+              onClose={() => setExpandedTile(null)}
+            />
+          </div>
+        ) : null}
       </div>
     </section>
+  );
+}
+
+// InlineDrillPanel — the rows-below-the-tile list. Round-34 Feature 4:
+// clicking a tile (e.g. "Submitted") fetches the same backend list
+// endpoint the admin queue uses, scoped by `projectId`, and renders
+// up to 10 rows with a "View all →" footer link to the full admin
+// queue. Same shape regardless of bucket (DPR vs Inspection vs BOQ)
+// — content is driven by TILE_META + a small renderRow function
+// that picks the fields each bucket exposes (date / subject /
+// status / amount).
+//
+// Stale-response guard: each load stores a per-tile epoch counter in
+// a ref. A tile click while a previous load is still in flight just
+// increments the epoch, so the older load's then() bails out instead
+// of overwriting the fresh state.
+function InlineDrillPanel({ tileKey, project, accessToken, onClose }) {
+  const meta = TILE_META[tileKey];
+  const [rows, setRows] = useState([]);
+  const [status, setStatus] = useState('idle'); // idle | loading | ready | error
+  const [errorMsg, setErrorMsg] = useState('');
+  const epochRef = useRef(0);
+
+  useEffect(() => {
+    if (!meta) return;
+    const myEpoch = ++epochRef.current;
+    setStatus('loading');
+    setErrorMsg('');
+    setRows([]);
+    meta.loader(project, accessToken)
+      .then((data) => {
+        if (myEpoch !== epochRef.current) return; // stale
+        setRows(Array.isArray(data) ? data : []);
+        setStatus('ready');
+      })
+      .catch((err) => {
+        if (myEpoch !== epochRef.current) return; // stale
+        setErrorMsg(err?.message || 'Failed to load rows');
+        setStatus('error');
+      });
+    // We intentionally re-bind on tileKey so flipping between tiles
+    // re-fetches. project/accessToken are stable per selection.
+  }, [tileKey, project?.id, project?.name, accessToken, meta]);
+
+  if (!meta) return null;
+  const viewAllHref = meta.viewAll(project);
+
+  return (
+    <div
+      id={`drill-${tileKey}`}
+      className="dpr-card"
+      style={{ padding: '1rem 1.25rem' }}
+      role="region"
+      aria-label={meta.label}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.6rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+        <div style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", fontWeight: 600, fontSize: '0.95rem', color: 'var(--navy, #0f172a)' }}>
+          {meta.label}
+        </div>
+        <div style={{ fontSize: '0.78rem', color: 'var(--steel, #64748b)' }}>
+          {status === 'ready' ? `${rows.length} row${rows.length === 1 ? '' : 's'}` : ''}
+        </div>
+      </div>
+
+      {status === 'loading' ? (
+        <div style={{ fontSize: '0.85rem', color: 'var(--steel, #64748b)', padding: '0.5rem 0' }}>Loading…</div>
+      ) : status === 'error' ? (
+        <div style={{ fontSize: '0.85rem', color: 'var(--red, #dc2626)', padding: '0.5rem 0' }}>{errorMsg}</div>
+      ) : rows.length === 0 ? (
+        <div style={{ fontSize: '0.85rem', color: 'var(--steel, #64748b)', padding: '0.5rem 0' }}>
+          No items in this bucket. <Link to={viewAllHref} style={{ color: 'var(--blue, #0066FF)', fontWeight: 600 }}>View all →</Link>
+        </div>
+      ) : (
+        <>
+          <div role="list" style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+            {rows.map((row) => (
+              <DrillRow key={row.id} row={row} tileKey={tileKey} />
+            ))}
+          </div>
+          <div style={{ marginTop: '0.75rem', borderTop: '1px solid var(--steel, #e2e8f0)', paddingTop: '0.6rem' }}>
+            <Link to={viewAllHref} style={{ color: 'var(--blue, #0066FF)', fontWeight: 600, fontSize: '0.88rem' }}>
+              View all → full queue
+            </Link>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// DrillRow — one row per record. Driven by tileKey so DPR rows
+// show reportDate + status, Inspection rows show reportDate + type +
+// status, BOQ rows show itemDescription + variance%. We deliberately
+// keep this small (no second-level action buttons) — drill-through
+// happens by clicking the row link to the detail/edit page.
+function DrillRow({ row, tileKey }) {
+  const isDpr = tileKey.startsWith('dpr.');
+  const isInspection = tileKey.startsWith('inspection.');
+  const isBoq = tileKey.startsWith('boq.');
+
+  let detailHref = '#';
+  let primary = '';
+  let secondary = '';
+  let statusLabel = '';
+
+  if (isDpr) {
+    detailHref = `/portal/admin/dpr/${row.id}`;
+    primary = row.subject || `DPR ${String(row.id).slice(0, 8)}`;
+    secondary = row.reportDate ? formatShortDate(row.reportDate) : '';
+    statusLabel = row.status || '';
+  } else if (isInspection) {
+    detailHref = `/portal/admin/inspection/${row.id}`;
+    primary = row.subject || prettyInspectionType(row.subWorkType || row.type) || `Inspection ${String(row.id).slice(0, 8)}`;
+    secondary = row.reportDate ? formatShortDate(row.reportDate) : '';
+    statusLabel = row.status || '';
+  } else if (isBoq) {
+    detailHref = `/portal/admin/boq/${row.id}`;
+    primary = row.itemDescription || row.description || `Item ${String(row.id).slice(0, 8)}`;
+    secondary = row.contractValue ? `Contract ₹${Number(row.contractValue).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '';
+    statusLabel = row.variancePercent != null ? `${Number(row.variancePercent).toFixed(1)}%` : '';
+  }
+
+  return (
+    <Link
+      to={detailHref}
+      role="listitem"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '0.75rem',
+        padding: '0.5rem 0.75rem',
+        borderRadius: 6,
+        border: '1px solid var(--steel, #e2e8f0)',
+        textDecoration: 'none',
+        color: 'inherit',
+        background: 'white',
+      }}
+    >
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{
+          fontSize: '0.88rem',
+          fontWeight: 600,
+          color: 'var(--navy, #0f172a)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>{primary}</div>
+        {secondary ? (
+          <div style={{ fontSize: '0.78rem', color: 'var(--steel, #64748b)', marginTop: 2 }}>{secondary}</div>
+        ) : null}
+      </div>
+      {statusLabel ? (
+        <StatusBadge label={statusLabel} />
+      ) : null}
+      <span aria-hidden="true" style={{ color: 'var(--blue, #0066FF)', fontSize: '0.95rem' }}>→</span>
+    </Link>
   );
 }

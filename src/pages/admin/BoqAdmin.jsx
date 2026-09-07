@@ -29,7 +29,7 @@
 //     FK reference intact.
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -395,6 +395,32 @@ export default function BoqAdmin() {
   const [formOpen, setFormOpen] = useState(false);
   const [formInitial, setFormInitial] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+
+  // Round-34 Feature 4: read ?projectId= from the URL so an admin
+  // landing on the page from ProjectDashboard's "View all →" link
+  // sees a project-scoped queue on first paint. Drops the manual
+  // dropdown pick that previously broke the deep-link contract.
+  //
+  // ProjectDashboard forwards either a UUID (registered project) or
+  // "name:<text>" (discovered project). BOQ accepts both shapes —
+  // the UUID slot is `projectId`, the bare-name slot is `projectName`
+  // text. We mirror accordingly so the deep-link Just Works for both
+  // kinds.
+  const [searchParams] = useSearchParams();
+  const urlProjectId = searchParams.get('projectId') || '';
+  const [urlSeeded, setUrlSeeded] = useState(false);
+  useEffect(() => {
+    if (urlSeeded || !urlProjectId) return;
+    if (urlProjectId.startsWith('name:')) {
+      // Discovered project — only `projectName` text matches.
+      const name = urlProjectId.slice(5);
+      setAppliedFilter(name);
+    } else {
+      setProjectIdFilter(urlProjectId);
+      setAppliedFilter(urlProjectId);
+    }
+    setUrlSeeded(true);
+  }, [urlProjectId, urlSeeded]);
 
   const fetchItems = useCallback(async () => {
     setLoading(true);

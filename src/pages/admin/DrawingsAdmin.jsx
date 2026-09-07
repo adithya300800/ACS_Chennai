@@ -32,7 +32,7 @@
 //     switches into supersede mode when `supersedes` is supplied.
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -69,6 +69,20 @@ export default function DrawingsAdmin() {
 
   const [projectId, setProjectId] = useState('');
   const [statusFilter, setStatusFilter] = useState('ACTIVE');
+
+  // Round-34 Feature 4: read ?projectId= from the URL so an admin
+  // landing here from ProjectDashboard's "View all →" / "+ Add
+  // drawing" affordance gets a project pre-picked. Discovered
+  // projects (name:<x>) are dropped silently — the admin can
+  // re-select via the dropdown after registering the project.
+  const [searchParams] = useSearchParams();
+  const urlProjectId = searchParams.get('projectId') || '';
+  const [urlSeeded, setUrlSeeded] = useState(false);
+  useEffect(() => {
+    if (urlSeeded || !urlProjectId || urlProjectId.startsWith('name:')) return;
+    setProjectId(urlProjectId);
+    setUrlSeeded(true);
+  }, [urlProjectId, urlSeeded]);
 
   const [drawings, setDrawings] = useState([]);
   const [loading, setLoading] = useState(false);

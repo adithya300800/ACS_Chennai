@@ -2466,6 +2466,26 @@ footer {
   box-shadow: 0 4px 12px rgba(0,0,0,0.12);
 }
 
+/* Round-34 Feature 4: the ProjectDashboard accordion tiles are
+   <button class="dpr-card dpr-tile-link"> — clicking one expands
+   the InlineDrillPanel below the section. The expanded state needs
+   a visible blue ring so the admin knows which tile drove the
+   rows they're looking at (especially helpful in BOQ Variance where
+   4 tiles look similar). Mirrors the Projects.jsx (Round-33)
+   "selected card" pattern. */
+.dpr-tile-link {
+  cursor: pointer;
+  font: inherit;
+}
+.dpr-tile-link:focus-visible {
+  outline: 2px solid var(--blue, #0066FF);
+  outline-offset: 2px;
+}
+.dpr-tile-link[aria-expanded="true"] {
+  border: 1.5px solid var(--blue, #0066FF);
+  box-shadow: 0 0 0 3px rgba(0,102,255,0.12);
+}
+
 .dpr-card-header {
   display: flex;
   align-items: flex-start;
