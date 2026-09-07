@@ -4,6 +4,46 @@ export const MAX_PHOTO_BYTES = 10 * 1024 * 1024; // 10MB — matches backend pho
 export const MAX_PHOTOS_PER_DPR = 10;
 export const ACCEPTED_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
+// R35: Project Reports — file attachments per project (weekly / monthly /
+// due-diligence / quality / other documents). Mirrors the widened
+// backend allowlist on the dpr-documents R2 bucket (see
+// backend/src/routes/dpr.js maxSizeBytesPerContainer) and the SAS-layer
+// extension in backend/src/lib/blobStorage.js#CONTENT_TYPE_EXT. Both
+// halves must accept the same MIME types or the upload pipeline 400s on
+// INVALID_CONTENT_TYPE before the bytes ever leave the browser.
+//
+// 25 MB cap matches the per-container byte ceiling; high-res HEIC site
+// photos + Office docs with embedded media routinely exceed 10 MB. Kept
+// here so the upload form's inline validation and the file-picker
+// `accept` attribute can pull from the same source.
+export const MAX_REPORT_BYTES = 25 * 1024 * 1024; // 25 MB
+export const ACCEPTED_REPORT_TYPES = [
+  // Photos (incl. HEIC from iOS site cameras — see round-29).
+  'image/jpeg', 'image/png', 'image/webp', 'image/heic',
+  // PDFs (already accepted on dpr-documents for Drawing PDFs).
+  'application/pdf',
+  // Office — both legacy (.doc/.xls/.ppt) and OOXML (.docx/.xlsx/.pptx).
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  // Plain text + CSV (for ad-hoc reports exported from spreadsheets).
+  'text/plain', 'text/csv',
+];
+
+// Map MIME → human label + short label for the type-filter chips + badges.
+// Order matters — it defines the canonical chip order in the UI.
+export const PROJECT_REPORT_TYPE_LABELS = {
+  WEEKLY_REPORT:        { label: 'Weekly',         short: 'Weekly' },
+  MONTHLY_REPORT:       { label: 'Monthly',        short: 'Monthly' },
+  DUE_DILIGENCE_REPORT: { label: 'Due diligence',  short: 'Due Dil.' },
+  QUALITY_REPORT:       { label: 'Quality',        short: 'Quality' },
+  OTHER:                { label: 'Other',          short: 'Other' },
+};
+export const PROJECT_REPORT_TYPES = Object.keys(PROJECT_REPORT_TYPE_LABELS);
+
 // Round-14: Employee Training. Mirrors backend/src/lib/trainingRules.js
 // values — keep in sync if the backend caps change.
 //

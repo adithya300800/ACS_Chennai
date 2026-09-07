@@ -775,4 +775,59 @@ export const api = {
   // frontend contract is fixed and a backend PR can slot in without
   // a frontend refactor.
   getDrawingReadSas: (id, token) => api.get(`/drawings/${id}/read-sas`, token),
+
+  // R35: Project Reports — file attachments per project. Backend lives at
+  // /api/projects/:projectId/attachments (see backend/src/routes/
+  // projectAttachments.js). Mirrors the Drawing contract shape:
+  //   - list           → GET ?type= filter, excludes soft-deleted rows,
+  //                      ordering = uploadedAt DESC then id DESC.
+  //   - create         → POST row AFTER bytes land in R2 (see
+  //                      getReportSasUrl + confirmReportUpload below).
+  //                      Same upload pipeline drawings use; the bytes go
+  //                      direct-to-R2 via /api/dpr/sas-url + /confirm-upload
+  //                      with `container: 'dpr-documents'`, and the JSON
+  //                      POST here just records the row.
+  //   - read-sas       → mint a 1h presigned GET URL (matches Drawing —
+  //                      same `dpr-documents` bucket).
+  //   - delete         → soft-delete via deletedAt; auth-gated to admin
+  //                      OR uploader in the backend. Idempotent on
+  //                      already-deleted rows.
+  getProjectAttachments: (projectId, params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/projects/${projectId}/attachments${qs ? '?' + qs : ''}`, token);
+  },
+  createProjectAttachment: (projectId, payload, token) =>
+    api.post(`/projects/${projectId}/attachments`, payload, token),
+  getProjectAttachmentReadSas: (projectId, attachmentId, token) =>
+    api.get(`/projects/${projectId}/attachments/${attachmentId}/read-sas`, token),
+  deleteProjectAttachment: (projectId, attachmentId, token) =>
+    api.delete(`/projects/${projectId}/attachments/${attachmentId}`, token),
+
+  // Project Reports upload — same SAS-mint + confirm pattern as drawings.
+  // The `report/` prefix is preserved verbatim in the blob path so an R2
+  // bucket-wide listing still shows which objects belong to reports vs
+  // drawings (the two shared consumers of dpr-documents).
+  //
+  // Frontend 3-step upload flow:
+  //   1. POST /api/dpr/sas-url  → get SAS URL + blobPath
+  //   2. PUT  <sasUrl>          → upload bytes direct to R2 (XHR with progress)
+  //   3. POST /api/projects/:projectId/attachments  → insert row referencing blobPath
+  // (The confirm-upload call before step 3 is OPTIONAL — the POST in step
+  // 3 only requires a non-empty blobPath; the upload-intent table tracks
+  // orphans. We still call confirm-upload to keep the lifetime clean and
+  // satisfy the 20-min pending TTL sweeper.)
+  getReportSasUrl: (filename, contentType, token) =>
+    api.post('/dpr/sas-url', {
+      filename: `report/${filename}`,
+      contentType,
+      container: 'dpr-documents',
+    }, token),
+  confirmReportUpload: (ulid, filename, contentType, sizeBytes, token) =>
+    api.post('/dpr/confirm-upload', {
+      ulid,
+      container: 'dpr-documents',
+      filename: `report/${filename}`,
+      contentType,
+      sizeBytes,
+    }, token),
 };
