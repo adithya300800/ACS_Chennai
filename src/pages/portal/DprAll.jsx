@@ -842,9 +842,11 @@ export default function DprAll() {
         </div>
       ) : (
         <>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: '1rem' }}>
           {dprs.map((dpr) => {
             const workTypeLabel = WORK_TYPE_LABEL[dpr.workType] || dpr.workType || '—';
+            const photoCount = Array.isArray(dpr.photos) ? dpr.photos.length : 0;
+            const customSections = Array.isArray(dpr.customSections) ? dpr.customSections : [];
             return (
               <div
                 key={dpr.id}
@@ -891,15 +893,216 @@ export default function DprAll() {
                   </div>
                   <StatusBadge status={dpr.status} map={DPR_STATUS_MAP} />
                 </div>
-                <div style={{ fontSize: '0.85rem', color: 'var(--steel)', marginBottom: '0.5rem' }}>{workTypeLabel}</div>
-                <div style={{ fontSize: '0.8rem', color: 'var(--steel)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid #f1f5f9', paddingTop: '0.5rem', marginTop: '0.5rem' }}>
-                  <span>
-                    Submitted by <strong style={{ color: 'var(--navy)' }}>{dpr.submittedBy?.name || '—'}</strong>
+
+                {/* Work-type + meta strip (workType, weather, contractor,
+                    submitted-by) — 2-col grid to keep the card balanced. */}
+                <div style={{
+                  display: 'grid', gridTemplateColumns: '1fr 1fr',
+                  gap: '0.5rem 0.875rem', marginTop: '0.625rem',
+                  fontSize: '0.8rem', color: 'var(--steel)',
+                }}>
+                  <div>
+                    <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--steel)', fontWeight: 600, marginBottom: '0.15rem' }}>Work type</div>
+                    <div style={{ color: 'var(--navy)', fontWeight: 500 }}>{workTypeLabel}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--steel)', fontWeight: 600, marginBottom: '0.15rem' }}>Weather</div>
+                    <div style={{ color: 'var(--navy)' }}>
+                      {dpr.weather || '—'}{dpr.temperature != null ? ` · ${dpr.temperature}°` : ''}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--steel)', fontWeight: 600, marginBottom: '0.15rem' }}>Contractor</div>
+                    <div style={{ color: 'var(--navy)' }}>{dpr.contractor || '—'}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--steel)', fontWeight: 600, marginBottom: '0.15rem' }}>Submitted by</div>
+                    <div style={{ color: 'var(--navy)' }}>
+                      {dpr.submittedBy?.name || '—'}
+                      {dpr.submittedAt ? <span style={{ color: 'var(--steel)', fontSize: '0.75rem', marginLeft: '0.25rem' }}>· {formatDateOnly(dpr.submittedAt)}</span> : null}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Full-text fields. Only the most semantically important
+                    block — work executed today — is rendered as its own
+                    block; the rest collapse to one-line value to keep the
+                    card scannable. */}
+                {dpr.workExecutedToday ? (
+                  <div style={{ marginTop: '0.75rem' }}>
+                    <div style={{
+                      fontSize: '0.7rem', color: 'var(--steel)', textTransform: 'uppercase',
+                      letterSpacing: '0.04em', marginBottom: '0.25rem', fontWeight: 600,
+                    }}>
+                      Work executed today
+                    </div>
+                    <div style={{
+                      fontSize: '0.85rem', color: 'var(--navy)',
+                      whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
+                      background: '#f8fafc', borderLeft: '3px solid var(--blue, #0066FF)',
+                      padding: '0.5rem 0.625rem', borderRadius: 4,
+                    }}>
+                      {dpr.workExecutedToday}
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* Lower-priority fields — rendered as one-line each. The
+                    admin can still see these without opening the modal;
+                    for the full review (admin notes, reject reason) the
+                    existing modal handles the form fields. */}
+                <div style={{ marginTop: '0.625rem', display: 'flex', flexDirection: 'column', gap: '0.3rem', fontSize: '0.82rem' }}>
+                  {dpr.workLocation ? (
+                    <div>
+                      <span style={{ fontWeight: 600, color: 'var(--steel)', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.04em', marginRight: '0.35rem' }}>Location detail</span>
+                      <span style={{ color: 'var(--navy)' }}>{dpr.workLocation}</span>
+                    </div>
+                  ) : null}
+                  {dpr.manpowerSummary ? (
+                    <div>
+                      <span style={{ fontWeight: 600, color: 'var(--steel)', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.04em', marginRight: '0.35rem' }}>Manpower</span>
+                      <span style={{ color: 'var(--navy)' }}>{dpr.manpowerSummary}</span>
+                    </div>
+                  ) : null}
+                  {dpr.risksHindrances ? (
+                    <div>
+                      <span style={{ fontWeight: 600, color: 'var(--steel)', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.04em', marginRight: '0.35rem' }}>Risks</span>
+                      <span style={{ color: 'var(--navy)' }}>{dpr.risksHindrances}</span>
+                    </div>
+                  ) : null}
+                  {dpr.materialsReceivedSummary ? (
+                    <div>
+                      <span style={{ fontWeight: 600, color: 'var(--steel)', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.04em', marginRight: '0.35rem' }}>Materials</span>
+                      <span style={{ color: 'var(--navy)' }}>{dpr.materialsReceivedSummary}</span>
+                    </div>
+                  ) : null}
+                  {dpr.notes ? (
+                    <div>
+                      <span style={{ fontWeight: 600, color: 'var(--steel)', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.04em', marginRight: '0.35rem' }}>Notes</span>
+                      <span style={{ color: 'var(--navy)' }}>{dpr.notes}</span>
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* Custom sections (user-added table or text blocks).
+                    Mirrors DprSubmit's preview. We only render table-typed
+                    sections here to keep the card height bounded — text
+                    blocks are shown in the modal. */}
+                {customSections.filter((cs) => cs?.type === 'table' && Array.isArray(cs.rows) && cs.rows.length > 0).length > 0 ? (
+                  <div style={{ marginTop: '0.75rem' }}>
+                    {customSections.filter((cs) => cs?.type === 'table' && Array.isArray(cs.rows) && cs.rows.length > 0).map((cs, idx) => (
+                      <div key={cs.id || idx} style={{ marginBottom: '0.5rem' }}>
+                        {cs.title ? (
+                          <div style={{
+                            fontSize: '0.7rem', color: 'var(--steel)', textTransform: 'uppercase',
+                            letterSpacing: '0.04em', marginBottom: '0.25rem', fontWeight: 600,
+                          }}>
+                            {cs.title}
+                          </div>
+                        ) : null}
+                        <div style={{ overflowX: 'auto' }}>
+                          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
+                            {Array.isArray(cs.columns) && cs.columns.length > 0 ? (
+                              <thead>
+                                <tr>
+                                  {cs.columns.map((col, ci) => (
+                                    <th key={ci} style={{
+                                      textAlign: 'left', padding: '0.35rem 0.5rem',
+                                      borderBottom: '1px solid var(--steel, #cbd5e1)',
+                                      color: 'var(--steel)', fontWeight: 600,
+                                    }}>{col}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                            ) : null}
+                            <tbody>
+                              {cs.rows.map((row, ri) => (
+                                <tr key={ri}>
+                                  {(Array.isArray(row) ? row : []).map((cell, ci) => (
+                                    <td key={ci} style={{
+                                      padding: '0.3rem 0.5rem',
+                                      borderBottom: '1px solid #f1f5f9',
+                                      color: 'var(--navy)',
+                                    }}>{cell}</td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                {/* Photo strip — only render if there are photos. Click
+                    is on the card (opens modal) so the photos here are
+                    visual previews, not direct lightbox triggers. */}
+                {photoCount > 0 ? (
+                  <div style={{ marginTop: '0.625rem' }}>
+                    <div style={{
+                      fontSize: '0.7rem', color: 'var(--steel)', textTransform: 'uppercase',
+                      letterSpacing: '0.04em', marginBottom: '0.25rem', fontWeight: 600,
+                      display: 'flex', alignItems: 'center', gap: '0.35rem',
+                    }}>
+                      <CameraIcon size={12} />
+                      {photoCount} photo{photoCount === 1 ? '' : 's'}
+                    </div>
+                    <div style={{
+                      display: 'flex', gap: '0.3rem', flexWrap: 'wrap',
+                    }}>
+                      {dpr.photos.slice(0, 4).map((p, i) => (
+                        <div key={p.id || i} style={{
+                          width: 48, height: 48, borderRadius: 4, overflow: 'hidden',
+                          background: '#f1f5f9', flexShrink: 0,
+                        }}>
+                          {/* Plain <img> for thumbnails — lightbox + download
+                              still go through the modal on card click. */}
+                          <img
+                            src={p.readUrl}
+                            alt={p.caption || `Photo ${i + 1}`}
+                            loading="lazy"
+                            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                          />
+                        </div>
+                      ))}
+                      {photoCount > 4 ? (
+                        <div style={{
+                          width: 48, height: 48, borderRadius: 4,
+                          background: 'var(--navy, #0f172a)', color: 'white',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          fontSize: '0.78rem', fontWeight: 600, flexShrink: 0,
+                        }}>
+                          +{photoCount - 4}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* Footer — Review CTA. The card itself is clickable, so
+                    the CTA is purely a visual cue (and a focus target for
+                    keyboard users) — clicking anywhere on the card opens
+                    the modal. The button stops propagation so the card
+                    click handler doesn't double-fire. */}
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  borderTop: '1px solid #f1f5f9', paddingTop: '0.625rem', marginTop: '0.75rem',
+                }}>
+                  <span style={{ fontSize: '0.72rem', color: 'var(--steel)' }}>
+                    Click card to review &amp; approve/reject
                   </span>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
-                    <CameraIcon size={13} />
-                    {Array.isArray(dpr.photos) ? dpr.photos.length : 0}
-                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      lastTriggerRef.current = e.currentTarget;
+                      setSelectedDpr(dpr);
+                    }}
+                  >
+                    Review →
+                  </button>
                 </div>
               </div>
             );
