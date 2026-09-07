@@ -12,17 +12,33 @@
  * allowlist was never updated, so this regression went unnoticed by
  * every test suite until a real browser hit it.
  *
- * These three assertions catch the failure mode:
+ * Live regression #2, 6 Sept 2026 — adding an employee to a project
+ * surfaced as "Couldn't reach the server" from /portal/admin/projects/:id.
+ * Root cause: PATCH handlers were mounted on /api/projects/:id
+ * (project assignments) and /api/dpr/:id (multiple status transitions),
+ * but the CORS allowlist still said "GET, POST, PUT, DELETE, OPTIONS".
+ * The browser preflight returned 204, the server processed the PATCH and
+ * returned 200, but the browser dropped the response because PATCH wasn't
+ * in the allowed-methods list. The SPA saw fetch() return status 0 and
+ * surfaced the generic NETWORK_ERROR toast. HAR captured 4 PATCH attempts
+ * (45/47/49/51), all status 0, all with no response headers. Same root
+ * cause as the 5 Sept DELETE bug, same fix: keep this list in lockstep
+ * with the HTTP verbs mounted under router.* in src/routes/*.js.
+ *
+ * These four assertions catch the failure mode:
  *
  *   1. Preflight for DELETE from an allowed origin MUST include DELETE
  *      in `Access-Control-Allow-Methods`. The browser uses this to decide
  *      whether the actual request can proceed.
- *   2. Preflight for PUT still works (no over-trimming).
- *   3. An actual GET from an allowed origin gets the CORS headers
+ *   2. Preflight for PATCH from an allowed origin MUST include PATCH
+ *      (Round-34 regression: project assignments, DPR status transitions).
+ *   3. Preflight for PUT still works (no over-trimming).
+ *   4. An actual GET from an allowed origin gets the CORS headers
  *      (regression guard for the origin-matching logic).
  *
- * If a future refactor drops DELETE again — e.g. "let me trim unused
- * methods again" without auditing the route table — test #1 fails.
+ * If a future refactor drops DELETE or PATCH again — e.g. "let me trim
+ * unused methods again" without auditing the route table — test #1 or #2
+ * fails.
  *
  * The test builds a throwaway app with the same middleware so it doesn't
  * need Prisma, R2, or any network. Mirrors bodyParser.test.js / error-
@@ -48,7 +64,7 @@ const buildApp = () => {
     if (origin && ALLOWED_ORIGINS.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
       res.setHeader(
         'Access-Control-Allow-Headers',
         'Content-Type, Authorization, Idempotency-Key, X-Request-ID, X-Internal-Token'
@@ -65,10 +81,11 @@ const buildApp = () => {
   });
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
   app.delete('/api/dpr/:id', (_req, res) => res.json({ deleted: true }));
+  app.patch('/api/projects/:id', (_req, res) => res.json({ ok: true }));
   return app;
 };
 
-describe('CORS allow-methods regression (Round-R8-CORS)', () => {
+describe('CORS allow-methods regression (Round-R8-CORS + Round-R34.2)', () => {
   test('DELETE preflight from an allowed origin lists DELETE in Allow-Methods', async () => {
     const res = await request(buildApp())
       .options('/api/dpr/some-id')
@@ -78,6 +95,21 @@ describe('CORS allow-methods regression (Round-R8-CORS)', () => {
     const allow = res.headers['access-control-allow-methods'] || '';
     expect(allow.split(',').map((s) => s.trim().toUpperCase())).toEqual(
       expect.arrayContaining(['DELETE'])
+    );
+  });
+
+  test('PATCH preflight from an allowed origin lists PATCH in Allow-Methods (Round-34.2)', async () => {
+    // Live bug, 6 Sept 2026: project assignments PATCH returned status 0
+    // because the allowlist omitted PATCH. Browser sent the PATCH, server
+    // returned 200, browser dropped the response as a CORS failure.
+    const res = await request(buildApp())
+      .options('/api/projects/some-id')
+      .set('Origin', 'https://acschennai.com')
+      .set('Access-Control-Request-Method', 'PATCH');
+    expect(res.status).toBe(204);
+    const allow = res.headers['access-control-allow-methods'] || '';
+    expect(allow.split(',').map((s) => s.trim().toUpperCase())).toEqual(
+      expect.arrayContaining(['PATCH'])
     );
   });
 

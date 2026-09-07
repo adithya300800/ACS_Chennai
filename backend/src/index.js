@@ -227,12 +227,23 @@ function createApp(deps = {}) {
   // interpreted it as NETWORK_ERROR, and the 4s/8s/16s retry ladder just
   // repeated the same failure. Always keep this list in sync with the
   // methods mounted under router.* in src/routes/*.js.
+  //
+  // Live bug, 6 Sept 2026: PATCH added to backend/src/routes/projects.js
+  // (project assignments) and backend/src/routes/dpr.js (multiple status
+  // transitions), but the allowlist still said "GET, POST, PUT, DELETE,
+  // OPTIONS" with no PATCH. Browser preflights on /api/projects/:id PATCH
+  // returned 204 *but* Access-Control-Allow-Methods omitted PATCH, so the
+  // browser sent the request, the server returned 200, and then the
+  // browser dropped the response as a CORS failure — fetch() saw status 0
+  // and the SPA surfaced "Couldn't reach the server" (api.js:44). Same root
+  // cause as the 5 Sept DELETE bug, same fix: keep this list in lockstep
+  // with the HTTP verbs mounted under router.* in src/routes/*.js.
   app.use((req, res, next) => {
     const origin = req.headers.origin;
     if (origin && ALLOWED_ORIGINS.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-Request-ID, X-Internal-Token');
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       // Round-13: expose Content-Disposition + X-Export-* so the browser JS
