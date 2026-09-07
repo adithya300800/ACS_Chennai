@@ -439,6 +439,13 @@ function createApp(deps = {}) {
   // SOL-P1#12: admin employee directory — powers the training bulk-assign
   // picker. Same requireAuth + requireFreshAdmin envelope.
   app.use('/api/admin', adminEmployeesRoutes);
+  // R36: admin Project Reports — unscoped cross-project, cross-employee
+  // list of ProjectAttachment rows. Same requireAuth + requireFreshAdmin
+  // envelope as the other /api/admin/* mounts; the page it powers lives
+  // at /portal/admin/reports next to the other registry pages
+  // (Drawings / BOQ / Variations).
+  const adminReportsRoutes = require('./routes/adminReports');
+  app.use('/api/admin/reports', adminReportsRoutes);
   // Round-25: per-employee notification preferences + admin-only test send.
   app.use('/api/notifications', notificationsRoutes);
   // N7 (round-28): BOQ items — registry CRUD + variance report. Auth

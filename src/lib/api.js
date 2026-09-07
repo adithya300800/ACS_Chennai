@@ -830,4 +830,18 @@ export const api = {
       contentType,
       sizeBytes,
     }, token),
+
+  // R36: Admin Project Reports — unscoped cross-project, cross-employee
+  // list of `ProjectAttachment` rows. Mounted at /api/admin/reports with
+  // requireAuth + requireFreshAdmin on the backend, so a 403 here means
+  // the JWT is stale or the demoted-admin claim has been refreshed
+  // (round-20 / DR-005). Mirrors the query shape the Drawings admin
+  // page consumes (cursor + limit + filter object) — see
+  // api.getDrawings above. Response: { reports, nextCursor, total }.
+  // Joins project.name + uploadedBy.name so the SPA doesn't have to
+  // resolve UUIDs to labels.
+  getAdminReports: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/admin/reports${qs ? '?' + qs : ''}`, token);
+  },
 };

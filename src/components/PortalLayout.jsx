@@ -234,6 +234,17 @@ const DRAWING_ICON = (
     <path d="M14 6l4 4-4 4" />
   </svg>
 );
+// R36: Project Reports icon — document-with-paperclip glyph echoing the
+// "weekly / monthly / due-diligence / quality" file-attachment shape.
+// Visually distinct from DRAWING_ICON (blueprint) and LIST_ICON (BOQ)
+// so the four registry entries in the Records group stay scannable.
+const REPORT_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+    <polyline points="14 2 14 8 20 8" />
+    <path d="M9 13l2 2 5-5" />
+  </svg>
+);
 
 const navGroups = [
   {
@@ -311,6 +322,14 @@ const navGroups = [
         // create/supersede/archive — admin-curated. Lives under Records
         // alongside the other admin-managed registries.
         { to: '/portal/admin/drawings', label: 'Drawings', icon: DRAWING_ICON },
+        // R36: Project Reports — unscoped cross-project, cross-employee
+        // list of weekly / monthly / due-diligence / quality / other
+        // file attachments uploaded via the per-project ReportSection.
+        // Mirrors the Drawings registry shape (cards + filters +
+        // cursor pagination) but read-only — uploads live in the
+        // per-project ReportSection, downloads/deletes reuse the
+        // existing /api/projects/:projectId/attachments helpers.
+        { to: '/portal/admin/reports', label: 'Project Reports', icon: REPORT_ICON },
       ],
     },
     {

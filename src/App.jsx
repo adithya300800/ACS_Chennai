@@ -87,6 +87,11 @@ const VariationOrderDetail = React.lazy(() => import('./pages/VariationOrderDeta
 // hosts the read-SAS PDF preview + the cross-record stamp panels.
 const DrawingsAdmin = React.lazy(() => import('./pages/admin/DrawingsAdmin.jsx'));
 const DrawingDetail = React.lazy(() => import('./pages/admin/DrawingDetail.jsx'));
+// R36: Admin Project Reports — unscoped cross-project, cross-employee
+// list of `ProjectAttachment` rows (weekly / monthly / due-diligence /
+// quality / other). Mirrors the Drawings / BOQ / Variations registry
+// pattern; sits in the Records sidebar group next to "Drawings".
+const ReportsAdmin = React.lazy(() => import('./pages/admin/ReportsAdmin.jsx'));
 // N3-employee: read-only employee browse surface for the same drawing
 // register. The list page is filtered to ACTIVE only; the detail page
 // renders the PDF + chain without the Edit / Supersede / Archive
@@ -189,6 +194,13 @@ function App() {
               routes above). */}
           <Route path="admin/drawings" element={<DrawingsAdmin />} />
           <Route path="admin/drawings/:id" element={<DrawingDetail />} />
+          {/* R36: Admin Project Reports — cross-org browse for every
+              ProjectAttachment uploaded by every employee. Sits next to
+              the other registry pages; consumes api.getAdminReports +
+              reuses the per-project read-sas + delete helpers (no new
+              download/delete endpoints needed — the response includes
+              projectId, which is what those helpers take). */}
+          <Route path="admin/reports" element={<ReportsAdmin />} />
           {/* N3-employee: read-only employee browse of the same drawing
               register. ACTIVE-only list + chain + PDF preview, no curation
               actions. Same literal-before-param ordering lesson. */}
