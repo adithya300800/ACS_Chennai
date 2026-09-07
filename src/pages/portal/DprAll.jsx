@@ -842,7 +842,7 @@ export default function DprAll() {
         </div>
       ) : (
         <>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: '1rem' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 360px), 1fr))', gap: '1rem' }}>
           {dprs.map((dpr) => {
             const workTypeLabel = WORK_TYPE_LABEL[dpr.workType] || dpr.workType || '—';
             const photoCount = Array.isArray(dpr.photos) ? dpr.photos.length : 0;
