@@ -11,7 +11,11 @@
 // Auth model pinned by these tests:
 //   - requireAuth on every route (401/403 with no/invalid token)
 //   - requireProjectScope: 404 PROJECT_NOT_FOUND when the parent
-//     projectId doesn't exist or is archived.
+//     projectId (UUID) doesn't exist or is archived. R35.1 broadened the
+//     middleware to accept a free-text projectName too — names that
+//     don't yet exist as Project rows are auto-created (isActive=true,
+//     minimal fields). The resolved UUID is rewritten onto req.params so
+//     the downstream handlers stay UUID-only.
 //   - DELETE additionally requires (admin OR uploader). Non-admin /
 //     non-uploader → 403 NOT_ATTACHMENT_OWNER.
 //
@@ -22,12 +26,20 @@
 //   4. POST creates row, auto-stamps uploadedById = req.employeeId
 //   5. POST rejects contentType outside allowlist (400 VALIDATION_ERROR)
 //   6. POST rejects sizeBytes > 25 MB (413 REPORT_TOO_LARGE)
-//   7. POST rejects missing projectId (404 PROJECT_NOT_FOUND)
+//   7. POST on missing UUID projectId → 404 PROJECT_NOT_FOUND
 //   8. GET read-sas mints a 1h SAS URL on the dpr-documents container
 //   9. DELETE as uploader soft-deletes (sets deletedAt)
 //  10. DELETE as admin (different uploader) → 200, soft-deletes
 //  11. DELETE as different non-admin employee → 403 NOT_ATTACHMENT_OWNER
 //  12. DELETE on already-deleted row → 404 ATTACHMENT_NOT_FOUND (idempotent)
+//
+// R35.1 additions:
+//  13. POST with name param for an EXISTING project name → uses existing UUID
+//  14. POST with name param for a NEW name → auto-creates Project row +
+//       inserts attachment against the new UUID
+//  15. POST with name param + casing mismatch → resolves via case-insensitive match
+//  16. GET with name param for a NEW name → 200 + empty list (no auto-create
+//       on read; only POST writes materialise a new project row)
 
 'use strict';
 
@@ -85,6 +97,11 @@ const OTHER_USER_ID = '66666666-6666-4666-8666-666666666666';
 const PROJECT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const ATTACHMENT_ID = '99999999-9999-4999-8999-999999999999';
 const ATTACHMENT_ID_2 = '99999999-9999-4999-8999-999999999998';
+// R35.1: a discovered project's free-text name + the UUID the
+// auto-create path will materialise. The two stay linked so the mock
+// can assert create was called with the right payload.
+const DISCOVERED_NAME = 'Brand New Site Visit';
+const NEW_PROJECT_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
 function adminJwt() {
   return `Bearer ${jwt.sign(
@@ -102,19 +119,54 @@ function userJwt(employeeId = USER_ID) {
 }
 
 // Build a fresh app + in-memory Prisma for each test so state can't leak.
-// The route calls prisma.project.findUnique (for requireProjectScope),
-// prisma.projectAttachment.{findMany, create, findUnique, update}. Each
-// test seeds the fixtures it needs.
+// The route calls prisma.project.findUnique (UUID lookup), findFirst
+// (case-insensitive name lookup, R35.1), create (auto-create path,
+// R35.1), and prisma.projectAttachment.{findMany, create, findUnique,
+// update}. Each test seeds the fixtures it needs.
 function buildApp() {
   const app = express();
   app.use(express.json());
   const attachmentRows = new Map();
+  const projectRows = new Map();
+  // Pre-seed the two test projects so the case-sensitive lookup works
+  // out of the box. The DISCOVERED_NAME row is what name-based requests
+  // resolve to via the case-insensitive match; tests that exercise
+  // auto-create should NOT pre-seed a matching name.
+  projectRows.set(PROJECT_ID, { id: PROJECT_ID, name: 'Registered Test', isActive: true });
   let createdSeq = 0;
+  let createdProjectSeq = 0;
   const prisma = {
     project: {
       findUnique: jest.fn(async ({ where }) => {
-        if (where.id === PROJECT_ID) return { id: PROJECT_ID, isActive: true };
+        if (where.id) return projectRows.get(where.id) || null;
+        if (where.name) return projectRows.get(where.name) || null;
         return null; // unknown / archived → 404
+      }),
+      findFirst: jest.fn(async ({ where }) => {
+        if (!where?.name?.equals) return null;
+        const needle = where.name.equals;
+        for (const row of projectRows.values()) {
+          if (row.name.toLowerCase() === needle.toLowerCase()) return row;
+        }
+        return null;
+      }),
+      create: jest.fn(async ({ data }) => {
+        createdProjectSeq += 1;
+        // P2002 collision simulation: only the "second" auto-create call
+        // with the same name actually inserts; the first one a separate
+        // test (race-condition coverage) is exercised separately.
+        const id = data.id || `new-${createdProjectSeq}`;
+        const row = {
+          id,
+          name: data.name,
+          isActive: data.isActive ?? true,
+          createdById: data.createdById || null,
+        };
+        projectRows.set(id, row);
+        // Also index by name so subsequent findUnique(name=...) calls
+        // in the same test resolve to the new row.
+        projectRows.set(row.name, row);
+        return row;
       }),
     },
     projectAttachment: {
@@ -166,7 +218,7 @@ function buildApp() {
       code: err.code || 'INTERNAL',
     });
   });
-  return { app, prisma, attachmentRows };
+  return { app, prisma, attachmentRows, projectRows };
 }
 
 const baseBody = {
@@ -401,5 +453,108 @@ describe('R35 — Project Reports: DELETE /:attachmentId', () => {
       .set('Authorization', adminJwt());
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('ATTACHMENT_NOT_FOUND');
+  });
+});
+
+describe('R35.1 — Auto-create project on free-text name in URL', () => {
+  it('16. POST with name of an EXISTING project → resolves to existing UUID, no create call', async () => {
+    const { app, prisma, projectRows } = buildApp();
+    // Pre-seed a registered project under the name we're about to use.
+    projectRows.set('seeded-name-id', { id: 'seeded-name-id', name: 'Seeded Site', isActive: true });
+    const res = await request(app)
+      .post('/api/projects/Seeded%20Site/attachments')
+      .set('Authorization', userJwt())
+      .send(baseBody);
+    expect(res.status).toBe(201);
+    expect(res.body.projectId).toBe('seeded-name-id');
+    expect(prisma.project.create).not.toHaveBeenCalled();
+    expect(prisma.projectAttachment.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ projectId: 'seeded-name-id' }) }),
+    );
+  });
+
+  it('17. POST with NEW name → auto-creates Project row, attachment uses new UUID', async () => {
+    const { app, prisma } = buildApp();
+    const res = await request(app)
+      .post(`/api/projects/${encodeURIComponent(DISCOVERED_NAME)}/attachments`)
+      .set('Authorization', userJwt())
+      .send(baseBody);
+    expect(res.status).toBe(201);
+    expect(prisma.project.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          name: DISCOVERED_NAME,
+          isActive: true,
+          createdById: USER_ID,
+        }),
+      }),
+    );
+    // The attachment row must reference the new UUID, not the raw name.
+    const createCall = prisma.projectAttachment.create.mock.calls[0][0];
+    expect(createCall.data.projectId).toMatch(/^new-\d+$/);
+    // The serialized response should include the resolved UUID too.
+    expect(res.body.projectId).toMatch(/^new-\d+$/);
+  });
+
+  it('18. POST with name + case mismatch → resolves via case-insensitive lookup', async () => {
+    const { app, prisma } = buildApp();
+    // Pre-seed a project with title-cased name; user posts with all-lowercase.
+    const built = buildApp();
+    built.projectRows.set('case-id', { id: 'case-id', name: 'T-Nagar Site', isActive: true });
+    const res = await request(built.app)
+      .post('/api/projects/t-nagar%20site/attachments')
+      .set('Authorization', userJwt())
+      .send(baseBody);
+    expect(res.status).toBe(201);
+    expect(res.body.projectId).toBe('case-id');
+    expect(built.prisma.project.create).not.toHaveBeenCalled();
+  });
+
+  it('19. POST with URL-encoded name with %20 / + characters → trimmed and resolved', async () => {
+    // Sanity-check that the decodeURIComponent step doesn't crash on
+    // an encoded space, plus, or ampersand. (URLParameters in the SPA
+    // use encodeURIComponent before interpolation.)
+    const { app } = buildApp();
+    const res = await request(app)
+      .post('/api/projects/Lots%20Of%20%26%20Symbols/attachments')
+      .set('Authorization', userJwt())
+      .send(baseBody);
+    expect(res.status).toBe(201);
+    expect(res.body.projectId).toMatch(/^new-\d+$/);
+  });
+
+  it('20. POST with name → still rejects sizeBytes > 25 MB', async () => {
+    const { app } = buildApp();
+    const res = await request(app)
+      .post(`/api/projects/${encodeURIComponent(DISCOVERED_NAME)}/attachments`)
+      .set('Authorization', userJwt())
+      .send({ ...baseBody, sizeBytes: 26 * 1024 * 1024 });
+    // Project auto-creates FIRST (the middleware runs before the size
+    // check), then the size validator catches it. This is intentional —
+    // better to leave a discovered project row than to surface a 413 to
+    // the user without telling them why.
+    expect(res.status).toBe(413);
+    expect(res.body.code).toBe('REPORT_TOO_LARGE');
+  });
+
+  it('21. GET with NEW name → 200 + empty list (no auto-create on read)', async () => {
+    const { app, prisma } = buildApp();
+    const res = await request(app)
+      .get(`/api/projects/${encodeURIComponent(DISCOVERED_NAME)}/attachments`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ attachments: [] });
+    expect(prisma.project.create).not.toHaveBeenCalled();
+  });
+
+  it('22. POST with name that resolves to an ARCHIVED project → 404 PROJECT_NOT_FOUND', async () => {
+    const built = buildApp();
+    built.projectRows.set('arch-id', { id: 'arch-id', name: 'Dead Project', isActive: false });
+    const res = await request(built.app)
+      .post('/api/projects/Dead%20Project/attachments')
+      .set('Authorization', userJwt())
+      .send(baseBody);
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('PROJECT_NOT_FOUND');
   });
 });

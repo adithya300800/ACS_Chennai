@@ -26,10 +26,16 @@
 //
 // Auth model:
 //   - requireAuth on every route.
-//   - `requireProjectScope` middleware (private to this module) checks
-//     the project exists + isActive — returns 404 PROJECT_NOT_FOUND
-//     otherwise. Mirrors the project-existence pre-check in
-//     drawings.js#POST /api/drawings.
+//   - `requireProjectScope` middleware (private to this module) resolves
+//     the project — the URL :projectId param can be EITHER a UUID (a
+//     registered project) OR a free-text project name (an unregistered
+//     "discovered" project that the employee typed into a DPR / a
+//     Drawing search box). For names, the helper looks the project up
+//     case-insensitive and, if no row exists, AUTO-CREATES one with
+//     minimal fields + isActive=true. The resolved UUID is rewritten
+//     onto req.params.projectId so the rest of the handlers stay
+//     UUID-only. This is the round-35.1 behaviour — the gate "Register
+//     this project first" was removed per user feedback.
 //   - DELETE additionally requires (req.isAdmin || row.uploadedById ===
 //     req.employeeId). Non-admin / non-uploader gets 403
 //     NOT_ATTACHMENT_OWNER. Admin can delete any report.
@@ -127,41 +133,143 @@ function serializeProjectAttachment(row) {
 }
 
 // ─── requireProjectScope ────────────────────────────────────────────────────
-// All routes except DELETE go through this gate — confirms the project
-// exists and is active. DELETE also gates per-attachment ownership below.
-// 404 PROJECT_NOT_FOUND rather than 403 so a leaked URL can't enumerate
-// archived projects by existence.
+// All routes except DELETE go through this gate — resolves the project
+// the URL refers to. The :projectId URL param accepts either a UUID OR a
+// free-text project name. Names that don't yet exist as Project rows are
+// AUTO-CREATED with minimal fields + isActive=true so the upload flow
+// works without an explicit "register this project" step — round-35.1
+// removed the gating copy. DELETE also gates per-attachment ownership
+// below.
+//
+// 404 PROJECT_NOT_FOUND is only returned for an explicitly-typed UUID
+// that resolves to no row (or a soft-deleted project). A name that
+// auto-creates successfully is treated as if the project existed all
+// along — the row materialises on first attachment.
 async function requireProjectScope(req, res, next) {
   const prisma = getPrisma(req);
   if (!prisma) {
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
   }
-  const { projectId } = req.params;
-  if (!projectId || !isValidUuid(projectId)) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'PROJECT_ID_INVALID', message: 'projectId must be a UUID' });
+  const raw = req.params.projectId;
+  if (!raw || !raw.trim()) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'PROJECT_KEY_REQUIRED', message: 'projectId is required' });
   }
+  const key = decodeURIComponent(raw).trim();
+  // Auto-create (round-35.1) only on writes. A read against a name that
+  // doesn't exist yet should return 200 with an empty list (the GET
+  // handler filters by `where: { projectId, deletedAt: null }`), NOT
+  // materialise a project row from a passive list call. Writes (POST)
+  // are the only path that surface a discovered project to the user
+  // via the upload form.
+  const isWrite = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE';
   try {
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      select: { id: true, isActive: true },
-    });
-    if (!project || !project.isActive) {
-      return res.status(404).json({
-        error: 'PROJECT_NOT_FOUND',
-        code: 'PROJECT_NOT_FOUND',
-        message: 'Linked project does not exist or is archived',
+    let resolvedId;
+    if (isValidUuid(key)) {
+      const project = await prisma.project.findUnique({
+        where: { id: key },
+        select: { id: true, isActive: true },
       });
+      if (!project || !project.isActive) {
+        return res.status(404).json({
+          error: 'PROJECT_NOT_FOUND',
+          code: 'PROJECT_NOT_FOUND',
+          message: 'Linked project does not exist or is archived',
+        });
+      }
+      resolvedId = project.id;
+    } else {
+      // Free-text name. Try case-insensitive match first so a name that
+      // already exists under a different casing doesn't materialise a
+      // duplicate row (Project.name has a unique constraint).
+      const existing = await prisma.project.findFirst({
+        where: { name: { equals: key, mode: 'insensitive' } },
+        select: { id: true, isActive: true },
+      });
+      if (existing) {
+        if (!existing.isActive) {
+          return res.status(404).json({
+            error: 'PROJECT_NOT_FOUND',
+            code: 'PROJECT_NOT_FOUND',
+            message: 'Linked project is archived',
+          });
+        }
+        resolvedId = existing.id;
+      } else if (!isWrite) {
+        // Read against a name that has no project row yet — return 200
+        // with an empty list rather than 404. A discovered card the
+        // user is browsing hasn't materialised a Project row yet, but
+        // it should still be readable (the GET handler treats it as an
+        // empty attachments set). The empty list is what the frontend
+        // wants to render the upload form + "No reports yet…" copy.
+        // We synthesise a sentinel projectId of `null` so the GET
+        // handler's `where: { projectId }` filter returns no rows.
+        req.resolvedProjectId = null;
+        return next();
+      } else {
+        // Auto-create (round-35.1). Mirror the legacy DPR "discovered
+        // project" pattern: a free-text name in a write context is
+        // treated as a project to track. The new row is isActive=true,
+        // name=key, no code/parties/contract — admins can curate later.
+        // P2002 (race against a concurrent insert with the same name) is
+        // caught and we re-resolve the winner.
+        let created;
+        try {
+          created = await prisma.project.create({
+            data: {
+              name: key,
+              isActive: true,
+              createdById: req.employeeId,
+            },
+            select: { id: true, isActive: true },
+          });
+        } catch (err) {
+          if (err?.code === 'P2002') {
+            const winner = await prisma.project.findFirst({
+              where: { name: { equals: key, mode: 'insensitive' } },
+              select: { id: true, isActive: true },
+            });
+            if (winner && winner.isActive) {
+              resolvedId = winner.id;
+              return nextWithResolved(req, res, next, resolvedId);
+            }
+            return res.status(409).json({
+              error: 'PROJECT_NAME_CONFLICT',
+              code: 'PROJECT_NAME_CONFLICT',
+              message: 'A project with this name already exists but is not accessible',
+            });
+          }
+          throw err;
+        }
+        resolvedId = created.id;
+      }
     }
-    next();
+    return nextWithResolved(req, res, next, resolvedId);
   } catch (err) {
     console.error('[project-attachments] project scope check failed', {
       employeeHash: hashIdentifier(req.employeeId),
-      projectId,
+      projectKey: raw,
       errCode: err?.code,
       errMessage: err?.message?.split('\n')[0],
     });
     return res.status(503).json({ error: 'PROJECT_SCOPE_CHECK_FAILED', message: 'Could not verify project' });
   }
+}
+
+// Tiny helper to keep the resolved UUID reachable by the route handlers
+// below. Express ≥4 lazy-parses req.params from req.url on every read,
+// so a plain `req.params.x = …` doesn't stick — we expose the resolved
+// UUID via a custom property `req.resolvedProjectId` and the route
+// handlers read it back via the helper below.
+function nextWithResolved(req, res, next, resolvedId) {
+  req.resolvedProjectId = resolvedId;
+  next();
+}
+
+// Helper the route handlers use to read the projectId — falls back to
+// `req.params.projectId` for legacy UUID callers, prefers the resolved
+// UUID when the URL carried a free-text name.
+function readProjectId(req) {
+  return req.resolvedProjectId || req.params.projectId;
 }
 
 router.use(requireAuth);
@@ -181,7 +289,7 @@ router.get('/', asyncHandler(async (req, res) => {
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
   }
 
-  const { projectId } = req.params;
+  const projectId = readProjectId(req);
   const { type } = req.query;
 
   if (type && !VALID_REPORT_TYPES.has(type)) {
@@ -193,6 +301,15 @@ router.get('/', asyncHandler(async (req, res) => {
   }
 
   try {
+    // A null projectId means the URL carried a free-text name with no
+    // matching Project row yet (the read-only path of round-35.1).
+    // ProjectAttachment.projectId is non-nullable in the schema, so a
+    // `where: { projectId: null }` filter matches zero rows — exactly
+    // what we want for "no reports yet" on a discovered card.
+    if (projectId == null) {
+      res.setHeader('X-Total-Count', 0);
+      return res.json({ attachments: [] });
+    }
     const rows = await prisma.projectAttachment.findMany({
       where: {
         projectId,
@@ -244,7 +361,7 @@ router.post('/', asyncHandler(async (req, res) => {
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
   }
 
-  const { projectId } = req.params;
+  const projectId = readProjectId(req);
   const body = req.body || {};
 
   // Field validation — keep the wire contract tight.
@@ -341,7 +458,8 @@ router.get('/:attachmentId/read-sas', asyncHandler(async (req, res) => {
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
   }
 
-  const { projectId, attachmentId } = req.params;
+  const projectId = readProjectId(req);
+  const { attachmentId } = req.params;
   if (!isValidUuid(attachmentId)) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'attachmentId must be a UUID' });
   }
@@ -415,7 +533,8 @@ router.delete('/:attachmentId', asyncHandler(async (req, res) => {
     return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
   }
 
-  const { projectId, attachmentId } = req.params;
+  const projectId = readProjectId(req);
+  const { attachmentId } = req.params;
   if (!isValidUuid(attachmentId)) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'attachmentId must be a UUID' });
   }

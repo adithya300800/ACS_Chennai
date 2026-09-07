@@ -177,9 +177,18 @@ describe('R35 — Project Reports: ReportSection component', () => {
     expect(panelSrc).toMatch(/ACCEPTED_REPORT_TYPES\.includes\(\s*file\.type\s*\)/);
   });
 
-  test('13. Discovered (unregistered) projects show the "register first" copy', () => {
-    // The empty-state branch is the first guard inside ReportSection —
-    // same shape DrawingSection uses (lines 905-910 in the original).
-    expect(panelSrc).toMatch(/Register this project first to start uploading reports\./);
+  test('13. R35.1: discovered (unregistered) projects do NOT show the "register first" gate', () => {
+    // Round-35.1 removed the `if (!isRegistered)` early-return from
+    // ReportSection — the upload form now renders for both registered
+    // and discovered projects. The backend auto-creates the Project
+    // row on the first POST (R35.1 server side). Pin the absence of
+    // the now-deleted copy so a future refactor can't silently
+    // re-introduce the gating.
+    expect(panelSrc).not.toMatch(/Register this project first to start uploading reports\./);
+    // The render form must reach the JSX without an `isRegistered`
+    // guard short-circuiting it. We assert by looking for the upload
+    // form's `<select>` element on the report type, which is
+    // unconditional in the current implementation.
+    expect(panelSrc).toMatch(/value=\{uploadType\}/);
   });
 });

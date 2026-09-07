@@ -202,10 +202,14 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
       setBoq({ status: 'ready', data: [] });
     }
 
-    // R35: Reports — attachments list. Backend requires projectId (FK
-    // constraint), so discovered rows get an empty list rather than a
-    // 400. Mirrors the DrawingSection empty-state pattern.
-    if (isRegistered) {
+    // R35: Reports — attachments list. R35.1 removed the gating that
+    // forced this only for registered projects; the backend now accepts
+    // either a UUID (existing project) or a free-text projectName and
+    // auto-creates the project row on first upload. The endpoint works
+    // for both `projectKey` shapes — a discovered card now uploads
+    // against its projectName and materialises the Project row on the
+    // server.
+    if (projectKey) {
       tasks.push(
         api.getProjectAttachments(projectKey, { limit: 50 }, accessToken)
           .then((resp) => {
@@ -244,10 +248,12 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
 
   // R35: Re-fetch only the reports sub-section after upload / delete.
   // Same shape as the drawings effect — skip the initial mount, only
-  // refetch when the user-triggered key bumps.
+  // refetch when the user-triggered key bumps. R35.1 dropped the
+  // `isRegistered` gate so discovered projects (projectKey = name) also
+  // refetch after an upload.
   useEffect(() => {
     if (reportsRefreshKey === 0) return;
-    if (!isRegistered || !projectKey) return;
+    if (!projectKey) return;
     api.getProjectAttachments(projectKey, { limit: 50 }, accessToken)
       .then((resp) => {
         if (!mountedRef.current) return;
@@ -258,7 +264,7 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
         if (!mountedRef.current) return;
         setReports({ status: 'error', error: err?.message || 'Failed to load' });
       });
-  }, [reportsRefreshKey, isRegistered, projectKey, accessToken]);
+  }, [reportsRefreshKey, projectKey, accessToken]);
 
   const toggleSection = useCallback((id) => {
     setOpenSections((s) => ({ ...s, [id]: !s[id] }));
@@ -1106,13 +1112,12 @@ function ReportSection({
     setFilterType(null);
   }, [projectKey]);
 
-  if (!isRegistered) {
-    return (
-      <div style={{ padding: '0.5rem 0', fontSize: '0.85rem', color: 'var(--steel, #64748b)' }}>
-        Register this project first to start uploading reports.
-      </div>
-    );
-  }
+  // R35.1: removed the `if (!isRegistered)` early-return that gated the
+  // upload form behind a "Register this project first…" message. The
+  // backend now accepts either a UUID (existing project) or a free-text
+  // projectName (a discovered card) and auto-creates the Project row on
+  // first upload. Discovered cards show the upload form + the regular
+  // empty-state copy until the user attaches their first file.
 
   if (reports.status === 'loading') return <LoadingHint>Loading reports…</LoadingHint>;
   if (reports.status === 'error') return <ErrorHint>{reports.error}</ErrorHint>;
