@@ -65,6 +65,9 @@ model Employee {
   // drawer / PM who issued the revision; SetNull mirrors the FK so the
   // deletion of an admin does not orphan the drawing register.
   drawingsIssued             Drawing[]               @relation("DrawingIssuer")
+  // [R35] Back-relation for project reports (file attachments). SetNull
+  // on the FK so deleting an admin does not orphan the upload audit.
+  projectAttachments         ProjectAttachment[]     @relation("ProjectAttachmentUploader")
   // Round-25: email notification preferences + audit log + digest runs.
   // NotificationPreference is 1:1 (PK = employeeId); EmailLog / DigestRun
   // are 1:N and outlive notification rows via onDelete: SetNull.
@@ -1004,32 +1007,37 @@ model Project {
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
-  createdBy   Employee?           @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdBy          Employee?           @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
   // [N1] Back-relations for the FK swap on DPR / InspectionRecord /
   // BoqItem. The migration creates nullable `project_id` columns on each
   // child with ON DELETE SET NULL, so archiving a Project row preserves
   // historical DPRs / inspections / BOQ lines (their free-text projectName
   // column still resolves the lookup, the FK just stops pointing at a
   // soft-deleted row).
-  dprs        DPR[]
-  inspections InspectionRecord[]
-  boqItems    BoqItem[]
+  dprs               DPR[]
+  inspections        InspectionRecord[]
+  boqItems           BoqItem[]
   // [N2] Phase C: back-relation for VariationOrder. CASCADE on project
   // delete — a variation IS the project record (see migration header for
   // the rationale and the deviation from the DPR/Inspection/BoqItem
   // SetNull contract).
-  variations  VariationOrder[]
+  variations         VariationOrder[]
   // [N3] Phase E: back-relation for the drawing register. Drawing rows
   // cascade-delete with the project (un-registering a project sweeps its
   // drawings) — distinct from DPR / InspectionRecord / BoqItem (those
   // preserve history with SetNull because they're operational records).
   // The drawing register is metadata, not history.
-  drawings    Drawing[]
+  drawings           Drawing[]
+  // [R35] Back-relation for project-level file attachments (weekly /
+  // monthly / due-diligence / quality / other reports). Cascade on the
+  // attachment side — un-registering a project sweeps its attachments
+  // (same as Drawing; metadata, not history).
+  projectAttachments ProjectAttachment[]
   // [Project Assignments] back-relation for the project_assignment join
   // table. Cascade-deletes are handled by the FK on project_assignment
   // (CASCADE) — when a Project row is hard-deleted (rare; the soft-delete
   // path flips isActive=false instead) all assignments go with it.
-  assignments ProjectAssignment[]
+  assignments        ProjectAssignment[]
 
   // Hot read: the KPI list endpoint filters by `isActive = true` so the
   // active-projects dropdown doesn't surface soft-deleted rows. Index is
@@ -1181,6 +1189,83 @@ model Drawing {
 //   are sufficient to detect concurrent writes via 409 INVALID_TRANSITION.
 //   Adding a `version` column would inflate the row for no audit benefit.
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// R35: Project Reports — file attachments per project.
+//
+// Field engineers (and admins) attach weekly / monthly / due-diligence /
+// quality / other documents to a project so there's an in-portal trail of
+// "what was filed against this project when". The My Projects accordion
+// (Round-33) renders this as a 6th sub-section alongside DPR / Inspection
+// / Drawing / BOQ.
+//
+// Why a new enum instead of free-form String?
+//   - The Reports UI exposes a type-filter chip group + a typed upload
+//     form. A free-form String would let typos like "weakly" or
+//     "qality" leak through and pollute the filter list.
+//   - Adding a 6th value later is a one-line enum change; same migration
+//     story as DPRStatus / TrainingProvider.
+//   - Matches the existing enum convention (DPRStatus, TrainingProvider,
+//     TrainingEnrollmentStatus, TrainingPriority).
+//
+// Why `deletedAt` and not the existing `status: ACTIVE|SUPERSEDED` enum?
+//   - `status` is meaningful for revision semantics (Drawing: a row is
+//     ACTIVE until a newer revision supersedes it). For a Report the
+//     natural lifecycle is just "exists" / "deleted" — no replacement
+//     row ever supersedes it. A timestamp records WHEN deletion
+//     happened (audit), which a boolean status column cannot.
+//   - First `deletedAt` in the schema — appropriate for an audit-relevant
+//     record where deletion is rare and needs to leave a trail.
+//
+// Why Cascade on projectId and SetNull on uploadedById?
+//   - Cascade on projectId: an unregistered Project row sweeps its
+//     attachments (matches Drawing — the register is metadata, not
+//     history). The blob in `dpr-documents` is orphaned at the R2 layer
+//     but the next upload-sweep pass (already running for DPR photos /
+//     Drawing PDFs) extends naturally to clean up unreferenced blobs.
+//   - SetNull on uploadedById: deleting an admin must not orphan the
+//     "who uploaded this" audit trail — same pattern as Drawing.issuedById.
+// ─────────────────────────────────────────────────────────────────────────────
+enum ProjectReportType {
+  WEEKLY_REPORT
+  MONTHLY_REPORT
+  DUE_DILIGENCE_REPORT
+  QUALITY_REPORT
+  OTHER
+}
+
+model ProjectAttachment {
+  id           String            @id @default(uuid())
+  projectId    String            @map("project_id")
+  type         ProjectReportType
+  title        String?
+  filename     String            @map("filename")
+  contentType  String            @map("content_type")
+  sizeBytes    Int               @map("size_bytes")
+  // R2 blob path: scoped under `${employeeId}/${ulid}.${ext}` by the
+  // upload route (mountUploadRoutes), so the actual stored path matches
+  // the shape used by DPR / Inspection / Drawing uploads. We store the
+  // full blob name verbatim so /read-sas can re-mint a GET URL without
+  // recomputing it.
+  blobPath     String            @map("blob_path")
+  uploadedById String?           @map("uploaded_by_id")
+  uploadedAt   DateTime          @default(now()) @map("uploaded_at")
+  // First `deletedAt` in the schema (Round-35). Set on DELETE; the list
+  // route excludes `deletedAt: not null` so soft-deleted rows stay
+  // hidden while preserving the deletion timestamp for audit.
+  deletedAt    DateTime?         @map("deleted_at")
+
+  project    Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  uploadedBy Employee? @relation("ProjectAttachmentUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  // Hot reads: per-project list (with optional ?type filter) and
+  // "uploader's recent uploads" for an audit view.
+  // Index order matches the WHERE shape: (projectId, type, deletedAt)
+  // covers BOTH the unfiltered list and the ?type filter.
+  @@index([projectId, type, deletedAt])
+  @@index([uploadedById])
+  @@map("project_attachment")
+}
+
 model VariationOrder {
   id                     String    @id @default(uuid())
   // NOT NULL — every variation is project-anchored.
