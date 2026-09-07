@@ -62,12 +62,52 @@ export default function ProjectForm() {
     location: '',
     startDate: '',
     expectedEndDate: '',
+    // Project Assignments — [{ id?, employeeId, role, _employee }]. `id` is
+    // present only for rows that came back from the server (edit mode);
+    // `_employee` is a display-only object stripped before submit.
+    assignments: [],
   });
   const [errors, setErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
   const [loading, setLoading] = useState(isEdit);
   const [serverError, setServerError] = useState('');
+  // Employee directory backing the "+ Add employee…" picker. Admin-only
+  // endpoint, which is fine — this whole page is behind the admin guard.
+  // A failure here is non-fatal: the rest of the form still saves, the
+  // picker just renders empty.
+  const [employees, setEmployees] = useState([]);
   const mountedRef = useRef(true);
+
+  useEffect(() => {
+    if (!accessToken) return undefined;
+    let mounted = true;
+    api.listAdminEmployees({ limit: 200 }, accessToken)
+      .then((resp) => { if (mounted) setEmployees(resp.employees || []); })
+      .catch((err) => console.warn('Failed to load employees', err?.message));
+    return () => { mounted = false; };
+  }, [accessToken]);
+
+  // ──── Assignment chip helpers ───────────────────────────────────────────
+  // `form.assignments` is the single source of truth — the chips render
+  // straight off it and every mutation goes through these three helpers.
+  const addAssignment = (employeeId) => {
+    const emp = employees.find((e) => e.id === employeeId);
+    if (!emp) return;
+    setForm((f) => (
+      f.assignments.some((a) => a.employeeId === employeeId)
+        ? f
+        : { ...f, assignments: [...f.assignments, { employeeId: emp.id, role: '', _employee: emp }] }
+    ));
+  };
+  const removeAssignment = (employeeId) => {
+    setForm((f) => ({ ...f, assignments: f.assignments.filter((a) => a.employeeId !== employeeId) }));
+  };
+  const updateAssignmentRole = (employeeId, role) => {
+    setForm((f) => ({
+      ...f,
+      assignments: f.assignments.map((a) => (a.employeeId === employeeId ? { ...a, role } : a)),
+    }));
+  };
 
   // Edit-mode initial load. Resolve the project, then patch the form
   // state. /portal/admin/projects/new never hits this — it uses the
@@ -87,6 +127,16 @@ export default function ProjectForm() {
         location: p.location || '',
         startDate: p.startDate || '',
         expectedEndDate: p.expectedEndDate || '',
+        // serializeProject includes `assignments`; an older payload (or a
+        // discovered project) may omit it, so fall back to an empty list.
+        assignments: Array.isArray(p.assignments)
+          ? p.assignments.map((a) => ({
+            id: a.id,
+            employeeId: a.employeeId,
+            role: a.role || '',
+            _employee: a.employee,
+          }))
+          : [],
       });
     } catch (err) {
       if (!mountedRef.current) return;
@@ -134,6 +184,13 @@ export default function ProjectForm() {
         location: form.location ? form.location.trim() : null,
         startDate: form.startDate || null,
         expectedEndDate: form.expectedEndDate || null,
+        // Strip the `_employee` display object and the server-side `id` —
+        // the backend only accepts { employeeId, role } and treats an
+        // empty role as null.
+        assignments: form.assignments.map((a) => ({
+          employeeId: a.employeeId,
+          role: a.role && a.role.trim() ? a.role.trim() : null,
+        })),
       };
       if (isEdit) {
         await api.updateProject(editId, payload, accessToken);
@@ -274,6 +331,79 @@ export default function ProjectForm() {
             error={errors.expectedEndDate}
             onChange={(v) => setForm((f) => ({ ...f, expectedEndDate: v }))}
           />
+        </div>
+
+        {/* ──── Assigned team ────────────────────────────────────────────
+            Chips render directly off `form.assignments` (no mirrored
+            state). The picker lists only employees not already assigned,
+            so the same person can't be added twice. Role is optional —
+            an empty string is normalised to null on submit. */}
+        <div className="dpr-card" style={{ padding: '1rem' }}>
+          <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1rem', color: 'var(--navy)' }}>
+            Assigned team
+          </h3>
+          {form.assignments.length === 0 && (
+            <p style={{ color: 'var(--steel)', fontSize: '0.9rem', margin: '0 0 0.75rem 0' }}>
+              No employees assigned yet. Add engineers, supervisors, or PMs working on this project.
+            </p>
+          )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            {form.assignments.map((a) => (
+              <div
+                key={a.employeeId}
+                style={{
+                  display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap',
+                  padding: '0.5rem', border: '1px solid var(--border)', borderRadius: 8,
+                  background: 'var(--light-gray, #f8fafc)',
+                }}
+              >
+                <span style={{ flex: '0 0 200px', fontWeight: 500, fontSize: '0.9rem' }}>
+                  {a._employee?.name || a.employeeId}
+                  {a._employee?.designation && (
+                    <span style={{ fontSize: '0.8rem', color: 'var(--steel)', marginLeft: '0.5rem' }}>
+                      ({a._employee.designation})
+                    </span>
+                  )}
+                </span>
+                <input
+                  type="text"
+                  placeholder="Role (e.g. Site Engineer)"
+                  value={a.role}
+                  maxLength={60}
+                  onChange={(e) => updateAssignmentRole(a.employeeId, e.target.value)}
+                  className="form-input"
+                  style={{ flex: 1, minWidth: 160 }}
+                  aria-label={`Role for ${a._employee?.name || a.employeeId}`}
+                />
+                <button
+                  type="button"
+                  onClick={() => removeAssignment(a.employeeId)}
+                  className="btn btn-ghost btn-sm"
+                  aria-label={`Remove ${a._employee?.name || a.employeeId}`}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            <select
+              value=""
+              onChange={(e) => { if (e.target.value) { addAssignment(e.target.value); e.target.value = ''; } }}
+              className="form-input"
+              style={{ flex: 1 }}
+              aria-label="Add employee to project team"
+            >
+              <option value="">+ Add employee…</option>
+              {employees
+                .filter((e) => !form.assignments.some((a) => a.employeeId === e.id))
+                .map((e) => (
+                  <option key={e.id} value={e.id}>
+                    {e.name}{e.designation ? ` (${e.designation})` : ''}
+                  </option>
+                ))}
+            </select>
+          </div>
         </div>
 
         <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>

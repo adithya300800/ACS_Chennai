@@ -20,13 +20,13 @@ datasource db {
 }
 
 model Employee {
-  id                     String                  @id @default(uuid())
-  email                  String                  @unique
-  password               String?
-  name                   String
-  designation            String?
-  department             String?
-  isAdmin                Boolean                 @default(false) @map("is_admin")
+  id                         String                  @id @default(uuid())
+  email                      String                  @unique
+  password                   String?
+  name                       String
+  designation                String?
+  department                 String?
+  isAdmin                    Boolean                 @default(false) @map("is_admin")
   // LPR-011 (smallest demonstrable fix): Zoho access + refresh tokens
   // are stored as plaintext columns. A database compromise (lost
   // backup, leaked read replica, SQL injection) hands an attacker the
@@ -42,49 +42,57 @@ model Employee {
   // in this commit — it changes the column type, breaks every
   // existing row, and requires a backfill migration. Documenting the
   // gap is the explicit deliverable for LPR-011 in this round.
-  zohoAccessToken        String?                 @map("zoho_access_token")
-  zohoRefreshToken       String?                 @map("zoho_refresh_token")
-  createdAt              DateTime                @default(now()) @map("created_at")
-  updatedAt              DateTime                @updatedAt @map("updated_at")
-  attendance             Attendance[]
-  dprSubmitted           DPR[]                   @relation("DPRSubmitter")
-  dprReviewed            DPR[]                   @relation("DPRReviewer")
-  dprApproved            DPR[]                   @relation("DPRApprover")
-  inspectionSubmitted    InspectionRecord[]      @relation("InspectionSubmitter")
-  notifications          Notification[]
-  leaveRequests          LeaveRequest[]          @relation("LeaveSubmitter")
-  leaveReviewed          LeaveRequest[]          @relation("LeaveReviewer")
-  trainingCoursesCreated TrainingCourse[]        @relation("CourseCreatedBy")
-  trainingEnrollments    TrainingEnrollment[]    @relation("EnrollEmployee")
-  trainingAssignedByMe   TrainingEnrollment[]    @relation("EnrollAssignedBy")
+  zohoAccessToken            String?                 @map("zoho_access_token")
+  zohoRefreshToken           String?                 @map("zoho_refresh_token")
+  createdAt                  DateTime                @default(now()) @map("created_at")
+  updatedAt                  DateTime                @updatedAt @map("updated_at")
+  attendance                 Attendance[]
+  dprSubmitted               DPR[]                   @relation("DPRSubmitter")
+  dprReviewed                DPR[]                   @relation("DPRReviewer")
+  dprApproved                DPR[]                   @relation("DPRApprover")
+  inspectionSubmitted        InspectionRecord[]      @relation("InspectionSubmitter")
+  notifications              Notification[]
+  leaveRequests              LeaveRequest[]          @relation("LeaveSubmitter")
+  leaveReviewed              LeaveRequest[]          @relation("LeaveReviewer")
+  trainingCoursesCreated     TrainingCourse[]        @relation("CourseCreatedBy")
+  trainingEnrollments        TrainingEnrollment[]    @relation("EnrollEmployee")
+  trainingAssignedByMe       TrainingEnrollment[]    @relation("EnrollAssignedBy")
   // N17: back-relation for Project.createdBy — projects admin-curated
   // through the dashboard. SetNull on the FK (see Project model notes),
   // so a deleted admin does not delete the projects they created.
-  projectsCreated        Project[]               @relation("ProjectCreator")
+  projectsCreated            Project[]               @relation("ProjectCreator")
   // [N3] Phase E: drawings issued by this employee. Audit only — the
   // drawer / PM who issued the revision; SetNull mirrors the FK so the
   // deletion of an admin does not orphan the drawing register.
-  drawingsIssued         Drawing[]               @relation("DrawingIssuer")
+  drawingsIssued             Drawing[]               @relation("DrawingIssuer")
   // Round-25: email notification preferences + audit log + digest runs.
   // NotificationPreference is 1:1 (PK = employeeId); EmailLog / DigestRun
   // are 1:N and outlive notification rows via onDelete: SetNull.
-  notificationPreference NotificationPreference?
-  emailLogs              EmailLog[]
-  digestRuns             DigestRun[]
+  notificationPreference     NotificationPreference?
+  emailLogs                  EmailLog[]
+  digestRuns                 DigestRun[]
   // [REPORT-S3-11] Admin-targeted daily attendance digest bookkeeping.
   // Mirrors DigestRun's (employeeId, scheduledFor) idempotency contract
   // for the admin recipient: a second cron fire on the same date is a
   // no-op. See src/routes/internal-admin-attendance.js header for the
   // claim/update pattern + the P2002 catch race-safety.
-  adminDigestRuns        AdminDigestRun[]
-  uploadIntents          UploadIntent[]
+  adminDigestRuns            AdminDigestRun[]
+  uploadIntents              UploadIntent[]
   // N7 (round-28): back-relation for BOQ items this employee created.
   // boqsCreated is for audit ("who added item 2.3.1?") — the create-time
   // audit trail. Mirror with the inspect/dpr back-relations above so the
   // prisma client offers the navigation in both directions.
-  boqsCreated            BoqItem[]               @relation("BoqCreator")
-  variationsRaised       VariationOrder[]        @relation("VariationRaiser")
-  variationsApproved     VariationOrder[]        @relation("VariationApprover")
+  boqsCreated                BoqItem[]               @relation("BoqCreator")
+  variationsRaised           VariationOrder[]        @relation("VariationRaiser")
+  variationsApproved         VariationOrder[]        @relation("VariationApprover")
+  // [Project Assignments] back-relations for the project_assignment join
+  // table. Two named relations because an employee appears in two roles
+  // on the join: the one being assigned (employeeId), and the one who
+  // performed the assignment (assignedById). Cascade-delete on the
+  // employeeId FK (model-side) sweeps the row; SetNull on assignedById
+  // preserves the audit trail when the assigning admin is removed.
+  projectAssignments         ProjectAssignment[]     @relation("ProjectAssignmentEmployee")
+  projectAssignmentsAssigned ProjectAssignment[]     @relation("ProjectAssignmentAssigner")
 
   @@map("employees")
 }
@@ -996,7 +1004,7 @@ model Project {
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
-  createdBy   Employee?          @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdBy   Employee?           @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
   // [N1] Back-relations for the FK swap on DPR / InspectionRecord /
   // BoqItem. The migration creates nullable `project_id` columns on each
   // child with ON DELETE SET NULL, so archiving a Project row preserves
@@ -1017,12 +1025,64 @@ model Project {
   // preserve history with SetNull because they're operational records).
   // The drawing register is metadata, not history.
   drawings    Drawing[]
+  // [Project Assignments] back-relation for the project_assignment join
+  // table. Cascade-deletes are handled by the FK on project_assignment
+  // (CASCADE) — when a Project row is hard-deleted (rare; the soft-delete
+  // path flips isActive=false instead) all assignments go with it.
+  assignments ProjectAssignment[]
 
   // Hot read: the KPI list endpoint filters by `isActive = true` so the
   // active-projects dropdown doesn't surface soft-deleted rows. Index is
   // not on `name` because the @unique constraint already creates one.
   @@index([isActive])
   @@map("project")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Project Assignments — many-to-many between Project and Employee.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Each row says "this employee is working on this project, in this
+// (optional) role". The `role` column is free-text (max 60 chars in the
+// application layer; no DB-side length cap so a future "role taxonomy"
+// can be enforced centrally without a migration).
+//
+// Two FKs on employees:
+//   - employeeId    — the person being assigned (CASCADE on delete so
+//                     removing an employee sweeps their assignments).
+//   - assignedById  — the admin who performed the assignment (SetNull on
+//                     delete so removing an admin preserves the audit
+//                     trail — we want to know that *someone* assigned
+//                     this row, even if that someone has since left).
+//
+// onDelete on projectId is CASCADE — the only path that hard-deletes a
+// Project is the schema fix / data backfill (soft-delete via DELETE flips
+// isActive=false and leaves the assignment rows intact, which is the
+// right behavior for "this project is archived but historical assignments
+// are still meaningful").
+//
+// `@map` snake_case on every column — N28 + N22 lesson: never trust
+// Prisma to guess column names; if the SQL migration uses snake_case
+// the schema must say so explicitly.
+model ProjectAssignment {
+  id           String   @id @default(uuid())
+  projectId    String   @map("project_id")
+  employeeId   String   @map("employee_id")
+  role         String?  @map("role")
+  assignedAt   DateTime @default(now()) @map("assigned_at")
+  assignedById String?  @map("assigned_by_id")
+
+  project    Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  employee   Employee  @relation("ProjectAssignmentEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
+  assignedBy Employee? @relation("ProjectAssignmentAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  // @@unique on (projectId, employeeId) — same employee cannot have two
+  // active rows on the same project. The application's diff logic uses
+  // this pair as the upsert key.
+  @@unique([projectId, employeeId])
+  @@index([projectId])
+  @@index([employeeId])
+  @@map("project_assignment")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1142,9 +1202,9 @@ model VariationOrder {
   createdAt              DateTime  @default(now()) @map("created_at")
   updatedAt              DateTime  @updatedAt @map("updated_at")
 
-  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  raisedBy     Employee  @relation("VariationRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
-  approvedBy   Employee? @relation("VariationApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  project    Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  raisedBy   Employee  @relation("VariationRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
+  approvedBy Employee? @relation("VariationApprover", fields: [approvedById], references: [id], onDelete: SetNull)
 
   // Hot reads: per-project list, admin queue by status.
   @@index([projectId])

@@ -60,6 +60,13 @@ const FIELD_MAX = {
   description: 4000,
 };
 
+// Cap on the number of assignment rows per project. Stops a runaway
+// admin from posting a 10k-element `assignments` array that would lock
+// the project table for the duration of the diff transaction. 100 is
+// well above the largest realistic project team — a 200-engineer mega-
+// project would be split into sub-projects long before this is hit.
+const MAX_ASSIGNMENTS_PER_PROJECT = 100;
+
 // ─── JSON helpers (N1 widening) ──────────────────────────────────────────────
 // `parties` and `sites` are JSONB columns — the client sends them as either
 // already-parsed JSON objects or as JSON-encoded strings (the frontend
@@ -94,6 +101,41 @@ function validateContractValue(raw) {
     return { ok: false, error: 'contractValue must be a non-negative number ≤ 999999999999.99' };
   }
   return { ok: true, value: n };
+}
+
+// Validate a single assignment object. Returns the normalised shape
+// `{ employeeId, role }` (employeeId always present + UUID; role null
+// if absent or empty). The caller is responsible for verifying that
+// `employeeId` exists in the `employees` table — we only do shape
+// validation here so this function can be reused across POST + PATCH
+// without duplicating the DB-existence check.
+const ASSIGNMENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ASSIGNMENT_ROLE_MAX = 60;
+
+function validateAssignment(raw, indexHint) {
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, error: `assignments[${indexHint}] must be an object` };
+  }
+  const { employeeId, role } = raw;
+  if (typeof employeeId !== 'string' || !employeeId.trim()) {
+    return { ok: false, error: `assignments[${indexHint}].employeeId is required` };
+  }
+  const trimmedId = employeeId.trim();
+  if (!ASSIGNMENT_UUID_RE.test(trimmedId)) {
+    return { ok: false, error: `assignments[${indexHint}].employeeId must be a UUID`, code: 'INVALID_UUID' };
+  }
+  let normalisedRole = null;
+  if (role != null && role !== '') {
+    if (typeof role !== 'string') {
+      return { ok: false, error: `assignments[${indexHint}].role must be a string` };
+    }
+    const trimmedRole = role.trim();
+    if (trimmedRole.length > ASSIGNMENT_ROLE_MAX) {
+      return { ok: false, error: `assignments[${indexHint}].role exceeds ${ASSIGNMENT_ROLE_MAX} chars` };
+    }
+    normalisedRole = trimmedRole || null;
+  }
+  return { ok: true, value: { employeeId: trimmedId, role: normalisedRole } };
 }
 
 function validateProjectPayload(body, { partial = false } = {}) {
@@ -175,6 +217,50 @@ function validateProjectPayload(body, { partial = false } = {}) {
       return { ok: false, error: 'description must be a string or null' };
     }
   }
+  // [Project Assignments] optional `assignments` array. Shape only here;
+  // the route handler verifies each employeeId exists in `employees`
+  // after the validation pass so we can return a precise
+  // EMPLOYEE_NOT_FOUND code rather than letting Prisma throw a foreign-
+  // key constraint violation.
+  //
+  // Back-compat: when `assignments` is absent the handler leaves
+  // existing rows untouched (the route handler treats undefined as
+  // "no change", distinct from `[]` which means "delete all").
+  if (!partial || body.assignments !== undefined) {
+    if (body.assignments == null) {
+      // null/missing → no change. Use undefined to delete-all.
+      out.assignments = undefined;
+    } else if (!Array.isArray(body.assignments)) {
+      return { ok: false, error: 'assignments must be an array' };
+    } else {
+      if (body.assignments.length > MAX_ASSIGNMENTS_PER_PROJECT) {
+        return {
+          ok: false,
+          error: `assignments exceeds ${MAX_ASSIGNMENTS_PER_PROJECT} entries`,
+        };
+      }
+      const validated = [];
+      for (let i = 0; i < body.assignments.length; i += 1) {
+        const r = validateAssignment(body.assignments[i], i);
+        if (!r.ok) {
+          return { ok: false, error: r.error, code: r.code };
+        }
+        validated.push(r.value);
+      }
+      // De-duplicate on employeeId (later wins). The DB has a unique
+      // constraint on (projectId, employeeId) so a duplicate here would
+      // otherwise surface as a P2002 race-prone error.
+      const deduped = [];
+      const seen = new Set();
+      for (const a of validated) {
+        if (!seen.has(a.employeeId)) {
+          seen.add(a.employeeId);
+          deduped.push(a);
+        }
+      }
+      out.assignments = deduped;
+    }
+  }
   // Length caps
   for (const [k, cap] of Object.entries(FIELD_MAX)) {
     if (out[k] != null && typeof out[k] === 'string' && out[k].length > cap) {
@@ -239,6 +325,14 @@ function serializeProject(row) {
     : (typeof contractValueRaw === 'string' || typeof contractValueRaw === 'number')
       ? contractValueRaw
       : (typeof contractValueRaw.toString === 'function' ? contractValueRaw.toString() : contractValueRaw);
+  // [Project Assignments] if the caller included `assignments` in the
+  // Prisma fetch's `include`, surface them as a flat array with the
+  // employee object inlined. The POST/PATCH/GET handlers below control
+  // whether assignments are loaded — the list endpoint deliberately
+  // does NOT include them (list payload is large enough already).
+  const assignments = Array.isArray(row.assignments)
+    ? row.assignments.map(serializeAssignment)
+    : undefined;
   return {
     id: row.id,
     name: row.name,
@@ -256,7 +350,139 @@ function serializeProject(row) {
     createdById: row.createdById,
     createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
     updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt,
+    // Only emit `assignments` when the fetch included them — keeps the
+    // list endpoint payload unchanged for callers that haven't asked.
+    ...(assignments !== undefined ? { assignments } : {}),
   };
+}
+
+// Row → JSON for a single ProjectAssignment. Used by serializeProject
+// (when the caller included `assignments` in the include) and by the
+// dedicated GET /api/projects/:idOrName/assignments endpoint.
+//
+// `row.employee` may be undefined when the fetch didn't include the
+// employee join — we still emit the bare FK so the caller can pivot on
+// employeeId. The dedicated assignments endpoint always includes the
+// join so the UI gets name + email + designation.
+function serializeAssignment(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    employeeId: row.employeeId,
+    role: row.role ?? null,
+    assignedAt: row.assignedAt instanceof Date ? row.assignedAt.toISOString() : row.assignedAt,
+    employee: row.employee
+      ? {
+          id: row.employee.id,
+          name: row.employee.name,
+          email: row.employee.email,
+          designation: row.employee.designation ?? null,
+        }
+      : null,
+  };
+}
+
+// Shared `include` shape for the project fetches that surface assignments.
+// Used by the POST/PATCH handlers (post-mutation re-fetch so the response
+// carries the freshly-written rows) and by the dedicated GET endpoint.
+const PROJECT_WITH_ASSIGNMENTS_INCLUDE = {
+  assignments: {
+    orderBy: { assignedAt: 'asc' },
+    include: {
+      employee: { select: { id: true, name: true, email: true, designation: true } },
+    },
+  },
+};
+
+// Diff `desired` (validated, de-duplicated `{employeeId, role}[]`)
+// against the existing rows for a project and apply the changes inside a
+// single transaction. The diff:
+//
+//   * creates rows for every (projectId, employeeId) pair in `desired`
+//     that doesn't already exist;
+//   * deletes rows for every existing (projectId, employeeId) pair that
+//     isn't in `desired`;
+//   * leaves existing rows alone (their role is NOT updated — the spec
+//     treats assignments as set membership, not a writable field after
+//     creation). This keeps the diff idempotent (PATCH twice → still one
+//     row, see round-25d scope-bleed lesson on transactions).
+//
+// `assignedById` is derived from `req.employeeId` — the request body is
+// never consulted, even on PATCH where the user could otherwise
+// impersonate another admin via `assignedById`.
+//
+// Returns the freshly-fetched assignment rows so the caller can
+// include them in the response payload.
+//
+// Throws an Error tagged with `.code = 'EMPLOYEE_NOT_FOUND'` if any
+// supplied employeeId doesn't resolve — the route handler maps this to
+// 400 with the offending IDs in the response.
+async function syncProjectAssignments(tx, projectId, desired, req) {
+  const employeeIds = desired.map((a) => a.employeeId);
+
+  // Validate the employee set exists. Use findMany + Set lookup rather
+  // than a separate findUnique per id — fewer round-trips, single
+  // query plan.
+  if (employeeIds.length) {
+    const existing = await tx.employee.findMany({
+      where: { id: { in: employeeIds } },
+      select: { id: true },
+    });
+    const found = new Set(existing.map((e) => e.id));
+    const missing = employeeIds.filter((id) => !found.has(id));
+    if (missing.length) {
+      const err = new Error('One or more assignments reference an unknown employee');
+      err.code = 'EMPLOYEE_NOT_FOUND';
+      err.missingEmployeeIds = missing;
+      throw err;
+    }
+  }
+
+  // Existing rows for this project.
+  const existingRows = await tx.projectAssignment.findMany({
+    where: { projectId },
+    select: { id: true, employeeId: true },
+  });
+  const existingByEmp = new Map(existingRows.map((r) => [r.employeeId, r.id]));
+  const desiredByEmp = new Map(desired.map((a) => [a.employeeId, a]));
+
+  // Diff.
+  const toCreate = [];
+  const toDelete = [];
+  for (const [empId, _row] of desiredByEmp.entries()) {
+    if (!existingByEmp.has(empId)) toCreate.push(empId);
+  }
+  for (const [empId, _id] of existingByEmp.entries()) {
+    if (!desiredByEmp.has(empId)) toDelete.push(empId);
+  }
+
+  // Apply. `createMany` skips the round-trip-per-row overhead; the
+  // @@unique([projectId, employeeId]) constraint prevents duplicates
+  // (and we just de-duplicated client-side above, so this is safe).
+  if (toCreate.length) {
+    await tx.projectAssignment.createMany({
+      data: toCreate.map((employeeId) => ({
+        projectId,
+        employeeId,
+        role: desiredByEmp.get(employeeId).role,
+        assignedById: req.employeeId,
+      })),
+    });
+  }
+  if (toDelete.length) {
+    await tx.projectAssignment.deleteMany({
+      where: { projectId, employeeId: { in: toDelete } },
+    });
+  }
+
+  // Return the fresh state so the caller can render it without a second
+  // round-trip. The returned rows do NOT carry the employee join — the
+  // route handler will re-fetch with the include if it needs the
+  // joined shape.
+  return tx.projectAssignment.findMany({
+    where: { projectId },
+    orderBy: { assignedAt: 'asc' },
+  });
 }
 
 router.use(requireAuth);
@@ -482,6 +708,10 @@ router.get('/', asyncHandler(async (req, res) => {
 // requireFreshAdmin (not requireAdmin): a freshly demoted admin cannot
 // keep creating projects with a stale-JWT for the rest of the 15-min
 // access-token TTL.
+//
+// [Project Assignments] optional `assignments: [{employeeId, role}]`
+// payload. When present, the entire create + assignment-insert runs
+// inside one transaction so a partial failure rolls everything back.
 router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma) {
@@ -490,18 +720,41 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
 
   const v = validateProjectPayload(req.body || {});
   if (!v.ok) {
-    return res.status(400).json({ error: v.error, code: 'VALIDATION_ERROR' });
+    return res.status(400).json({ error: v.error, code: v.code || 'VALIDATION_ERROR' });
   }
 
+  // Pull `assignments` out of the validated payload — it isn't a column
+  // on `project`, so we strip it before the create and apply it inside
+  // the same transaction.
+  const { assignments: desiredAssignments, ...projectData } = v.data;
+
   try {
-    const project = await prisma.project.create({
-      data: {
-        ...v.data,
-        createdById: req.employeeId,
-      },
+    const project = await prisma.$transaction(async (tx) => {
+      const created = await tx.project.create({
+        data: {
+          ...projectData,
+          createdById: req.employeeId,
+        },
+      });
+      if (Array.isArray(desiredAssignments)) {
+        await syncProjectAssignments(tx, created.id, desiredAssignments, req);
+      }
+      // Re-fetch with the assignments include so the response carries
+      // the freshly-written rows + the joined employee metadata.
+      return tx.project.findUnique({
+        where: { id: created.id },
+        include: PROJECT_WITH_ASSIGNMENTS_INCLUDE,
+      });
     });
     res.status(201).json(serializeProject(project));
   } catch (err) {
+    if (err && err.code === 'EMPLOYEE_NOT_FOUND') {
+      return res.status(400).json({
+        error: err.message,
+        code: 'EMPLOYEE_NOT_FOUND',
+        missingEmployeeIds: err.missingEmployeeIds,
+      });
+    }
     console.error('Projects create error', {
       employeeHash: hashIdentifier(req.employeeId),
       prismaCode: err.code,
@@ -608,6 +861,8 @@ router.post('/resolve', asyncHandler(async (req, res) => {
 // (which decodes fine but never matches the UUID regex, so it falls
 // through to the name match and 404s on the literal string '<uuid>/kpis').
 // /:idOrName/parties follows the same ordering rule (added in N1 Phase A).
+// /:idOrName/assignments follows the same ordering rule (added in N1
+// Phase A — the project assignments read surface).
 router.get('/:idOrName/kpis', asyncHandler(kpiHandler));
 // ─── GET /api/projects/:idOrName/parties (N1) ───────────────────────────────
 //
@@ -670,6 +925,58 @@ router.get('/:idOrName/parties', asyncHandler(async (req, res) => {
     description: p.description ?? null,
   });
 }));
+// ─── GET /api/projects/:idOrName/assignments (Project Assignments) ─────────
+//
+// Canonical read surface for the assignment list. The POST / PATCH
+// handlers also include `assignments` in their response payload, but a
+// dedicated endpoint keeps the project-anchor "Team" panel from
+// needing to fetch the whole project just to render the assignment
+// list.
+//
+// Resolves by UUID or by name (case-insensitive) via the existing
+// resolveProject helper. A discovered project (name with no curated
+// row) returns `{ assignments: [], isRegistered: false, name }` so the
+// panel can render "no project registered yet" without 404ing — the
+// same shape /:idOrName/parties uses for symmetry.
+//
+// Auth: any authenticated employee. The assignment list is not admin-
+// only — the picker + project-anchor surfaces it for everyone.
+router.get('/:idOrName/assignments', asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  const result = await resolveProject(prisma, req.params.idOrName);
+  if (result.kind === 'missing') {
+    return res.status(404).json({ error: 'PROJECT_NOT_FOUND', code: 'PROJECT_NOT_FOUND', message: 'No project matches that id or name' });
+  }
+  if (result.kind === 'discovered') {
+    return res.json({
+      isRegistered: false,
+      name: result.name,
+      assignments: [],
+    });
+  }
+
+  // Registered project — fetch assignments with the employee join.
+  // Order by assignedAt ASC so the UI gets a stable, oldest-first
+  // view (mirrors the order POST/PATCH return).
+  const rows = await prisma.projectAssignment.findMany({
+    where: { projectId: result.project.id },
+    orderBy: { assignedAt: 'asc' },
+    include: {
+      employee: { select: { id: true, name: true, email: true, designation: true } },
+    },
+  });
+
+  res.json({
+    isRegistered: true,
+    projectId: result.project.id,
+    name: result.project.name,
+    assignments: rows.map(serializeAssignment),
+  });
+}));
 router.get('/:idOrName', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma) {
@@ -681,7 +988,16 @@ router.get('/:idOrName', asyncHandler(async (req, res) => {
     return res.status(404).json({ error: 'PROJECT_NOT_FOUND', code: 'PROJECT_NOT_FOUND', message: 'No project matches that id or name' });
   }
   if (result.kind === 'project') {
-    return res.json(serializeProject(result.project));
+    // [Round-34] The detail endpoint surfaces the full project + assignments
+    // so the frontend's Team tab and ProjectForm pre-populate without a
+    // second round-trip. resolveProject() deliberately uses a lean fetch
+    // for KPI/parties hot paths, so we re-fetch here with the assignments
+    // include (cheap — single indexed JOIN per project).
+    const full = await prisma.project.findUnique({
+      where: { id: result.project.id },
+      include: PROJECT_WITH_ASSIGNMENTS_INCLUDE,
+    });
+    return res.json(serializeProject(full || result.project));
   }
   // Discovered (name with no Project row): return a stub so the frontend
   // can render the empty-state with the project name. The N1 widening
@@ -726,6 +1042,10 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
     // validateProjectPayload handles each field's shape / cap / parse
     // rules — same code path as POST, so a PATCH and a POST cannot drift.
     'parties', 'sites', 'contractValue', 'description',
+    // [Project Assignments] optional mass-replace of the assignments
+    // set. `assignments: []` means "remove everyone"; `assignments`
+    // absent means "leave existing rows alone" (back-compat).
+    'assignments',
   ];
   const fields = req.body || {};
   const unknown = Object.keys(fields).filter((k) => !ALLOWED_UPDATE_FIELDS.includes(k) && k !== 'isActive');
@@ -749,20 +1069,57 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
 
   const v = validateProjectPayload(fields, { partial: true });
   if (!v.ok) {
-    return res.status(400).json({ error: v.error, code: 'VALIDATION_ERROR' });
+    return res.status(400).json({ error: v.error, code: v.code || 'VALIDATION_ERROR' });
   }
 
+  // `assignments` in v.data is one of:
+  //   * undefined — body.assignments absent → leave existing rows
+  //                 untouched (back-compat)
+  //   * []        — explicit empty array → remove everyone
+  //   * Array     — replace existing set with this diff
+  const wantsAssignmentSync = Object.prototype.hasOwnProperty.call(fields, 'assignments');
+  const { assignments: desiredAssignments, ...projectData } = v.data;
+
   try {
-    const existing = await prisma.project.findUnique({ where: { id } });
-    if (!existing) {
-      return res.status(404).json({ error: 'PROJECT_NOT_FOUND', code: 'PROJECT_NOT_FOUND', message: 'Project not found' });
-    }
-    const updated = await prisma.project.update({
-      where: { id },
-      data: v.data,
+    const updated = await prisma.$transaction(async (tx) => {
+      const existing = await tx.project.findUnique({ where: { id } });
+      if (!existing) {
+        const err = new Error('Project not found');
+        err.code = 'PROJECT_NOT_FOUND';
+        throw err;
+      }
+      const baseUpdate = await tx.project.update({
+        where: { id },
+        data: projectData,
+      });
+      if (wantsAssignmentSync) {
+        await syncProjectAssignments(
+          tx,
+          id,
+          Array.isArray(desiredAssignments) ? desiredAssignments : [],
+          req,
+        );
+      }
+      // Re-fetch with the assignments include so the response carries
+      // the post-mutation row set. Only include when the caller touched
+      // assignments — otherwise the include is wasted work.
+      return tx.project.findUnique({
+        where: { id },
+        include: wantsAssignmentSync ? PROJECT_WITH_ASSIGNMENTS_INCLUDE : undefined,
+      });
     });
     res.json(serializeProject(updated));
   } catch (err) {
+    if (err && err.code === 'EMPLOYEE_NOT_FOUND') {
+      return res.status(400).json({
+        error: err.message,
+        code: 'EMPLOYEE_NOT_FOUND',
+        missingEmployeeIds: err.missingEmployeeIds,
+      });
+    }
+    if (err && err.code === 'PROJECT_NOT_FOUND') {
+      return res.status(404).json({ error: 'PROJECT_NOT_FOUND', code: 'PROJECT_NOT_FOUND', message: 'Project not found' });
+    }
     console.error('Projects update error', {
       employeeHash: hashIdentifier(req.employeeId),
       prismaCode: err.code,

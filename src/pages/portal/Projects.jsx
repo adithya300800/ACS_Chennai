@@ -369,6 +369,23 @@ function ProjectCard({ project, isExpanded, onToggle }) {
                   {project.code}
                 </span>
               ) : null}
+              {/* Project Assignments: passive team-count badge. Renders only
+                  when serializeProject includes a non-empty `assignments`
+                  array, so a discovered (name-only) project or an older
+                  cached payload simply omits it. No fetch of its own. */}
+              {project.assignments && project.assignments.length > 0 ? (
+                <span
+                  style={{
+                    padding: '0.125rem 0.5rem',
+                    background: 'var(--blue, #0066FF)', color: 'white',
+                    borderRadius: 12, fontSize: '0.75rem', fontWeight: 600,
+                  }}
+                  title={`${project.assignments.length} employee${project.assignments.length === 1 ? '' : 's'} assigned`}
+                >
+                  <span aria-hidden="true">👥 </span>
+                  {project.assignments.length}
+                </span>
+              ) : null}
               {!project.isRegistered ? (
                 <span style={{
                   fontSize: '0.7rem', fontWeight: 600,

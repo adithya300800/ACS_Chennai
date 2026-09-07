@@ -5,7 +5,7 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
-import { BuildingIcon, ClipboardIcon, CameraIcon, MapPinIcon, DocIcon, BookIcon } from '../../components/Icons.jsx';
+import { BuildingIcon, ClipboardIcon, CameraIcon, MapPinIcon, DocIcon, BookIcon, UserIcon } from '../../components/Icons.jsx';
 import { formatShortDate } from '../../lib/format.js';
 
 // [N1 Phase B] Project detail — the anchor page at /portal/projects/:id.
@@ -26,6 +26,10 @@ import { formatShortDate } from '../../lib/format.js';
 // through the linked admin page's `?projectId=…` URL param instead.)
 const TABS = [
   { id: 'overview',  label: 'Overview',    Icon: BuildingIcon,     always: true  },
+  // Project Assignments: unlike BOQ / DPRs / Inspections, the Team tab
+  // renders its roster IN PLACE (TeamPanel below) rather than linking out
+  // — there is no standalone assignments page to navigate to.
+  { id: 'team',      label: 'Team',        Icon: UserIcon,         always: true  },
   { id: 'boq',       label: 'BOQ',         Icon: BookIcon,         always: true  },
   { id: 'dprs',      label: 'DPRs',        Icon: DocIcon,          always: true  },
   { id: 'inspections', label: 'Inspections', Icon: ClipboardIcon,   always: true  },
@@ -137,6 +141,11 @@ export default function ProjectDetail() {
         // drawingNumber + rev in each card so the engineer can spot
         // the right revision quickly.
         navigate(`/portal/drawings?projectId=${pid}`);
+        break;
+      case 'team':
+        // Renders in place — no navigation. Falling through to `default`
+        // would try to scroll to #project-overview, which isn't mounted
+        // while the Team panel is active.
         break;
       case 'overview':
       default:
@@ -371,8 +380,11 @@ export default function ProjectDetail() {
             href={`/portal/admin/inspection?projectId=${encodeURIComponent(p.id || p.name)}`}
           />
         )}
+        {activeTab === 'team' && (
+          <TeamPanel project={p} accessToken={accessToken} isAdmin={Boolean(employee?.isAdmin)} />
+        )}
         {/* Round-29: rfis tab branch REMOVED — RFI feature is gone. */}
-        {(activeTab === 'variations' || activeTab === 'drawings' || activeTab === 'documents' || activeTab === 'issues' || activeTab === 'team') && (
+        {(activeTab === 'variations' || activeTab === 'drawings' || activeTab === 'documents' || activeTab === 'issues') && (
           <ComingSoonNotice label={TABS.find((t) => t.id === activeTab)?.label || activeTab} />
         )}
       </div>
@@ -576,6 +588,115 @@ function ComingSoonNotice({ label }) {
         roadmap. The tab is reserved so the navigation stays stable; a
         dedicated page will land in a future phase.
       </p>
+    </div>
+  );
+}
+
+// Small status hints for the Team panel. The page's top-level loading /
+// error states are full-page takeovers; these are panel-scoped so the
+// header + tab strip stay visible while the roster loads.
+function LoadingHint({ children }) {
+  return (
+    <div className="dpr-card" style={{ padding: '1.25rem', textAlign: 'center', color: 'var(--steel, #64748b)' }}>
+      {children}
+    </div>
+  );
+}
+
+function ErrorHint({ children }) {
+  return (
+    <div
+      className="dpr-card"
+      role="alert"
+      style={{
+        padding: '0.75rem 1rem',
+        color: 'var(--red, #dc2626)',
+        background: 'rgba(220,38,38,0.06)',
+        fontSize: '0.85rem',
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+// ──── TeamPanel ───────────────────────────────────────────────────────────
+// Project Assignments roster. Renders in place (the only tab that does)
+// because there's no standalone assignments page to link out to. Resolves
+// by `project.id` when registered, falling back to the name so a
+// discovered project still gets a lookup — the backend accepts either.
+// Admin sees a "Manage team" link into the ProjectForm edit page, which
+// owns the write path.
+function TeamPanel({ project, accessToken, isAdmin }) {
+  const [state, setState] = useState({ status: 'idle', data: [], error: null });
+  const projectKey = project.id || project.name;
+
+  useEffect(() => {
+    if (!projectKey) return undefined;
+    let mounted = true;
+    setState({ status: 'loading', data: [], error: null });
+    api.getProjectAssignments(projectKey, accessToken)
+      .then((resp) => {
+        if (!mounted) return;
+        setState({ status: 'ready', data: resp.assignments || [], error: null });
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        setState({ status: 'error', data: [], error: err?.message || 'Failed to load team' });
+      });
+    return () => { mounted = false; };
+  }, [projectKey, accessToken]);
+
+  const editHref = `#/portal/admin/projects/${encodeURIComponent(projectKey)}/edit`;
+
+  if (state.status === 'loading' || state.status === 'idle') return <LoadingHint>Loading team…</LoadingHint>;
+  if (state.status === 'error') return <ErrorHint>{state.error}</ErrorHint>;
+  if (state.data.length === 0) {
+    return (
+      <div className="dpr-card" style={{ padding: '1.25rem', color: 'var(--steel, #64748b)' }}>
+        <p style={{ margin: '0 0 0.75rem 0' }}>No employees have been assigned to this project yet.</p>
+        {isAdmin && (
+          <a href={editHref} className="btn btn-secondary btn-sm">
+            Assign team members →
+          </a>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="dpr-card" style={{ padding: '1.25rem' }}>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
+          <caption className="sr-only">Employees assigned to {project.name}</caption>
+          <thead>
+            <tr style={{ borderBottom: '2px solid var(--border)', textAlign: 'left' }}>
+              <th scope="col" style={{ padding: '0.5rem' }}>Name</th>
+              <th scope="col" style={{ padding: '0.5rem' }}>Designation</th>
+              <th scope="col" style={{ padding: '0.5rem' }}>Role</th>
+              <th scope="col" style={{ padding: '0.5rem' }}>Assigned</th>
+            </tr>
+          </thead>
+          <tbody>
+            {state.data.map((a) => (
+              <tr key={a.id || a.employeeId} style={{ borderBottom: '1px solid var(--border)' }}>
+                <td style={{ padding: '0.5rem', fontWeight: 500 }}>{a.employee?.name || a.employeeId}</td>
+                <td style={{ padding: '0.5rem', color: 'var(--steel)' }}>{a.employee?.designation || '—'}</td>
+                <td style={{ padding: '0.5rem' }}>{a.role || '—'}</td>
+                <td style={{ padding: '0.5rem', fontSize: '0.8rem', color: 'var(--steel)' }}>
+                  {a.assignedAt ? formatShortDate(a.assignedAt) : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {isAdmin && (
+        <div style={{ marginTop: '1rem' }}>
+          <a href={editHref} className="btn btn-secondary btn-sm">
+            Manage team →
+          </a>
+        </div>
+      )}
     </div>
   );
 }

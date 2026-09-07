@@ -111,6 +111,13 @@ const inspectionRows = [
 function makePrisma(opts = {}) {
   const { boqItemThrows = false } = opts;
 
+  // Per-mock store for rows created during this test. The module-level
+  // `projectRows` is read-only seed data shared across the file —
+  // writing back into it pollutes subsequent GET /api/projects tests.
+  // (Added in round-34 when POST/PATCH started wrapping writes in a
+  // transaction + post-mutation re-fetch.)
+  const createdRows = [];
+
   // Helper: filter DPR / Inspection rows by projectName + window predicate
   function filterRows(rows, where = {}) {
     let r = rows;
@@ -133,28 +140,58 @@ function makePrisma(opts = {}) {
     return r;
   }
 
-  return {
+  const prisma = {
+    // $transaction: pass `prisma` itself as the tx callback's argument so
+    // the route's `tx.<model>` calls resolve to the same mock functions.
+    // The existing tests don't exercise rollback semantics — they just
+    // need the callback to fire — so this shortcut is fine. (Added in
+    // round-34 when POST/PATCH started wrapping writes in transactions
+    // for the project_assignments feature.) The two-step const-then-
+    // assign avoids the TDZ on `prisma` inside the arrow body.
+    $transaction: null,
     project: {
-      findMany: jest.fn(async () => projectRows.filter((p) => p.isActive)),
+      findMany: jest.fn(async () => projectRows.filter((p) => p.isActive).concat(createdRows.filter((p) => p.isActive))),
       findUnique: jest.fn(async ({ where }) => {
-        if (where.id) return projectRows.find((p) => p.id === where.id) || null;
-        if (where.name) return projectRows.find((p) => p.name === where.name) || null;
+        if (where.id) {
+          return projectRows.find((p) => p.id === where.id)
+            || createdRows.find((p) => p.id === where.id)
+            || null;
+        }
+        if (where.name) {
+          return projectRows.find((p) => p.name === where.name)
+            || createdRows.find((p) => p.name === where.name)
+            || null;
+        }
         return null;
       }),
       findFirst: jest.fn(async ({ where }) => {
         if (!where || !where.name) return null;
         const target = String(where.name.equals || '').toLowerCase();
-        return projectRows.find((p) => p.name.toLowerCase() === target) || null;
+        return projectRows.find((p) => p.name.toLowerCase() === target)
+          || createdRows.find((p) => p.name.toLowerCase() === target)
+          || null;
       }),
-      create: jest.fn(async ({ data }) => ({
-        id: 'proj-new',
-        isActive: true,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        ...data,
-      })),
+      create: jest.fn(async ({ data }) => {
+        // [round-34] The new POST handler wraps the create in a
+        // transaction + post-mutation re-fetch (`tx.project.findUnique`
+        // with `include: { assignments: ... }`). The findUnique mock
+        // looks up rows in `projectRows` + a per-mock `createdRows`
+        // list, so the re-fetch finds the just-created row without
+        // polluting the shared module-level `projectRows` array (which
+        // would otherwise bleed into subsequent GET /api/projects tests).
+        const row = {
+          id: `proj-new-${createdRows.length + 1}`,
+          isActive: true,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          ...data,
+        };
+        createdRows.push(row);
+        return row;
+      }),
       update: jest.fn(async ({ where, data }) => {
-        const existing = projectRows.find((p) => p.id === where.id);
+        const inSeed = projectRows.find((p) => p.id === where.id);
+        const existing = inSeed || createdRows.find((p) => p.id === where.id);
         if (!existing) {
           const err = new Error('Not found');
           err.code = 'P2025';
@@ -238,6 +275,10 @@ function makePrisma(opts = {}) {
       }),
     },
   };
+  // Hook $transaction now that `prisma` is in scope — the closure can't
+  // see `prisma` during the literal above (TDZ).
+  prisma.$transaction = jest.fn(async (cb) => cb(prisma));
+  return prisma;
 }
 
 function buildApp(prisma) {

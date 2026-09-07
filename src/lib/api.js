@@ -647,6 +647,15 @@ export const api = {
   // survives the round trip.
   getProjectParties: (idOrName, token) =>
     api.get(`/projects/${encodeURIComponent(idOrName)}/parties`, token),
+  // Project Assignments — the employee roster for one project. Returns
+  // { assignments: [{ id, employeeId, role, assignedAt, employee: {…} }] }.
+  // Resolves by UUID or name (same `:idOrName` contract as /parties and
+  // /kpis above), so a discovered name-only project can be queried too.
+  // Writes go through createProject / updateProject, which pass an
+  // `assignments: [{ employeeId, role }]` array in the payload — there is
+  // no separate assignment write endpoint.
+  getProjectAssignments: (idOrName, token) =>
+    api.get(`/projects/${encodeURIComponent(idOrName)}/assignments`, token),
 
   // N7 (round-28) — Bill of Quantities (BOQ) CRUD + variance report.
   // Backend (backend/src/routes/boq.js) — committed 68611e2. The
