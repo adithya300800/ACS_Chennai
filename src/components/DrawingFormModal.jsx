@@ -339,7 +339,6 @@ export default function DrawingFormModal({
               onChange={handleChange}
               maxLength={DRAWING_NUMBER_MAX}
               required
-              disabled={isSupersede || submitting}
               placeholder="e.g. STR-101"
               disabled={isSupersede || isEdit || submitting}
               aria-invalid={errors.drawingNumber ? 'true' : 'false'}

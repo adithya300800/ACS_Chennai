@@ -25,7 +25,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api.js';
-import { formatShortDate } from '../../lib/format.js';
+import { formatShortDate, formatBytes } from '../../lib/format.js';
 import {
   MAX_REPORT_BYTES,
   ACCEPTED_REPORT_TYPES,
@@ -1483,13 +1483,6 @@ function FilterChip({ label, active, onClick }) {
 // Compact file size formatter (bytes → KB/MB). Keeps the reports list
 // scannable without adding a new helper to lib/format.js for a single
 // consumer.
-function formatBytes(n) {
-  if (n == null) return '—';
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 // ── Field renderers ──────────────────────────────────────────────────
 //
 // Two layouts:

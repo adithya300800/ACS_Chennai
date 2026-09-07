@@ -278,3 +278,13 @@ export function formatTimeOnly(value) {
     hour: '2-digit', minute: '2-digit',
   });
 }
+
+// R36: human-readable byte size for file attachments (reports,
+// drawings, photos). Rounded to 1 decimal for KB/MB; em-dash for null
+// so an unknown-size row still renders something coherent.
+export function formatBytes(n) {
+  if (n == null) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
