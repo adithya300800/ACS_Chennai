@@ -5507,7 +5507,7 @@ footer {
 }
 
 /* ===== F-01b: extracted inline hex tokens to utility classes ===== */
-.text-placeholder { color: #94a3b8; }              /* slate-400 — empty / (untitled) / — / Draft placeholders */
+.text-placeholder { color: #475569; }              /* [DR-033] was #94a3b8 (slate-400) ≈3.0:1 vs white — fails WCAG AA for normal text. Bumped to --steel (#475569) ≈7.6:1 (AA pass). Used for empty / (untitled) / — / Draft placeholders throughout portal/admin tables. The visual cue as empty-info still comes from the surrounding italic + parenthetical context; the actual color now meets WCAG. */
 .text-on-navy { color: #fff; }                    /* white text on dark navy backgrounds (CTA, etc.) */
 .draft-banner {                                   /* restored-draft banner on DPR / Inspection submit forms */
   display: flex;

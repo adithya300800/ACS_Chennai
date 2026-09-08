@@ -53,16 +53,26 @@ export default function WorkEntryForm({ workType, onAdd, onCancel, submitLabel =
 
       <form onSubmit={handleSubmit}>
         <div className="work-entry-fields">
-          {config.fields.map((field) => (
+          {/* [DR-033] Namespace each field's DOM id with the work type so
+              multiple work types on the same page (e.g. DprSubmit also
+              has id="location" for the site address, plus a safety work
+              entry with name="location") don't share the same id. Two
+              elements with the same id is invalid HTML and breaks the
+              label-to-input click target — clicking the second label
+              focused the FIRST input. `name=` stays unscoped so form
+              submissions still round-trip the data correctly. */}
+          {config.fields.map((field) => {
+            const inputId = `${workType}-${field.name}`;
+            return (
             <div key={field.name} className="work-entry-field">
               {field.type === 'select' ? (
                 <div className="form-group">
-                  <label htmlFor={field.name}>
+                  <label htmlFor={inputId}>
                     {field.label}
                     {field.required && <span className="required">*</span>}
                   </label>
                   <select
-                    id={field.name}
+                    id={inputId}
                     name={field.name}
                     className={`form-input ${errors[field.name] ? 'input-error' : ''}`}
                     value={formData[field.name] || ''}
@@ -77,12 +87,12 @@ export default function WorkEntryForm({ workType, onAdd, onCancel, submitLabel =
                 </div>
               ) : field.type === 'textarea' ? (
                 <div className="form-group">
-                  <label htmlFor={field.name}>
+                  <label htmlFor={inputId}>
                     {field.label}
                     {field.required && <span className="required">*</span>}
                   </label>
                   <textarea
-                    id={field.name}
+                    id={inputId}
                     name={field.name}
                     className={`form-input ${errors[field.name] ? 'input-error' : ''}`}
                     rows={3}
@@ -116,12 +126,12 @@ export default function WorkEntryForm({ workType, onAdd, onCancel, submitLabel =
                 </div>
               ) : field.type === 'number' ? (
                 <div className="form-group">
-                  <label htmlFor={field.name}>
+                  <label htmlFor={inputId}>
                     {field.label}
                     {field.required && <span className="required">*</span>}
                   </label>
                   <input
-                    id={field.name}
+                    id={inputId}
                     name={field.name}
                     type="number"
                     className={`form-input ${errors[field.name] ? 'input-error' : ''}`}
@@ -135,12 +145,12 @@ export default function WorkEntryForm({ workType, onAdd, onCancel, submitLabel =
                 </div>
               ) : field.type === 'time' ? (
                 <div className="form-group">
-                  <label htmlFor={field.name}>
+                  <label htmlFor={inputId}>
                     {field.label}
                     {field.required && <span className="required">*</span>}
                   </label>
                   <input
-                    id={field.name}
+                    id={inputId}
                     name={field.name}
                     type="time"
                     className={`form-input ${errors[field.name] ? 'input-error' : ''}`}
@@ -151,12 +161,12 @@ export default function WorkEntryForm({ workType, onAdd, onCancel, submitLabel =
                 </div>
               ) : (
                 <div className="form-group">
-                  <label htmlFor={field.name}>
+                  <label htmlFor={inputId}>
                     {field.label}
                     {field.required && <span className="required">*</span>}
                   </label>
                   <input
-                    id={field.name}
+                    id={inputId}
                     name={field.name}
                     type={field.type || 'text'}
                     className={`form-input ${errors[field.name] ? 'input-error' : ''}`}
@@ -168,7 +178,8 @@ export default function WorkEntryForm({ workType, onAdd, onCancel, submitLabel =
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="work-entry-actions">
