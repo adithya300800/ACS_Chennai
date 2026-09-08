@@ -191,3 +191,45 @@ describe('DR-018 — Billing Certifications Admin: client-side admin route guard
     );
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DR-021 (audit, 2026-09-08) — pagination-invariant totals + three distinct
+// summary figures on the admin + employee billing-cert pages.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('DR-021 — pagination-invariant summary figures (admin page)', () => {
+  test('14. admin page wires the summaryTotals state setter (so the three figures re-fetch on !append)', () => {
+    expect(pageSrc).toMatch(/setSummaryTotals\(data\?\.summary\s*\|\|\s*null\)/);
+  });
+
+  test('15. admin page renders all three labeled figures from summaryTotals', () => {
+    // All-status context (sum-of-recordValues across DRAFT+CERTIFIED+DISPUTED).
+    expect(pageSrc).toMatch(/All status \(context\)/);
+    expect(pageSrc).toMatch(/totalCertifiedAllStatus/);
+    // Certified liability (CERTIFIED only).
+    expect(pageSrc).toMatch(/Certified liability/);
+    expect(pageSrc).toMatch(/totalCertifiedLiability/);
+    // Disputed amounts (DISPUTED only).
+    expect(pageSrc).toMatch(/Disputed amounts/);
+    expect(pageSrc).toMatch(/totalCertifiedDisputed/);
+  });
+});
+
+const myCertPath = resolvePath(__dirname, '../pages/portal/MyCertifications.jsx');
+const myCertSrc = readFileSync(myCertPath, 'utf8');
+
+describe('DR-021 — pagination-invariant summary figures (employee MyCertifications)', () => {
+  test('16. employee page also renders all three labeled figures', () => {
+    expect(myCertSrc).toMatch(/All status \(context\)/);
+    expect(myCertSrc).toMatch(/Certified liability/);
+    expect(myCertSrc).toMatch(/Disputed amounts/);
+  });
+
+  test('17. employee page preserves the summary envelope on the non-append path so totals do not flicker during Load more', () => {
+    expect(myCertSrc).toMatch(/setSummaryTotals\(data\?\.summary\s*\|\|\s*null\)/);
+    // Both admin + employee should gate the setter so the totals do not
+    // visibly replace while Load more appends rows.
+    expect(pageSrc).toMatch(/if\s*\(!append\)\s*\{[\s\S]*?setSummaryByStatus\([\s\S]*?setSummaryTotals\(/);
+    expect(myCertSrc).toMatch(/if\s*\(!append\)\s*\{[\s\S]*?setSummaryByStatus\([\s\S]*?setSummaryTotals\(/);
+  });
+});

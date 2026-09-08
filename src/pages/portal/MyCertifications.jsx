@@ -79,6 +79,11 @@ export default function MyCertifications() {
   const [nextCursor, setNextCursor] = useState(null);
   const [total, setTotal] = useState(0);
   const [summaryByStatus, setSummaryByStatus] = useState(null);
+  // [DR-021] Top-level summary envelope — distinct labels for
+  // all-status context vs certified liability vs disputed amounts.
+  // Mirrors the admin page's three-figure summary so the two surfaces
+  // read identically apart from the action buttons.
+  const [summaryTotals, setSummaryTotals] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
@@ -110,14 +115,25 @@ export default function MyCertifications() {
       const items = data?.certifications || [];
       setCerts((prev) => (append ? [...prev, ...items] : items));
       setNextCursor(data?.nextCursor || null);
-      setTotal(data?.total || 0);
-      setSummaryByStatus(data?.summary?.byStatus || null);
+      // [DR-021] Totals + per-status summary describe the FULL filtered
+      // population. Server already separates count + sums from cursor
+      // (see backend/src/routes/billingCertifications.js), so the
+      // response is invariant under `cursor`. Don't replace on append
+      // to avoid a flicker; the next non-append fetch (filter change,
+      // pull-to-refresh, mutation) will repopulate.
+      if (!append) {
+        setTotal(data?.total || 0);
+        setSummaryByStatus(data?.summary?.byStatus || null);
+        setSummaryTotals(data?.summary || null);
+      }
     } catch (err) {
       setError(err?.message || 'Failed to load your certifications');
       if (!append) {
         setCerts([]);
         setNextCursor(null);
         setTotal(0);
+        setSummaryByStatus(null);
+        setSummaryTotals(null);
       }
     } finally {
       if (append) setLoadingMore(false); else setLoading(false);
@@ -198,47 +214,98 @@ export default function MyCertifications() {
         </p>
       </header>
 
-      {/* Summary tile — DRAFT / CERTIFIED / DISPUTED counts. */}
+      {/* [DR-021] Three distinct summary figures — all-status context
+          (sum-of-recordValues across statuses), certified liability
+          (CERTIFIED only), and disputed amounts (DISPUTED only) — so
+          the employee sees the same three-figure summary the admin
+          page renders. Mirrors the admin-side `bc-summary-totals`
+          tile so the two pages read identically apart from the
+          action buttons. */}
       {summaryTiles && (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 160px), 1fr))',
-            gap: '0.5rem',
-            marginBottom: '0.75rem',
-          }}
-        >
-          {summaryTiles.map((tile) => {
-            const badge = STATUS_BADGE_STYLES[tile.key];
-            return (
-              <div
-                key={tile.key}
-                className="dpr-card"
-                style={{ padding: '0.6rem 0.75rem', display: 'flex', flexDirection: 'column', gap: '0.15rem' }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                  <span
-                    style={{
-                      fontSize: '0.65rem', fontWeight: 700,
-                      background: badge.background, color: badge.color,
-                      padding: '2px 8px', borderRadius: 999,
-                      textTransform: 'uppercase', letterSpacing: '0.04em',
-                    }}
-                  >
-                    {tile.label}
-                  </span>
-                </div>
-                <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--navy)' }}>
-                  {tile.count}
-                </div>
-                {Number(tile.totalCertified) > 0 && (
-                  <div style={{ fontSize: '0.78rem', color: 'var(--steel)' }}>
-                    Certified {formatAmount(tile.totalCertified)}
-                  </div>
-                )}
+        <div className="dpr-card" style={{ marginBottom: '0.75rem', display: 'grid', gap: '0.5rem' }}>
+          <div
+            data-testid="mycert-summary-totals"
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))',
+              gap: '0.5rem',
+            }}
+          >
+            <div>
+              <div style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--steel)' }}>
+                All status (context)
               </div>
-            );
-          })}
+              <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--navy)', marginTop: '0.2rem' }}>
+                {formatAmount((summaryTotals && summaryTotals.totalCertifiedAllStatus) || 0)}
+              </div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--steel)', marginTop: '0.15rem' }}>
+                Sum across DRAFT + CERTIFIED + DISPUTED
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: '#166534' }}>
+                Certified liability
+              </div>
+              <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#166534', marginTop: '0.2rem' }}>
+                {formatAmount((summaryTotals && summaryTotals.totalCertifiedLiability) || 0)}
+              </div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--steel)', marginTop: '0.15rem' }}>
+                CERTIFIED sum only
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: '#b91c1c' }}>
+                Disputed amounts
+              </div>
+              <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#b91c1c', marginTop: '0.2rem' }}>
+                {formatAmount((summaryTotals && summaryTotals.totalCertifiedDisputed) || 0)}
+              </div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--steel)', marginTop: '0.15rem' }}>
+                DISPUTED sum only
+              </div>
+            </div>
+          </div>
+          <div
+            data-testid="mycert-summary-by-status"
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 160px), 1fr))',
+              gap: '0.5rem',
+              borderTop: '1px solid #f1f5f9',
+              paddingTop: '0.5rem',
+            }}
+          >
+            {summaryTiles.map((tile) => {
+              const badge = STATUS_BADGE_STYLES[tile.key];
+              return (
+                <div
+                  key={tile.key}
+                  style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <span
+                      style={{
+                        fontSize: '0.65rem', fontWeight: 700,
+                        background: badge.background, color: badge.color,
+                        padding: '2px 8px', borderRadius: 999,
+                        textTransform: 'uppercase', letterSpacing: '0.04em',
+                      }}
+                    >
+                      {tile.label}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--navy)' }}>
+                    {tile.count}
+                  </div>
+                  {Number(tile.totalCertified) > 0 && (
+                    <div style={{ fontSize: '0.78rem', color: 'var(--steel)' }}>
+                      Certified {formatAmount(tile.totalCertified)}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

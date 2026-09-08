@@ -461,6 +461,13 @@ router.get('/', asyncHandler(async (req, res) => {
     };
   }
 
+  // [DR-021] The full filtered population (used for count + sums) MUST
+  // NOT include the cursor predicate. Reusing the seek predicate here
+  // made Load more shrink the totals to "what's left after the cursor" —
+  // 60 rows + 50/page + Load more showed 60 cards under a total of 10.
+  // The seek predicate is applied only to the row fetch (`rowsWhere`
+  // below); count + groupBy operate on the full WHERE so the totals
+  // stay invariant as pages load.
   const where = {
     deletedAt: null,
     // [DR-019] Hide superseded rows from the default list. Superseded
@@ -483,8 +490,10 @@ router.get('/', asyncHandler(async (req, res) => {
         ...(toDate ? { lte: toDate } : {}),
       },
     } : {}),
-    ...(cursorPredicate || {}),
   };
+  // Rows-only WHERE — same filters + the seek predicate. Count + sums
+  // do NOT include this so totals stay invariant under pagination.
+  const rowsWhere = cursorPredicate ? { ...where, ...cursorPredicate } : where;
 
   // Apply ?scope=assigned on top of the explicit filters. Both the row
   // list AND the summary aggregates must respect the same scope — an
@@ -495,11 +504,14 @@ router.get('/', asyncHandler(async (req, res) => {
     employeeId: req.employeeId,
     isAdmin: !!req.isAdmin,
   });
+  const scopedRowsWhere = cursorPredicate
+    ? { ...scopedWhere, ...cursorPredicate }
+    : scopedWhere;
 
   try {
     const [rows, total, totalsByStatus] = await Promise.all([
       prisma.billingCertification.findMany({
-        where: scopedWhere,
+        where: scopedRowsWhere,
         take: take + 1,
         orderBy: [{ billDate: 'desc' }, { id: 'desc' }],
         include: {
@@ -508,6 +520,10 @@ router.get('/', asyncHandler(async (req, res) => {
           certifiedBy: { select: { id: true, name: true, designation: true } },
         },
       }),
+      // [DR-021] count + groupBy operate on `scopedWhere` (no cursor) so
+      // totals reflect the full filtered population, not the residual
+      // slice after the seek predicate. The audit's specific failure
+      // mode was "60 rows + 50/page + Load more shows total: 10".
       prisma.billingCertification.count({ where: scopedWhere }),
       prisma.billingCertification.groupBy({
         where: scopedWhere,
@@ -530,11 +546,25 @@ router.get('/', asyncHandler(async (req, res) => {
       claimSums[row.status] = row._sum?.claimedAmount ? Number(row._sum.claimedAmount) : 0;
       deductSums[row.status] = row._sum?.deductedAmount ? Number(row._sum.deductedAmount) : 0;
     }
+    // [DR-021] All-status context (sum across statuses, not payable
+    // liability) lives at the top level so the UI can render three
+    // distinct figures: total / certified liability / disputed. The
+    // per-status breakdown below remains the source-of-truth for each
+    // bucket's count + sum.
+    const totalAll = (sums.CERTIFIED || 0) + (sums.DISPUTED || 0) + (sums.DRAFT || 0);
+    const totalCertified = sums.CERTIFIED || 0;
+    const totalDisputed = sums.DISPUTED || 0;
     return res.json({
       certifications: page.map(serializeBillingCertification),
       nextCursor: hasMore && last ? encodeCursor(last.billDate, last.id) : null,
       total,
       summary: {
+        // [DR-021] All-status context — sum-of-recordValues across the
+        // full filtered population, invariant under pagination. UI
+        // renders this as "All status (context)".
+        totalCertifiedAllStatus: totalAll,
+        totalCertifiedLiability: totalCertified,
+        totalCertifiedDisputed: totalDisputed,
         byStatus: {
           DRAFT: { count: summary.DRAFT, totalCertified: sums.DRAFT, totalClaimed: claimSums.DRAFT, totalDeducted: deductSums.DRAFT },
           CERTIFIED: { count: summary.CERTIFIED, totalCertified: sums.CERTIFIED, totalClaimed: claimSums.CERTIFIED, totalDeducted: deductSums.CERTIFIED },

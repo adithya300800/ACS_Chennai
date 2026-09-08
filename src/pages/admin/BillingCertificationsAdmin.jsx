@@ -131,6 +131,11 @@ export default function BillingCertificationsAdmin() {
   const [nextCursor, setNextCursor] = useState(null);
   const [total, setTotal] = useState(0);
   const [summaryByStatus, setSummaryByStatus] = useState(null);
+  // [DR-021] Top-level summary envelope — distinct labels for
+  // all-status context vs certified liability vs disputed amounts so
+  // the admin sees three separate figures, not a single "sum-of-rows"
+  // that mixes payable liability with disputed / draft amounts.
+  const [summaryTotals, setSummaryTotals] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
@@ -176,14 +181,29 @@ export default function BillingCertificationsAdmin() {
       const items = data?.certifications || [];
       setCerts((prev) => (append ? [...prev, ...items] : items));
       setNextCursor(data?.nextCursor || null);
-      setTotal(data?.total || 0);
-      setSummaryByStatus(data?.summary?.byStatus || null);
+      // [DR-021] Totals + per-status summary describe the FULL filtered
+      // population. The server already separates count + sums from the
+      // cursor predicate (see backend/src/routes/billingCertifications.js),
+      // so the response is invariant under `cursor`. We still gate the
+      // setter on `!append` because the UI must not visibly flicker
+      // (a 50ms replace during Load more would briefly show the same
+      // number, but it's safer to just not call setState when nothing
+      // changed). The mutation handlers below do a full non-append
+      // fetchCerts() after POST/PATCH/certify/dispute/correct/delete,
+      // so the post-mutation totals stay current.
+      if (!append) {
+        setTotal(data?.total || 0);
+        setSummaryByStatus(data?.summary?.byStatus || null);
+        setSummaryTotals(data?.summary || null);
+      }
     } catch (err) {
       setError(err?.message || 'Failed to load billing certifications');
       if (!append) {
         setCerts([]);
         setNextCursor(null);
         setTotal(0);
+        setSummaryByStatus(null);
+        setSummaryTotals(null);
       }
     } finally {
       if (append) setLoadingMore(false); else setLoading(false);
@@ -403,33 +423,92 @@ export default function BillingCertificationsAdmin() {
       </div>
 
       {/* ─── Aggregates summary tile ───────────────────────────────────── */}
+      {/* [DR-021] Three distinct figures — all-status context (sum-of-
+          recordValues across statuses), certified liability (CERTIFIED
+          only), and disputed amounts (DISPUTED only) — so the admin
+          doesn't conflate payable liability with disputed or in-flight
+          draft amounts. The per-status breakdown below preserves the
+          count + per-status sum so DRAFT / CERTIFIED / DISPUTED still
+          read as a triplet. */}
       {summaryByStatus && (
         <div
           className="dpr-card"
           style={{
             marginBottom: '1rem',
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
             gap: '0.75rem',
           }}
         >
-          {Object.values(BILLING_CERTIFICATION_STATUSES).map((s) => {
-            const cfg = BILLING_CERTIFICATION_STATUS_LABELS[s];
-            const cell = summaryByStatus[s] || { count: 0, totalCertified: 0 };
-            return (
-              <div key={s} style={{ minWidth: 0 }}>
-                <div style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--steel)' }}>
-                  {cfg.label}
-                </div>
-                <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--navy)', marginTop: '0.2rem' }}>
-                  {cell.count}
-                </div>
-                <div style={{ fontSize: '0.78rem', color: 'var(--steel)', marginTop: '0.15rem' }}>
-                  {formatINR(cell.totalCertified || 0)}
-                </div>
+          <div
+            data-testid="bc-summary-totals"
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+              gap: '0.75rem',
+            }}
+          >
+            <div>
+              <div style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--steel)' }}>
+                All status (context)
               </div>
-            );
-          })}
+              <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--navy)', marginTop: '0.2rem' }}>
+                {formatINR((summaryTotals && summaryTotals.totalCertifiedAllStatus) || 0)}
+              </div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--steel)', marginTop: '0.15rem' }}>
+                Sum-of-recordValues across DRAFT + CERTIFIED + DISPUTED
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: '#166534' }}>
+                Certified liability
+              </div>
+              <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#166534', marginTop: '0.2rem' }}>
+                {formatINR((summaryTotals && summaryTotals.totalCertifiedLiability) || 0)}
+              </div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--steel)', marginTop: '0.15rem' }}>
+                CERTIFIED sum only — payable against POs
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: '#b91c1c' }}>
+                Disputed amounts
+              </div>
+              <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#b91c1c', marginTop: '0.2rem' }}>
+                {formatINR((summaryTotals && summaryTotals.totalCertifiedDisputed) || 0)}
+              </div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--steel)', marginTop: '0.15rem' }}>
+                DISPUTED sum only — withheld pending resolution
+              </div>
+            </div>
+          </div>
+          <div
+            data-testid="bc-summary-by-status"
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+              gap: '0.75rem',
+              borderTop: '1px solid #f1f5f9',
+              paddingTop: '0.6rem',
+            }}
+          >
+            {Object.values(BILLING_CERTIFICATION_STATUSES).map((s) => {
+              const cfg = BILLING_CERTIFICATION_STATUS_LABELS[s];
+              const cell = summaryByStatus[s] || { count: 0, totalCertified: 0 };
+              return (
+                <div key={s} style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--steel)' }}>
+                    {cfg.label}
+                  </div>
+                  <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--navy)', marginTop: '0.2rem' }}>
+                    {cell.count}
+                  </div>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--steel)', marginTop: '0.15rem' }}>
+                    {formatINR(cell.totalCertified || 0)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
