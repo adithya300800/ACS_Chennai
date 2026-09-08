@@ -363,6 +363,14 @@ export const api = {
     api.get(`/dpr/notifications/list${lastId ? '?lastNotificationId=' + lastId : ''}`, token),
   markAllNotificationsRead: (token) =>
     api.put('/dpr/notifications/read-all', {}, token),
+  // [DR-025] Owner-scoped single-notification read. Backend is
+  // PUT /api/dpr/notifications/:notifId/read; persists isRead across
+  // reloads so the bell badge stays accurate after a page refresh.
+  // The audit found individual reads only mutated local React state —
+  // the server still considered the row unread, so the next /list
+  // returned it again with isRead: false.
+  markNotificationRead: (notifId, token) =>
+    api.put(`/dpr/notifications/${notifId}/read`, {}, token),
   // Single-use SSE ticket — replaces ?token= JWT-in-URL (Code Reviewer P2-2)
   getNotificationTicket: (token) =>
     api.post('/dpr/notifications/ticket', {}, token),

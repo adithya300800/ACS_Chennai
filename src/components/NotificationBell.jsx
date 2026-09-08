@@ -288,14 +288,38 @@ useLayoutEffect(() => {
   }, [open]);
 
   const handleNotifClick = async (notif) => {
+    // [DR-025] Persist the read so the server converges with the local
+    // optimistic update. The previous code only flipped React state;
+    // a fresh /list still came back with isRead:false and the badge
+    // never reflected the user's true read state. The optimistic flip
+    // keeps the UI snappy; the new endpoint PUTs the change to the
+    // server in parallel.
     if (!notif.isRead) {
       setNotifications((prev) =>
         prev.map((n) => (n.id === notif.id ? { ...n, isRead: true } : n))
       );
       setUnreadCount((c) => Math.max(0, c - 1));
+      try {
+        await api.markNotificationRead(notif.id, accessToken);
+      } catch (err) {
+        // Roll the optimistic flip back so the badge is honest again.
+        setNotifications((prev) =>
+          prev.map((n) => (n.id === notif.id ? { ...n, isRead: false } : n))
+        );
+        setUnreadCount((c) => c + 1);
+        toast.push('Could not mark notification as read on the server.', 'error');
+      }
     }
     if (notif.dprId) {
+      // [DR-025] Type-aware nav handoff. The destination page reads
+      // location.state.selectedDprId and opens the detail modal — see
+      // src/pages/portal/DprList.jsx for the consumer.
       navigate('/portal/dpr/my', { state: { selectedDprId: notif.dprId } });
+    } else {
+      // No typed target? Stay where we are (the bell dropdown itself
+      // acts as the read surface) and surface the message inline.
+      // Future target types (INSPECTION / LEAVE / TRAINING) will
+      // route to their own pages with the same handoff pattern.
     }
     setOpen(false);
   };

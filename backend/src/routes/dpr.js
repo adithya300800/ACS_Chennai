@@ -2593,6 +2593,57 @@ router.get('/notifications/list', async (req, res) => {
   }
 });
 
+// ─── PUT /api/dpr/notifications/:notifId/read ──────────────────────────────
+// [DR-025] Owner-scoped single-notification read. Previous behaviour was
+// a local-only optimistic update in NotificationBell — the server still
+// considered the row unread, so the next /list returned it with
+// isRead: false and the badge never converged. This endpoint:
+//   - requires auth + ownership (employeeId match on the row)
+//   - is idempotent (marking an already-read row is a no-op 200)
+//   - scopes to a single notification by id (audit requires
+//     per-record persistence rather than read-all only)
+router.put('/notifications/:notifId/read', async (req, res) => {
+  const prisma = getPrisma(req);
+  const { notifId } = req.params;
+  if (!notifId || typeof notifId !== 'string') {
+    return res.status(400).json({ error: 'NOTIF_ID_REQUIRED', message: 'notifId path parameter is required' });
+  }
+
+  try {
+    const existing = await prisma.notification.findUnique({
+      where: { id: notifId },
+      select: { id: true, employeeId: true, isRead: true },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'Notification not found' });
+    }
+    // Owner scope: another employee cannot mark someone else's
+    // notification as read (would leak "I saw this" metadata).
+    if (existing.employeeId !== req.employeeId) {
+      return res.status(403).json({ error: 'FORBIDDEN', message: 'You cannot mark another user\'s notification as read' });
+    }
+    // Idempotent: a second call returns 200 without churn.
+    const updated = existing.isRead
+      ? existing
+      : await prisma.notification.update({
+          where: { id: notifId },
+          data: { isRead: true },
+          select: { id: true, isRead: true },
+        });
+    res.json({ id: updated.id, isRead: updated.isRead });
+  } catch (err) {
+    console.error('Mark single notification read error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      notifId,
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to mark notification read' });
+  }
+});
+
 // ─── PUT /api/dpr/notifications/read-all ───────────────────────────────────
 router.put('/notifications/read-all', async (req, res) => {
   const prisma = getPrisma(req);

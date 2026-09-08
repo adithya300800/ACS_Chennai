@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -111,6 +111,14 @@ export default function DprList() {
   const { accessToken, employee } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
+  // [DR-025] Notification-click nav handoff. NotificationBell navigates
+  // to /portal/dpr/my with location.state.selectedDprId set. We previously
+  // ignored that, so a click on a "DPR rejected" notification landed on
+  // the list page with no modal opening — making the notification feel
+  // broken. Consume the state on mount + whenever it changes (route
+  // transitions re-use the same component instance), and open the
+  // modal the same way a row click would.
+  const location = useLocation();
   const isAdmin = !!employee?.isAdmin;
   // DR-016 mirror: filter state lives in the URL so refresh / back /
   // share-link / email-CTA all land on the same filtered view. The URL
@@ -338,6 +346,22 @@ export default function DprList() {
     setExpandedError('');
     setExpandedLoading(false);
   };
+
+  // [DR-025] Notification-click handoff. NotificationBell.jsx navigates
+  // here with location.state.selectedDprId when the user clicks a DPR
+  // notification. Open the detail modal the same way a row click would.
+  // Guard against re-entry (state may persist across re-mounts) and
+  // clear the state after consuming so a refresh or back-then-forward
+  // doesn't re-open the same modal.
+  useEffect(() => {
+    const selectedDprId = location.state?.selectedDprId;
+    if (!selectedDprId || !accessToken) return;
+    handleRowClick({ id: selectedDprId });
+    // Replace, don't push — we want to drop the state without a back-button
+    // explosion. Use null state so React Router clears it cleanly.
+    navigate(location.pathname + location.search, { replace: true, state: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state?.selectedDprId, accessToken]);
 
   // SOL-P0#4: Resume / Edit / Delete draft actions.
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
