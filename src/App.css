@@ -5326,6 +5326,13 @@ footer {
    sections the user has filled in, with clickable step anchors that
    reuse the existing section ids. Sits below .section-skip-nav. */
 .form-progress {
+  /* [DR-032] App.css:162 applies `nav { display: flex }` to every <nav>,
+     so the FormProgress <nav> would lay out meta / bar / steps as a
+     single horizontal row with 0.2rem gap — at 375px that collapsed the
+     step pills and squeezed the recovery banner text. Explicitly block
+     the element so its children (each of which is already display:flex)
+     stack vertically as authored. */
+  display: block;
   position: sticky;
   top: 56px;
   z-index: 9;

@@ -1161,7 +1161,12 @@ export default function DprSubmit() {
             role="status"
             className="draft-banner"
           >
-            <span style={{ flex: 1 }}>📝 Restored unsaved draft from your previous visit.</span>
+            {/* [DR-032] Inline `flex: 1` (which expands to `flex: 1 1 0%`)
+                overrode the stylesheet contract at .draft-banner > span
+                (`flex: 1 1 200px; min-width: 0;`). The `0%` basis +
+                flex-shrink collapsed the text to one character per line
+                at 375px. Let the stylesheet handle the layout. */}
+            <span>📝 Restored unsaved draft from your previous visit.</span>
             <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowDraftBanner(false)}>
               Dismiss
             </button>
@@ -1852,7 +1857,10 @@ export default function DprSubmit() {
 
           {editingId && (
             <div className="draft-banner" style={{ marginTop: '1rem' }}>
-              <span style={{ flex: 1 }}>
+              {/* [DR-032] Same fix as the restored-draft banner — drop
+                  the inline `flex: 1` so the stylesheet's `flex: 1 1 200px;
+                  min-width: 0` contract applies at narrow widths. */}
+              <span>
                 ✏️ Editing saved draft. Changes will update the existing draft when you click Save or Submit.
               </span>
               <button
