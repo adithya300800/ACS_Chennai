@@ -69,16 +69,21 @@ const KNOWN_BAD = Object.freeze([
       //
       // [N1 fix 2] Prisma 5's `_prisma_migrations` has NO `status` column —
       // state is derived from `finished_at` / `rolled_back_at` /
-      // `applied_steps_count`. So the predicate is simply the migration
-      // name. The corrective migration is idempotent (`ADD COLUMN IF
-      // NOT EXISTS`, etc.) so deleting a row that was somehow applied
-      // (it never is, by definition: these are KNOWN_BAD entries) won't
-      // cause data drift — re-applying the corrective migration recreates
-      // any partially-applied DDL harmlessly.
+      // `applied_steps_count`. The corrective migration is idempotent
+      // (`ADD COLUMN IF NOT EXISTS`, etc.) so deleting a row that was
+      // somehow applied won't cause data drift — re-applying the
+      // corrective migration recreates any partially-applied DDL harmlessly.
+      //
+      // [DR-031] Guard the DELETE so it ONLY matches rows that are clearly
+      // NOT applied: rolled back, or never finished. A successfully-applied
+      // row has finished_at NOT NULL AND applied_steps_count > 0 AND
+      // rolled_back_at IS NULL. Excluding that combination prevents a
+      // migration-name collision or typo from clobbering a legitimate
+      // ledger row and forcing `migrate deploy` to re-apply DDL.
       const res = await prisma.$executeRawUnsafe(
         "DELETE FROM \"_prisma_migrations\" WHERE \"migration_name\" = '" +
         name +
-        "'",
+        "' AND \"rolled_back_at\" IS NULL AND (\"finished_at\" IS NULL OR \"applied_steps_count\" = 0)",
       );
       console.log('[clear-failed-migrations] cleared', res, 'rows for', name);
       totalCleared += res;

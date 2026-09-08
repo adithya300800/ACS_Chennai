@@ -3,6 +3,8 @@ FROM node:22-alpine
 WORKDIR /app
 
 COPY package*.json ./
+# DR-031: postinstall runs scripts/clear-failed-migrations.js — must be present before `npm ci`
+COPY scripts/ ./scripts/
 
 RUN npm ci --only=production
 
