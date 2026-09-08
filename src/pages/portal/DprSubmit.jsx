@@ -1092,12 +1092,19 @@ export default function DprSubmit() {
             line 311 already enforced `d.status === 'DRAFT'` before
             setting `editingId`, so `editingId` alone is sufficient.
             Reuses the existing `.draft-banner` class — same AA-compliant
-            palette and round-37 mobile-wrap fix as `showDraftBanner`. */}
+            palette and round-37 mobile-wrap fix as `showDraftBanner`.
+            The Discard button calls `handleDiscardDraft`, which resets the
+            form state and clears localStorage (same handler the
+            `showDraftBanner` block uses), so the engineer can get a clean
+            slate instead of having to change the project/date. */}
         {editingId && (
           <div role="status" className="draft-banner">
             <span>
-              Draft cached from your last submit. Update the project/date to file a fresh one.
+              Draft cached from your last submit. Hit Discard to clear, or change the project/date to file a fresh one.
             </span>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={handleDiscardDraft}>
+              Discard
+            </button>
           </div>
         )}
 
