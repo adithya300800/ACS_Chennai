@@ -130,6 +130,20 @@ function mountUploadRoutes(router, config = {}) {
     // dpr-documents=25 MB. Missing entries fall back to MAX_PHOTO_SIZE
     // (defense in depth — same pattern as allowedTypesPerContainer).
     maxSizeBytesPerContainer = {},
+    // [DR-016] Per-container allowlist of path-prefix segments the
+    // client may opt into via the `pathPrefix` body field. When a
+    // container has an entry, the client MAY pick any of the listed
+    // prefixes; the issuer prepends it to the blob name and the
+    // returned blobPath keeps the prefix so the downstream save /
+    // read / DR-001 binding helpers always see a server-owned,
+    // stable key. A container missing from this allowlist means
+    // "this container does not support prefixes" — `pathPrefix`
+    // body fields are 400'd regardless of value. The DPR mount
+    // advertises `{ 'dpr-documents': ['billing'] }` so COP PDF
+    // certs land under `billing/<employee>/<ulid>.pdf` while
+    // Drawing + Project Report uploads stay unprefixed (their
+    // backend readers do not expect a leading segment).
+    allowedPathPrefixesPerContainer = {},
   } = config;
 
   // Per-route resolver: lookup the per-container allowlist if present,
@@ -155,6 +169,23 @@ function mountUploadRoutes(router, config = {}) {
       return maxSizeBytesPerContainer[container];
     }
     return MAX_PHOTO_SIZE;
+  };
+
+  // [DR-016] Per-container path prefix resolver. Returns the
+  // requested prefix when the container's allowlist contains it,
+  // or null. A container missing from the allowlist is
+  // "no-prefixes-supported" — any client-supplied pathPrefix is
+  // rejected with 400 below. A missing pathPrefix body field is
+  // always OK (a no-op), so unprefixed callers (Drawing, Report)
+  // need no knowledge of the field.
+  const resolvedPathPrefix = (container, requested) => {
+    if (!requested) return null;
+    if (typeof requested !== 'string') return null;
+    const trimmed = requested.trim();
+    if (!trimmed) return null;
+    const allowed = allowedPathPrefixesPerContainer[container];
+    if (!Array.isArray(allowed) || !allowed.includes(trimmed)) return null;
+    return trimmed;
   };
 
   if (!hardcodedContainer && (!allowedContainers || allowedContainers.length === 0)) {
@@ -201,6 +232,24 @@ function mountUploadRoutes(router, config = {}) {
     const container = pickContainer(req.body);
     if (!validateContainer(container, res)) return;
 
+    // [DR-016] Validate the client-requested path prefix BEFORE the
+    // types / size checks so a malicious value never reaches the
+    // issuer. Resolver returns null when the body field is absent
+    // (most callers — Drawing / Report — never set it), or when the
+    // requested prefix isn't in the container's allowlist. The
+    // latter surfaces as 400 INVALID_PATH_PREFIX so a misbehaving
+    // client gets an explicit signal instead of a silent
+    // unprefixed mint that would later break server-side
+    // validation.
+    const requestedPrefix = req.body?.pathPrefix;
+    const pathPrefix = resolvedPathPrefix(container, requestedPrefix);
+    if (requestedPrefix != null && requestedPrefix !== '' && pathPrefix === null) {
+      return res.status(400).json({
+        error: 'INVALID_PATH_PREFIX',
+        message: `pathPrefix is not allowed for ${container}`,
+      });
+    }
+
     const allowed = resolvedAllowedTypesFor(container);
     if (!allowed.includes(contentType)) {
       return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: `Only ${allowed.join(', ')} allowed for ${container}` });
@@ -211,14 +260,17 @@ function mountUploadRoutes(router, config = {}) {
 
     const ulid = generateULID();
 
-    // Blob scoped under `${employeeId}/${ulid}.${ext}` so a leaked
-    // SAS cannot cross tenants. Extension derived from validated
-    // contentType, NEVER from user-supplied filename.
+    // [DR-016] The validated prefix is threaded through to the
+    // issuer so the returned `blobPath` keeps the server-owned
+    // shape (e.g. `billing/<employee>/<ulid>.pdf`). With no prefix
+    // the legacy unprefixed shape is preserved — Drawing / Report
+    // uploads stay unaffected.
     const { sasUrl, blobPath, expiresAt } = await generateUploadSASUrl(
       container,
       req.employeeId,
       ulid,
-      contentType
+      contentType,
+      { pathPrefix }
     );
 
     pendingUploads.set(`${req.employeeId}:${ulid}`, {
@@ -227,6 +279,7 @@ function mountUploadRoutes(router, config = {}) {
       filename,
       contentType,
       blobName: blobPath,
+      pathPrefix,
     });
 
     // LPR-012: persist an UploadIntent row BEFORE returning the SAS
@@ -357,9 +410,25 @@ function mountUploadRoutes(router, config = {}) {
     // Server-side blob verification — derive the same scoped blob
     // name and confirm the bytes actually landed with the claimed
     // size + content-type.
+    //
+    // [DR-016] The blob name is read from the persisted pending
+    // entry (intent + Map) instead of being reconstructed as
+    // `${employeeId}/${ulid}.${ext}`. The mint stage is the
+    // canonical owner of the key shape (including any
+    // `allowedPathPrefixesPerContainer` prefix) and every
+    // subsequent confirm / read / binding helper must consume
+    // what was issued — never re-derive independently. Falling
+    // back to the legacy shape when the entry is missing keeps
+    // pre-LPR-012 / no-prisma-stub test paths green.
     try {
-      const ext = CONTENT_TYPE_EXT[contentType];
-      const blobName = `${req.employeeId}/${ulid}.${ext}`;
+      const pendingEntry = pendingUploads.get(`${req.employeeId}:${ulid}`);
+      const intentRow = prisma?.uploadIntent
+        ? await prisma.uploadIntent.findUnique({
+            where: { employeeId_ulid: { employeeId: req.employeeId, ulid } },
+            select: { blobPath: true },
+          }).catch(() => null)
+        : null;
+      const blobName = pendingEntry?.blobName || intentRow?.blobPath || `${req.employeeId}/${ulid}.${CONTENT_TYPE_EXT[contentType] || 'bin'}`;
       const props = await verifyBlobExists(container, blobName);
       if (!props.exists) {
         return res.status(404).json({ error: 'BLOB_NOT_UPLOADED', message: 'Photo bytes not found in storage' });

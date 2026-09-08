@@ -25,12 +25,23 @@ jest.mock('../src/lib/blobStorage', () => {
   const actual = jest.requireActual('../src/lib/blobStorage');
   return {
     ...actual,
-    generateUploadSASUrl: jest.fn(async (container, employeeId, ulid, contentType) => ({
-      sasUrl: `https://r2.example/${container}/${employeeId}/${ulid}?X-Amz-Signature=fake`,
-      ulid,
-      blobPath: `${employeeId}/${ulid}.${actual.CONTENT_TYPE_EXT[contentType] || 'bin'}`,
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-    })),
+    // [DR-016] Reflect the new server-owned `pathPrefix` option:
+    // when supplied, the issuer bakes the prefix into the returned
+    // `blobPath` so the downstream save / read / DR-001 binding
+    // helpers see a stable, server-issued key.
+    generateUploadSASUrl: jest.fn(async (container, employeeId, ulid, contentType, options = {}) => {
+      const pathPrefix = options && typeof options.pathPrefix === 'string' && options.pathPrefix.length > 0
+        ? options.pathPrefix.replace(/^\/+|\/+$/g, '')
+        : null;
+      const ext = actual.CONTENT_TYPE_EXT[contentType] || 'bin';
+      const blobName = pathPrefix ? `${pathPrefix}/${employeeId}/${ulid}.${ext}` : `${employeeId}/${ulid}.${ext}`;
+      return {
+        sasUrl: `https://r2.example/${container}/${blobName}?X-Amz-Signature=fake`,
+        ulid,
+        blobPath: blobName,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      };
+    }),
     verifyBlobExists: jest.fn(async () => ({ exists: false })),
     deleteBlob: jest.fn(async () => ({ ok: true })),
     CONTENT_TYPE_EXT: actual.CONTENT_TYPE_EXT,
@@ -110,12 +121,14 @@ describe('DR-021 — "hardcoded container" mode (Inspection)', () => {
     // The blob path in the SAS reflects the hardcoded container.
     expect(res.body.blobPath).toMatch(/^test-employee-1\/.+\.jpg$/);
     // generateUploadSASUrl was called with the hardcoded container, not
-    // anything from the client.
+    // anything from the client. [DR-016] the 5th arg is the
+    // server-owned path-prefix options bag.
     expect(blobStorage.generateUploadSASUrl).toHaveBeenCalledWith(
       'inspection-photos',
       expect.any(String),
       expect.any(String),
       'image/jpeg',
+      { pathPrefix: null },
     );
   });
 
@@ -130,11 +143,13 @@ describe('DR-021 — "hardcoded container" mode (Inspection)', () => {
 
     expect(res.status).toBe(200);
     // Server still uses 'inspection-photos', not 'dpr-photos'.
+    // [DR-016] the 5th arg is the server-owned path-prefix options bag.
     expect(blobStorage.generateUploadSASUrl).toHaveBeenCalledWith(
       'inspection-photos',
       expect.any(String),
       expect.any(String),
       'image/jpeg',
+      { pathPrefix: null },
     );
   });
 });
@@ -168,11 +183,14 @@ describe('DR-021 — "client-pick from allowlist" mode (DPR)', () => {
         .post('/api/dpr/sas-url')
         .send({ filename: 'a.jpg', contentType: 'image/jpeg', container });
       expect(res.status).toBe(200);
+      // [DR-016] the 5th arg is the server-owned path-prefix options
+      // bag; the DPR mount with no pathPrefix opt-in passes null.
       expect(blobStorage.generateUploadSASUrl).toHaveBeenLastCalledWith(
         container,
         expect.any(String),
         expect.any(String),
         'image/jpeg',
+        { pathPrefix: null },
       );
     }
   });

@@ -13,8 +13,8 @@
 // Two modals are embedded (create/edit form + detail view) so we ship
 // only one new file instead of three. The create form mirrors
 // components/DrawingFormModal.jsx — same 4-step upload pipeline (mint
-// SAS via /api/dpr/sas-url, PUT bytes, confirm-upload, POST row) but
-// with the `billing/` blob-path prefix enforced server-side.
+// SAS via /api/dpr/sas-url, PUT bytes, confirm-upload, POST row); the
+// `billing/` prefix is applied server-side via `pathPrefix: 'billing'`.
 //
 // Sits at /portal/admin/billing-certifications, mounted under
 // PortalLayout's admin tree. Backend route is /api/billing-certifications
@@ -29,7 +29,10 @@
 //   - BILLING_CERTIFICATION_STATUSES / BILLING_CERTIFICATION_STATUS_LABELS
 //     from src/lib/constants.js — single source of truth for status pills.
 //   - uploadBlob + the new getBillingCertSasUrl / confirmBillingCertUpload
-//     pair (mirrors the Drawing upload pipeline, `billing/` prefix).
+//     pair (mirrors the Drawing upload pipeline). [DR-016] the `billing/`
+//     blob-path prefix is now server-owned — the wrapper sends
+//     `pathPrefix: 'billing'` to /api/dpr/sas-url and the dpr mount adds
+//     it server-side, so the saved row's blobPath is a real R2 key.
 //   - formatShortDate / formatBytes / formatINR from src/lib/format.js.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';

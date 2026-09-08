@@ -109,13 +109,31 @@ const CONTENT_TYPE_EXT = {
 /**
  * Generate a presigned PUT URL for direct browser-to-R2 upload (15 min expiry).
  * Permissions: 'cw' (create + write) — no read, no delete.
+ *
+ * [DR-016] `options.pathPrefix` is an OPTIONAL server-owned namespace
+ * segment prepended to the blob name. When supplied, the returned
+ * `blobPath` becomes `${pathPrefix}/${employeeId}/${ulid}.${ext}` —
+ * the issuer (not the client) owns the prefix, so the downstream
+ * save / read / binding helpers see a stable, server-issued key. The
+ * DPR mount passes `pathPrefix: 'billing'` only for the
+ * dpr-documents container; other consumers omit it and the key
+ * stays unprefixed.
+ *
+ * The legacy single-container layout (`${employeeId}/${ulid}.${ext}`)
+ * is preserved when `pathPrefix` is omitted, so existing callers
+ * (Inspection photos, DPR photos) are unaffected.
  */
-async function generateUploadSASUrl(containerName, employeeId, ulid, contentType) {
+async function generateUploadSASUrl(containerName, employeeId, ulid, contentType, options = {}) {
   const ext = CONTENT_TYPE_EXT[contentType];
   if (!ext) throw new Error(`Unsupported content type: ${contentType}`);
 
   const client = getClient();
-  const blobName = `${employeeId}/${ulid}.${ext}`;
+  const pathPrefix = typeof options.pathPrefix === 'string' && options.pathPrefix.length > 0
+    ? options.pathPrefix.replace(/^\/+|\/+$/g, '')
+    : null;
+  const blobName = pathPrefix
+    ? `${pathPrefix}/${employeeId}/${ulid}.${ext}`
+    : `${employeeId}/${ulid}.${ext}`;
 
   const command = new PutObjectCommand({
     Bucket: containerName,

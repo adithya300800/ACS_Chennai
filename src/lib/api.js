@@ -889,27 +889,37 @@ export const api = {
   //     to the COP register.
   //
   // The 4-step upload pipeline is the same one Drawing + Project
-  // Report use, with the `billing/` blob path prefix:
+  // Report use. [DR-016] the server (not the client) owns the
+  // `billing/` blob-path prefix: the wrapper signals it via the
+  // `pathPrefix: 'billing'` body field, and the dpr mount adds it
+  // when minting the upload intent. The early R37 wrapper
+  // embedded `billing/${filename}` in the filename field, which
+  // pointed at nonexistent bytes once the issuer derived the blob
+  // name independently — that was the DR-016 root cause.
   //   1. POST /api/dpr/sas-url                    → get SAS URL + blobPath
   //   2. PUT  <sasUrl>                            → upload bytes to R2
   //   3. POST /api/dpr/confirm-upload             → register the upload intent
   //   4. POST /api/billing-certifications         → insert the row
-  // The backend enforces blobPath.startsWith('billing/') so the
-  // bucket-wide listing still distinguishes COP blobs from drawing /
-  // report blobs that share the dpr-documents container.
   getBillingCertSasUrl: (filename, contentType, token) =>
     api.post('/dpr/sas-url', {
-      filename: `billing/${filename}`,
+      filename,
       contentType,
       container: 'dpr-documents',
+      // [DR-016] server-owned prefix; the issuer bakes `billing/`
+      // into the returned blobPath.
+      pathPrefix: 'billing',
     }, token),
   confirmBillingCertUpload: (ulid, filename, contentType, sizeBytes, token) =>
     api.post('/dpr/confirm-upload', {
       ulid,
       container: 'dpr-documents',
-      filename: `billing/${filename}`,
+      filename,
       contentType,
       sizeBytes,
+      // [DR-016] same prefix — the confirm stage reads the
+      // stored blob name from the persisted UploadIntent so it
+      // matches the bytes that were PUT.
+      pathPrefix: 'billing',
     }, token),
   getBillingCertifications: (params = {}, token) => {
     const qs = new URLSearchParams(params).toString();

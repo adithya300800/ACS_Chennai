@@ -620,6 +620,38 @@ describe('R37 — Billing Certifications: soft-delete + reads', () => {
     expect(res.body.code).toBe('CERTIFICATION_NOT_FOUND');
   });
 
+  it('17a. POST — accepts the server-owned `billing/` blobPath minted by /sas-url [DR-016]', async () => {
+    // [DR-016] Fix the audit's reproduction. The client never types
+    // the `billing/` prefix itself — /api/dpr/sas-url with
+    // `pathPrefix: 'billing'` mints the key
+    // `billing/<employeeId>/<ulid>.pdf` server-side, and the
+    // confirm-upload + DB UploadIntent row record the same shape.
+    // This test simulates that end-to-end by feeding a realistically
+    // minted blobPath into the POST and asserting 201.
+    const { app, certRows } = buildApp();
+    const adminEmployeeId = ADMIN_ID;
+    const res = await request(app)
+      .post('/api/billing-certifications')
+      .set('Authorization', adminJwt())
+      .send({
+        projectId: PROJECT_A,
+        contractorName: 'Ponni Constructions',
+        billNumber: 'RAB 02',
+        billDate: '2026-09-07',
+        claimedAmount: 250000,
+        certifiedAmount: 240000,
+        filename: 'cop.pdf',
+        contentType: 'application/pdf',
+        sizeBytes: 102400,
+        blobPath: `billing/${adminEmployeeId}/0123456789ABCDEFGHJKMNPQR.pdf`,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.blobPath).toBe(`billing/${adminEmployeeId}/0123456789ABCDEFGHJKMNPQR.pdf`);
+    // Round-trip: the row persists the exact blobPath that the
+    // mint stage issued (no normalization, no stripping).
+    expect(certRows.get(res.body.id).blobPath).toBe(`billing/${adminEmployeeId}/0123456789ABCDEFGHJKMNPQR.pdf`);
+  });
+
   it('17. POST — rejects unknown blobPath prefix', async () => {
     // The server enforces `billing/` as the namespace prefix on any
     // attachment metadata so the bucket-wide listing still

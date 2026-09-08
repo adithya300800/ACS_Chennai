@@ -379,6 +379,18 @@ mountUploadRoutes(router, {
     'dpr-documents': 25 * 1024 * 1024,
     'inspection-photos': 10 * 1024 * 1024,
   },
+  // [DR-016] Per-container allowlist of path-prefix segments the
+  // client may opt into via the `pathPrefix` body field. Only
+  // `dpr-documents` opts in: the COP / Billing Certification
+  // Register saves its attached PDF through this route and the
+  // server-enforced `billing/` namespace check on the POST
+  // handler needs the issuer (not the client) to own the prefix.
+  // Drawing uploads and Project Report attachments stay
+  // unprefixed — they don't send `pathPrefix` and their backend
+  // readers do not expect a leading segment.
+  allowedPathPrefixesPerContainer: {
+    'dpr-documents': ['billing'],
+  },
 });
 
 // ─── POST /api/dpr ────────────────────────────────────────────────────────────
