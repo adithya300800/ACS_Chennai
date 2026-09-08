@@ -218,8 +218,21 @@ function App() {
               next to the ReportsAdmin route. Both routes are unscoped
               cross-project registries with the same shape. No literal-
               before-param ordering needed here since the path takes no
-              `:id` segment. */}
-          <Route path="admin/billing-certifications" element={<BillingCertificationsAdmin />} />
+              `:id` segment.
+              [DR-018] Wrapped in <ProtectedRoute requireAdmin> so the
+              client-side guard matches the server-side admin gate on
+              the list + aggregates endpoints — non-admins get bounced
+              to the employee dashboard on direct navigation, and the
+              underlying API rejects them with 403 if they bypass the
+              client and call the endpoint directly. */}
+          <Route
+            path="admin/billing-certifications"
+            element={
+              <ProtectedRoute requireAdmin>
+                <BillingCertificationsAdmin />
+              </ProtectedRoute>
+            }
+          />
           {/* R37.1: Employee read-only mirror of the same register, scoped
               via ?scope=assigned. Sits at /portal/certifications so the
               My Reports sidebar entry has a stable hash. No admin gate

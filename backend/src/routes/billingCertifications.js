@@ -323,12 +323,13 @@ async function getAssignedProjectIds(prisma, employeeId) {
 
 async function applyScopeFilter(where, { scope, prisma, employeeId, isAdmin }) {
   if (isAdmin) return where;
-  // Non-admin: ?scope=assigned is mandatory by contract. If the param is
-  // absent or empty, default to 'assigned' so a non-admin can't widen
-  // scope by simply omitting the query parameter. The `resolveScope`
-  // validator has already rejected any non-'assigned' value with 400
-  // before this point, so an unexpected value here falls through to an
-  // unrestricted `where` only in the no-longer-possible bypass edge case.
+  // Non-admin: [DR-018] `?scope=assigned` is mandatory by contract.
+  // If the param is absent or empty, default to 'assigned' so a non-
+  // admin can't widen scope by simply omitting the query parameter.
+  // The `resolveScope` validator has already rejected any non-'assigned'
+  // value with 400 before this point, so an unexpected value here
+  // falls through to an unrestricted `where` only in the no-longer-
+  // possible bypass edge case (defence-in-depth).
   const effectiveScope = scope === undefined || scope === '' ? 'assigned' : scope;
   if (effectiveScope !== 'assigned') return where;
   // Employee + scope=assigned → narrow to their assigned projects.
@@ -396,6 +397,14 @@ router.get('/', asyncHandler(async (req, res) => {
       message: scopeCheck.error,
     });
   }
+  // [DR-018] Defence-in-depth (see applyScopeFilter below): the omitted
+  // param defaults to 'assigned' for non-admins so an employee can
+  // never accidentally widen scope by forgetting the param. The scope
+  // defaulting + INVALID_SCOPE 400 already close the widening path;
+  // the client-side admin route guard (ProtectedRoute requireAdmin in
+  // src/App.jsx) closes the "load an admin-labelled route" path. The
+  // detail + read-sas endpoints keep their 404-not-403 not-leak guard
+  // (lines 735-740 + 1680-1689 below) so an employee can't probe IDs.
   if (status && !VALID_STATUS.has(status)) {
     return res.status(400).json({
       error: 'VALIDATION_ERROR',
@@ -624,6 +633,10 @@ router.get('/aggregates', asyncHandler(async (req, res) => {
       message: scopeCheck.error,
     });
   }
+  // [DR-018] Same default-to-assigned narrowing as the list endpoint
+  // above — applyScopeFilter handles it on the next line. Aggregates
+  // honour the scope the same way the list does so a per-project roll-up
+  // for an employee never includes other projects' COPs.
   const scopedWhere = await applyScopeFilter(where, {
     scope: scopeCheck?.scope,
     prisma,

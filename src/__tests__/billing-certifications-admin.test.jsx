@@ -162,7 +162,32 @@ describe('R37 — Billing Certifications Admin: App.jsx route', () => {
 
   test('13. App.jsx mounts <Route path="admin/billing-certifications" element={<BillingCertificationsAdmin />} />', () => {
     expect(appSrc).toMatch(
-      /<Route\s+path="admin\/billing-certifications"\s+element=\{<BillingCertificationsAdmin\s*\/>}\s*\/>/,
+      /<Route\s+path="admin\/billing-certifications"\s+element=\{[\s\S]*<BillingCertificationsAdmin\s*\/>[\s\S]*}\s*\/>/,
+    );
+  });
+});
+
+// [DR-018] The admin-labelled route must require isAdmin on top of
+// authentication. The page's existing render-time guard (inside
+// BillingCertificationsAdmin.jsx) is still there as defence in depth,
+// but the route itself now goes through <ProtectedRoute requireAdmin>
+// so a non-admin navigating directly to /portal/admin/billing-certifications
+// is bounced to /portal/dashboard before the admin shell renders.
+describe('DR-018 — Billing Certifications Admin: client-side admin route guard', () => {
+  test('14. ProtectedRoute accepts a `requireAdmin` prop', () => {
+    const protectedSrc = readFileSync(resolvePath(__dirname, '../components/ProtectedRoute.jsx'), 'utf8');
+    expect(protectedSrc).toMatch(/requireAdmin\s*=\s*false/);
+    expect(protectedSrc).toMatch(/requireAdmin\s*&&\s*!isAdmin/);
+    expect(protectedSrc).toMatch(/<Navigate\s+to="\/portal\/dashboard"\s+replace/);
+  });
+
+  test('15. App.jsx wraps admin/billing-certifications in <ProtectedRoute requireAdmin>', () => {
+    // The admin-labelled register route must use the requireAdmin wrapper
+    // so a non-admin direct-navigation is bounced, and the underlying
+    // API rejects with 403 if they bypass the client (server-side
+    // ADMIN_ONLY gate on GET / and GET /aggregates).
+    expect(appSrc).toMatch(
+      /<Route\s+path="admin\/billing-certifications"[\s\S]*?<ProtectedRoute\s+requireAdmin>[\s\S]*<BillingCertificationsAdmin\s*\/>[\s\S]*<\/ProtectedRoute>[\s\S]*\/>/,
     );
   });
 });
