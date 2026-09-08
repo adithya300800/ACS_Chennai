@@ -107,6 +107,24 @@ export const TRAINING_TERMINAL_STATUS_SET = new Set(TRAINING_TERMINAL_STATUSES);
 
 export const isTrainingTerminal = (status) => TRAINING_TERMINAL_STATUS_SET.has(status);
 
+// DR-024: broader "no further action" predicate — the union of completion
+// states AND the bookkeeping terminal states (CANCELLED, OVERDUE). Used at
+// every boundary where progress writes, the embedded-player's onEnded
+// handler, and the manual-complete button should stop. Kept separate from
+// `isTrainingTerminal` so the "Completed" counters and filters in
+// Training.jsx / TrainingDashboard.jsx still count exactly the 5
+// *_COMPLETED states — we don't want CANCELLED rows silently bucketing
+// into "Completed". Mirrors `isInactive()` in backend/src/lib/trainingRules.js.
+export const TRAINING_INACTIVE_STATUSES = Object.freeze([
+  ...TRAINING_TERMINAL_STATUSES,
+  'CANCELLED',
+  'OVERDUE',
+]);
+
+export const TRAINING_INACTIVE_STATUS_SET = new Set(TRAINING_INACTIVE_STATUSES);
+
+export const isTrainingInactive = (status) => TRAINING_INACTIVE_STATUS_SET.has(status);
+
 // Priority — used to sort + colour the pill on admin rows.
 export const TRAINING_PRIORITIES = {
   LOW: 'LOW',

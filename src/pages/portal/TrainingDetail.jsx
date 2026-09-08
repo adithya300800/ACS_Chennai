@@ -12,6 +12,7 @@ import {
   TRAINING_PROVIDER_LABELS,
   TRAINING_STATUSES,
   isTrainingTerminal,
+  isTrainingInactive,
 } from '../../lib/constants.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
@@ -94,9 +95,12 @@ export default function TrainingDetail() {
   // picking up whatever the latest player event left in latestRef.
   // LPR-009: terminal-check uses the canonical list so progress pings stop
   // on every *_COMPLETED state, not just the legacy `COMPLETED` value.
+  // DR-024: use the broader `isTrainingInactive` so CANCELLED + OVERDUE
+  // rows also short-circuit — pre-fix, the throttle kept firing on these
+  // rows and the backend silently 200-noop'd them.
   useEffect(() => {
     if (!enrollment) return undefined;
-    if (isTrainingTerminal(enrollment.status)) return undefined;
+    if (isTrainingInactive(enrollment.status)) return undefined;
 
     const id = setInterval(async () => {
       if (!dirtyRef.current) return;
@@ -118,7 +122,7 @@ export default function TrainingDetail() {
         // that.
         if (updated.status !== enrollment.status) {
           setEnrollment((prev) => ({ ...prev, status: updated.status, progressPct: updated.progressPct }));
-          if (isTrainingTerminal(updated.status)) {
+          if (isTrainingInactive(updated.status)) {
             push('Course marked complete.', 'success');
           }
         }
@@ -129,6 +133,11 @@ export default function TrainingDetail() {
           setEnrollment((prev) => ({ ...prev, status: TRAINING_STATUSES.COMPLETED, progressPct: 100 }));
         }
         // 429 TRAINING_THROTTLED — silently skip; next tick will try again.
+        // DR-024: ENROLLMENT_CANCELLED / ENROLLMENT_OVERDUE — server says
+        // the row is now in a terminal-non-actionable state. Stop pinging
+        // and mirror the server-side state into local UI. Do NOT auto-flip
+        // to COMPLETED here (only ENROLLMENT_LOCKED means we lost a
+        // completion race — see comment above).
       }
     }, TRAINING_PROGRESS_PING_MS);
 
@@ -156,9 +165,12 @@ export default function TrainingDetail() {
   // session.
   // LPR-009: terminal-check uses the canonical list so a row that already
   // landed in any *_COMPLETED state short-circuits here.
+  // DR-024: use `isTrainingInactive` (broader than terminal-completed) so
+  // a CANCELLED or OVERDUE row whose embedded player happens to still be
+  // mounted can't announce completion.
   const handleEnded = useCallback(async () => {
     if (!enrollment) return;
-    if (isTrainingTerminal(enrollment.status)) return;
+    if (isTrainingInactive(enrollment.status)) return;
     try {
       const updated = await api.updateTrainingProgress(
         enrollment.id,
@@ -181,9 +193,11 @@ export default function TrainingDetail() {
   // serves as the employee-side safety net if the auto-capture missed
   // the ended event (e.g. browser killed the tab mid-video).
   // LPR-009: terminal-check uses the canonical list.
+  // DR-024: gate on `isTrainingInactive` (broader) so CANCELLED + OVERDUE
+  // rows cannot be silently re-completed via this fallback either.
   const handleManualComplete = useCallback(async () => {
     if (!enrollment) return;
-    if (isTrainingTerminal(enrollment.status)) return;
+    if (isTrainingInactive(enrollment.status)) return;
     if (!window.confirm('Mark this course as complete?')) return;
     setCompleting(true);
     try {
@@ -219,6 +233,33 @@ export default function TrainingDetail() {
   const course = enrollment.course || {};
   // LPR-009: any of the four *_COMPLETED evidence states counts as done.
   const isComplete = isTrainingTerminal(enrollment.status);
+  // DR-024: separate the three "done" / "not-done" terminal states so each
+  // gets a distinct label and the embedded player is hidden for non-actionable
+  // rows (cancelled + overdue). isComplete above stays narrow — it drives the
+  // success checkmark only.
+  const isCancelled = enrollment.status === 'CANCELLED';
+  const isOverdue = enrollment.status === 'OVERDUE';
+  const isSelfAttested = enrollment.status === 'SELF_ATTESTED_COMPLETED';
+  // Human label per status. Replaces the previous ternary that collapsed
+  // every terminal state to "Completed" — that hid CANCELLED / OVERDUE.
+  const statusLabel = isCancelled
+    ? 'Cancelled'
+    : isOverdue
+      ? 'Overdue'
+      : enrollment.status === 'IN_PROGRESS'
+        ? 'In Progress'
+        : isComplete
+          ? 'Completed'
+          : 'Assigned';
+  // DR-024: the percent-watched label is only meaningful when the learner
+  // actually watched something. SELF_ATTESTED completions often persist
+  // with lastWatchedSec: 0 (external-launch → manual mark-complete path);
+  // rendering "100% watched" in that case is a lie, so we substitute
+  // "Self-attested" and rely on the pill + completion timestamp for the
+  // rest of the context.
+  const progressLabel = isSelfAttested
+    ? 'Self-attested'
+    : `${Math.min(100, Math.max(0, enrollment.progressPct))}% watched`;
 
   return (
     <div className="training-page training-detail-page">
@@ -238,11 +279,7 @@ export default function TrainingDetail() {
         <h1 className="training-detail-title" aria-label={`Training: ${course.title || 'Untitled course'}`}>{course.title || 'Untitled course'}</h1>
         <div className="training-detail-sub">
           <span className={`training-pill training-pill-${enrollment.status.toLowerCase()}`}>
-            {enrollment.status === 'IN_PROGRESS'
-              ? 'In Progress'
-              : isTrainingTerminal(enrollment.status)
-                ? 'Completed'
-                : 'Assigned'}
+            {statusLabel}
           </span>
           <span className="training-detail-divider">·</span>
           <span>{TRAINING_PROVIDER_LABELS[course.provider] || 'External'}</span>
@@ -267,47 +304,61 @@ export default function TrainingDetail() {
         </div>
       </div>
 
-      <div className="training-player-region">
-        <VideoPlayer
-          provider={course.provider}
-          externalUrl={course.externalUrl}
-          onProgress={handleProgress}
-          onEnded={handleEnded}
-          initialTime={enrollment.lastWatchedSec || 0}
-        />
-      </div>
-
-      <div className="training-progress training-progress-large" aria-label={`Progress: ${enrollment.progressPct}%`}>
-        <div className="training-progress-bar" style={{ width: `${Math.min(100, Math.max(0, enrollment.progressPct))}%` }} />
-        <span className="training-progress-label">{enrollment.progressPct}% watched</span>
-      </div>
-
-      <div className="training-detail-actions">
-        {isComplete ? (
-          <div className="training-detail-completed" role="status">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
-            Completed {enrollment.completedAt && `on ${formatDateTime(enrollment.completedAt)}`}
+      {/* DR-024: cancelled + overdue rows are terminal-non-actionable.
+          Hide the embedded player + the manual-complete button so the
+          learner can't push progress writes or announce completion on a
+          row that should not accept either. */}
+      {isCancelled || isOverdue ? (
+        <div className="training-detail-inactive" role="status">
+          {isCancelled
+            ? 'This assignment has been cancelled and cannot be completed. Contact your administrator if you believe this is in error.'
+            : 'This assignment is overdue and can no longer be completed here. Contact your administrator to reopen or reassign.'}
+        </div>
+      ) : (
+        <>
+          <div className="training-player-region">
+            <VideoPlayer
+              provider={course.provider}
+              externalUrl={course.externalUrl}
+              onProgress={handleProgress}
+              onEnded={handleEnded}
+              initialTime={enrollment.lastWatchedSec || 0}
+            />
           </div>
-        ) : (
-          <button
-            type="button"
-            className="training-btn training-btn-primary"
-            onClick={handleManualComplete}
-            disabled={completing}
-          >
-            {completing ? 'Saving…' : 'Mark as Complete'}
-          </button>
-        )}
-        <span className="training-detail-ping" aria-live="polite">
-          {lastPingAt > 0
-            ? `Progress saved ${formatTimeOnly(lastPingAt)}`
-            : pendingPct > 0
-              ? `Tracking ${Math.round(pendingPct)}%…`
-              : ''}
-        </span>
-      </div>
+
+          <div className="training-progress training-progress-large" aria-label={`Progress: ${progressLabel}`}>
+            <div className="training-progress-bar" style={{ width: `${Math.min(100, Math.max(0, enrollment.progressPct))}%` }} />
+            <span className="training-progress-label">{progressLabel}</span>
+          </div>
+
+          <div className="training-detail-actions">
+            {isComplete ? (
+              <div className="training-detail-completed" role="status">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                Completed {enrollment.completedAt && `on ${formatDateTime(enrollment.completedAt)}`}
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="training-btn training-btn-primary"
+                onClick={handleManualComplete}
+                disabled={completing}
+              >
+                {completing ? 'Saving…' : 'Mark as Complete'}
+              </button>
+            )}
+            <span className="training-detail-ping" aria-live="polite">
+              {lastPingAt > 0
+                ? `Progress saved ${formatTimeOnly(lastPingAt)}`
+                : pendingPct > 0
+                  ? `Tracking ${Math.round(pendingPct)}%…`
+                  : ''}
+            </span>
+          </div>
+        </>
+      )}
 
       {course.description && (
         <section className="training-detail-section">

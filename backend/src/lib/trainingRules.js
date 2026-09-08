@@ -94,6 +94,17 @@ function isTerminal(status) {
   return isCompleted(status) || status === 'CANCELLED';
 }
 
+// DR-024: broader "no further action" predicate — completion states plus
+// the bookkeeping terminal states (CANCELLED, OVERDUE). Used at every
+// progress-write boundary where the route should refuse an otherwise
+// valid-looking update. Distinct from `isTerminal()` (above) so the
+// manual-complete / admin-override boundaries — which must still allow
+// OVERDUE → CANCELLED, etc. — keep their narrower gate. Mirrors the
+// `TRAINING_INACTIVE_STATUSES` export in src/lib/constants.js.
+function isInactive(status) {
+  return isCompleted(status) || status === 'CANCELLED' || status === 'OVERDUE';
+}
+
 const ALLOWED_PRIORITIES = new Set([
   'LOW',
   'NORMAL',
@@ -782,6 +793,7 @@ module.exports = {
   canAutoCompleteFromPlayer,
   isCompleted,
   isTerminal,
+  isInactive,
   TERMINAL_STATUSES,
   TERMINAL_STATUS_SET,
   markComplete,

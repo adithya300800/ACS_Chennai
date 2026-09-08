@@ -41,6 +41,7 @@ const {
   canAutoCompleteFromPlayer,
   isCompleted,
   isTerminal,
+  isInactive,
   markComplete,
   httpStatusForCode,
   // LPR-009: canonical terminal-status list — single source of truth for the
@@ -525,12 +526,22 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
     return res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
   }
   // DR-010 (round-20): once a row hits any of the four completed-states, the
-  // progress route is a noop (we don't auto-downgrade). Idempotent echo so
-  // the player can stop pinging.
-  if (isCompleted(existing.status) || existing.status === 'CANCELLED' || existing.status === 'OVERDUE') {
-    return res.json({
-      ok: true,
-      noop: true,
+  // progress route is a noop (we don't auto-downgrade). DR-024: also refuse
+  // CANCELLED + OVERDUE explicitly with 409 (not 200 noop) so the embedded
+  // player's onEnded handler and the throttle loop both stop — previously a
+  // 200 noop let stale ping handlers keep firing on rows that should not
+  // accept any progress write at all.
+  if (isInactive(existing.status)) {
+    const code = existing.status === 'CANCELLED'
+      ? 'ENROLLMENT_CANCELLED'
+      : existing.status === 'OVERDUE'
+        ? 'ENROLLMENT_OVERDUE'
+        : 'ENROLLMENT_LOCKED';
+    return res.status(409).json({
+      error: code === 'ENROLLMENT_LOCKED'
+        ? 'Already completed'
+        : `Enrollment is ${existing.status.toLowerCase()} and cannot accept progress`,
+      code,
       enrollmentId: existing.id,
       status: existing.status,
       progressPct: existing.progressPct,

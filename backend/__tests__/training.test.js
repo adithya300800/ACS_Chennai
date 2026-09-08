@@ -27,6 +27,7 @@ const {
   canTransition,
   canAutoCompleteFromPlayer,
   isCompleted,
+  isInactive,
   markComplete,
   httpStatusForCode,
   ALLOWED_PROVIDERS,
@@ -569,6 +570,36 @@ describe('trainingRules — isCompleted (DR-010)', () => {
     expect(isCompleted('COMPLETED')).toBe(false); // legacy enum value, gone
     expect(isCompleted(null)).toBe(false);
     expect(isCompleted(undefined)).toBe(false);
+  });
+});
+
+// DR-024: broader "no further action" predicate — completion states plus
+// the bookkeeping terminal states (CANCELLED, OVERDUE). Mirrors
+// `isTrainingInactive` in src/lib/constants.js so server + client agree on
+// which rows cannot accept progress writes, the embedded player, or the
+// manual-complete button.
+describe('trainingRules — isInactive (DR-024)', () => {
+  it('returns true for every completed-state', () => {
+    expect(isInactive('SELF_ATTESTED_COMPLETED')).toBe(true);
+    expect(isInactive('PLAYER_OBSERVED_COMPLETED')).toBe(true);
+    expect(isInactive('PROVIDER_VERIFIED_COMPLETED')).toBe(true);
+    expect(isInactive('ADMIN_OVERRIDE_COMPLETED')).toBe(true);
+  });
+
+  it('returns true for the bookkeeping terminal states (CANCELLED, OVERDUE)', () => {
+    expect(isInactive('CANCELLED')).toBe(true);
+    expect(isInactive('OVERDUE')).toBe(true);
+  });
+
+  it('returns false for in-progress / open states', () => {
+    expect(isInactive('ASSIGNED')).toBe(false);
+    expect(isInactive('IN_PROGRESS')).toBe(false);
+  });
+
+  it('returns false for legacy / unknown statuses', () => {
+    expect(isInactive('COMPLETED')).toBe(false); // legacy enum value, gone
+    expect(isInactive(null)).toBe(false);
+    expect(isInactive(undefined)).toBe(false);
   });
 });
 

@@ -4932,6 +4932,18 @@ footer {
   color: var(--steel, #5b6b7c);
   font-style: italic;
 }
+/* DR-024: banner for terminal-non-actionable rows (cancelled / overdue)
+   where the embedded player + manual-complete must be hidden. */
+.training-detail-inactive {
+  margin-top: 1.5rem;
+  padding: 1.25rem 1.5rem;
+  background: #fef3c7;
+  color: #92400e;
+  border-left: 4px solid #f59e0b;
+  border-radius: 8px;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
 .training-detail-section {
   margin-top: 2rem;
   padding-top: 1.5rem;
