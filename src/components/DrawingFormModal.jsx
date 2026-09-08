@@ -357,7 +357,10 @@ export default function DrawingFormModal({
               onChange={handleChange}
               maxLength={REVISION_MAX}
               required
-              disabled={submitting || isEdit || isSupersede}
+              // [DR-002] Supersede MUST allow typing a new revision — the
+              // predecessor's revision is locked into the chain, the new
+              // row gets the value the admin types here.
+              disabled={submitting || isEdit}
               placeholder={isSupersede ? 'e.g. R1, A, 1.1' : '0'}
               aria-invalid={errors.revision ? 'true' : 'false'}
             />

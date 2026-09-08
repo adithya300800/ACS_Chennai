@@ -12,6 +12,7 @@
 //   GET    /api/drawings/:id            detail + reference counts + supersedes chain
 //   PATCH  /api/drawings/:id            update metadata (admin)
 //   DELETE /api/drawings/:id            soft-delete via status=SUPERSEDED (admin)
+//   POST   /api/drawings/:id/supersede  explicit supersede (admin) — DR-002
 //
 // Auth model:
 //   - requireAuth on every route (any employee can read the register).
@@ -31,7 +32,16 @@
 //   - POST /api/drawings with `supersedesId` flips the prior row to
 //     status=SUPERSEDED atomically with the new row insert. Both rows must
 //     belong to the same project (cross-project supersedes is rejected
-//     with 400).
+//     with 400) and the predecessor must be in ACTIVE state (otherwise
+//     409 PREDECESSOR_NOT_ACTIVE — DR-002).
+//   - POST /api/drawings/:id/supersede is the explicit, admin-only
+//     supersede command the Drawing Detail page's "Supersede" button
+//     calls (DR-002). It reads the predecessor inside the transaction so
+//     the ACTIVE check is atomic with the flip + successor insert; the
+//     successor inherits (projectId, drawingNumber, issuedById) from the
+//     predecessor and accepts optional title/issuedDate/pdfBlobPath
+//     overrides; revision is required. Returns { successor, predecessor }
+//     in their post-commit state.
 //   - The reference-count endpoint lists every DPR / Inspection that links
 //     to a drawing, so an admin about to supersede a drawing can warn the
 //     submitter that future submissions against the old revision will still
@@ -407,8 +417,11 @@ router.post('/', requireAuth, asyncHandler(async (req, res) => {
   }
 
   // Cross-project supersedes guard: the row we're superseding must belong
-  // to the same project. Done OUTSIDE the transaction so a malformed
-  // payload returns 400 before we touch any rows.
+  // to the same project and be in ACTIVE state. Done OUTSIDE the
+  // transaction so a malformed payload returns 400/409 before we touch
+  // any rows. The ACTIVE-state check (DR-002) is what stops a stale or
+  // already-superseded predecessor from being silently bundled into a
+  // fresh issuance.
   if (data.supersedesId) {
     const predecessor = await prisma.drawing.findUnique({
       where: { id: data.supersedesId },
@@ -422,6 +435,14 @@ router.post('/', requireAuth, asyncHandler(async (req, res) => {
         error: 'PREDECESSOR_PROJECT_MISMATCH',
         code: 'PREDECESSOR_PROJECT_MISMATCH',
         message: 'supersedesId belongs to a different project',
+      });
+    }
+    if (predecessor.status !== 'ACTIVE') {
+      return res.status(409).json({
+        error: 'PREDECESSOR_NOT_ACTIVE',
+        code: 'PREDECESSOR_NOT_ACTIVE',
+        message: `Cannot supersede a drawing in status ${predecessor.status}`,
+        currentStatus: predecessor.status,
       });
     }
   }
@@ -746,6 +767,174 @@ router.delete('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to delete drawing' });
+  }
+}));
+
+// ─── POST /api/drawings/:id/supersede ───────────────────────────────────────
+//
+// DR-002 — explicit supersede command. Creates a NEW drawing row that
+// supersedes the predecessor identified in the URL, atomically flipping
+// the predecessor to status=SUPERSEDED. The previous POST /api/drawings
+// path with `supersedesId` is a side-effect of fresh issuance (any
+// employee can hit it, Round-31) and remains in place for that flow;
+// this endpoint is the curation path that the admin Drawing Detail
+// page's "Supersede" button calls — and it is the only path that
+// guarantees the predecessor is in ACTIVE state before flipping it
+// (a stale or wrong-state predecessor is rejected with 409).
+//
+// Body:
+//   revision    — required, non-empty string (≤20 chars)
+//   title       — optional override (defaults to predecessor's title)
+//   issuedDate  — optional override (defaults to predecessor's issuedDate)
+//   pdfBlobPath — optional override (defaults to predecessor's pdfBlobPath)
+//
+// Inherited (NOT accepted in body — natural-key + audit columns):
+//   projectId, drawingNumber  →  carried forward from predecessor
+//   issuedById                →  carried forward (the issuer of record is
+//                                 the original author, not the admin who
+//                                 pressed the button; PATCH /:id if you
+//                                 need to reissue on behalf of someone else)
+//
+// 201 → { successor, predecessor }   both rows in their post-commit state
+// 400 → VALIDATION_ERROR             bad UUID / missing revision / caps
+// 404 → DRAWING_NOT_FOUND            unknown predecessor
+// 409 → PREDECESSOR_NOT_ACTIVE       predecessor in status != ACTIVE
+// 409 → DUPLICATE_REVISION           (project, drawingNumber, revision)
+//                                    collision — the natural-key constraint
+router.post('/:id/supersede', requireFreshAdmin, asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  const { id } = req.params;
+  if (!isValidUuid(id)) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Drawing id must be a UUID' });
+  }
+
+  const body = req.body || {};
+
+  // revision is required (and bounded). title / issuedDate / pdfBlobPath
+  // are optional overrides — each is validated to the same caps the
+  // regular POST/PATCH enforce.
+  if (typeof body.revision !== 'string' || !body.revision.trim()) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      code: 'REVISION_REQUIRED',
+      message: 'revision is required and must be a non-empty string',
+    });
+  }
+  const revision = body.revision.trim();
+  if (revision.length > FIELD_MAX.revision) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      message: `revision exceeds ${FIELD_MAX.revision} chars`,
+    });
+  }
+
+  let titleOverride;
+  if (body.title !== undefined) {
+    if (body.title === null || body.title === '') {
+      titleOverride = null;
+    } else if (typeof body.title !== 'string') {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'title must be a string' });
+    } else if (body.title.length > FIELD_MAX.title) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: `title exceeds ${FIELD_MAX.title} chars` });
+    } else {
+      titleOverride = body.title.trim();
+    }
+  }
+
+  let issuedDateValue;
+  if (body.issuedDate !== undefined) {
+    if (body.issuedDate === null || body.issuedDate === '') {
+      issuedDateValue = null;
+    } else {
+      const p = parseStrictISODate(body.issuedDate);
+      if (!p.ok) return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'issuedDate must be a valid YYYY-MM-DD' });
+      issuedDateValue = p.date;
+    }
+  }
+
+  let pdfBlobPathOverride;
+  if (body.pdfBlobPath !== undefined) {
+    if (body.pdfBlobPath === null || body.pdfBlobPath === '') {
+      pdfBlobPathOverride = null;
+    } else if (typeof body.pdfBlobPath !== 'string') {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'pdfBlobPath must be a string' });
+    } else if (body.pdfBlobPath.length > FIELD_MAX.pdfBlobPath) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: `pdfBlobPath exceeds ${FIELD_MAX.pdfBlobPath} chars` });
+    } else {
+      pdfBlobPathOverride = body.pdfBlobPath;
+    }
+  }
+
+  try {
+    // Read the predecessor INSIDE the transaction so the ACTIVE check is
+    // atomic with the flip — no TOCTOU window between the status read
+    // and the update.
+    const result = await prisma.$transaction(async (tx) => {
+      const predecessor = await tx.drawing.findUnique({ where: { id } });
+      if (!predecessor) {
+        return { error: { status: 404, body: { error: 'DRAWING_NOT_FOUND', code: 'DRAWING_NOT_FOUND', message: 'Predecessor drawing not found' } } };
+      }
+      if (predecessor.status !== 'ACTIVE') {
+        return {
+          error: {
+            status: 409,
+            body: {
+              error: 'PREDECESSOR_NOT_ACTIVE',
+              code: 'PREDECESSOR_NOT_ACTIVE',
+              message: `Cannot supersede a drawing in status ${predecessor.status}`,
+              currentStatus: predecessor.status,
+            },
+          },
+        };
+      }
+
+      // Mint the new id server-side (matches the POST convention so the
+      // Prisma client doesn't try to use @default(uuid()) against a
+      // non-standard client config).
+      const successor = await tx.drawing.create({
+        data: {
+          id: randomUUID(),
+          projectId: predecessor.projectId,
+          drawingNumber: predecessor.drawingNumber,
+          title: titleOverride !== undefined ? titleOverride : predecessor.title,
+          revision,
+          status: 'ACTIVE',
+          issuedDate: issuedDateValue !== undefined ? issuedDateValue : predecessor.issuedDate,
+          issuedById: predecessor.issuedById,
+          pdfBlobPath: pdfBlobPathOverride !== undefined ? pdfBlobPathOverride : predecessor.pdfBlobPath,
+          supersedesId: predecessor.id,
+        },
+      });
+
+      const updatedPredecessor = await tx.drawing.update({
+        where: { id: predecessor.id },
+        data: { status: 'SUPERSEDED' },
+      });
+
+      return { successor, predecessor: updatedPredecessor };
+    });
+
+    if (result.error) {
+      return res.status(result.error.status).json(result.error.body);
+    }
+    res.status(201).json({
+      successor: serializeDrawing(result.successor),
+      predecessor: serializeDrawing(result.predecessor),
+    });
+  } catch (err) {
+    console.error('Drawing supersede error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      drawingId: id,
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to supersede drawing' });
   }
 }));
 

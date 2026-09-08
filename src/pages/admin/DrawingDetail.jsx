@@ -150,6 +150,27 @@ export default function DrawingDetail() {
     await load();
   };
 
+  // [DR-002] Supersede must CREATE a new drawing row that points back at
+  // the predecessor — the backend (POST /api/drawings/:id/supersede)
+  // then atomically flips the predecessor to SUPERSEDED inside the same
+  // transaction. The modal's payload is supersede-shaped (projectId /
+  // drawingNumber / supersedesId included for the create-with-id path),
+  // but the explicit supersede endpoint only accepts { revision, title?,
+  // issuedDate?, pdfBlobPath? } — projectId / drawingNumber / issuedById
+  // are inherited from the predecessor, NOT in the body. Strip the
+  // supersede-relevant fields here and forward.
+  const handleSupersedeSave = async (payload) => {
+    const result = await api.supersedeDrawing(drawing.id, {
+      revision: payload.revision,
+      ...(payload.title != null ? { title: payload.title } : {}),
+      ...(payload.issuedDate != null ? { issuedDate: payload.issuedDate } : {}),
+      ...(payload.pdfBlobPath ? { pdfBlobPath: payload.pdfBlobPath } : {}),
+    }, accessToken);
+    toast.push(`Superseded — new revision ${result.successor.revision} created.`, 'success');
+    setFormOpen(false);
+    navigate(`/portal/admin/drawings/${result.successor.id}`);
+  };
+
   const handleSupersedeFromHere = () => {
     // Open the same modal in supersede mode — the modal pre-fills
     // project + drawingNumber + title from the current row.
@@ -373,7 +394,10 @@ export default function DrawingDetail() {
       <DrawingFormModal
         open={formOpen}
         onClose={() => { setFormOpen(false); setFormMode(null); }}
-        onSave={handleEditSave}
+        // [DR-002] supersede → POST /api/drawings (creates new row +
+        // flips predecessor atomically); edit → PATCH /api/drawings/:id.
+        // Same modal, different wire path keyed off formMode.
+        onSave={formMode === 'supersede' ? handleSupersedeSave : handleEditSave}
         accessToken={accessToken}
         projects={projects}
         supersedes={formMode === 'supersede' ? drawing : null}

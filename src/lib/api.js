@@ -775,6 +775,16 @@ export const api = {
   // frontend contract is fixed and a backend PR can slot in without
   // a frontend refactor.
   getDrawingReadSas: (id, token) => api.get(`/drawings/${id}/read-sas`, token),
+  // [DR-002] Explicit admin-only supersede command. The general
+  // POST /api/drawings with `supersedesId` stays in place as the
+  // side-effect of fresh issuance; this endpoint is the curation path
+  // that guarantees the predecessor is in ACTIVE state before the
+  // atomic flip + successor insert. Body shape: { revision (required),
+  // title?, issuedDate?, pdfBlobPath? } — projectId / drawingNumber /
+  // issuedById are inherited from the predecessor, NOT in the body.
+  // Returns { successor, predecessor } in their post-commit state.
+  supersedeDrawing: (id, payload, token, idempotencyKey) =>
+    api.post(`/drawings/${id}/supersede`, payload, token, idempotencyKey),
 
   // R35: Project Reports — file attachments per project. Backend lives at
   // /api/projects/:projectId/attachments (see backend/src/routes/
