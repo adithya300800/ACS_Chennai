@@ -336,6 +336,11 @@ export const api = {
   getDpr: (id, token) => api.get(`/dpr/${id}`, token),
   updateDpr: (id, data, version, token) =>
     api.put(`/dpr/${id}`, { ...data, version }, token),
+  // SOL DR-003: dedicated owner-authorized DRAFT -> SUBMITTED command. The
+  // PUT path excludes `status` from its allowlist, so the Submit Report
+  // gesture needed its own endpoint to land the publish transition.
+  submitDpr: (id, version, token) =>
+    api.post(`/dpr/${id}/submit`, { version }, token),
   // Terminal-state endpoints. Backend POST /api/dpr/:id/review still exists
   // for UNDER_REVIEW but is not used by the admin UI anymore — the buttons
   // here are approve/reject only.

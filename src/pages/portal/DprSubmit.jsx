@@ -854,45 +854,70 @@ export default function DprSubmit() {
       // embedded version in the body, which both mis-set the version field
       // AND left the PUT unauthenticated.
       if (editingId) {
-        await api.updateDpr(
-          editingId,
-          {
-            // [N1 Phase B] projectId is the new foreign-key; projectName
-            // is kept on the wire for legacy-compat and as the canonical
-            // name to denormalize if the relation is null. Both come
-            // from form state — set atomically in handleProjectChange.
-            projectId: form.projectId || null,
-            projectName: form.projectName,
-            location: form.location,
-            reportDate: form.reportDate,
-            weather: form.weather,
-            temperature: form.temperature,
-            contractor: form.contractor,
-            workType: form.workType,
-            notes: notes || null,
-            // Round-12: 5 daily-narrative fields.
-            workExecutedToday: dailyFields.workExecutedToday || null,
-            workLocation: dailyFields.workLocation || null,
-            manpowerSummary: serializedManpower || null,
-            risksHindrances: dailyFields.risksHindrances || null,
-            materialsReceivedSummary: dailyFields.materialsReceivedSummary || null,
-            // User-added ad-hoc text + table sections.
-            customSections: Array.isArray(customSections) && customSections.length > 0 ? customSections : null,
-            // N7: optional BOQ link. Sent as null when unset so the
-            // backend treats it as "no link" rather than a literal "".
-            boqItemId: form.boqItemId || null,
-            // N3 (Phase F): optional drawing stamp. drawingId is the
-            // foreign key; drawingRev is denormalized so the wire
-            // record survives the original drawing being renamed or
-            // superseded.
-            drawingId: form.drawingId || null,
-            drawingRev: form.drawingRev || null,
-          },
-          editingVersion,
-          accessToken
-        );
-        toast.push(submitStatus === 'DRAFT' ? 'Draft updated.' : 'DPR submitted successfully.', 'success');
-        navigate('/portal/dpr/my');
+        // SOL DR-003: the PUT mass-assignment allowlist deliberately
+        // excludes `status`, so the Submit Report gesture cannot ride the
+        // same PUT as Save Draft — the publish transition would be
+        // silently dropped. Branch on the gesture: DRAFT keeps the PUT
+        // (no behavior change), SUBMITTED calls the dedicated
+        // /:id/submit command which transitions DRAFT -> SUBMITTED and
+        // returns the row in its terminal state.
+        if (submitStatus === 'SUBMITTED') {
+          const submitted = await api.submitDpr(editingId, editingVersion, accessToken);
+          // Show success ONLY for the returned terminal state. If the
+          // server returned something else (e.g. an idempotent retry
+          // where the row was already SUBMITTED), the round-trip still
+          // succeeded — surface the same success path. Otherwise treat it
+          // as the publish didn't land and stay on the form.
+          if (submitted && submitted.status === 'SUBMITTED') {
+            toast.push('DPR submitted successfully.', 'success');
+            navigate('/portal/dpr/my');
+          } else {
+            toast.push('Submit did not complete. Please refresh and try again.', 'error');
+            setStatus('idle');
+            submittingRef.current = false;
+            return;
+          }
+        } else {
+          await api.updateDpr(
+            editingId,
+            {
+              // [N1 Phase B] projectId is the new foreign-key; projectName
+              // is kept on the wire for legacy-compat and as the canonical
+              // name to denormalize if the relation is null. Both come
+              // from form state — set atomically in handleProjectChange.
+              projectId: form.projectId || null,
+              projectName: form.projectName,
+              location: form.location,
+              reportDate: form.reportDate,
+              weather: form.weather,
+              temperature: form.temperature,
+              contractor: form.contractor,
+              workType: form.workType,
+              notes: notes || null,
+              // Round-12: 5 daily-narrative fields.
+              workExecutedToday: dailyFields.workExecutedToday || null,
+              workLocation: dailyFields.workLocation || null,
+              manpowerSummary: serializedManpower || null,
+              risksHindrances: dailyFields.risksHindrances || null,
+              materialsReceivedSummary: dailyFields.materialsReceivedSummary || null,
+              // User-added ad-hoc text + table sections.
+              customSections: Array.isArray(customSections) && customSections.length > 0 ? customSections : null,
+              // N7: optional BOQ link. Sent as null when unset so the
+              // backend treats it as "no link" rather than a literal "".
+              boqItemId: form.boqItemId || null,
+              // N3 (Phase F): optional drawing stamp. drawingId is the
+              // foreign key; drawingRev is denormalized so the wire
+              // record survives the original drawing being renamed or
+              // superseded.
+              drawingId: form.drawingId || null,
+              drawingRev: form.drawingRev || null,
+            },
+            editingVersion,
+            accessToken
+          );
+          toast.push('Draft updated.', 'success');
+          navigate('/portal/dpr/my');
+        }
       } else {
         // DR-012: mint a fresh idempotency key per submit intent. The
         // backend stores (employeeId, Idempotency-Key, bodyHash) → 201

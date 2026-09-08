@@ -1558,6 +1558,170 @@ router.put('/:id', async (req, res) => {
   }
 });
 
+// ─── POST /api/dpr/:id/submit ───────────────────────────────────────────────
+// SOL DR-003: owner-authorized DRAFT -> SUBMITTED transition. The PUT path
+// explicitly excludes `status` from its mass-assignment allowlist (lines
+// 1328-1343), which is what the audit flagged — the Submit Report gesture
+// silently dropped the user's intent to publish. Adding a dedicated command
+// keeps the PUT allowlist tight and mirrors the existing transition pattern
+// (/:id/review, /:id/approve, /:id/reject) without opening a new surface on
+// the edit route.
+//
+// Contract:
+//   - Owner-only (req.employeeId === existing.submittedById).
+//   - Source status must be DRAFT (already-SUBMITTED returns 200 idempotent;
+//     UNDER_REVIEW / APPROVED / REJECTED → 409 INVALID_TRANSITION).
+//   - Required-field validation mirrors POST /api/dpr so an empty draft
+//     can't be smuggled into the admin review queue.
+//   - Optimistic concurrency: the client MUST send the `version` they read
+//     on load. Stale version → P2025 → 409 VERSION_CONFLICT.
+router.post('/:id/submit', async (req, res) => {
+  const prisma = getPrisma(req);
+  const { id } = req.params;
+  const { version } = req.body || {};
+
+  if (!Number.isInteger(version) || version < 1) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      message: 'version must be a positive integer',
+    });
+  }
+
+  const existing = await prisma.dPR.findUnique({
+    where: { id },
+    include: { photos: true },
+  });
+  if (!existing) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
+  }
+  if (existing.submittedById !== req.employeeId) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Only owner can submit' });
+  }
+
+  // Idempotent re-submit: a retried Submit click on a row that already
+  // landed SUBMITTED should NOT 409 — the user already succeeded, they
+  // just didn't see the success page. Pin the version too so we don't
+  // paper over a real concurrent change (the response is the row as-is).
+  if (existing.status === 'SUBMITTED') {
+    if (existing.version !== version) {
+      return res.status(409).json({
+        error: 'DPR was modified by another action. Please refresh and try again.',
+        code: 'VERSION_CONFLICT',
+      });
+    }
+    return res.json(existing);
+  }
+
+  if (existing.status !== 'DRAFT') {
+    return res.status(409).json({
+      error: 'INVALID_TRANSITION',
+      code: 'INVALID_TRANSITION',
+      message: `Cannot submit a DPR in status ${existing.status}`,
+      currentStatus: existing.status,
+    });
+  }
+
+  // Required-field validation. Same gate as the POST handler — without it
+  // a direct API call could publish an empty DPR and pollute the admin
+  // queue. SOL-P1#11 mirrors this on the client to give the user a fast
+  // pre-flight error, but the server is the authority.
+  if (!existing.projectName || !existing.location || !existing.reportDate) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      message: 'Project name, location, and date are required',
+    });
+  }
+  if (!existing.workType) {
+    return res.status(400).json({
+      error: 'WORKTYPE_REQUIRED',
+      code: 'WORKTYPE_REQUIRED',
+      message: 'workType is required',
+    });
+  }
+  const hasNarrative = (
+    (existing.workExecutedToday && existing.workExecutedToday.trim().length > 0) ||
+    (existing.manpowerSummary && existing.manpowerSummary.trim().length > 0) ||
+    (existing.materialsReceivedSummary && existing.materialsReceivedSummary.trim().length > 0) ||
+    (existing.notes && existing.notes.trim().length > 0) ||
+    (Array.isArray(existing.photos) && existing.photos.length > 0)
+  );
+  if (!hasNarrative) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      message: 'Add at least one work item, manpower note, materials note, or photo before submitting.',
+    });
+  }
+
+  try {
+    // Pin status AND version on the conditional WHERE so any concurrent
+    // mutation (admin /review, owner PUT) between our read and our write
+    // races to P2025 → 409 VERSION_CONFLICT. Same wire code as the other
+    // transition endpoints.
+    const updated = await prisma.dPR.update({
+      where: { id, status: 'DRAFT', version },
+      data: {
+        status: 'SUBMITTED',
+        submittedAt: new Date(),
+        version: { increment: 1 },
+        updatedAt: new Date(),
+      },
+      include: {
+        photos: true,
+        submittedBy: { select: { id: true, name: true, email: true } },
+        inspections: { select: { id: true, inspectionType: true, status: true, severity: true } },
+        boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
+        project: { select: { id: true, name: true, code: true } },
+        drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
+      },
+    });
+
+    // Round-26: fire admin-targeted fan-out for SUBMITTED DPRs. Same
+    // payload shape as the POST handler so the admin dashboard surfaces a
+    // consistent notification when an owner submits a draft.
+    try {
+      const canonicalProjectName = updated.project?.name || updated.projectName;
+      await fanOutToAdmins(
+        {
+          type: 'ADMIN_DPR_SUBMITTED',
+          message: `New DPR submitted by ${updated.submittedBy?.name || 'an employee'} for ${canonicalProjectName}`,
+          meta: {
+            employeeName: updated.submittedBy?.name || 'an employee',
+            projectName: canonicalProjectName,
+            reportDate: formatReportDate(updated.reportDate),
+            dprId: updated.id,
+          },
+        },
+        prisma,
+      );
+    } catch (adminErr) {
+      // Defence in depth — fanOutToAdmins never throws, but if anything
+      // escapes we MUST NOT poison the request lifecycle that already
+      // returned the updated row.
+      console.error('DPR admin fan-out error', {
+        dprId: updated.id,
+        message: adminErr?.message?.split('\n')[0],
+      });
+    }
+
+    return res.json(updated);
+  } catch (err) {
+    console.error('DPR submit error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    if (err.code === 'P2025') {
+      return res.status(409).json({
+        error: 'DPR was modified by another action. Please refresh and try again.',
+        code: 'VERSION_CONFLICT',
+      });
+    }
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    return res.status(500).json({ error: 'Failed to submit DPR' });
+  }
+});
+
 // ─── DELETE /api/dpr/:id ────────────────────────────────────────────────────
 // SOL-P0#4: owners can delete their own DRAFT DPRs (no admin involvement).
 // Terminal/submitted states are immutable: deleting an in-review or already-
