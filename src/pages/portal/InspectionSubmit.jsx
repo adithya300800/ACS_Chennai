@@ -122,11 +122,16 @@ function saveDraft() {/* no-op: never write an unscoped draft */}
 function clearDraft() {/* no-op: never wipe an unscoped draft */}
 
 export default function InspectionSubmit() {
-  useDocumentTitle('New Inspection / Compliance Record');
+  // SOL DR-007: when arriving via ?draftId=<id>, title reflects that
+  // the engineer is editing an existing saved draft rather than
+  // starting fresh. Mirrors DprSubmit.jsx#useDocumentTitle for
+  // consistency across the two submit pages.
   const { accessToken, employee } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const draftId = searchParams.get('draftId') || null;
+  useDocumentTitle(draftId ? 'Edit Draft · Inspection Record' : 'New Inspection / Compliance Record');
   const fileInputRef = useRef(null);
   const submittingRef = useRef(false);
   // S5 audit: per-field refs so validation failure can move focus to the
@@ -144,6 +149,31 @@ export default function InspectionSubmit() {
   // they don't have to re-pick the date.
   const queryDprId = searchParams.get('dpr') || null;
   const queryDate = searchParams.get('date') || null;
+
+  // SOL DR-007: server-side draft resume (mirror DprSubmit.jsx's
+  // editingId + editingVersion state). When set, the submit handler
+  // routes Save-as-Draft through PUT /:id and Submit-Record through
+  // POST /:id/submit instead of POST /.
+  const [editingId, setEditingId] = useState(null);
+  const [draftLoadedFromServer, setDraftLoadedFromServer] = useState(false);
+
+  // Reusable YYYY-MM-DD normaliser. The backend serialises reportDate
+  // as a Date that JSON.stringify renders as ISO datetime on some
+  // versions; strip the time suffix so the <input type="date"> keeps
+  // its value, falling back to today when the value is missing/invalid.
+  function toYmd(value) {
+    if (!value) return getLocalDate();
+    if (typeof value === 'string') {
+      const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+      if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+    }
+    const d = new Date(value);
+    if (isNaN(d.getTime())) return getLocalDate();
+    const y = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    return `${y}-${mm}-${dd}`;
+  }
 
   // SOL DR-003: every draft read/write is keyed by employeeId. If the
   // auth context has not populated yet (very first render), we treat that
@@ -369,13 +399,75 @@ export default function InspectionSubmit() {
 
   // Persist draft (debounced 750ms — matches DPR pattern at DprSubmit.jsx:124).
   useEffect(() => {
-    if (!currentEmployeeId) return;
+    // SOL DR-007: do not clobber an in-progress local draft when the
+    // user is editing a server-side draft (editingId is set). The
+    // server record is the source of truth once we're editing it;
+    // mirroring it back to localStorage would race against the live
+    // PUT /api/inspection/:id updates that the resumed-edit flow
+    // performs.
+    if (!currentEmployeeId || editingId) return;
     const t = setTimeout(
       () => saveDraftForEmployee(currentEmployeeId, { form, workEntry, photos }),
       750
     );
     return () => clearTimeout(t);
-  }, [form, workEntry, photos, currentEmployeeId]);
+  }, [form, workEntry, photos, currentEmployeeId, editingId]);
+
+  // SOL DR-007: when arriving via ?draftId=<id>, fetch the saved
+  // server-side draft and pre-populate the form. Mirrors the equivalent
+  // effect at DprSubmit.jsx:304 — same shape, inspection fields
+  // instead of DPR. If the record is no longer DRAFT (admin moved it
+  // to OPEN/ACKNOWLEDGED/etc.), navigate back to the list with a
+  // warning instead of silently editing a row that can no longer be
+  // PUT-touched.
+  useEffect(() => {
+    if (!draftId || !accessToken) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await api.getInspection(draftId, accessToken);
+        if (cancelled) return;
+        if (d.status !== 'DRAFT') {
+          toast.push(`This inspection is no longer a draft (status: ${d.status}).`, 'warning');
+          navigate('/portal/inspection/my', { replace: true });
+          return;
+        }
+        setEditingId(d.id);
+        setForm({
+          projectId: d.projectId || (d.project && d.project.id) || '',
+          projectName: d.projectName || '',
+          location: d.location || '',
+          reportDate: toYmd(d.reportDate),
+          weather: d.weather || '',
+          contractor: d.contractor || '',
+          boqItemId: d.boqItemId || '',
+          drawingId: d.drawingId || '',
+          drawingRev: d.drawingRev || '',
+        });
+        // workEntry on the wire = { inspectionType, data }. Persist the
+        // structured fields verbatim so the renderer card shows the
+        // engineer what they originally saved.
+        if (d.data && (d.inspectionType || Object.keys(d.data).length > 0)) {
+          setWorkEntry({
+            workType: d.inspectionType || 'material_inspection',
+            data: d.data || {},
+            addedAt: null,
+          });
+        }
+        // Photo ULIDs from the server are preserved as references — no
+        // preview blobs possible from the readUrls (they're SAS URLs we
+        // can't re-upload through). User can re-add photos in the
+        // editor if needed.
+        setPhotos([]);
+        setShowDraftBanner(false); // suppress local-autosave banner
+        setDraftLoadedFromServer(true);
+      } catch (err) {
+        if (!cancelled) toast.push(err.message || 'Failed to load draft', 'error');
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftId, accessToken, toast, navigate]);
 
   // [N1 Phase B] Project picker — one-time fetch on mount. Same shape
   // as the DprSubmit.jsx equivalent; defensive on failure so the form
@@ -754,6 +846,54 @@ export default function InspectionSubmit() {
         .map(({ ulid, container, filename, contentType, sizeBytes, caption, location, takenAt }) => ({
           ulid, container, filename, contentType, sizeBytes, caption, location, takenAt,
         }));
+
+      // SOL DR-007: when editing an existing server-side draft the
+      // publish transition can't ride a single PUT — the backend's
+      // mass-assignment allowlist deliberately excludes `status`
+      // (mirrors DprSubmit.jsx + dpr.js after DR-003). Branch on the
+      // submit intent: DRAFT keeps the PUT, SUBMITTED first PUTs the
+      // edit (so the latest structured fields land) then calls
+      // POST /:id/submit which transitions DRAFT → OPEN. The same
+      // helper shape as DprSubmit.jsx:925-948 — keep the per-record
+      // contract symmetric across the two submit pages.
+      if (editingId) {
+        const editPayload = {
+          projectId: form.projectId || null,
+          projectName: form.projectName,
+          location: form.location || (isDraftSave ? 'TBD' : ''),
+          reportDate: form.reportDate || (isDraftSave ? getBusinessToday() : null),
+          weather: form.weather || null,
+          contractor: form.contractor || null,
+          dprId: queryDprId || null,
+          inspectionType: workEntry?.workType || 'material_inspection',
+          data: workEntry?.data || null,
+          boqItemId: form.boqItemId || null,
+          drawingId: form.drawingId || null,
+          drawingRev: form.drawingRev || null,
+          severity: null,
+        };
+        // PUT first so the latest structured fields land on the row.
+        // Then for SUBMITTED, call the dedicated publish endpoint —
+        // the response carries the row in its terminal OPEN state so
+        // we can show the same success path as a fresh submit.
+        await api.updateInspection(editingId, editPayload, null, accessToken);
+        if (submitStatus === 'SUBMITTED') {
+          const submitted = await api.submitInspection(editingId, accessToken);
+          if (submitted && submitted.status === 'OPEN') {
+            toast.push('Inspection record submitted.', 'success');
+            navigate('/portal/inspection/my');
+          } else {
+            toast.push('Submit did not complete. Please refresh and try again.', 'error');
+            setStatus('idle');
+            submittingRef.current = false;
+            return;
+          }
+        } else {
+          toast.push('Draft updated.', 'success');
+          navigate('/portal/inspection/my');
+        }
+        return;
+      }
 
       // DR-012: mint a fresh idempotency key per submit intent. The
       // backend stores (employeeId, Idempotency-Key, bodyHash) → 201
@@ -1411,12 +1551,37 @@ export default function InspectionSubmit() {
           </div>
           </section>
 
+          {/* SOL DR-007: when the user reopened a saved DRAFT draft via
+              Resume, the form fields are pre-filled with values cached
+              from their previous submit. Without this hint the user
+              might file a duplicate against the wrong date. Mirrors
+              the editing banner on DprSubmit.jsx:1800 — same AA-compliant
+              palette and round-37 mobile-wrap fix as `showDraftBanner`.
+              Only shows when `editingId` is set; the load effect above
+              already enforced `d.status === 'DRAFT'` before setting
+              `editingId`, so `editingId` alone is sufficient. */}
+          {editingId && (
+            <div className="draft-banner" style={{ marginTop: '1rem' }}>
+              <span style={{ flex: 1 }}>
+                ✏️ Editing saved draft. Changes will update the existing draft when you click Save or Submit.
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => navigate('/portal/inspection/my')}
+                style={{ flexShrink: 0 }}
+              >
+                Cancel edit
+              </button>
+            </div>
+          )}
+
           <div className="dpr-form-actions dpr-form-actions-sticky">
             <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting' || hasInFlightUploads}>
-              {status === 'submitting' ? 'Saving...' : 'Save as Draft'}
+              {status === 'submitting' ? 'Saving...' : editingId ? 'Save changes' : 'Save as Draft'}
             </button>
             <button type="button" className="btn btn-primary" onClick={() => handleSubmit('SUBMITTED')} disabled={status === 'submitting' || hasInFlightUploads}>
-              {status === 'submitting' ? 'Submitting...' : hasInFlightUploads ? 'Waiting for photos…' : 'Submit Record'}
+              {status === 'submitting' ? 'Submitting...' : hasInFlightUploads ? 'Waiting for photos…' : editingId ? 'Submit Draft' : 'Submit Record'}
             </button>
           </div>
         </div>

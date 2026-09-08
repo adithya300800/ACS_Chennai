@@ -44,6 +44,10 @@ export default function InspectionDetail() {
   const [error, setError] = useState('');
   // Round-28 #7: lightbox state. Null = closed. Number = open at index.
   const [lightboxIndex, setLightboxIndex] = useState(null);
+  // SOL DR-007: in-flight flag for the Publish action so a double-click
+  // doesn't double-submit. Mirrors the `submittingRef` shape from the
+  // DPR submit handler.
+  const [publishing, setPublishing] = useState(false);
   // Round-29: linkedCubeTests state REMOVED — the cube-test feature is
   // gone. Cube testing is captured by the cube_casting / cube_testing
   // InspectionRecord sub-types; no separate cube-test rows to link.
@@ -172,6 +176,58 @@ export default function InspectionDetail() {
                 Admin note: {record.adminNotes}
               </div>
             )}
+          </div>
+        )}
+
+        {/* SOL DR-007: DRAFT banner + Publish action for the owner. The
+            previous detail view was read-only for DRAFT rows, so an
+            engineer who closed the form mid-edit had no way to advance
+            the row to OPEN. Mirrors the DRAFT row UX on DprList.jsx +
+            the editing banner on DprSubmit.jsx (line 1135). */}
+        {record.status === 'DRAFT' && employee?.id && record.submittedBy?.id === employee.id && (
+          <div
+            role="status"
+            className="draft-banner"
+            style={{ marginBottom: '1rem' }}
+          >
+            <span style={{ flex: 1 }}>
+              📝 This inspection is a draft. Resume editing to add or change structured fields, or Publish to send it for admin review.
+            </span>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => navigate(`/portal/inspection/submit?draftId=${record.id}`)}
+              style={{ flexShrink: 0 }}
+            >
+              Resume
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={async () => {
+                if (publishing) return;
+                setPublishing(true);
+                try {
+                  const updated = await api.submitInspection(record.id, accessToken);
+                  if (updated && updated.status === 'OPEN') {
+                    toast.push('Inspection published for review.', 'success');
+                    setRecord(updated);
+                  } else {
+                    toast.push('Publish did not complete. Please refresh and try again.', 'error');
+                  }
+                } catch (err) {
+                  const msg = err?.message || 'Failed to publish inspection.';
+                  setError(msg);
+                  if (err?.status !== 401) toast.push(msg, 'error');
+                } finally {
+                  setPublishing(false);
+                }
+              }}
+              disabled={publishing}
+              style={{ flexShrink: 0 }}
+            >
+              {publishing ? 'Publishing…' : 'Publish'}
+            </button>
           </div>
         )}
 

@@ -275,9 +275,9 @@ describe('SOL DR-005 — POST /api/inspection/:id/submit (DRAFT → OPEN)', () =
     expect(mockFanOutCalls).toHaveLength(0);
   });
 
-  it('cannot submit a record that is not DRAFT (e.g. OPEN)', async () => {
-    const id = 'rec-already-open';
-    seedRecord({ id, status: 'OPEN' });
+  it('cannot submit a record that is not DRAFT (e.g. ACKNOWLEDGED)', async () => {
+    const id = 'rec-already-ack';
+    seedRecord({ id, status: 'ACKNOWLEDGED' });
     const app = buildApp();
     const res = await request(app)
       .post(`/api/inspection/${id}/submit`)

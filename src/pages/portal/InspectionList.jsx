@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -36,6 +36,9 @@ export default function InspectionList() {
   useDocumentTitle('My Inspection Records');
   const { accessToken, employee } = useAuth();
   const toast = useToast();
+  // SOL DR-007: Resume action navigates to the submit page with the
+  // draftId query param so InspectionSubmit can hydrate the form.
+  const navigate = useNavigate();
   const [inspections, setInspections] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -184,63 +187,103 @@ export default function InspectionList() {
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem' }}>
           {inspections.map((insp) => (
-            <Link
+            // SOL DR-007: convert the wrapper from <Link> to <div role=listitem>
+            // so the DRAFT row can host a Resume button as a sibling rather
+            // than nesting an interactive control inside another. Mirrors the
+            // a11y pattern adopted by DprList.jsx (round-37 S5-dpr-a11y).
+            <div
               key={insp.id}
-              to={`/portal/inspection/${insp.id}`}
+              role="listitem"
               className="dpr-card"
-              style={{ textDecoration: 'none', color: 'inherit', display: 'block' }}
+              style={{ position: 'relative' }}
             >
-              <div className="dpr-card-header">
-                <div>
-                  <h3 className="dpr-card-title">
-                    <InspectionTypeLabel type={insp.inspectionType} />
-                  </h3>
-                  <div className="dpr-card-meta" style={{ marginTop: '0.5rem' }}>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
-                      <MapPinIcon size={13} style={{ color: 'var(--steel)' }} />
-                      {insp.location}
-                    </span>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
-                      <CalendarIcon size={13} style={{ color: 'var(--steel)' }} />
-                      {formatIndianDate(insp.reportDate)}
-                    </span>
+              <button
+                type="button"
+                onClick={() => navigate(`/portal/inspection/${insp.id}`)}
+                aria-label={`${insp.inspectionType || 'inspection'} — ${insp.status} for ${insp.project?.name || insp.projectName || 'project'}`}
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  color: 'inherit',
+                  font: 'inherit',
+                }}
+              >
+                <div className="dpr-card-header">
+                  <div>
+                    <h3 className="dpr-card-title">
+                      <InspectionTypeLabel type={insp.inspectionType} />
+                    </h3>
+                    <div className="dpr-card-meta" style={{ marginTop: '0.5rem' }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                        <MapPinIcon size={13} style={{ color: 'var(--steel)' }} />
+                        {insp.location}
+                      </span>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                        <CalendarIcon size={13} style={{ color: 'var(--steel)' }} />
+                        {formatIndianDate(insp.reportDate)}
+                      </span>
+                    </div>
                   </div>
+                  <StatusBadge status={insp.status} />
                 </div>
-                <StatusBadge status={insp.status} />
-              </div>
 
-              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
-                <SeverityBadge severity={insp.severity} />
-                <span style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
-                  {insp.project?.name || insp.projectName}
-                </span>
-                {/* N3 (Phase F): drawing stamp sub-line. Renders only when
-                    the inspection was filed against a specific drawing
-                    revision. drawingId is the joined UUID; drawingRev is
-                    the denormalised revision string. */}
-                {insp.drawingId && insp.drawingRev && (
-                  <span style={{ fontSize: '0.75rem', color: '#075985', fontFamily: 'monospace' }}>
-                    Drawing · Rev {insp.drawingRev}
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
+                  <SeverityBadge severity={insp.severity} />
+                  <span style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
+                    {insp.project?.name || insp.projectName}
                   </span>
-                )}
-              </div>
+                  {/* N3 (Phase F): drawing stamp sub-line. Renders only when
+                      the inspection was filed against a specific drawing
+                      revision. drawingId is the joined UUID; drawingRev is
+                      the denormalised revision string. */}
+                  {insp.drawingId && insp.drawingRev && (
+                    <span style={{ fontSize: '0.75rem', color: '#075985', fontFamily: 'monospace' }}>
+                      Drawing · Rev {insp.drawingRev}
+                    </span>
+                  )}
+                </div>
 
-              <div style={{ display: 'flex', gap: '1rem', fontSize: '0.8rem', color: 'var(--steel)' }}>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
-                  <CameraIcon size={13} style={{ color: 'var(--steel)' }} />
-                  {insp.photos?.length || 0}
-                </span>
-                {insp.dpr && (
+                <div style={{ display: 'flex', gap: '1rem', fontSize: '0.8rem', color: 'var(--steel)' }}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
-                    <PaperclipIcon size={13} style={{ color: 'var(--steel)' }} />
-                    Linked to DPR
+                    <CameraIcon size={13} style={{ color: 'var(--steel)' }} />
+                    {insp.photos?.length || 0}
                   </span>
-                )}
-                <span style={{ marginLeft: 'auto' }}>
-                  {insp.submittedBy?.name || ''}
-                </span>
-              </div>
-            </Link>
+                  {insp.dpr && (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                      <PaperclipIcon size={13} style={{ color: 'var(--steel)' }} />
+                      Linked to DPR
+                    </span>
+                  )}
+                  <span style={{ marginLeft: 'auto' }}>
+                    {insp.submittedBy?.name || ''}
+                  </span>
+                </div>
+              </button>
+              {/* SOL DR-007: Resume action on DRAFT rows. The button is a
+                  sibling of the open-detail button so we don't nest
+                  interactive controls (the same a11y fix DPRList.jsx
+                  adopted in round-37). Owner-only — non-owners can't
+                  resume someone else's draft, so we gate on
+                  `employee?.id === insp.submittedBy?.id`. */}
+              {insp.status === 'DRAFT' && employee?.id && insp.submittedBy?.id === employee.id && (
+                <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={() => navigate(`/portal/inspection/submit?draftId=${insp.id}`)}
+                    style={{ padding: '0.3rem 0.7rem', fontSize: '0.78rem' }}
+                    aria-label={`Resume editing inspection ${insp.inspectionType || ''} on ${insp.project?.name || insp.projectName || ''}`.trim()}
+                  >
+                    Resume
+                  </button>
+                </div>
+              )}
+            </div>
           ))}
         </div>
       )}

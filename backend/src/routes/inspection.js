@@ -1382,7 +1382,7 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
   let notifType;
   if (action === 'ACKNOWLEDGE') { nextStatus = 'ACKNOWLEDGED'; notifType = 'INSPECTION_ACKNOWLEDGED'; }
   else if (action === 'CLOSE') { nextStatus = 'CLOSED'; notifType = 'INSPECTION_CLOSED'; }
-  else if (action === 'SUBMIT') { nextStatus = 'OPEN'; notifType = null; } // SOL DR-005: no per-record notif — fan-out fires post-tx
+  else if (action === 'SUBMIT') { nextStatus = 'OPEN'; notifType = 'INSPECTION_SUBMITTED'; } // SOL DR-007: write a per-record notif to the owner with a non-null type literal (Notification.type is required). Admin fan-out still fires post-tx.
   else { nextStatus = 'REJECTED'; notifType = 'INSPECTION_REJECTED'; }
 
   return prisma.$transaction(async (tx) => {
@@ -1392,6 +1392,21 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
     });
     if (!record) {
       throw Object.assign(new Error('Inspection record not found'), { _code: 'NOT_FOUND', _status: 404 });
+    }
+
+    // SOL DR-007: idempotent re-submit. If the row is already OPEN
+    // (i.e. the owner submitted once and the request was retried after
+    // the original committed), return the row as-is without writing a
+    // second notification row or firing a second admin fan-out. Without
+    // this, the API.js NETWORK_ERROR retry (api.js:168-178) would 409
+    // the user with INVALID_TRANSITION even though the row is in the
+    // correct terminal state — reading as "the system rejected my
+    // submit" instead of "you're already done". Only OPEN gets the
+    // idempotent path; ACKNOWLEDGED/CLOSED/REJECTED still 409 because
+    // they were moved by an admin and the owner has no business
+    // re-submitting.
+    if (action === 'SUBMIT' && record.status === 'OPEN') {
+      return record;
     }
 
     if (!allowedFrom.has(record.status)) {
@@ -1605,6 +1620,18 @@ router.post('/:id/submit', async (req, res) => {
   const { id } = req.params;
 
   try {
+    // SOL DR-007: snapshot the row's status BEFORE the tx so the
+    // idempotent OPEN re-submit path can skip the admin fan-out. The
+    // early-return inside transitionInspectionRecord handles the no-op
+    // row return; this flag gates the post-tx admin email so a
+    // NETWORK_ERROR retry doesn't spam the admin inbox with a
+    // duplicate "New inspection opened by …" message.
+    const snapshot = await prisma.inspectionRecord.findUnique({
+      where: { id },
+      select: { status: true },
+    });
+    const isIdempotentReplay = !!(snapshot && snapshot.status === 'OPEN');
+
     const updated = await transitionInspectionRecord(
       prisma,
       id,
@@ -1614,27 +1641,32 @@ router.post('/:id/submit', async (req, res) => {
       { allowAdminOverride: false } // owner-only; no future-date override path
     );
 
-    // Fan-out fires AFTER the tx commits. Same shape as the create path —
-    // admins get one email per submission, best-effort.
-    try {
-      await fanOutToAdmins(
-        {
-          type: 'ADMIN_INSPECTION_OPENED',
-          message: `New inspection opened by ${updated.submittedBy?.name || 'an employee'}: ${updated.inspectionType || 'inspection'}`,
-          meta: {
-            employeeName: updated.submittedBy?.name || 'an employee',
-            recordTitle: updated.projectName || updated.inspectionType || 'an inspection',
-            inspectionType: updated.inspectionType || '',
-            inspectionId: updated.id,
+    // Fan-out fires AFTER the tx commits — but only when the tx
+    // actually transitioned the row. The idempotent OPEN early-return
+    // above means the row was already in its terminal state, so
+    // admins already saw (or are about to see) the fan-out from the
+    // original submit. Skip to avoid double-emailing.
+    if (!isIdempotentReplay) {
+      try {
+        await fanOutToAdmins(
+          {
+            type: 'ADMIN_INSPECTION_OPENED',
+            message: `New inspection opened by ${updated.submittedBy?.name || 'an employee'}: ${updated.inspectionType || 'inspection'}`,
+            meta: {
+              employeeName: updated.submittedBy?.name || 'an employee',
+              recordTitle: updated.projectName || updated.inspectionType || 'an inspection',
+              inspectionType: updated.inspectionType || '',
+              inspectionId: updated.id,
+            },
           },
-        },
-        prisma,
-      );
-    } catch (adminErr) {
-      console.error('Inspection submit fan-out error', {
-        inspectionId: updated.id,
-        message: adminErr?.message?.split('\n')[0],
-      });
+          prisma,
+        );
+      } catch (adminErr) {
+        console.error('Inspection submit fan-out error', {
+          inspectionId: updated.id,
+          message: adminErr?.message?.split('\n')[0],
+        });
+      }
     }
 
     res.json(updated);
