@@ -46,7 +46,18 @@ node -e "
       for (const name of KNOWN_BAD) {
         try {
           const res = await p.\$executeRawUnsafe(
-            \"DELETE FROM \\\"_prisma_migrations\\\" WHERE migration_name = '\" + name + \"' AND status <> 'applied'\"
+            // [DR-031] Prisma 5's `_prisma_migrations` has NO `status`
+            // column — applied state is derived from `finished_at` /
+            // `rolled_back_at` / `applied_steps_count`. The old
+            // `status <> 'applied'` predicate would crash on every cold
+            // start. Mirror the postinstall guard so both recovery paths
+            // use the same predicate: a row is "non-applied" iff it was
+            // rolled back, or never finished its steps. A successfully-
+            // applied row (finished_at NOT NULL AND applied_steps_count
+            // > 0 AND rolled_back_at IS NULL) is NEVER touched — this
+            // guards against a name collision clobbering a legitimate
+            // ledger row.
+            \"DELETE FROM \\\"_prisma_migrations\\\" WHERE \\\"migration_name\\\" = '\" + name + \"' AND \\\"rolled_back_at\\\" IS NULL AND (\\\"finished_at\\\" IS NULL OR \\\"applied_steps_count\\\" = 0)\"
           );
           console.log('[start.sh] cleared', res, 'failed/rolled_back rows for', name);
           totalDeleted += res;
