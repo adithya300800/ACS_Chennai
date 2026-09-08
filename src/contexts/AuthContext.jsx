@@ -288,6 +288,12 @@ export function AuthProvider({ children }) {
       setAuthData,
       setRouter,
       isAuthenticated: !!accessToken,
+      // [DR-018] Expose isAdmin from the auth context so <ProtectedRoute requireAdmin>
+      // can branch correctly. Without this, `requireAdmin && !isAdmin` short-circuits to
+      // `true` and admin-labelled routes (e.g. /portal/admin/billing-certifications)
+      // bounce the admin to /portal/dashboard. Live sweep on 2026-09-08 caught this:
+      // a freshly-logged-in admin couldn't reach the billing-cert register.
+      isAdmin: !!(employee && employee.isAdmin),
     }}>
       <RouterScope setRouter={setRouter}>{children}</RouterScope>
     </AuthContext.Provider>
