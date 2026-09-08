@@ -36,6 +36,7 @@ const router = express.Router();
 const { requireAuth, requireFreshAdmin } = require('../middleware/auth');
 const { mapPrismaError, parseStrictISODate } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
+const { getTodayBusinessDate } = require('../lib/dateOnly');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -689,12 +690,42 @@ router.get('/', asyncHandler(async (req, res) => {
     }
 
     const curatedNames = new Set(filteredProjects.map((p) => p.name));
+    // [DR-012] Exclude names that match an archived Project row from the
+    // discovered list. DPR.projectName / InspectionRecord.projectName are
+    // free-text columns that retain their old value after the admin
+    // archives (or renames) the parent Project row — without this filter
+    // the employee-side picker re-surfaces the archived master as
+    // "Not registered" instead of hiding it. Look up every distinct
+    // discovered name against Project.name (case-insensitive) and drop
+    // the ones that resolve to an isActive=false row. Best-effort: an
+    // error in the archive-lookup should not 500 the whole list (the
+    // curated list is still useful), so we fall back to the
+    // unfiltered set and log a warning.
     const discoveredNamesRaw = [
       ...dprNames.map((d) => d.projectName),
       ...inspectionNames.map((i) => i.projectName),
     ];
-    const discoveredNames = Array.from(new Set(discoveredNamesRaw))
-      .filter((n) => n && !curatedNames.has(n))
+    const distinctDiscovered = Array.from(new Set(discoveredNamesRaw)).filter((n) => n && !curatedNames.has(n));
+    let archivedNames = new Set();
+    if (distinctDiscovered.length) {
+      try {
+        const archivedRows = await prisma.project.findMany({
+          where: {
+            isActive: false,
+            name: { in: distinctDiscovered },
+          },
+          select: { name: true },
+        });
+        archivedNames = new Set(archivedRows.map((r) => r.name));
+      } catch (archiveErr) {
+        console.warn('Projects list — archived-name lookup failed (continuing unfiltered)', {
+          prismaCode: archiveErr.code,
+          message: archiveErr.message?.split('\n')[0],
+        });
+      }
+    }
+    const discoveredNames = distinctDiscovered
+      .filter((n) => !archivedNames.has(n))
       .sort((a, b) => a.localeCompare(b));
 
     res.json({
@@ -1216,6 +1247,33 @@ router.delete('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
 // the roll-up returns zeros and a `warning` is attached to the response.
 // The dashboard must not 500 because one KPI source is unavailable — the
 // other counts are still useful.
+// DR-013: compute the half-open window [fromDay, toDayExclusive) in the
+// ACS business timezone (Asia/Kolkata), reusing the canonical helper from
+// lib/dateOnly.js — the same one attendance / dpr / inspection routes
+// already use, so there is exactly one source of truth for "today".
+//
+// Why this used to be wrong: the previous inline computation picked the UTC
+// calendar day from `new Date()`, so at 00:00–05:29 IST the upper bound
+// became "yesterday in IST" (because UTC was still on the prior day). DPRs
+// and inspections with `reportDate` stored as today's UTC midnight fell on
+// the wrong side of the half-open range and the KPI tiles showed zero for
+// the current IST day until 05:30 IST, when UTC's calendar day finally
+// caught up. Reusing getTodayBusinessDate collapses both branches onto
+// the IST calendar day.
+//
+// `fromDay` is `days` calendar days before `toDay` (subtracting whole
+// days from a UTC-midnight Date is safe because UTC has no DST).
+// `toDayExclusive` is the day after `toDay` at UTC midnight — the upper
+// bound for the `lt` predicate that satisfies `gte fromDay && lt
+// toDayExclusive`. Exported so tests can pin the IST boundary without
+// having to mock `new Date()` globally.
+function computeKpiWindow(now, days) {
+  const toDay = getTodayBusinessDate(now); // UTC midnight of IST today
+  const fromDay = new Date(toDay.getTime() - days * 24 * 60 * 60 * 1000);
+  const toDayExclusive = new Date(toDay.getTime() + 24 * 60 * 60 * 1000);
+  return { fromDay, toDayExclusive };
+}
+
 async function kpiHandler(req, res) {
   const prisma = getPrisma(req);
   if (!prisma) {
@@ -1234,12 +1292,9 @@ async function kpiHandler(req, res) {
     ? Math.min(Math.max(daysRaw, 1), 365)
     : 30;
   const toDate = new Date(); // now (server clock)
-  const fromDate = new Date(toDate.getTime() - days * 24 * 60 * 60 * 1000);
-  // For @db.Date columns the predicate is half-open [gte, lt) over UTC
-  // midnights. reportDate is the consistent column across DPR +
-  // InspectionRecord + BoqItem (all @db.Date).
-  const fromDay = new Date(Date.UTC(fromDate.getUTCFullYear(), fromDate.getUTCMonth(), fromDate.getUTCDate()));
-  const toDayExclusive = new Date(Date.UTC(toDate.getUTCFullYear(), toDate.getUTCMonth(), toDate.getUTCDate() + 1));
+  // DR-013: window is half-open over IST calendar days, not UTC.
+  // See computeKpiWindow below for the rationale + the test that pins it.
+  const { fromDay, toDayExclusive } = computeKpiWindow(toDate, days);
 
   // Resolve the project (or auto-discovered name).
   const result = await resolveProject(prisma, req.params.idOrName);
@@ -1398,7 +1453,10 @@ async function kpiHandler(req, res) {
     overdueTrainingCount: 0,
   };
   try {
-    const today = new Date(Date.UTC(toDate.getUTCFullYear(), toDate.getUTCMonth(), toDate.getUTCDate()));
+    // DR-013: same UTC→IST correction as the DPR/Inspection window above.
+    // A leave covering IST today must show as on-leave-today even before
+    // 05:30 IST (when the UTC calendar day catches up to IST).
+    const today = getTodayBusinessDate(toDate);
     const [onLeaveToday, pendingLeaveCount, overdueTrainingCount] = await Promise.all([
       prisma.leaveRequest.count({
         where: {
@@ -1447,5 +1505,12 @@ async function kpiHandler(req, res) {
 // (no require cycle). Same exposure contract as the route handlers below
 // — anything that imports resolveProject gets the same semantics the
 // /:idOrName endpoints honour.
+//
+// [DR-013] Phase A: export computeKpiWindow so the IST day-bucket
+// boundary can be pinned by a unit test against the same function the
+// kpiHandler uses. Keep the export list flat — no `module.exports =
+// { ...router, ... }` merge, that would break existing default-import
+// sites (projectRouter = require('./projects')).
 module.exports = router;
 module.exports.resolveProject = resolveProject;
+module.exports.computeKpiWindow = computeKpiWindow;
