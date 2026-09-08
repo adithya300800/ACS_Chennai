@@ -151,6 +151,16 @@ function buildApp({ isAdmin = false } = {}) {
     },
     notification: { create: async () => ({}) },
     notificationRecipient: { findMany: async () => [] },
+    // [N1] POST / and PUT /:id resolve projectName through
+    // resolveProject() (imported from routes/projects.js), which reads
+    // prisma.project. Returning null from both lookups is the
+    // "discovered project" path — projectId stays NULL and the typed
+    // projectName is kept verbatim, which is exactly what these tests
+    // assert on (they never pass a projectId).
+    project: {
+      findUnique: async () => null,
+      findFirst: async () => null,
+    },
     // Top-level transaction wrapper — mirrors Prisma's `$transaction(fn)`
     // shape. We deliberately do NOT short-circuit on a return value
     // because the SUBMIT path performs multiple writes inside the

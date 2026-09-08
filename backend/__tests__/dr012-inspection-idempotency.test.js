@@ -92,6 +92,16 @@ function buildApp({ inspectionCreate }) {
     // each recipient; stub it so the create call completes without
     // dragging in a fan-out mock.
     notificationPreference: { findUnique: jest.fn(async () => null) },
+    // [N1] The POST resolves projectName via resolveProject() (from
+    // routes/projects.js), which reads prisma.project. Both lookups
+    // return null → the "discovered project" path, so projectId stays
+    // NULL and projectName is kept verbatim. Idempotency hashing works
+    // off the raw request body, so this does not affect the replay
+    // assertions.
+    project: {
+      findUnique: jest.fn(async () => null),
+      findFirst: jest.fn(async () => null),
+    },
   };
   app.set('prisma', prisma);
   app.use('/api/inspection', inspectionRouter);

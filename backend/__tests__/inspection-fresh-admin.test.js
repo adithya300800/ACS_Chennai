@@ -65,6 +65,15 @@ function buildApp({ employeeFindUnique }) {
         dpr: null,
       })),
     },
+    // [N1] The POST resolves projectName through resolveProject() (from
+    // routes/projects.js), which reads prisma.project. Both lookups
+    // return null → the "discovered project" path: projectId stays NULL
+    // and the typed projectName is kept. The S3-9 status gate under test
+    // is unaffected by project resolution.
+    project: {
+      findUnique: jest.fn(async () => null),
+      findFirst: jest.fn(async () => null),
+    },
   };
 
   app.set('prisma', prisma);
