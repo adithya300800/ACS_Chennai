@@ -191,6 +191,14 @@ function makePrisma() {
         return [];
       }),
     },
+    // [DR-010] The 6th source in the ?scope=assigned union. Round-30
+    // tests don't allocate a project to USER, so the result is empty
+    // — the regression suite asserts that the child-record paths
+    // still drive the curated list. The DR-010 suite in
+    // projects.dr010.test.js covers the assignment-only path.
+    projectAssignment: {
+      findMany: jest.fn(async () => []),
+    },
   };
 }
 

@@ -612,12 +612,12 @@ router.get('/', asyncHandler(async (req, res) => {
     ]);
 
     // For ?scope=assigned, narrow the curated list to ONLY the projects
-    // this employee has personally touched via any child record. We
-    // query five audit columns in parallel (DPR.submittedById,
+    // this employee has personally touched via any child record OR has
+    // been explicitly allocated to via ProjectAssignment. We query six
+    // audit/assignment sources in parallel (DPR.submittedById,
     // InspectionRecord.submittedById, BoqItem.createdById,
-    // VariationOrder.raisedById, Drawing.issuedById) and union the
-    // projectId sets — every project the employee filed against will
-    // surface, even if they used a different submission type.
+    // VariationOrder.raisedById, Drawing.issuedById,
+    // ProjectAssignment.employeeId) and union the projectId sets.
     //
     // [Round-32.1 bugfix] The earlier implementation also matched
     // `Project.createdById === req.employeeId`, which leaked
@@ -629,9 +629,19 @@ router.get('/', asyncHandler(async (req, res) => {
     // Projects created via the resolveProject flow now register the
     // new project's id and the employee files a child record against
     // it (DPR/Inspection/etc.) before it lands in their picker.
+    //
+    // [DR-010] The six-source union now ALSO includes
+    // ProjectAssignment.employeeId — explicit roster membership is
+    // distinct from history-based discovery (an admin may allocate
+    // an employee to a brand-new project with no DPR/Inspection/BOQ
+    // rows yet, and the assigned employee must see the project in
+    // their picker immediately, without having to invent dummy
+    // history first). The audit: "history-based discovery is
+    // intentional, not automatically an authorization flaw" — this
+    // is the bridge: roster + history, unioned.
     let filteredProjects = projects;
     if (scope === 'assigned') {
-      const [dprProj, inspProj, boqProj, voProj, drwProj] = await Promise.all([
+      const [dprProj, inspProj, boqProj, voProj, drwProj, assignProj] = await Promise.all([
         prisma.dPR.findMany({
           distinct: ['projectId'],
           where: { submittedById: req.employeeId, projectId: { not: null } },
@@ -657,6 +667,15 @@ router.get('/', asyncHandler(async (req, res) => {
           where: { issuedById: req.employeeId, projectId: { not: null } },
           select: { projectId: true },
         }).catch(() => []),
+        // [DR-010] Explicit roster membership. Admins create a
+        // ProjectAssignment row when allocating a project to an
+        // employee — the assigned employee should see that project
+        // in their picker before they've filed any child record.
+        prisma.projectAssignment.findMany({
+          distinct: ['projectId'],
+          where: { employeeId: req.employeeId },
+          select: { projectId: true },
+        }).catch(() => []),
       ]);
       const touched = new Set([
         ...dprProj.map((r) => r.projectId),
@@ -664,6 +683,7 @@ router.get('/', asyncHandler(async (req, res) => {
         ...boqProj.map((r) => r.projectId),
         ...voProj.map((r) => r.projectId),
         ...drwProj.map((r) => r.projectId),
+        ...assignProj.map((r) => r.projectId),
       ].filter(Boolean));
       filteredProjects = projects.filter((p) => touched.has(p.id));
     }

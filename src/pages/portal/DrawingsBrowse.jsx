@@ -63,7 +63,7 @@
 // requireAuth (all employees) so no client-side gating is needed beyond
 // the ProtectedRoute wrapper.
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
@@ -96,6 +96,18 @@ export default function DrawingsBrowse() {
   const [projects, setProjects] = useState([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [projectsError, setProjectsError] = useState('');
+
+  // [DR-010] Locally-resolved projects survive URL-driven re-fetches.
+  // handleCreateProject resolves a project name via /api/projects/resolve
+  // and pushes the result into `projects`. Setting ?projectId=<uuid> in
+  // the URL re-fires the effect below, which fetches /api/projects with
+  // the employee-scoped (touched + roster) union — that endpoint does
+  // NOT necessarily include the just-resolved project (DR-010: an
+  // assignee should not need child-record history to start work). The
+  // ref ensures the locally-resolved entry is merged back into the
+  // next fetch's result, so the <select> keeps the right <option> for
+  // the user's selection through the URL-triggered refresh.
+  const locallyResolvedRef = useRef(new Map());
 
   // `projectId` is driven by the URL — `?projectId=<uuid>` from
   // ProjectDetail's "Drawings" tab, or a click on a typeahead result.
@@ -173,14 +185,28 @@ export default function DrawingsBrowse() {
           ...curated,
           ...discovered.filter((d) => !seen.has((d.name || '').toLowerCase())),
         ];
-        setProjects(merged);
+        // [DR-010] Merge in any locally-resolved projects the user just
+        // picked via the + Create new project… affordance. The backend
+        // ?scope=assigned union includes ProjectAssignment rows as of
+        // this round, but a freshly-resolved project still needs to
+        // survive the URL-triggered re-fetch below. We key on id and
+        // let name collisions resolve in favor of the locally-resolved
+        // entry (its metadata is fresher).
+        const localEntries = Array.from(locallyResolvedRef.current.values()).filter(
+          (p) => p.id && !merged.some((m) => m.id === p.id)
+        );
+        const finalProjects = localEntries.length ? [...merged, ...localEntries] : merged;
+        setProjects(finalProjects);
         // Pick a default project: URL-supplied first, else the first
         // active one. This keeps the page non-empty for any employee
-        // who has at least one assigned project.
+        // who has at least one assigned project. [DR-010] The lookup
+        // uses the post-merge list so a freshly-resolved project
+        // (still in the ref because the backend's ?scope=assigned
+        // doesn't know about it yet) survives the URL-driven refresh.
         setProjectId((prev) => {
-          if (prev && merged.some((p) => p.id === prev)) return prev;
-          const fromUrl = merged.some((p) => p.id === urlProjectId) ? urlProjectId : '';
-          return fromUrl || (merged.length > 0 && merged[0].id ? merged[0].id : '');
+          if (prev && finalProjects.some((p) => p.id === prev)) return prev;
+          const fromUrl = finalProjects.some((p) => p.id === urlProjectId) ? urlProjectId : '';
+          return fromUrl || (finalProjects.length > 0 && finalProjects[0].id ? finalProjects[0].id : '');
         });
       } catch (err) {
         if (!cancelled) setProjectsError(err?.message || 'Failed to load projects');
@@ -219,8 +245,11 @@ export default function DrawingsBrowse() {
       const proj = await api.resolveProject(name, accessToken);
       // Add to the projects list so it shows up in the dropdown for the
       // rest of the session — the next /scope=assigned fetch won't
-      // return it until the employee files a child record against it,
-      // but Project.createdById=req.employeeId includes it from then on.
+      // necessarily return it until the employee is allocated to it
+      // (round DR-010 added ProjectAssignment to the assigned union),
+      // so we ALSO stash the resolved project in a ref so it survives
+      // the URL-driven re-fetch below.
+      locallyResolvedRef.current.set(proj.id, proj);
       setProjects((prev) => (prev.some((p) => p.id === proj.id) ? prev : [...prev, proj]));
       setCreateMode(false);
       setNewProjectName('');
