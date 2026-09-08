@@ -1083,6 +1083,24 @@ export default function DprSubmit() {
           </div>
         )}
 
+        {/* DR-003 banner: when the user reopens a saved DRAFT draft via
+            Resume, the form fields are pre-filled with values cached from
+            their previous submit (the SUBMITTED path no longer clears
+            localStorage so the engineer can copy fields forward). Without
+            this hint the user might file a duplicate against the wrong
+            date. Only shows when `editingId` is set; the load effect at
+            line 311 already enforced `d.status === 'DRAFT'` before
+            setting `editingId`, so `editingId` alone is sufficient.
+            Reuses the existing `.draft-banner` class — same AA-compliant
+            palette and round-37 mobile-wrap fix as `showDraftBanner`. */}
+        {editingId && (
+          <div role="status" className="draft-banner">
+            <span>
+              Draft cached from your last submit. Update the project/date to file a fresh one.
+            </span>
+          </div>
+        )}
+
         {error && <div className="portal-auth-error" style={{ marginBottom: '1rem' }}>{error}</div>}
 
         <div className="dpr-form">
