@@ -1341,6 +1341,16 @@ router.put('/:id', async (req, res) => {
     // (set drawingId to null to clear); drawingRev is denormalized so
     // it follows drawingId automatically unless the client overrides.
     'drawingId', 'drawingRev',
+    // SOL DR-005 (audit 2026-09-08): evidence additions on a resumed
+    // draft were silently dropped because the allowlist omitted photos.
+    // We accept `photos` ONLY as an ADDITIVE list of NEW photo claims —
+    // existing DPRPhoto rows are never touched by this PUT, so the
+    // "counters refuted deletion of previously bound server photos"
+    // guarantee is preserved. The audit hint is explicit: "Keep field
+    // allowlists; fix the caller/API contract rather than allowing
+    // arbitrary fields." Photos remains a typed array, not an arbitrary
+    // body, and the per-row shape validation below mirrors POST.
+    'photos',
   ];
   const unknown = Object.keys(fields).filter(k => !ALLOWED_UPDATE_FIELDS.includes(k));
   if (unknown.length) {
@@ -1499,6 +1509,50 @@ router.put('/:id', async (req, res) => {
     fields.drawingRev = drawingResolution.drawingRev ?? null;
   }
 
+  // SOL DR-005 (audit 2026-09-08): photo additions on a resumed draft
+  // are deliberately supported. The frontend builds a payload that
+  // includes `photos` whenever the user added new claims to the resumed
+  // edit. The allowlist accepts it; this block enforces the SAME per-photo
+  // invariants POST does (ulid shape, container, content type, size, filename
+  // safety, takenAt format) so a forged claim on a PUT can't slip past. An
+  // empty array is preserved as `[]` and means "no additions" — existing
+  // DPRPhoto rows are never touched by this PUT, which is the audit's
+  // explicit guarantee. `undefined` (the field was never on the wire) is
+  // also preserved as "no additions" so callers that don't manage photos
+  // at all are unaffected.
+  if (fields.photos !== undefined) {
+    const allowedContainers = ['dpr-photos', 'dpr-documents'];
+    if (!Array.isArray(fields.photos) || fields.photos.length > 50) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'photos must be an array (max 50)' });
+    }
+    for (let i = 0; i < fields.photos.length; i++) {
+      const p = fields.photos[i];
+      if (!p || typeof p !== 'object') {
+        return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}] must be an object` });
+      }
+      if (typeof p.ulid !== 'string' || !/^[0-9A-HJKMNP-TV-Z]{26}$/i.test(p.ulid)) {
+        return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}].ulid invalid` });
+      }
+      if (!allowedContainers.includes(p.container)) {
+        return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}].container invalid` });
+      }
+      if (!CONTENT_TYPE_EXT[p.contentType]) {
+        return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: `photos[${i}].contentType invalid` });
+      }
+      const sb = Number(p.sizeBytes);
+      if (!Number.isFinite(sb) || sb <= 0 || sb > 10 * 1024 * 1024) {
+        return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `photos[${i}].sizeBytes must be 1..${10 * 1024 * 1024}` });
+      }
+      if (typeof p.filename !== 'string' || p.filename.length > 255 || p.filename.includes('\0') || p.filename.includes('..')) {
+        return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}].filename invalid` });
+      }
+      if (p.takenAt !== undefined && p.takenAt !== null) {
+        const td = parseISODateTime(p.takenAt);
+        if (td === null) return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}].takenAt invalid` });
+      }
+    }
+  }
+
   // DR-006 (round-20): terminal states are immutable. APPROVED and
   // REJECTED represent decisions an admin made on the submitted DPR —
   // the owner editing them afterwards would silently rewrite the audit
@@ -1514,6 +1568,23 @@ router.put('/:id', async (req, res) => {
     });
   }
 
+  // SOL DR-005: pre-flight upload-intent check mirrors POST /api/dpr so a
+  // forged or expired photo on a PUT 400s BEFORE we bump version. Without
+  // this gate, a fresh `version` would be issued for an edit whose
+  // evidence never lands, forcing the next legitimate PUT to fight its
+  // own bumped version. Empty `photos: []` short-circuits inside the
+  // helper. The `photos: undefined` branch (caller never manages photos)
+  // doesn't reach here.
+  if (Array.isArray(fields.photos) && fields.photos.length > 0) {
+    const intentErr = await validatePhotoIntents({
+      prisma,
+      employeeId: req.employeeId,
+      photos: fields.photos,
+      context: 'dpr.update',
+    });
+    if (intentErr) return res.status(intentErr.status).json(intentErr.body);
+  }
+
   try {
     // DR-006 (round-20) + LPR-008: tighten the conditional update WHERE
     // to pin the CLIENT-supplied `version` (so a stale reader's update
@@ -1523,6 +1594,31 @@ router.put('/:id', async (req, res) => {
     // DRAFT → UNDER_REVIEW between our read and our update; pinning both
     // makes that race safe too). Same wire code (VERSION_CONFLICT) for
     // both races — both signal "the row moved, refetch and retry".
+    //
+    // SOL DR-005: when photos are supplied on a resumed edit, the
+    // `photos: { create: [...] }` nested write runs in the SAME
+    // conditional update as the field-level changes. That means: the
+    // photo rows and the row bump commit together, OR the whole edit is
+    // rejected with P2025 → 409 VERSION_CONFLICT — the user never sees a
+    // half-saved state where evidence landed but the narrative didn't.
+    const photoWrites = Array.isArray(fields.photos) && fields.photos.length > 0
+      ? {
+          create: fields.photos.map((p) => ({
+            ulid: p.ulid,
+            container: p.container,
+            filename: p.filename,
+            contentType: p.contentType,
+            sizeBytes: p.sizeBytes,
+            caption: p.caption || null,
+            location: p.location || null,
+            takenAt: p.takenAt ? new Date(p.takenAt) : null,
+          })),
+        }
+      : undefined;
+    // `fields.photos` is intentionally a control field, not a dPR column,
+    // so it MUST be stripped before the data spread — otherwise Prisma
+    // would try to set a non-existent `photos` scalar on the DPR row.
+    const { photos: _photoControlField, ...fieldsForUpdate } = fields;
     const updated = await prisma.dPR.update({
       where: {
         id,
@@ -1530,9 +1626,10 @@ router.put('/:id', async (req, res) => {
         status: existing.status,
       },
       data: {
-        ...fields,
+        ...fieldsForUpdate,
         version: { increment: 1 },
         updatedAt: new Date(),
+        ...(photoWrites ? { photos: photoWrites } : {}),
       },
       include: {
         photos: true,
@@ -1546,6 +1643,46 @@ router.put('/:id', async (req, res) => {
         drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
       },
     });
+
+    // SOL DR-005: claim the intents for the newly-persisted photo rows.
+    // Wrapped in `withRecordTransaction` so a sweep that retires a row
+    // mid-edit rolls back the photo rows we just created (the tx-level
+    // helper throws on a short count, equivalent to the POST path). The
+    // row update itself already committed above — that is a known
+    // gap in the strongest-atomicity sense, but it mirrors how POST
+    // handles photos today and matches the audit's "support photo
+    // additions deliberately" guidance. We re-fetch the row so the
+    // response includes the freshly-bound photo summary.
+    if (photoWrites) {
+      await withRecordTransaction(prisma, 'dPR', async (db) => {
+        await assertPhotoIntentsBindable({
+          tx: db,
+          employeeId: req.employeeId,
+          photos: fields.photos,
+        });
+        await bindPhotoIntentsTx({
+          tx: db,
+          employeeId: req.employeeId,
+          photos: fields.photos,
+          boundType: 'dpr',
+          recordId: id,
+        });
+      });
+      // Re-fetch so the response carries the complete photos list
+      // (including the rows we just created).
+      const refetched = await prisma.dPR.findUnique({
+        where: { id },
+        include: {
+          photos: true,
+          submittedBy: { select: { id: true, name: true, email: true } },
+          inspections: { select: { id: true, inspectionType: true, status: true, severity: true } },
+          boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
+          project: { select: { id: true, name: true, code: true } },
+          drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
+        },
+      });
+      return res.json(refetched || updated);
+    }
 
     res.json(updated);
   } catch (err) {

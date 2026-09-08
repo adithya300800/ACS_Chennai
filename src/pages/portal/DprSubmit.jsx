@@ -761,6 +761,75 @@ export default function DprSubmit() {
     handleFiles(e.dataTransfer.files);
   };
 
+  // SOL DR-005 (audit 2026-09-08): shared, explicit payload construction
+  // for every DPR write the form can make. The audit caught two divergent
+  // call sites — a POST that omitted `drawingId`/`drawingRev` (so the
+  // server stored `NULL` for the link the user clearly selected) and a PUT
+  // on a resumed draft that omitted `photos` (so newly-added evidence was
+  // silently dropped). Defining one builder that every branch consumes
+  // removes the divergence and makes it impossible for a future edit to
+  // fall back out of sync.
+  //
+  // Modes:
+  //   - newDraft     — POST /api/dpr with status:DRAFT  (Save Draft)
+  //   - newFinal     — POST /api/dpr with status:SUBMITTED  (first-time submit)
+  //   - resumedEdit  — PUT /api/dpr/:id (DRAFT resume Save Draft)
+  //   - publish      — POST /api/dpr/:id/submit — no body at all, dedicated
+  //                    endpoint owns the DRAFT -> SUBMITTED transition
+  //                    (DR-003). The helper returns null in this mode so
+  //                    the call site is explicit that there is no body to
+  //                    shape.
+  const buildDprPayload = useCallback(
+    ({ form: f, dailyFields: d, customSections: c, photosToSubmit: p, serializedManpower: m, mode }) => {
+      if (mode === 'publish') return null;
+      const payload = {
+        // [N1 Phase B] projectId is the FK; projectName is the denormalized
+        // legacy string. Both come from form state and are set atomically
+        // in handleProjectChange so they can't drift apart.
+        projectId: f.projectId || null,
+        projectName: f.projectName,
+        location: f.location,
+        reportDate: f.reportDate,
+        weather: f.weather,
+        temperature: f.temperature,
+        contractor: f.contractor,
+        workType: f.workType,
+        notes: notes || null,
+        // Round-12: 5 daily-narrative PMC fields.
+        workExecutedToday: d.workExecutedToday || null,
+        workLocation: d.workLocation || null,
+        manpowerSummary: m || null,
+        risksHindrances: d.risksHindrances || null,
+        materialsReceivedSummary: d.materialsReceivedSummary || null,
+        // User-added ad-hoc text + table sections.
+        customSections: Array.isArray(c) && c.length > 0 ? c : null,
+        // N7: optional BOQ link. null when unset so the backend treats it
+        // as "no link" rather than a literal "".
+        boqItemId: f.boqItemId || null,
+        // N3 (Phase F): optional drawing stamp. drawingId is the FK;
+        // drawingRev is denormalized so the wire record survives the
+        // original drawing being renamed or superseded.
+        drawingId: f.drawingId || null,
+        drawingRev: f.drawingRev || null,
+        // Photos: included on every mode that has a body. The backend
+        // PUT handler treats `photos: []` and `photos` undefined as
+        // "no additions" — existing DPRPhoto rows are never touched,
+        // which is the audit's explicit guarantee ("counters refuted
+        // deletion of previously bound server photos").
+        photos: Array.isArray(p) ? p : [],
+      };
+      // Status is only ever set on the create paths. The PUT mass-
+      // assignment allowlist deliberately excludes `status` — DR-003 made
+      // the publish transition its own endpoint. For resumed edits, the
+      // server keeps the existing status untouched.
+      if (mode === 'newDraft') payload.status = 'DRAFT';
+      else if (mode === 'newFinal') payload.status = 'SUBMITTED';
+      // mode === 'resumedEdit' → no `status` field.
+      return payload;
+    },
+    [notes]
+  );
+
   const handleSubmit = async (submitStatus) => {
     if (submittingRef.current) return;
     submittingRef.current = true;
@@ -878,40 +947,23 @@ export default function DprSubmit() {
             return;
           }
         } else {
+          // SOL DR-005: build the resumed-edit PUT body via the shared
+          // helper. The previous inline literal here omitted `photos`,
+          // so newly-added evidence on a resumed draft was silently
+          // dropped. The helper always includes the four evidence-link
+          // fields (drawingId, drawingRev, boqItemId, photos) along with
+          // the narrative set, so a future caller can't regress this.
+          const resumePayload = buildDprPayload({
+            form,
+            dailyFields,
+            customSections,
+            photosToSubmit,
+            serializedManpower,
+            mode: 'resumedEdit',
+          });
           await api.updateDpr(
             editingId,
-            {
-              // [N1 Phase B] projectId is the new foreign-key; projectName
-              // is kept on the wire for legacy-compat and as the canonical
-              // name to denormalize if the relation is null. Both come
-              // from form state — set atomically in handleProjectChange.
-              projectId: form.projectId || null,
-              projectName: form.projectName,
-              location: form.location,
-              reportDate: form.reportDate,
-              weather: form.weather,
-              temperature: form.temperature,
-              contractor: form.contractor,
-              workType: form.workType,
-              notes: notes || null,
-              // Round-12: 5 daily-narrative fields.
-              workExecutedToday: dailyFields.workExecutedToday || null,
-              workLocation: dailyFields.workLocation || null,
-              manpowerSummary: serializedManpower || null,
-              risksHindrances: dailyFields.risksHindrances || null,
-              materialsReceivedSummary: dailyFields.materialsReceivedSummary || null,
-              // User-added ad-hoc text + table sections.
-              customSections: Array.isArray(customSections) && customSections.length > 0 ? customSections : null,
-              // N7: optional BOQ link. Sent as null when unset so the
-              // backend treats it as "no link" rather than a literal "".
-              boqItemId: form.boqItemId || null,
-              // N3 (Phase F): optional drawing stamp. drawingId is the
-              // foreign key; drawingRev is denormalized so the wire
-              // record survives the original drawing being renamed or
-              // superseded.
-              drawingId: form.drawingId || null,
-              drawingRev: form.drawingRev || null,
-            },
+            resumePayload,
             editingVersion,
             accessToken
           );
@@ -930,38 +982,21 @@ export default function DprSubmit() {
           ? crypto.randomUUID()
           : `dpr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-        await api.createDpr(
-          {
-            // [N1 Phase B] projectId is the new foreign-key; projectName
-            // is kept on the wire for legacy-compat and as the canonical
-            // name to denormalize if the relation is null. Both come
-            // from form state — set atomically in handleProjectChange.
-            projectId: form.projectId || null,
-            projectName: form.projectName,
-            location: form.location,
-            reportDate: form.reportDate,
-            weather: form.weather,
-            temperature: form.temperature,
-            contractor: form.contractor,
-            workType: form.workType,
-            notes: notes || null,
-            status: submitStatus,
-            // Round-12: 5 daily-narrative fields.
-            workExecutedToday: dailyFields.workExecutedToday || null,
-            workLocation: dailyFields.workLocation || null,
-            manpowerSummary: serializedManpower || null,
-            risksHindrances: dailyFields.risksHindrances || null,
-            materialsReceivedSummary: dailyFields.materialsReceivedSummary || null,
-            // User-added ad-hoc text + table sections.
-            customSections: Array.isArray(customSections) && customSections.length > 0 ? customSections : null,
-            photos: photosToSubmit,
-            // workEntries intentionally omitted — moved to Inspection & Compliance Records.
-            // N7: optional BOQ link. Sent as null when unset.
-            boqItemId: form.boqItemId || null,
-          },
-          accessToken,
-          idempotencyKey
-        );
+        // SOL DR-005: build the create body via the shared helper. The
+        // previous inline literal omitted `drawingId` and `drawingRev`,
+        // so a fresh final DPR that picked a drawing would land
+        // drawingId=NULL even though the UI selected one. The helper
+        // carries all four evidence-link fields through both create and
+        // edit, so the round-trip is the same shape on every code path.
+        const createPayload = buildDprPayload({
+          form,
+          dailyFields,
+          customSections,
+          photosToSubmit,
+          serializedManpower,
+          mode: submitStatus === 'DRAFT' ? 'newDraft' : 'newFinal',
+        });
+        await api.createDpr(createPayload, accessToken, idempotencyKey);
         clearDraftForEmployee(currentEmployeeId);
         toast.push(submitStatus === 'DRAFT' ? 'Draft saved.' : 'DPR submitted successfully.', 'success');
         navigate('/portal/dpr/my');
