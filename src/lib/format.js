@@ -200,7 +200,12 @@ export function shiftMonth(yearMonth, delta) {
 export function formatShortDate(value) {
   if (value == null || value === '') return '';
   if (typeof value === 'string') {
-    const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+    // [DR-029] Anchor the date-only check at both ends so a full ISO
+    // timestamp like "2026-09-07T19:30:00.000Z" does NOT match the
+    // first 10 chars and fall through to the date-only branch (which
+    // would then render the LOCAL-TZ day, not the IST day). Only a
+    // bare YYYY-MM-DD string is a calendar day.
+    const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
     if (dateOnlyMatch) {
       const year = Number(dateOnlyMatch[1]);
       const month = Number(dateOnlyMatch[2]);
@@ -214,8 +219,11 @@ export function formatShortDate(value) {
   // Real timestamp / Date / unparseable → use the browser default.
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return '';
+  // [DR-029] Force Asia/Kolkata so an event at 02:00 IST on 8 Sept
+  // shows "8 Sept 2026" rather than the UTC day "7 Sept 2026".
   return d.toLocaleDateString('en-IN', {
     day: 'numeric', month: 'short', year: 'numeric',
+    timeZone: 'Asia/Kolkata',
   });
 }
 
@@ -236,9 +244,15 @@ export function formatDateTime(value) {
     }
     const d = new Date(value);
     if (!Number.isNaN(d.getTime())) {
+      // [DR-029] Force Asia/Kolkata so an event created at 02:00 IST on
+      // 8 Sept shows "8 Sept, 02:00 AM" regardless of the browser TZ.
+      // Without this, `toLocaleString` would use the browser's local
+      // time — UTC test runs would display the *previous* UTC day,
+      // disagreeing with the IST header rendered by businessDate.js.
       return d.toLocaleString('en-IN', {
         day: 'numeric', month: 'short', year: 'numeric',
         hour: '2-digit', minute: '2-digit',
+        timeZone: 'Asia/Kolkata',
       });
     }
     return '';
@@ -260,9 +274,12 @@ export function formatDateTime(value) {
         day: 'numeric', month: 'short', year: 'numeric',
       });
     }
+    // [DR-029] Same as the string path above — force Asia/Kolkata so
+    // event timestamps agree with the IST header.
     return value.toLocaleString('en-IN', {
       day: 'numeric', month: 'short', year: 'numeric',
       hour: '2-digit', minute: '2-digit',
+      timeZone: 'Asia/Kolkata',
     });
   }
   return '';
@@ -274,8 +291,11 @@ export function formatTimeOnly(value) {
   if (value == null || value === '') return '';
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return '';
+  // [DR-029] Force Asia/Kolkata so the wall-clock matches the IST
+  // header, not the browser local TZ.
   return d.toLocaleTimeString('en-IN', {
     hour: '2-digit', minute: '2-digit',
+    timeZone: 'Asia/Kolkata',
   });
 }
 
