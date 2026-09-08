@@ -138,7 +138,53 @@ const ALLOWED_STATUSES = new Set([
   'DRAFT', 'OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION', 'CLOSED', 'REJECTED',
 ]);
 
-const ALLOWED_SEVERITIES = new Set(['MINOR', 'MAJOR', 'CRITICAL', null]);
+const ALLOWED_SEVERITIES = new Set(['MINOR', 'MAJOR', 'CRITICAL', 'NEAR_MISS', null]);
+
+// DR-009: wire shape (Title Case from WorkTypes.jsx selector) → canonical
+// column shape (UPPER_SNAKE_CASE on InspectionRecord.severity). Explicit
+// table — no silent equivalents. Near Miss is intentionally NOT collapsed
+// into MINOR: the whole point of offering it on the form is to distinguish
+// a near-miss signal (no injury, no damage, but a real risk) from an actual
+// minor event. If a wire value isn't in this map, the validation block
+// below rejects it as SEVERITY_INVALID rather than defaulting to null.
+const SEVERITY_TITLE_TO_CANONICAL = {
+  'Near Miss': 'NEAR_MISS',
+  'Minor': 'MINOR',
+  'Major': 'MAJOR',
+  'Critical': 'CRITICAL',
+};
+// DR-009: sub-types whose form selector writes severity into `data.severity`
+// (not the wire top-level `severity` field). InspectionSubmit.jsx:873 sends
+// `severity: null` at the wire top level, so the canonical column stays
+// empty unless we copy from `data.severity`. Without this normalization the
+// admin queue loses the severity signal entirely.
+const SUBTYPES_WITH_STRUCTURED_SEVERITY = new Set([
+  'safety_violation', 'major_deviation', 'ncr',
+]);
+
+// DR-009: per-subtype required-array contract. Mirrors the `required: true`
+// flag on `type: 'checklist'` fields in WORK_TYPE_FIELDS
+// (src/pages/portal/WorkTypes.jsx) — server is authoritative for the wire
+// shape, frontend can only enforce UX rules. The Day Activity defect: a
+// user checks and then unchecks every checklist option, producing
+// `checklistItems: []`; the form's `if (field.required && !formData[field.name])`
+// treats the empty array as truthy and lets Add+Submit succeed with Overall
+// Status Pass. Server-side we require at least one entry. Keep this list
+// small and explicit — if a new sub-type adds a required array, add it
+// here at the same time as the WorkTypes.jsx edit.
+const REQUIRED_ARRAY_FIELDS_BY_TYPE = {
+  day_activity_inspection: ['checklistItems'],
+};
+
+// DR-009: nested action-status (WorkTypes.jsx:338 — 'Pending' | 'Under
+// Investigation' | 'Action Taken' | 'Closed') is intentionally NOT mapped
+// to the InspectionRecord.status state machine (OPEN / ACKNOWLEDGED /
+// IN_PROGRESS / PENDING_VERIFICATION / CLOSED / REJECTED). The wire form
+// captures the on-the-ground status of the safety action; the row's
+// status column is admin-controlled through the dedicated /acknowledge,
+// /close, /reject endpoints. Don't invent equivalences between the two —
+// the actionStatus lives free-form inside `data.actionStatus` and is
+// rendered verbatim on the admin queue card.
 
 // Walk an arbitrary JSON object and cap every string value at `max` chars.
 // Stops a malicious client from POSTing { data: { someField: '<2GB string>' } }
@@ -375,6 +421,12 @@ router.post('/', async (req, res) => {
     }
   }
   const finalStatus = requestedStatus;
+  // DR-009: canonical severity used at write time. The wire top-level
+  // `severity` field is already allowlist-validated above (line 325);
+  // this local mirrors it so the data-block normalization can promote
+  // `data.severity` (Title Case from the form selector) into the same
+  // column without mutating the const destructured from req.body.
+  let normalisedSeverity = severity;
 
   // data — must be a non-null object; cap string values to prevent abuse.
   // Per-field validation (required-ness) is the frontend's job (mirrors how
@@ -398,6 +450,61 @@ router.post('/', async (req, res) => {
         message: `data has oversized string fields: ${oversized.slice(0, 3).join('; ')}`,
         field: 'data',
       });
+    }
+
+    // DR-009: server-side enforcement of required-array fields. The
+    // frontend validates each field, but a checked-then-unchecked checklist
+    // (e.g. Day Activity `checklistItems: []`) used to slip past the form
+    // because the empty array is truthy in WorkEntryForm.jsx's
+    // `if (field.required && !formData[field.name])` check. Pin the
+    // contract server-side so an empty required array rejects with a
+    // actionable field path. DRAFT is exempt — the barest bones (just a
+    // project name) is the whole point of "Save as Draft".
+    if (requestedStatus !== 'DRAFT') {
+      const requiredArrays = REQUIRED_ARRAY_FIELDS_BY_TYPE[inspectionType] || [];
+      for (const fieldName of requiredArrays) {
+        const arr = data[fieldName];
+        if (!Array.isArray(arr) || arr.length === 0) {
+          return res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            code: 'REQUIRED_FIELD_EMPTY',
+            message: `${fieldName} must contain at least one entry`,
+            field: `data.${fieldName}`,
+          });
+        }
+      }
+    }
+
+    // DR-009: normalize wire-shaped severity into the canonical column.
+    // The form selector on WorkTypes.jsx:331 emits Title Case ('Near Miss',
+    // 'Minor', 'Major', 'Critical') into `data.severity`. InspectionSubmit
+    // (line 873) always sends `severity: null` at the wire top level, so
+    // without this copy the canonical column stays NULL and the admin
+    // queue loses the severity signal. Copy via SEVERITY_TITLE_TO_CANONICAL
+    // (explicit map — no silent defaults); reject anything outside the
+    // known set so a typo like 'Critcal' doesn't silently downgrade to
+    // null and lose the signal entirely. Wire top-level `severity` wins
+    // when both are present (it's the explicit signal); otherwise the
+    // mapped value flows through `normalisedSeverity`.
+    if (
+      SUBTYPES_WITH_STRUCTURED_SEVERITY.has(inspectionType)
+      && typeof data.severity === 'string'
+      && data.severity.length > 0
+    ) {
+      const mapped = SEVERITY_TITLE_TO_CANONICAL[data.severity];
+      if (mapped === undefined) {
+        return res.status(422).json({
+          error: `data.severity not recognized: ${data.severity}`,
+          code: 'SEVERITY_INVALID',
+          allowed: Object.keys(SEVERITY_TITLE_TO_CANONICAL),
+        });
+      }
+      // Wire top-level `severity` was null but `data.severity` mapped
+      // cleanly — promote it. If both are present, the wire top level
+      // wins (it's the explicit signal). If both are null, leave null.
+      if (normalisedSeverity === null || normalisedSeverity === undefined) {
+        normalisedSeverity = mapped;
+      }
     }
   }
 
@@ -525,7 +632,7 @@ router.post('/', async (req, res) => {
           inspectionType,
           data,
           status: finalStatus,
-          severity: severity || null,
+          severity: normalisedSeverity || null,
           submittedById: req.employeeId,
           // N7 (round-28): BOQ link — null when omitted so the FK
           // column is NULL (the row stays unlinked).
@@ -1116,6 +1223,31 @@ router.put('/:id', async (req, res) => {
     });
   }
 
+  // Read the existing row up front. The boqItemId validation below
+  // (round-28) already falls back to `existing.projectName` when the
+  // caller PUTs only a boqItemId without a fresh projectId/projectName;
+  // DR-009's data-shape validation also needs `existing.inspectionType`
+  // to know which required-array contract applies. Without the early
+  // fetch both call sites would TDZ on the const.
+  const existing = await prisma.inspectionRecord.findUnique({ where: { id } });
+  if (!existing) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'Inspection record not found' });
+  }
+  if (existing.submittedById !== req.employeeId) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Only owner can update' });
+  }
+  // SOL DR-005: DRAFT is also editable by the owner — that's the whole
+  // point of "Save as Draft". Once the record transitions to OPEN (and
+  // beyond) the state machine takes over and only the dedicated
+  // /acknowledge, /close, /reject endpoints can move it forward.
+  if (existing.status !== 'OPEN' && existing.status !== 'DRAFT') {
+    return res.status(409).json({
+      error: 'INSPECTION_LOCKED',
+      code: 'INSPECTION_LOCKED',
+      message: `Cannot edit a record in status ${existing.status}`,
+    });
+  }
+
   // Length caps on string fields
   const MAX = { projectName: 200, location: 200, weather: 80, contractor: 200 };
   for (const [k, cap] of Object.entries(MAX)) {
@@ -1200,6 +1332,14 @@ router.put('/:id', async (req, res) => {
   if (fields.severity !== undefined && fields.severity !== null && !ALLOWED_SEVERITIES.has(fields.severity)) {
     return res.status(422).json({ error: 'severity not allowed', code: 'SEVERITY_INVALID' });
   }
+  // Effective inspectionType for the data-shape checks below: a PUT
+  // can change inspectionType in the same request, so use the new value
+  // when present, otherwise the existing row's type.
+  const effectiveInspectionType = fields.inspectionType || existing.inspectionType;
+  // DR-009: normalised severity used at write time (same rationale as
+  // the POST handler — wire top-level wins, data.severity Title Case
+  // promotes into the canonical column when wire is null).
+  let normalisedSeverity = fields.severity;
   if (fields.data !== undefined) {
     if (fields.data == null || typeof fields.data !== 'object' || Array.isArray(fields.data)) {
       return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'data must be a JSON object' });
@@ -1212,26 +1352,48 @@ router.put('/:id', async (req, res) => {
         field: 'data',
       });
     }
-  }
 
-  // Owner check
-  const existing = await prisma.inspectionRecord.findUnique({ where: { id } });
-  if (!existing) {
-    return res.status(404).json({ error: 'NOT_FOUND', message: 'Inspection record not found' });
-  }
-  if (existing.submittedById !== req.employeeId) {
-    return res.status(403).json({ error: 'FORBIDDEN', message: 'Only owner can update' });
-  }
-  // SOL DR-005: DRAFT is also editable by the owner — that's the whole
-  // point of "Save as Draft". Once the record transitions to OPEN (and
-  // beyond) the state machine takes over and only the dedicated
-  // /acknowledge, /close, /reject endpoints can move it forward.
-  if (existing.status !== 'OPEN' && existing.status !== 'DRAFT') {
-    return res.status(409).json({
-      error: 'INSPECTION_LOCKED',
-      code: 'INSPECTION_LOCKED',
-      message: `Cannot edit a record in status ${existing.status}`,
-    });
+    // DR-009: required-array contract enforcement on PUT (same shape as
+    // POST). DRAFT records can have missing required arrays — that's the
+    // whole point of "Save as Draft". OPEN records (or DRAFT rows being
+    // promoted) must satisfy the contract so PUT can't be a trivial
+    // bypass of the create-time check.
+    if (existing.status !== 'DRAFT') {
+      const requiredArrays = REQUIRED_ARRAY_FIELDS_BY_TYPE[effectiveInspectionType] || [];
+      for (const fieldName of requiredArrays) {
+        const arr = fields.data[fieldName];
+        if (!Array.isArray(arr) || arr.length === 0) {
+          return res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            code: 'REQUIRED_FIELD_EMPTY',
+            message: `${fieldName} must contain at least one entry`,
+            field: `data.${fieldName}`,
+          });
+        }
+      }
+    }
+
+    // DR-009: severity normalization on PUT. Wire top-level `severity`
+    // is already allowlist-validated above (line 1332); this block
+    // promotes `data.severity` (Title Case from the form selector)
+    // into the canonical column when wire top-level is null/undefined.
+    if (
+      SUBTYPES_WITH_STRUCTURED_SEVERITY.has(effectiveInspectionType)
+      && typeof fields.data.severity === 'string'
+      && fields.data.severity.length > 0
+    ) {
+      const mapped = SEVERITY_TITLE_TO_CANONICAL[fields.data.severity];
+      if (mapped === undefined) {
+        return res.status(422).json({
+          error: `data.severity not recognized: ${fields.data.severity}`,
+          code: 'SEVERITY_INVALID',
+          allowed: Object.keys(SEVERITY_TITLE_TO_CANONICAL),
+        });
+      }
+      if (normalisedSeverity === null || normalisedSeverity === undefined) {
+        normalisedSeverity = mapped;
+      }
+    }
   }
 
   // [N3] Phase E: drawingId PUT validation. Same shape as POST —
@@ -1270,6 +1432,10 @@ router.put('/:id', async (req, res) => {
       where: { id, status: existing.status },
       data: {
         ...fields,
+        // DR-009: write the normalised severity rather than the raw wire
+        // value so a PUT that arrived with `severity: null` + a clean
+        // `data.severity` still promotes to the canonical column.
+        severity: normalisedSeverity === undefined ? fields.severity : normalisedSeverity || null,
         updatedAt: new Date(),
       },
       include: {
