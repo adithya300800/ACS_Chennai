@@ -88,15 +88,13 @@ export default function InspectionDashboard() {
 
   // Round-17 B-06: bulk-select state for the inspection admin queue. The
   // inspection status enum is OPEN / ACKNOWLEDGED / IN_PROGRESS /
-  // PENDING_VERIFICATION / CLOSED / REJECTED (schema.prisma). Admin actions
-  // (acknowledge / close / reject) only allow OPEN as a starting point;
-  // the backend's REJECT_FROM set also covers IN_PROGRESS / PENDING_VERIFICATION.
-  // Mirror that here so the checkbox only appears where bulk review is legal.
+  // PENDING_VERIFICATION / CLOSED / REJECTED (schema.prisma). The checkbox
+  // only appears where at least one bulk action is legal — see
+  // REVIEWABLE_STATUSES below, which is derived from the per-action sets.
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
   const [bulkRejectReason, setBulkRejectReason] = useState('');
 
-  const REVIEWABLE_STATUSES = new Set(['OPEN', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
   // Round-26.5: per-action allowed-from sets that mirror the backend
   // ACK_FROM / CLOSE_FROM / REJECT_FROM constants in routes/inspection.js.
   // Without this, an admin who selects an OPEN record and clicks "Close" gets
@@ -106,6 +104,19 @@ export default function InspectionDashboard() {
   const ACK_ALLOWED_FROM = new Set(['OPEN']);
   const CLOSE_ALLOWED_FROM = new Set(['ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
   const REJECT_ALLOWED_FROM = new Set(['OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
+  // DR-008 (2026-09-08 audit): a row is selectable iff *some* admin action can
+  // act on it — i.e. the union of the three per-action allowed-from sets.
+  // Previously this was a hand-typed set that omitted ACKNOWLEDGED, so an
+  // acknowledged record rendered with no checkbox and therefore no reachable
+  // Close action, even though CLOSE_ALLOWED_FROM / REJECT_ALLOWED_FROM both
+  // accept it. Deriving the set means it can never drift from the per-action
+  // sets again. Per-action restrictions are unchanged: OPEN is selectable but
+  // still cannot Close directly (the Close button stays disabled for it).
+  const REVIEWABLE_STATUSES = new Set([
+    ...ACK_ALLOWED_FROM,
+    ...CLOSE_ALLOWED_FROM,
+    ...REJECT_ALLOWED_FROM,
+  ]);
   const selectableInspections = inspections.filter((i) => REVIEWABLE_STATUSES.has(i.status));
   const selectableIds = selectableInspections.map((i) => i.id);
   const allSelected =
