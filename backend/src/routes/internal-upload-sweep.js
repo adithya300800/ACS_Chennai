@@ -87,6 +87,33 @@
 // deleting live bytes — a redundant lookup failure must never turn into
 // silent data loss.
 //
+// SOL DR-001 — extending the defence to non-photo document owners
+// ────────────────────────────────────────────────────────────────────
+//
+// DPR photos and Inspection photos store their blob reference as a
+// dedicated `ulid` FK column, so the referenced-ulid set above is
+// sufficient. Drawing, ProjectAttachment, and BillingCertification store
+// their reference as a `blobPath` STRING field — the legacy-intent
+// backfill doesn't cover them, and the post-deploy `uploadIntentUlid`
+// column is only populated for new rows.
+//
+// The DR-001 widening has two halves:
+//   1. `uploadIntentUlid` columns on drawing / project_attachment /
+//      billing_certification (added by migration
+//      20260908130000_dr001_upload_intent_ulid_binding). For new entities
+//      populated via the 4-step pipeline the route stamps this verbatim
+//      inside the same transaction as the intent claim — so the sweep
+//      sees `boundAt != NULL` and never tries to retire the blob. The
+//      columns are also indexed for the sweep's pre-collect.
+//   2. The legacy defence below collects the *blobPath* of every
+//      non-deleted Drawing / ProjectAttachment / BillingCertification
+//      row and excludes intents whose `blobPath` matches. This protects
+//      the pre-deploy rows whose `uploadIntentUlid` is NULL — their
+//      `blobPath` is the only authoritative signal that "this blob is
+//      in active use". Once a future migration backfills the ulid for
+//      legacy rows, both halves of the defence continue to work
+//      independently.
+//
 // The dry-run mode (body `{ "dryRun": true }`) returns the same counts the
 // real run would produce without flipping any rows or calling R2. It is
 // the operator-evidence tool DR-002 acceptance criteria require: rehearse
@@ -162,20 +189,37 @@ async function tryDeleteBlob(intent) {
  * signal the caller uses to abort the entire sweep rather than risk
  * deleting live bytes.
  *
- * Both queries are deliberately narrow: only `ulid` is selected. dpr_photo
- * and inspection_photo can each be in the hundreds of thousands once the
- * portal is in steady-state, but the indexed `ulid` lookup is bounded by
- * the index size and we only materialise the strings, not the rows.
+ * Both queries are deliberately narrow: only the ulid column is selected.
+ * dpr_photo and inspection_photo can each be in the hundreds of thousands
+ * once the portal is in steady-state, but the indexed ulid lookup is
+ * bounded by the index size and we only materialise the strings, not the
+ * rows.
+ *
+ * SOL DR-001: extended to also collect the `uploadIntentUlid` columns on
+ * drawing / project_attachment / billing_certification. New entities
+ * populate these via the 4-step upload pipeline's binding claim — see
+ * routes/drawings.js, projectAttachments.js, billingCertifications.js.
+ * The queries are indexed so the read cost is bounded.
+ *
+ * Each source declares its own `selectField` because the Photo tables
+ * use `ulid` (an FK-shaped column) while the document tables use
+ * `uploadIntentUlid` (a new nullable column added by the DR-001
+ * migration). Hard-coding one column name across both shapes would
+ * have broken existing tests + the wire contract for dpr_photo.
  */
-async function collectPhotoReferencedUlids(prisma) {
+async function collectReferencedUlids(prisma) {
   const out = new Set();
   const sources = [
-    { name: 'dpr_photo', delegate: prisma && prisma.dPRPhoto },
-    { name: 'inspection_photo', delegate: prisma && prisma.inspectionPhoto },
+    { name: 'dpr_photo.ulid', delegate: prisma && prisma.dPRPhoto, selectField: 'ulid' },
+    { name: 'inspection_photo.ulid', delegate: prisma && prisma.inspectionPhoto, selectField: 'ulid' },
+    // [DR-001] new entities stamped by the route layer
+    { name: 'drawing.uploadIntentUlid', delegate: prisma && prisma.drawing, selectField: 'uploadIntentUlid' },
+    { name: 'projectAttachment.uploadIntentUlid', delegate: prisma && prisma.projectAttachment, selectField: 'uploadIntentUlid' },
+    { name: 'billingCertification.uploadIntentUlid', delegate: prisma && prisma.billingCertification, selectField: 'uploadIntentUlid' },
   ];
   for (const src of sources) {
     if (!src.delegate || typeof src.delegate.findMany !== 'function') {
-      // The Photo model may legitimately be absent in unit-test mocks that
+      // The model may legitimately be absent in unit-test mocks that
       // exercise only the intent table. Treat that as a hard fail rather
       // than a silent skip — the safety guarantee requires the data, not
       // its absence.
@@ -185,10 +229,76 @@ async function collectPhotoReferencedUlids(prisma) {
       return null;
     }
     try {
-      const refs = await src.delegate.findMany({ select: { ulid: true } });
-      for (const row of refs) if (row && row.ulid) out.add(row.ulid);
+      const refs = await src.delegate.findMany({ select: { [src.selectField]: true } });
+      for (const row of refs) if (row && row[src.selectField]) out.add(row[src.selectField]);
     } catch (err) {
       console.error('[internal-upload-sweep] referenced-ulid lookup failed', {
+        source: src.name,
+        errCode: err && err.code,
+        errMessage: err && err.message ? err.message.split('\n')[0] : String(err),
+      });
+      return null;
+    }
+  }
+  return out;
+}
+
+/**
+ * SOL DR-001: collect the set of blob paths currently referenced by any
+ * non-deleted Drawing / ProjectAttachment / BillingCertification row.
+ *
+ * This is the LEGACY defence — it protects pre-deploy rows whose
+ * `uploadIntentUlid` is NULL but whose `blobPath` is in active use.
+ * New entities are protected by their explicit `uploadIntentUlid`
+ * (see collectReferencedUlids above) — this set is a defence-in-depth
+ * belt-and-braces that also catches an edge case: a drawing whose
+ * `pdfBlobPath` was set via PATCH without a corresponding intent claim.
+ *
+ * Returns `null` when any source table cannot be queried — same
+ * fatal-abort contract as collectReferencedUlids. A failed lookup
+ * must not silently admit unprotected deletes.
+ *
+ * Soft-deleted rows are excluded: `ProjectAttachment.deletedAt` and
+ * `BillingCertification.deletedAt` filter out archived attachments.
+ * Drawings use `status='SUPERSEDED'` as their lifecycle marker; we
+ * exclude those because the bytes behind a superseded drawing are no
+ * longer in active use by the stamp UI (a successor row carries the
+ * audit chain).
+ */
+async function collectReferencedBlobPaths(prisma) {
+  const out = new Set();
+  const sources = [
+    {
+      name: 'drawing.pdfBlobPath',
+      delegate: prisma && prisma.drawing,
+      where: { status: 'ACTIVE', pdfBlobPath: { not: null } },
+      field: 'pdfBlobPath',
+    },
+    {
+      name: 'projectAttachment.blobPath',
+      delegate: prisma && prisma.projectAttachment,
+      where: { deletedAt: null },
+      field: 'blobPath',
+    },
+    {
+      name: 'billingCertification.blobPath',
+      delegate: prisma && prisma.billingCertification,
+      where: { deletedAt: null, blobPath: { not: null } },
+      field: 'blobPath',
+    },
+  ];
+  for (const src of sources) {
+    if (!src.delegate || typeof src.delegate.findMany !== 'function') {
+      console.error('[internal-upload-sweep] referenced-blobPath lookup missing model', {
+        source: src.name,
+      });
+      return null;
+    }
+    try {
+      const refs = await src.delegate.findMany({ where: src.where, select: { [src.field]: true } });
+      for (const row of refs) if (row && row[src.field]) out.add(row[src.field]);
+    } catch (err) {
+      console.error('[internal-upload-sweep] referenced-blobPath lookup failed', {
         source: src.name,
         errCode: err && err.code,
         errMessage: err && err.message ? err.message.split('\n')[0] : String(err),
@@ -216,15 +326,34 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
   // use by an accepted report would have its R2 bytes retired, leaving the
   // report's photo row pointing at a 404.
   //
+  // SOL DR-001: extended to also cover Drawing / ProjectAttachment /
+  // BillingCertification via the new `uploadIntentUlid` columns. The
+  // pre-collect is the same shape — one Set, O(1) membership, fatal-abort
+  // on lookup failure.
+  //
   // Failure here aborts the entire sweep. A failed lookup must not silently
   // admit unprotected deletes — that would re-open the very hole DR-002
   // exists to close. We deliberately treat this as fatal rather than
   // warn-and-continue.
-  const photoReferencedUlids = await collectPhotoReferencedUlids(prisma);
-  if (photoReferencedUlids === null) {
+  const referencedUlids = await collectReferencedUlids(prisma);
+  if (referencedUlids === null) {
     return res.status(503).json({
       error: 'REFERENCED_ULID_LOOKUP_FAILED',
       message: 'Could not enumerate ulids referenced by photo tables; sweep aborted to protect live data.',
+    });
+  }
+
+  // SOL DR-001: legacy defence — exclude intents whose `blobPath` is still
+  // referenced by a non-deleted Drawing / ProjectAttachment /
+  // BillingCertification row. Protects pre-deploy rows whose
+  // `uploadIntentUlid` is NULL. Same fatal-abort contract on lookup
+  // failure — a redundant lookup failure must never turn into silent data
+  // loss.
+  const referencedBlobPaths = await collectReferencedBlobPaths(prisma);
+  if (referencedBlobPaths === null) {
+    return res.status(503).json({
+      error: 'REFERENCED_BLOBPATH_LOOKUP_FAILED',
+      message: 'Could not enumerate blobPaths referenced by document tables; sweep aborted to protect live data.',
     });
   }
 
@@ -284,11 +413,24 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
         if (actions() >= PER_RUN_MAX) { stoppedReason = 'per_run_max'; break outer; }
         if (Date.now() - startTime >= RUN_BUDGET_MS) { stoppedReason = 'time_budget'; break outer; }
 
-        // SOL DR-002: per-row defence. Even if a candidate matches the
-        // batch predicate (buildWhere already excludes photo-referenced
-        // ulids), re-check defensively in case of a race where a Photo row
-        // was inserted between the buildWhere query and this iteration.
-        if (intent && intent.ulid && photoReferencedUlids.has(intent.ulid)) {
+        // SOL DR-002 / DR-001: per-row defence. Even if a candidate
+        // matches the batch predicate (buildWhere already excludes
+        // photo-referenced ulids), re-check defensively in case of a race
+        // where a Photo row was inserted between the buildWhere query and
+        // this iteration.
+        //
+        // Two halves of the defence (both required):
+        //   1. ulid match against any of: dpr_photo, inspection_photo, OR
+        //      a new entity's `uploadIntentUlid` (DR-001 widening).
+        //   2. blobPath match against a non-deleted
+        //      Drawing/ProjectAttachment/BillingCertification row (DR-001
+        //      legacy defence — covers pre-deploy rows whose
+        //      `uploadIntentUlid` is NULL).
+        const isReferenced = (
+          (intent && intent.ulid && referencedUlids.has(intent.ulid)) ||
+          (intent && intent.blobPath && referencedBlobPaths.has(intent.blobPath))
+        );
+        if (isReferenced) {
           if (onPreservedByPhotoRef) onPreservedByPhotoRef();
           continue;
         }
@@ -498,12 +640,17 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
     // would have been in a real run. In real-run mode it stays 0 and is
     // included only for schema symmetry so dashboards can render one row.
     blobsWouldClean: dryRun ? blobsWouldClean : 0,
-    // SOL DR-002: candidates pass 2 skipped because a Photo row still
-    // references the ulid. Always populated (real or dry-run) so an operator
-    // can see whether the legacy-intent backfill left anything for the
-    // ongoing defence to preserve.
+    // SOL DR-002 / DR-001: candidates pass 2 skipped because an active
+    // row still references the ulid OR the blobPath. Always populated
+    // (real or dry-run) so an operator can see whether the legacy
+    // defences are saving rows.
     preservedByPhotoRef,
-    photoReferencedCount: photoReferencedUlids.size,
+    // [DR-001] Renamed from `photoReferencedCount` — the set now spans
+    // photo tables + the new `uploadIntentUlid` columns. Kept the legacy
+    // field name for back-compat with the existing DR-002 dashboards.
+    photoReferencedCount: referencedUlids.size,
+    // [DR-001] New: size of the legacy blobPath defence set.
+    referencedBlobPathCount: referencedBlobPaths.size,
     skipped,
     batches,
     stoppedReason,

@@ -79,6 +79,17 @@ const { mapPrismaError, parseStrictISODate, toDateOnly } = require('../lib/error
 const { hashIdentifier } = require('../lib/pii');
 const { randomUUID } = require('crypto');
 const { generateReadSASUrl, READ_URL_TTL_SECONDS } = require('../lib/blobStorage');
+// [DR-001] Mirror the drawings.js + projectAttachments.js binding — the
+// single `blobPath` field is wrapped as a one-element `photos` array at
+// the call site so the helper's array shape doesn't need a parallel
+// "single" API. See lib/uploadIntentBinding.js for the full rationale.
+const {
+  validatePhotoIntents,
+  assertPhotoIntentsBindable,
+  bindPhotoIntentsTx,
+  withRecordTransaction,
+  photoBindingLostResponse,
+} = require('../lib/uploadIntentBinding');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -118,6 +129,9 @@ const FIELD_MAX = {
   filename: 512,
   contentType: 120,
   blobPath: 1024,
+  // [DR-001] Crockford base32 ULIDs are 26 chars; 30 leaves headroom for
+  // any future prefix scheme without forcing a schema change.
+  uploadIntentUlid: 30,
 };
 
 const DEFAULT_LIMIT = 50;
@@ -201,6 +215,9 @@ function serializeBillingCertification(row) {
     contentType: row.contentType,
     sizeBytes: row.sizeBytes,
     blobPath: row.blobPath,
+    // [DR-001] Internal: ulid of the UploadIntent row that vouched for
+    // `blobPath`. Echoed for traceability; not consumed by the React UI.
+    uploadIntentUlid: row.uploadIntentUlid,
     uploadedAt: row.uploadedAt instanceof Date ? row.uploadedAt.toISOString() : row.uploadedAt,
     deletedAt: row.deletedAt instanceof Date ? row.deletedAt.toISOString() : row.deletedAt,
     createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
@@ -812,6 +829,32 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
     }
   }
 
+  // [DR-001] Optional — ulid of the UploadIntent row that vouched for
+  // `blobPath`. Reject if it's not a string when supplied. Legacy
+  // clients uploading through the old 4-step pipeline don't know about
+  // the column yet; they POST with a bare blobPath and the sweep's
+  // referenced-blobPath defence covers them until they upgrade.
+  if (body.uploadIntentUlid != null && body.uploadIntentUlid !== '') {
+    if (typeof body.uploadIntentUlid !== 'string') {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'uploadIntentUlid must be a string' });
+    }
+  }
+
+  // [DR-001] Validate the upload intent BEFORE we touch any rows when
+  // an attachment is being submitted. Same single-element-array adapter
+  // as drawings.js / projectAttachments.js.
+  let intentWrapper = null;
+  if (body.blobPath && body.uploadIntentUlid) {
+    intentWrapper = [{ ulid: body.uploadIntentUlid }];
+    const intentErr = await validatePhotoIntents({
+      prisma,
+      employeeId: req.employeeId,
+      photos: intentWrapper,
+      context: 'billingCertification.create',
+    });
+    if (intentErr) return res.status(intentErr.status).json(intentErr.body);
+  }
+
   // Project must exist + be active. Mirrors drawing.js#POST.
   const project = await prisma.project.findUnique({
     where: { id: projectId },
@@ -852,6 +895,9 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
     contentType: body.contentType || null,
     sizeBytes: body.sizeBytes || null,
     blobPath: body.blobPath || null,
+    // [DR-001] Stamp the ulid verbatim so the sweep's referenced-ulid
+    // defence can find this row. NULL for legacy uploads.
+    uploadIntentUlid: body.uploadIntentUlid || null,
     uploadedAt: body.blobPath ? now : null,
   };
   if (initialStatus === 'CERTIFIED') {
@@ -860,7 +906,27 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
   }
 
   try {
-    const row = await prisma.billingCertification.create({ data });
+    // [DR-001] Create + intent claim are one tx. Mirrors the dpr.js
+    // contract — see lib/uploadIntentBinding.js for the rationale. A
+    // sweep that retires the blob between validate and here makes
+    // bindPhotoIntentsTx throw `PhotoBindingLostError`, the whole tx
+    // rolls back, the client gets 409 and re-uploads.
+    const row = await withRecordTransaction(prisma, 'billingCertification', async (db) => {
+      if (intentWrapper) {
+        await assertPhotoIntentsBindable({ tx: db, employeeId: req.employeeId, photos: intentWrapper });
+      }
+      const created = await db.billingCertification.create({ data });
+      if (intentWrapper) {
+        await bindPhotoIntentsTx({
+          tx: db,
+          employeeId: req.employeeId,
+          photos: intentWrapper,
+          boundType: 'billingCertification',
+          recordId: created.id,
+        });
+      }
+      return created;
+    });
     const full = await prisma.billingCertification.findUnique({
       where: { id: row.id },
       include: {
@@ -871,6 +937,17 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
     });
     res.status(201).json(serializeBillingCertification(full));
   } catch (err) {
+    // [DR-001] Lost upload claim → 409, never 500. Same envelope as
+    // dpr.js — the client knows what to do.
+    const bindingLost = photoBindingLostResponse(err);
+    if (bindingLost) {
+      console.warn('BillingCertification create rolled back — upload binding lost', {
+        employeeHash: hashIdentifier(req.employeeId),
+        expected: err.expected,
+        bound: err.bound,
+      });
+      return res.status(bindingLost.status).json(bindingLost.body);
+    }
     console.error('[billing-certifications] create failed', {
       employeeHash: hashIdentifier(req.employeeId),
       projectId,
@@ -906,6 +983,15 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
     'gstAmount', 'poValue', 'balanceValue',
     'remarks', 'disputeReason',
     'filename', 'contentType', 'blobPath', 'sizeBytes',
+    // [DR-001] PATCH-time intent swap: when blobPath is being replaced,
+    // the new uploadIntentUlid (if supplied) is stamped verbatim. We do
+    // NOT claim the new intent inside this PATCH transaction — the row
+    // already exists and binding failures must not turn into 500s. The
+    // sweep's CONFIRMED-orphan pass retires the create-time intent after
+    // its grace window (the bytes behind it are now orphaned by the
+    // swap), and the new intent is left unbound but CONFIRMED — also
+    // reclaimed on its next pass. Same caveat as drawings.js PATCH.
+    'uploadIntentUlid',
   ];
   const unknown = Object.keys(body).filter((k) => !ALLOWED_PATCH_FIELDS.includes(k));
   if (unknown.length) {
@@ -970,6 +1056,16 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
       return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'disputeReason must be a string' });
     }
     data.disputeReason = body.disputeReason ? body.disputeReason.trim() : null;
+  }
+  // [DR-001] PATCH-time intent swap. Stamped verbatim when supplied;
+  // explicit null clears the reference (the attachment is being
+  // detached). We don't validate or claim the intent here — see the
+  // ALLOWED_PATCH_FIELDS comment for the rationale.
+  if (body.uploadIntentUlid !== undefined) {
+    if (body.uploadIntentUlid !== null && body.uploadIntentUlid !== '' && typeof body.uploadIntentUlid !== 'string') {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'uploadIntentUlid must be a string or null' });
+    }
+    data.uploadIntentUlid = body.uploadIntentUlid || null;
   }
   // Attachment-field swaps. Same all-or-nothing check as POST.
   const attachFields = ['filename', 'contentType', 'blobPath'];

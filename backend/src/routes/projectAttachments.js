@@ -68,6 +68,16 @@ const { mapPrismaError } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
 const { randomUUID } = require('crypto');
 const { generateReadSASUrl, READ_URL_TTL_SECONDS } = require('../lib/blobStorage');
+// [DR-001] Mirror the drawings.js binding — the single `blobPath` field
+// is wrapped as a one-element `photos` array at the call site so the
+// helper's array shape doesn't need a parallel "single" API.
+const {
+  validatePhotoIntents,
+  assertPhotoIntentsBindable,
+  bindPhotoIntentsTx,
+  withRecordTransaction,
+  photoBindingLostResponse,
+} = require('../lib/uploadIntentBinding');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -107,6 +117,9 @@ const FIELD_MAX = {
   filename: 512,
   contentType: 100,
   blobPath: 1024,
+  // [DR-001] Crockford base32 ULIDs are 26 chars; 30 leaves headroom for
+  // any future prefix scheme without forcing a schema change.
+  uploadIntentUlid: 30,
 };
 
 function isValidUuid(s) {
@@ -126,6 +139,9 @@ function serializeProjectAttachment(row) {
     contentType: row.contentType,
     sizeBytes: row.sizeBytes,
     blobPath: row.blobPath,
+    // [DR-001] Internal: ulid of the UploadIntent row that vouched for
+    // `blobPath`. Echoed for traceability; not consumed by the React UI.
+    uploadIntentUlid: row.uploadIntentUlid,
     uploadedById: row.uploadedById,
     uploadedAt: row.uploadedAt instanceof Date ? row.uploadedAt.toISOString() : row.uploadedAt,
     deletedAt: row.deletedAt instanceof Date ? row.deletedAt.toISOString() : row.deletedAt,
@@ -395,6 +411,15 @@ router.post('/', asyncHandler(async (req, res) => {
   if (!body.blobPath || typeof body.blobPath !== 'string') {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'blobPath is required' });
   }
+  // [DR-001] Optional — ulid of the UploadIntent row that vouched for
+  // `blobPath`. When supplied it MUST be a non-empty string; when
+  // omitted the legacy clients keep working and the sweep's
+  // referenced-blobPath defence covers them until they upgrade.
+  if (body.uploadIntentUlid != null && body.uploadIntentUlid !== '') {
+    if (typeof body.uploadIntentUlid !== 'string') {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'uploadIntentUlid must be a string' });
+    }
+  }
   if (!body.type || !VALID_REPORT_TYPES.has(body.type)) {
     return res.status(400).json({
       error: 'VALIDATION_ERROR',
@@ -414,22 +439,71 @@ router.post('/', asyncHandler(async (req, res) => {
     }
   }
 
+  // [DR-001] Validate the upload intent BEFORE we touch any rows.
+  // Same single-element-array adapter as drawings.js — the helper only
+  // reads `p.ulid` from each entry.
+  let intentWrapper = null;
+  if (body.uploadIntentUlid) {
+    intentWrapper = [{ ulid: body.uploadIntentUlid }];
+    const intentErr = await validatePhotoIntents({
+      prisma,
+      employeeId: req.employeeId,
+      photos: intentWrapper,
+      context: 'projectAttachment.create',
+    });
+    if (intentErr) return res.status(intentErr.status).json(intentErr.body);
+  }
+
   try {
-    const row = await prisma.projectAttachment.create({
-      data: {
-        id: randomUUID(),
-        projectId,
-        type: body.type,
-        title: body.title ? body.title.trim() : null,
-        filename: body.filename.trim(),
-        contentType: body.contentType,
-        sizeBytes: body.sizeBytes,
-        blobPath: body.blobPath,
-        uploadedById: req.employeeId,
-      },
+    // [DR-001] Create + intent claim are one tx. Mirrors the dpr.js
+    // contract — see lib/uploadIntentBinding.js for the rationale. A
+    // sweep that retires the blob between validate and here makes
+    // bindPhotoIntentsTx throw `PhotoBindingLostError`, the whole tx
+    // rolls back, the client gets 409 and re-uploads.
+    const row = await withRecordTransaction(prisma, 'projectAttachment', async (db) => {
+      if (intentWrapper) {
+        await assertPhotoIntentsBindable({ tx: db, employeeId: req.employeeId, photos: intentWrapper });
+      }
+      const created = await db.projectAttachment.create({
+        data: {
+          id: randomUUID(),
+          projectId,
+          type: body.type,
+          title: body.title ? body.title.trim() : null,
+          filename: body.filename.trim(),
+          contentType: body.contentType,
+          sizeBytes: body.sizeBytes,
+          blobPath: body.blobPath,
+          // [DR-001] Stamp the ulid verbatim so the sweep's
+          // referenced-ulid defence can find this row.
+          uploadIntentUlid: body.uploadIntentUlid || null,
+          uploadedById: req.employeeId,
+        },
+      });
+      if (intentWrapper) {
+        await bindPhotoIntentsTx({
+          tx: db,
+          employeeId: req.employeeId,
+          photos: intentWrapper,
+          boundType: 'projectAttachment',
+          recordId: created.id,
+        });
+      }
+      return created;
     });
     res.status(201).json(serializeProjectAttachment(row));
   } catch (err) {
+    // [DR-001] Lost upload claim → 409, never 500. Same envelope as
+    // dpr.js — the client knows what to do.
+    const bindingLost = photoBindingLostResponse(err);
+    if (bindingLost) {
+      console.warn('ProjectAttachment create rolled back — upload binding lost', {
+        employeeHash: hashIdentifier(req.employeeId),
+        expected: err.expected,
+        bound: err.bound,
+      });
+      return res.status(bindingLost.status).json(bindingLost.body);
+    }
     console.error('[project-attachments] create failed', {
       employeeHash: hashIdentifier(req.employeeId),
       projectId,

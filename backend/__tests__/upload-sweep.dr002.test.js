@@ -91,6 +91,18 @@ function buildPrisma({ intents = [], dprPhotos = [], inspectionPhotos = [] } = {
     inspectionPhoto: {
       findMany: jest.fn(async () => inspectionPhotos.map((p) => ({ ulid: p.ulid }))),
     },
+    // [DR-001] New entity models — the existing DR-002 suites don't
+    // populate them, but the harness must expose the delegates so the
+    // sweep's wider pre-collect doesn't fail-closed.
+    drawing: {
+      findMany: jest.fn(async () => []),
+    },
+    projectAttachment: {
+      findMany: jest.fn(async () => []),
+    },
+    billingCertification: {
+      findMany: jest.fn(async () => []),
+    },
     _intents: intents,
     _updateManyCalls: updateManyCalls,
   };

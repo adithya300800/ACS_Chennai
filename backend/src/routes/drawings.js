@@ -66,6 +66,18 @@ const { hashIdentifier } = require('../lib/pii');
 const { randomUUID } = require('crypto');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
 const { generateReadSASUrl, READ_URL_TTL_SECONDS } = require('../lib/blobStorage');
+// [DR-001] Reuse the S3-7 + DR-006 binding primitives — they are about
+// upload intents, not literally photos, even though the function names
+// carry the photo terminology. The single `pdfBlobPath` field is wrapped
+// as a one-element `photos` array at the call site so the helpers' array
+// shape doesn't need a parallel "single" API.
+const {
+  validatePhotoIntents,
+  assertPhotoIntentsBindable,
+  bindPhotoIntentsTx,
+  withRecordTransaction,
+  photoBindingLostResponse,
+} = require('../lib/uploadIntentBinding');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -83,6 +95,9 @@ const FIELD_MAX = {
   title: 200,
   revision: 20,
   pdfBlobPath: 1024,
+  // [DR-001] Crockford base32 ULIDs are 26 chars; 30 leaves headroom for
+  // any future prefix scheme without forcing a schema change.
+  uploadIntentUlid: 30,
 };
 
 function isValidUuid(s) {
@@ -105,6 +120,10 @@ function serializeDrawing(row) {
     issuedDate: toDateOnly(row.issuedDate),
     issuedById: row.issuedById,
     pdfBlobPath: row.pdfBlobPath,
+    // [DR-001] Internal: ulid of the UploadIntent row that vouched for
+    // `pdfBlobPath`. Echoed back to the client so the round-trip is
+    // traceable end-to-end; not used by the React UI yet.
+    uploadIntentUlid: row.uploadIntentUlid,
     supersedesId: row.supersedesId,
     createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
     updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt,
@@ -187,6 +206,19 @@ function validateDrawingPayload(body, { partial = false } = {}) {
       return { ok: false, error: 'pdfBlobPath must be a string' };
     } else {
       out.pdfBlobPath = body.pdfBlobPath;
+    }
+  }
+  // [DR-001] Optional — ulid of the UploadIntent row that vouched for
+  // `pdfBlobPath`. Only meaningful when pdfBlobPath is supplied; rejected
+  // otherwise so the column never carries a stale reference to a
+  // blob that no longer exists on this row.
+  if (!partial || body.uploadIntentUlid !== undefined) {
+    if (body.uploadIntentUlid == null || body.uploadIntentUlid === '') {
+      out.uploadIntentUlid = null;
+    } else if (typeof body.uploadIntentUlid !== 'string') {
+      return { ok: false, error: 'uploadIntentUlid must be a string' };
+    } else {
+      out.uploadIntentUlid = body.uploadIntentUlid;
     }
   }
   if (!partial || body.supersedesId !== undefined) {
@@ -447,20 +479,53 @@ router.post('/', requireAuth, asyncHandler(async (req, res) => {
     }
   }
 
+  // [DR-001] Validate the upload intent BEFORE we touch any rows. The
+  // helper takes a `photos` array but only reads `p.ulid` from each
+  // entry, so a single-element array is the right adapter shape — no
+  // parallel "single-ulid" helper needed.
+  //
+  // Skip when no pdfBlobPath was supplied: a drawing without an
+  // attachment never needs an intent claim. Also skip when the client
+  // omitted uploadIntentUlid (legacy clients uploading through the old
+  // 4-step pipeline don't know about the column yet — they POST with a
+  // bare blobPath; the sweep's referenced-blobPath defence covers them
+  // until they upgrade).
+  let intentWrapper = null;
+  if (data.pdfBlobPath && data.uploadIntentUlid) {
+    intentWrapper = [{ ulid: data.uploadIntentUlid }];
+    const intentErr = await validatePhotoIntents({
+      prisma,
+      employeeId: req.employeeId,
+      photos: intentWrapper,
+      context: 'drawing.create',
+    });
+    if (intentErr) return res.status(intentErr.status).json(intentErr.body);
+  }
+
   try {
-    const drawing = await prisma.$transaction(async (tx) => {
+    // [DR-001] Use the same `withRecordTransaction` driver as dpr.js so
+    // the create + intent claim are one tx. If the sweep retired the
+    // intent between validate and here, `assertPhotoIntentsBindable`
+    // re-asserts the CONFIRMED predicate under the tx snapshot and the
+    // bind updateMany hits 0 rows → we throw `PhotoBindingLostError` →
+    // the whole tx rolls back, no half-saved drawing.
+    const drawing = await withRecordTransaction(prisma, 'drawing', async (db) => {
+      if (intentWrapper) {
+        await assertPhotoIntentsBindable({ tx: db, employeeId: req.employeeId, photos: intentWrapper });
+      }
+
       // Flip the predecessor to SUPERSEDED inside the same transaction so
       // an admin can't end up with two ACTIVE rows for the same
       // (project, drawingNumber).
       if (data.supersedesId) {
-        await tx.drawing.update({
+        await db.drawing.update({
           where: { id: data.supersedesId },
           data: { status: 'SUPERSEDED' },
         });
       }
       // Mint the id server-side so the Prisma client doesn't try to use
       // @default(uuid()) against a non-standard client config.
-      return tx.drawing.create({
+      const created = await db.drawing.create({
         data: {
           id: randomUUID(),
           projectId: data.projectId,
@@ -471,13 +536,41 @@ router.post('/', requireAuth, asyncHandler(async (req, res) => {
           issuedDate: data.issuedDate,
           issuedById: data.issuedById,
           pdfBlobPath: data.pdfBlobPath,
+          // [DR-001] Stamp the ulid verbatim so the sweep's
+          // referenced-ulid defence can find this row. NULL for
+          // uploads that bypassed /sas-url (legacy clients).
+          uploadIntentUlid: data.uploadIntentUlid || null,
           supersedesId: data.supersedesId,
         },
       });
+
+      if (intentWrapper) {
+        await bindPhotoIntentsTx({
+          tx: db,
+          employeeId: req.employeeId,
+          photos: intentWrapper,
+          boundType: 'drawing',
+          recordId: created.id,
+        });
+      }
+
+      return created;
     });
 
     res.status(201).json(serializeDrawing(drawing));
   } catch (err) {
+    // [DR-001] Lost upload claim → 409, never 500. Mirrors the dpr.js
+    // contract — the client knows what to do (re-upload) and the audit
+    // gets a clean signal that the upload pipeline raced the sweep.
+    const bindingLost = photoBindingLostResponse(err);
+    if (bindingLost) {
+      console.warn('Drawing create rolled back — upload binding lost', {
+        employeeHash: hashIdentifier(req.employeeId),
+        expected: err.expected,
+        bound: err.bound,
+      });
+      return res.status(bindingLost.status).json(bindingLost.body);
+    }
     console.error('Drawings create error', {
       employeeHash: hashIdentifier(req.employeeId),
       prismaCode: err.code,
@@ -678,7 +771,7 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
 
   // Guardrail: the natural key + cross-table pointer are immutable. Allow
   // every other field on the model.
-  const ALLOWED_PATCH_FIELDS = ['title', 'status', 'issuedDate', 'issuedById', 'pdfBlobPath'];
+  const ALLOWED_PATCH_FIELDS = ['title', 'status', 'issuedDate', 'issuedById', 'pdfBlobPath', 'uploadIntentUlid'];
   const unknown = Object.keys(req.body || {}).filter(k => !ALLOWED_PATCH_FIELDS.includes(k));
   if (unknown.length) {
     return res.status(400).json({
@@ -712,6 +805,16 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
         issuedDate: data.issuedDate !== undefined ? data.issuedDate : existing.issuedDate,
         issuedById: data.issuedById !== undefined ? data.issuedById : existing.issuedById,
         pdfBlobPath: data.pdfBlobPath !== undefined ? data.pdfBlobPath : existing.pdfBlobPath,
+        // [DR-001] PATCH-time intent swap: when pdfBlobPath is being
+        // replaced, the new uploadIntentUlid (if supplied) is stamped
+        // verbatim. The create-time intent is left alone — the blob
+        // behind it is now orphaned by the PDF swap, and the sweep's
+        // CONFIRMED-orphan pass will reclaim it after its grace window.
+        // We do NOT claim the new intent inside this PATCH transaction:
+        // the row already exists and binding failures must not turn
+        // into 500s. The intent is still CONFIRMED + boundAt=NULL; the
+        // sweep retires it gracefully on its next fire.
+        uploadIntentUlid: data.uploadIntentUlid !== undefined ? data.uploadIntentUlid : existing.uploadIntentUlid,
       },
     });
     res.json(serializeDrawing(updated));

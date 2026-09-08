@@ -109,6 +109,18 @@ function buildPrisma(seedRows = []) {
     inspectionPhoto: {
       findMany: jest.fn(async () => []),
     },
+    // [DR-001] Drawing / ProjectAttachment / BillingCertification
+    // mocks for the new referenced-ulid + referenced-blobPath defences.
+    // Existing tests run with no rows, so the sweep behaves the same.
+    drawing: {
+      findMany: jest.fn(async () => []),
+    },
+    projectAttachment: {
+      findMany: jest.fn(async () => []),
+    },
+    billingCertification: {
+      findMany: jest.fn(async () => []),
+    },
     _intents: intents,
     _updateManyCalls: updateManyCalls,
   };
