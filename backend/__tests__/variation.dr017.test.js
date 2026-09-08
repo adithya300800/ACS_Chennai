@@ -103,6 +103,25 @@ function buildApp({ isAdmin = false, employeeId = EMPLOYEE_ID } = {}) {
           approvedBy: null,
         };
       },
+      // [DR-019] updateMany support — the PATCH / /submit / /approve /
+      // /reject handlers now use updateMany for conditional writes. The
+      // existing tests don't exercise the conditional-WHERE path so a
+      // simple count-then-mutate shape is fine; the dr019 test file
+      // exercises the strict path.
+      updateMany: async ({ where = {}, data }) => {
+        const row = variations[where.id];
+        if (!row) return { count: 0 };
+        for (const [k, v] of Object.entries(data)) {
+          if (v && typeof v === 'object' && 'increment' in v) {
+            row[k] = (row[k] || 0) + v.increment;
+          } else if (k === 'deltaAmount') {
+            row[k] = String(v);
+          } else {
+            row[k] = v;
+          }
+        }
+        return { count: 1 };
+      },
     },
     employee: {
       findUnique: async () => ({ id: employeeId, isAdmin }),

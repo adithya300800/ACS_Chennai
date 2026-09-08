@@ -324,6 +324,20 @@ function buildApp({
         Object.assign(row, data, { updatedAt: new Date() });
         return row;
       }),
+      // [DR-019] updateMany support — the PATCH / /certify / /dispute /
+      // /correct handlers all now use updateMany for conditional writes
+      // (pin on version + status + supersededAt). Without this, those
+      // handlers throw `updateMany is not a function` and return 500.
+      // Mirrors the legacy `update` behavior — applied data wins —
+      // because the existing tests don't exercise the conditional-WHERE
+      // path; the new test file (billing-certifications-dr019-versioning.test.js)
+      // exercises the conditional path with a stricter mock.
+      updateMany: jest.fn(async ({ where = {}, data }) => {
+        const row = certRows.get(where.id);
+        if (!row) return { count: 0 };
+        Object.assign(row, data, { updatedAt: new Date() });
+        return { count: 1 };
+      }),
     },
     employee: {
       findUnique: jest.fn(async ({ where }) => {

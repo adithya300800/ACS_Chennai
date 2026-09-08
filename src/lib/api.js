@@ -939,6 +939,12 @@ export const api = {
     api.post(`/billing-certifications/${id}/certify`, {}, token),
   disputeBillingCertification: (id, reason, token) =>
     api.post(`/billing-certifications/${id}/dispute`, { reason }, token),
+  // [DR-019] Draft correction flow. Returns the new DRAFT row (with
+  // parentCertificationId set to the original's id). The caller should
+  // open the new row for editing rather than treating the response as
+  // a refresh of the old row — the new row carries its own id.
+  correctBillingCertification: (id, token) =>
+    api.post(`/billing-certifications/${id}/correct`, {}, token),
   deleteBillingCertification: (id, token) =>
     api.delete(`/billing-certifications/${id}`, token),
   getBillingCertificationReadSas: (id, token) =>

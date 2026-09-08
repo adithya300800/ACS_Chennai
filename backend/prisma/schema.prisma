@@ -1019,32 +1019,32 @@ model Project {
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
-  createdBy          Employee?           @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdBy             Employee?              @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
   // [N1] Back-relations for the FK swap on DPR / InspectionRecord /
   // BoqItem. The migration creates nullable `project_id` columns on each
   // child with ON DELETE SET NULL, so archiving a Project row preserves
   // historical DPRs / inspections / BOQ lines (their free-text projectName
   // column still resolves the lookup, the FK just stops pointing at a
   // soft-deleted row).
-  dprs               DPR[]
-  inspections        InspectionRecord[]
-  boqItems           BoqItem[]
+  dprs                  DPR[]
+  inspections           InspectionRecord[]
+  boqItems              BoqItem[]
   // [N2] Phase C: back-relation for VariationOrder. CASCADE on project
   // delete — a variation IS the project record (see migration header for
   // the rationale and the deviation from the DPR/Inspection/BoqItem
   // SetNull contract).
-  variations         VariationOrder[]
+  variations            VariationOrder[]
   // [N3] Phase E: back-relation for the drawing register. Drawing rows
   // cascade-delete with the project (un-registering a project sweeps its
   // drawings) — distinct from DPR / InspectionRecord / BoqItem (those
   // preserve history with SetNull because they're operational records).
   // The drawing register is metadata, not history.
-  drawings           Drawing[]
+  drawings              Drawing[]
   // [R35] Back-relation for project-level file attachments (weekly /
   // monthly / due-diligence / quality / other reports). Cascade on the
   // attachment side — un-registering a project sweeps its attachments
   // (same as Drawing; metadata, not history).
-  projectAttachments ProjectAttachment[]
+  projectAttachments    ProjectAttachment[]
   // [R37] Back-relation for the COP / Billing Certification register.
   // Cascade on the certification side — a COP IS the project record,
   // same contract as VariationOrder (see Phase C / N2 header above).
@@ -1053,7 +1053,7 @@ model Project {
   // table. Cascade-deletes are handled by the FK on project_assignment
   // (CASCADE) — when a Project row is hard-deleted (rare; the soft-delete
   // path flips isActive=false instead) all assignments go with it.
-  assignments        ProjectAssignment[]
+  assignments           ProjectAssignment[]
 
   // Hot read: the KPI list endpoint filters by `isActive = true` so the
   // active-projects dropdown doesn't surface soft-deleted rows. Index is
@@ -1141,15 +1141,15 @@ model ProjectAssignment {
 // drawing side).
 // ─────────────────────────────────────────────────────────────────────────────
 model Drawing {
-  id            String    @id @default(uuid())
-  projectId     String    @map("project_id")
-  drawingNumber String    @map("drawing_number")
-  title         String?
-  revision      String    @default("0")
-  status        String    @default("ACTIVE")
-  issuedDate    DateTime? @map("issued_date") @db.Date
-  issuedById    String?   @map("issued_by_id")
-  pdfBlobPath   String?   @map("pdf_blob_path")
+  id               String    @id @default(uuid())
+  projectId        String    @map("project_id")
+  drawingNumber    String    @map("drawing_number")
+  title            String?
+  revision         String    @default("0")
+  status           String    @default("ACTIVE")
+  issuedDate       DateTime? @map("issued_date") @db.Date
+  issuedById       String?   @map("issued_by_id")
+  pdfBlobPath      String?   @map("pdf_blob_path")
   // [DR-001] ulid of the UploadIntent row that vouched for `pdfBlobPath`.
   // Stamped at create-time inside the same transaction as the binding
   // claim (see lib/uploadIntentBinding.js + routes/drawings.js), so a
@@ -1157,10 +1157,10 @@ model Drawing {
   // dangling for the durable sweep's CONFIRMED-orphan pass to retire.
   // Legacy rows (pre-deploy) leave this NULL and rely on the
   // referenced-blobPath sweep defence for protection.
-  uploadIntentUlid String? @map("upload_intent_ulid")
-  supersedesId  String?   @map("supersedes_id")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
+  uploadIntentUlid String?   @map("upload_intent_ulid")
+  supersedesId     String?   @map("supersedes_id")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
   project                       Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
   issuedBy                      Employee?          @relation("DrawingIssuer", fields: [issuedById], references: [id], onDelete: SetNull)
@@ -1262,31 +1262,31 @@ enum ProjectReportType {
 }
 
 model ProjectAttachment {
-  id           String            @id @default(uuid())
-  projectId    String            @map("project_id")
-  type         ProjectReportType
-  title        String?
-  filename     String            @map("filename")
-  contentType  String            @map("content_type")
-  sizeBytes    Int               @map("size_bytes")
+  id               String            @id @default(uuid())
+  projectId        String            @map("project_id")
+  type             ProjectReportType
+  title            String?
+  filename         String            @map("filename")
+  contentType      String            @map("content_type")
+  sizeBytes        Int               @map("size_bytes")
   // R2 blob path: scoped under `${employeeId}/${ulid}.${ext}` by the
   // upload route (mountUploadRoutes), so the actual stored path matches
   // the shape used by DPR / Inspection / Drawing uploads. We store the
   // full blob name verbatim so /read-sas can re-mint a GET URL without
   // recomputing it.
-  blobPath     String            @map("blob_path")
-  uploadedById String?           @map("uploaded_by_id")
-  uploadedAt   DateTime          @default(now()) @map("uploaded_at")
+  blobPath         String            @map("blob_path")
+  uploadedById     String?           @map("uploaded_by_id")
+  uploadedAt       DateTime          @default(now()) @map("uploaded_at")
   // [DR-001] ulid of the UploadIntent row that vouched for `blobPath`.
   // Stamped at create-time inside the same transaction as the binding
   // claim (see lib/uploadIntentBinding.js + routes/projectAttachments.js).
   // Legacy rows (pre-deploy) leave this NULL and rely on the
   // referenced-blobPath sweep defence for protection.
-  uploadIntentUlid String?       @map("upload_intent_ulid")
+  uploadIntentUlid String?           @map("upload_intent_ulid")
   // First `deletedAt` in the schema (Round-35). Set on DELETE; the list
   // route excludes `deletedAt: not null` so soft-deleted rows stay
   // hidden while preserving the deletion timestamp for audit.
-  deletedAt    DateTime?         @map("deleted_at")
+  deletedAt        DateTime?         @map("deleted_at")
 
   project    Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   uploadedBy Employee? @relation("ProjectAttachmentUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
@@ -1384,61 +1384,82 @@ enum BillingCertificationStatus {
 }
 
 model BillingCertification {
-  id              String                     @id @default(uuid())
-  projectId       String                     @map("project_id")
+  id                    String                     @id @default(uuid())
+  projectId             String                     @map("project_id")
   // Free-text contractor name — mirrors DPR.contractor / InspectionRecord.
   // contractor. No Contractor master exists today (intentional — see the
   // design header); if one ships later, add an optional contractorId FK
   // without removing this column (back-compat for legacy rows).
-  contractorName  String                     @map("contractor_name") @db.VarChar(160)
+  contractorName        String                     @map("contractor_name") @db.VarChar(160)
   // Contractor bill reference (e.g. "RAB 05", "RA Bill 03 - Civil").
   // Required so duplicate-RA-bill detection is meaningful at the
   // (projectId, contractorName, billNumber) level.
-  billNumber      String                     @map("bill_number") @db.VarChar(60)
-  billDate        DateTime                   @map("bill_date") @db.Date
-  invoiceNo       String?                    @map("invoice_no") @db.VarChar(60)
-  poContractRef   String?                    @map("po_contract_ref") @db.VarChar(120)
-  claimedAmount   Decimal                    @map("claimed_amount") @db.Decimal(15, 2)
-  deductedAmount  Decimal                    @default(0) @map("deducted_amount") @db.Decimal(15, 2)
-  certifiedAmount Decimal                    @map("certified_amount") @db.Decimal(15, 2)
-  gstAmount       Decimal?                   @map("gst_amount") @db.Decimal(15, 2)
-  poValue         Decimal?                   @map("po_value") @db.Decimal(15, 2)
-  balanceValue    Decimal?                   @map("balance_value") @db.Decimal(15, 2)
-  remarks         String?                    @map("remarks")
-  status          BillingCertificationStatus @default(DRAFT)
+  billNumber            String                     @map("bill_number") @db.VarChar(60)
+  billDate              DateTime                   @map("bill_date") @db.Date
+  invoiceNo             String?                    @map("invoice_no") @db.VarChar(60)
+  poContractRef         String?                    @map("po_contract_ref") @db.VarChar(120)
+  claimedAmount         Decimal                    @map("claimed_amount") @db.Decimal(15, 2)
+  deductedAmount        Decimal                    @default(0) @map("deducted_amount") @db.Decimal(15, 2)
+  certifiedAmount       Decimal                    @map("certified_amount") @db.Decimal(15, 2)
+  gstAmount             Decimal?                   @map("gst_amount") @db.Decimal(15, 2)
+  poValue               Decimal?                   @map("po_value") @db.Decimal(15, 2)
+  balanceValue          Decimal?                   @map("balance_value") @db.Decimal(15, 2)
+  remarks               String?                    @map("remarks")
+  status                BillingCertificationStatus @default(DRAFT)
   // Audit timestamps — every state transition gets its own column. Mirrors
   // the DPR / VariationOrder convention so reports can GROUP BY any one
   // of them without parsing `updatedAt` timestamps.
-  recordedById    String                     @map("recorded_by_id")
-  certifiedById   String?                    @map("certified_by_id")
-  certifiedAt     DateTime?                  @map("certified_at")
-  disputedAt      DateTime?                  @map("disputed_at")
-  disputeReason   String?                    @map("dispute_reason")
+  recordedById          String                     @map("recorded_by_id")
+  certifiedById         String?                    @map("certified_by_id")
+  certifiedAt           DateTime?                  @map("certified_at")
+  disputedAt            DateTime?                  @map("disputed_at")
+  disputeReason         String?                    @map("dispute_reason")
   // Single-file attachment — same shape as Drawing.pdfBlobPath but with
   // the full ProjectAttachment-style metadata kept inline so the row
   // carries the file context without a join. R2 lives under the existing
   // `dpr-documents` bucket with a `billing/` blob-path prefix (the
   // prefix is server-enforced by the upload pipeline).
-  filename        String?                    @map("filename") @db.VarChar(512)
-  contentType     String?                    @map("content_type") @db.VarChar(120)
-  sizeBytes       Int?                       @map("size_bytes")
-  blobPath        String?                    @map("blob_path") @db.VarChar(1024)
-  uploadedAt      DateTime?                  @map("uploaded_at")
+  filename              String?                    @map("filename") @db.VarChar(512)
+  contentType           String?                    @map("content_type") @db.VarChar(120)
+  sizeBytes             Int?                       @map("size_bytes")
+  blobPath              String?                    @map("blob_path") @db.VarChar(1024)
+  uploadedAt            DateTime?                  @map("uploaded_at")
   // First `deletedAt` use outside ProjectAttachment — same audit
   // rationale (the lifecycle is exists / archived, no revision semantics).
-  deletedAt       DateTime?                  @map("deleted_at")
+  deletedAt             DateTime?                  @map("deleted_at")
   // [DR-001] ulid of the UploadIntent row that vouched for `blobPath`.
   // Stamped at create-time inside the same transaction as the binding
   // claim (see lib/uploadIntentBinding.js + routes/billingCertifications.js).
   // Legacy rows (pre-deploy) leave this NULL and rely on the
   // referenced-blobPath sweep defence for protection.
-  uploadIntentUlid String?                   @map("upload_intent_ulid")
-  createdAt       DateTime                   @default(now()) @map("created_at")
-  updatedAt       DateTime                   @updatedAt @map("updated_at")
+  uploadIntentUlid      String?                    @map("upload_intent_ulid")
+  // [DR-019] Optimistic-concurrency pin + correction history. The
+  // audit's "competing VO/COP decisions and stale edits read state
+  // first and later update by ID alone — no version pin" finding is
+  // addressed by `version` (every PATCH + state-transition increments;
+  // the route's WHERE clause pins it). `parentCertificationId` +
+  // `supersededAt` model the correction history chain (POST /:id/correct
+  // creates a new DRAFT row with parentCertificationId set to the
+  // original, and stamps supersededAt on the original in the same
+  // transaction). See backend/src/routes/billingCertifications.js for
+  // the conditional-WHERE pattern + the migration header for the
+  // append-only rationale.
+  version               Int                        @default(0) @map("version")
+  parentCertificationId String?                    @map("parent_certification_id")
+  supersededAt          DateTime?                  @map("superseded_at")
+  createdAt             DateTime                   @default(now()) @map("created_at")
+  updatedAt             DateTime                   @updatedAt @map("updated_at")
 
-  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  recordedBy  Employee  @relation("BillingCertRecorder", fields: [recordedById], references: [id], onDelete: Restrict)
-  certifiedBy Employee? @relation("BillingCertCertifier", fields: [certifiedById], references: [id], onDelete: SetNull)
+  project             Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  recordedBy          Employee               @relation("BillingCertRecorder", fields: [recordedById], references: [id], onDelete: Restrict)
+  certifiedBy         Employee?              @relation("BillingCertCertifier", fields: [certifiedById], references: [id], onDelete: SetNull)
+  // Self-referencing FK for correction history. ON DELETE SET NULL so a
+  // hard-delete of an old row doesn't cascade-delete the corrected
+  // row's pointer back to it (mirrors ProjectAssignment.assignedById's
+  // SetNull pattern — preserving the audit trail when a referenced row
+  // is removed).
+  parentCertification BillingCertification?  @relation("BillingCertCorrection", fields: [parentCertificationId], references: [id], onDelete: SetNull)
+  corrections         BillingCertification[] @relation("BillingCertCorrection")
 
   // Hot reads: per-project timeline (newest first), admin registry by
   // (projectId, status, deletedAt) for the filter combo, and the
@@ -1452,6 +1473,11 @@ model BillingCertification {
   //   `SELECT upload_intent_ulid FROM billing_certification`
   // — an index keeps that read bounded by the indexed rows, not the table.
   @@index([uploadIntentUlid])
+  // [DR-019] Correction history lookups.
+  @@index([parentCertificationId])
+  // Active-rows filter (`WHERE superseded_at IS NULL` on the list /
+  // aggregates endpoints).
+  @@index([supersededAt])
   @@map("billing_certification")
 }
 
@@ -1473,6 +1499,14 @@ model VariationOrder {
   submittedAt            DateTime? @map("submitted_at")
   approvedAt             DateTime? @map("approved_at")
   rejectedAt             DateTime? @map("rejected_at")
+  // [DR-019] Optimistic-concurrency pin. Mirrors billing_certification
+  // .version: every PATCH on a DRAFT row + every state transition
+  // (submit / approve / reject) increments it; the route's WHERE clause
+  // pins it via the body's `expectedVersion` so a stale tab whose read
+  // happened BEFORE another writer's commit gets 409 instead of
+  // silently overwriting the new state. Same pattern as DPR.version
+  // (see backend/src/routes/dpr.js:1309-1326).
+  version                Int       @default(0) @map("version")
   createdAt              DateTime  @default(now()) @map("created_at")
   updatedAt              DateTime  @updatedAt @map("updated_at")
 

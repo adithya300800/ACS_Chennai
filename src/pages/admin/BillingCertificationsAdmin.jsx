@@ -261,6 +261,44 @@ export default function BillingCertificationsAdmin() {
     }
   }
 
+  // [DR-019] Draft correction flow. Creates a NEW DRAFT row pointing
+  // back at the original via parentCertificationId, stamps supersededAt
+  // on the original in the same transaction, and returns the new row.
+  // We open the new row in the detail modal so the admin can immediately
+  // edit + re-certify it. The original is preserved verbatim — prior
+  // amounts / PDF / reasons / actors all stay intact for audit.
+  async function handleCorrect(cert) {
+    if (transitionPending) return;
+    setTransitionPending(true);
+    try {
+      const newRow = await api.correctBillingCertification(cert.id, accessToken);
+      toast.push(
+        `Opened correction DRAFT for bill ${newRow.billNumber}. Edit amounts, then re-certify.`,
+        'success',
+      );
+      // Switch the detail modal to the new row so the admin can start
+      // editing immediately. Close any dispute modal that was open on
+      // the old row.
+      setDetailCert(newRow);
+      setDisputeOpen(null);
+      setDisputeReason('');
+      await fetchCerts();
+    } catch (err) {
+      // 409 SUPERSEDED — the original was already superseded by
+      // another admin's correction. Refetch and surface a helpful
+      // message rather than the raw error.
+      const code = err?.code || err?.body?.code;
+      if (code === 'SUPERSEDED') {
+        toast.push('This certification is already superseded. Opening the latest version.', 'warning');
+        await fetchCerts();
+      } else {
+        toast.push(err?.message || err?.body?.message || 'Failed to start correction', 'error');
+      }
+    } finally {
+      setTransitionPending(false);
+    }
+  }
+
   async function handleDisputeSubmit() {
     if (!disputeOpen) return;
     if (!disputeReason.trim()) {
@@ -809,6 +847,33 @@ export default function BillingCertificationsAdmin() {
                   >
                     Mark Disputed
                   </button>
+                )}
+                {/* [DR-019] "Correct certification" — opens a new DRAFT
+                    row that carries the original's amounts forward verbatim
+                    so the admin can re-edit + re-certify. The original
+                    stays in the audit trail (supersededAt is stamped on
+                    the server). Hidden once the row is already superseded
+                    (the chain's latest successor is the right place to
+                    correct from). */}
+                {(detailCert.status === 'CERTIFIED' || detailCert.status === 'DISPUTED') && !detailCert.supersededAt && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={transitionPending}
+                    onClick={() => handleCorrect(detailCert)}
+                    title="Create a corrected DRAFT. The original row stays in the audit trail."
+                  >
+                    Correct certification
+                  </button>
+                )}
+                {detailCert.supersededAt && (
+                  <span
+                    className="badge"
+                    style={{ background: '#94a3b8', color: 'white', alignSelf: 'center' }}
+                    title={`Superseded by correction ${detailCert.parentCertificationId ? '— parent row: ' + detailCert.parentCertificationId : ''}`}
+                  >
+                    Superseded
+                  </span>
                 )}
               </div>
             </>

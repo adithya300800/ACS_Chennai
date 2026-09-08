@@ -378,6 +378,12 @@ router.get('/:id', asyncHandler(async (req, res) => {
 // of { status: 'APPROVED' }).
 const ALLOWED_UPDATE_FIELDS = [
   'title', 'description', 'deltaAmount', 'clientApprovalRequired',
+  // [DR-019] Optimistic-concurrency pin. Optional body field read by
+  // the route and stripped from the data payload before the
+  // conditional WHERE clause is composed. Listed in the allowlist so
+  // the generic UNKNOWN_FIELDS guard above doesn't reject it when a
+  // caller pins a version. Same convention as billingCertifications.js.
+  'expectedVersion',
 ];
 
 // Inline admin gate for DRAFT edits. requireFreshAdmin is reserved
@@ -462,9 +468,45 @@ router.patch('/:id', asyncHandler(async (req, res) => {
       });
     }
 
-    const updated = await prisma.variationOrder.update({
+    // [DR-019] Optimistic-concurrency pin on PATCH. Optional
+    // `expectedVersion` body field — when supplied, the WHERE clause
+    // pins (id, version = expectedVersion, status = DRAFT) so two
+    // concurrent raisers (or one raiser and one admin) can't race on
+    // the same row. Legacy callers that omit expectedVersion fall
+    // back to the unconditional update — preserves N2 compatibility.
+    const expectedVersion = req.body && req.body.expectedVersion;
+    if (expectedVersion !== undefined && expectedVersion !== null) {
+      if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'expectedVersion must be a non-negative integer',
+        });
+      }
+      if (existing.version !== expectedVersion) {
+        return res.status(409).json({
+          error: 'VERSION_CONFLICT',
+          code: 'VERSION_CONFLICT',
+          message: 'This variation was modified by another action. Please refresh and try again.',
+          currentVersion: existing.version,
+        });
+      }
+    }
+    const patchWhere = expectedVersion !== undefined && expectedVersion !== null
+      ? { id, version: expectedVersion, status: 'DRAFT' }
+      : { id };
+    const updateResult = await prisma.variationOrder.updateMany({
+      where: patchWhere,
+      data: { ...fields, version: { increment: 1 } },
+    });
+    if (updateResult.count !== 1) {
+      return res.status(409).json({
+        error: 'VERSION_CONFLICT',
+        code: 'VERSION_CONFLICT',
+        message: 'This variation was modified by another action. Please refresh and try again.',
+      });
+    }
+    const updated = await prisma.variationOrder.findUnique({
       where: { id },
-      data: fields,
       include: {
         project: { select: { id: true, name: true, code: true } },
         raisedBy: { select: { id: true, name: true, email: true } },
@@ -526,12 +568,47 @@ router.post('/:id/submit', asyncHandler(async (req, res) => {
       });
     }
 
-    const updated = await prisma.variationOrder.update({
-      where: { id },
+    // [DR-019] Optimistic-concurrency pin. Pin (id, status, version) so
+    // two callers racing on the same DRAFT row can't both succeed — a
+    // stale tab whose read happened BEFORE another admin's submit
+    // gets 409 instead of silently overwriting the new state.
+    const expectedVersion = req.body && req.body.expectedVersion;
+    if (expectedVersion !== undefined && expectedVersion !== null) {
+      if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'expectedVersion must be a non-negative integer',
+        });
+      }
+      if (existing.version !== expectedVersion) {
+        return res.status(409).json({
+          error: 'VERSION_CONFLICT',
+          code: 'VERSION_CONFLICT',
+          message: 'This variation was modified by another action. Please refresh and try again.',
+          currentVersion: existing.version,
+        });
+      }
+    }
+    const submitWhere = expectedVersion !== undefined && expectedVersion !== null
+      ? { id, status: 'DRAFT', version: expectedVersion }
+      : { id, status: 'DRAFT' };
+    const submitResult = await prisma.variationOrder.updateMany({
+      where: submitWhere,
       data: {
         status: 'SUBMITTED',
         submittedAt: new Date(),
+        version: { increment: 1 },
       },
+    });
+    if (submitResult.count !== 1) {
+      return res.status(409).json({
+        error: 'VERSION_CONFLICT',
+        code: 'VERSION_CONFLICT',
+        message: 'This variation was modified by another action. Please refresh and try again.',
+      });
+    }
+    const updated = await prisma.variationOrder.findUnique({
+      where: { id },
       include: {
         project: { select: { id: true, name: true, code: true } },
         raisedBy: { select: { id: true, name: true, email: true } },
@@ -585,15 +662,51 @@ router.post('/:id/approve', requireFreshAdmin, asyncHandler(async (req, res) => 
       });
     }
 
-    const updated = await prisma.variationOrder.update({
-      where: { id },
+    // [DR-019] Optimistic-concurrency pin. Pin (id, status, version) so
+    // two admins can't both approve the same SUBMITTED row, and a
+    // stale tab whose read happened BEFORE the row was advanced
+    // (e.g. by another admin's reject) gets 409 instead of silently
+    // flipping a rejected row back to APPROVED.
+    const expectedVersion = req.body && req.body.expectedVersion;
+    if (expectedVersion !== undefined && expectedVersion !== null) {
+      if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'expectedVersion must be a non-negative integer',
+        });
+      }
+      if (existing.version !== expectedVersion) {
+        return res.status(409).json({
+          error: 'VERSION_CONFLICT',
+          code: 'VERSION_CONFLICT',
+          message: 'This variation was modified by another action. Please refresh and try again.',
+          currentVersion: existing.version,
+        });
+      }
+    }
+    const approveWhere = expectedVersion !== undefined && expectedVersion !== null
+      ? { id, status: 'SUBMITTED', version: expectedVersion }
+      : { id, status: 'SUBMITTED' };
+    const approveResult = await prisma.variationOrder.updateMany({
+      where: approveWhere,
       data: {
         status: 'APPROVED',
         approvedById: req.employeeId,
         approvedAt: new Date(),
         rejectedAt: null,
         rejectedReason: null,
+        version: { increment: 1 },
       },
+    });
+    if (approveResult.count !== 1) {
+      return res.status(409).json({
+        error: 'VERSION_CONFLICT',
+        code: 'VERSION_CONFLICT',
+        message: 'This variation was modified by another action. Please refresh and try again.',
+      });
+    }
+    const updated = await prisma.variationOrder.findUnique({
+      where: { id },
       include: {
         project: { select: { id: true, name: true, code: true } },
         raisedBy: { select: { id: true, name: true, email: true } },
@@ -655,15 +768,50 @@ router.post('/:id/reject', requireFreshAdmin, asyncHandler(async (req, res) => {
       });
     }
 
-    const updated = await prisma.variationOrder.update({
-      where: { id },
+    // [DR-019] Optimistic-concurrency pin — same shape as /approve.
+    // Prevents two admins from racing each other into REJECTED on the
+    // same SUBMITTED row, and prevents a stale tab from rejecting a
+    // row that's already been advanced by another admin's approve.
+    const expectedVersion = req.body && req.body.expectedVersion;
+    if (expectedVersion !== undefined && expectedVersion !== null) {
+      if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'expectedVersion must be a non-negative integer',
+        });
+      }
+      if (existing.version !== expectedVersion) {
+        return res.status(409).json({
+          error: 'VERSION_CONFLICT',
+          code: 'VERSION_CONFLICT',
+          message: 'This variation was modified by another action. Please refresh and try again.',
+          currentVersion: existing.version,
+        });
+      }
+    }
+    const rejectWhere = expectedVersion !== undefined && expectedVersion !== null
+      ? { id, status: 'SUBMITTED', version: expectedVersion }
+      : { id, status: 'SUBMITTED' };
+    const rejectResult = await prisma.variationOrder.updateMany({
+      where: rejectWhere,
       data: {
         status: 'REJECTED',
         approvedById: null,
         approvedAt: null,
         rejectedAt: new Date(),
         rejectedReason: reason.trim(),
+        version: { increment: 1 },
       },
+    });
+    if (rejectResult.count !== 1) {
+      return res.status(409).json({
+        error: 'VERSION_CONFLICT',
+        code: 'VERSION_CONFLICT',
+        message: 'This variation was modified by another action. Please refresh and try again.',
+      });
+    }
+    const updated = await prisma.variationOrder.findUnique({
+      where: { id },
       include: {
         project: { select: { id: true, name: true, code: true } },
         raisedBy: { select: { id: true, name: true, email: true } },

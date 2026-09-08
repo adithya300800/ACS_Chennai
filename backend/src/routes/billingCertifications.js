@@ -220,6 +220,16 @@ function serializeBillingCertification(row) {
     uploadIntentUlid: row.uploadIntentUlid,
     uploadedAt: row.uploadedAt instanceof Date ? row.uploadedAt.toISOString() : row.uploadedAt,
     deletedAt: row.deletedAt instanceof Date ? row.deletedAt.toISOString() : row.deletedAt,
+    // [DR-019] Versioning + correction-history envelope. `version` is
+    // the optimistic-concurrency pin the client must echo back on PATCH
+    // / certify / dispute / correct (see route comments); `parentCertificationId`
+    // is the FK back to the row this one corrects (corrections only);
+    // `supersededAt` is the audit timestamp on the original when a
+    // correction supersedes it. Surfaced on the wire so the React UI can
+    // render the correction chain without an extra round-trip.
+    version: row.version == null ? 0 : row.version,
+    parentCertificationId: row.parentCertificationId || null,
+    supersededAt: row.supersededAt instanceof Date ? row.supersededAt.toISOString() : row.supersededAt,
     createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
     updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt,
     project: row.project ? {
@@ -444,6 +454,15 @@ router.get('/', asyncHandler(async (req, res) => {
 
   const where = {
     deletedAt: null,
+    // [DR-019] Hide superseded rows from the default list. Superseded
+    // rows are the OLD versions of a COP that was corrected — the
+    // correction chain is reachable via the detail endpoint (the new
+    // row's parentCertificationId + the recursive children relation),
+    // but the list should only ever show one "live" row per
+    // contractor × bill-number × project. The history view (out of
+    // scope here) can include a separate `?includeSuperseded=true`
+    // escape hatch.
+    supersededAt: null,
     ...(projectId ? { projectId } : {}),
     ...(status ? { status } : {}),
     ...(contractorName && typeof contractorName === 'string' && contractorName.trim()
@@ -579,6 +598,11 @@ router.get('/aggregates', asyncHandler(async (req, res) => {
 
   const where = {
     deletedAt: null,
+    // [DR-019] Aggregates must use the same "active row only" filter as
+    // the list — otherwise the certifiedAmount sums double-count (once
+    // for the original + once for the correction). Mirrors the list's
+    // supersededAt IS NULL gate above.
+    supersededAt: null,
     ...(projectId ? { projectId } : {}),
     ...(fromDate || toDate ? {
       billDate: {
@@ -992,6 +1016,12 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
     // swap), and the new intent is left unbound but CONFIRMED — also
     // reclaimed on its next pass. Same caveat as drawings.js PATCH.
     'uploadIntentUlid',
+    // [DR-019] Optimistic-concurrency pin. Optional body field that
+    // the route reads and strips from the data payload before the
+    // conditional WHERE clause is composed. Listed in the allowlist
+    // so the generic UNKNOWN_FIELDS guard above doesn't reject it
+    // when a caller pins a version.
+    'expectedVersion',
   ];
   const unknown = Object.keys(body).filter((k) => !ALLOWED_PATCH_FIELDS.includes(k));
   if (unknown.length) {
@@ -1136,7 +1166,52 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
     if (!existing || existing.deletedAt) {
       return res.status(404).json({ error: 'CERTIFICATION_NOT_FOUND', code: 'CERTIFICATION_NOT_FOUND', message: 'Billing certification not found' });
     }
-    const updated = await prisma.billingCertification.update({ where: { id }, data });
+    // [DR-019] Optimistic-concurrency pin on PATCH. Optional
+    // `expectedVersion` body field — when supplied, the WHERE clause
+    // pins (id, version = expectedVersion, supersededAt IS NULL) so a
+    // stale tab whose read happened BEFORE another writer's commit
+    // cannot overwrite the new state. Legacy callers that omit
+    // expectedVersion fall back to the unconditional update (preserves
+    // R37 compatibility for any in-flight caller).
+    const expectedVersion = req.body && req.body.expectedVersion;
+    if (expectedVersion !== undefined && expectedVersion !== null) {
+      if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'expectedVersion must be a non-negative integer',
+        });
+      }
+      if (existing.version !== expectedVersion) {
+        return res.status(409).json({
+          error: 'VERSION_CONFLICT',
+          code: 'VERSION_CONFLICT',
+          message: 'This certification was modified by another action. Please refresh and try again.',
+          currentVersion: existing.version,
+        });
+      }
+    }
+    if (existing.supersededAt) {
+      return res.status(409).json({
+        error: 'SUPERSEDED',
+        code: 'SUPERSEDED',
+        message: 'This certification is already superseded by a newer correction.',
+        parentCertificationId: existing.parentCertificationId,
+      });
+    }
+    const patchWhere = expectedVersion !== undefined && expectedVersion !== null
+      ? { id, version: expectedVersion, supersededAt: null }
+      : { id };
+    const updateResult = await prisma.billingCertification.updateMany({
+      where: patchWhere,
+      data: { ...data, version: { increment: 1 } },
+    });
+    if (updateResult.count !== 1) {
+      return res.status(409).json({
+        error: 'VERSION_CONFLICT',
+        code: 'VERSION_CONFLICT',
+        message: 'This certification was modified by another action. Please refresh and try again.',
+      });
+    }
     const full = await prisma.billingCertification.findUnique({
       where: { id },
       include: {
@@ -1188,8 +1263,43 @@ router.post('/:id/certify', requireFreshAdmin, asyncHandler(async (req, res) => 
       return res.json(serializeBillingCertification(full));
     }
     const now = new Date();
-    await prisma.billingCertification.update({
-      where: { id },
+    // [DR-019] Optimistic-concurrency pin — match /dispute's shape.
+    // Pinning on (status, version) prevents two admins from racing
+    // each other into CERTIFIED on the same row (e.g. one re-certifying
+    // a DISPUTED row while another is still mid-edit on the DRAFT
+    // correction that replaced it). Pinning on supersededAt as well
+    // prevents a stale tab from re-certifying a row that's already
+    // been superseded by a newer correction.
+    const expectedVersion = req.body && req.body.expectedVersion;
+    if (expectedVersion !== undefined && expectedVersion !== null) {
+      if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'expectedVersion must be a non-negative integer',
+        });
+      }
+      if (existing.version !== expectedVersion) {
+        return res.status(409).json({
+          error: 'VERSION_CONFLICT',
+          code: 'VERSION_CONFLICT',
+          message: 'This certification was modified by another action. Please refresh and try again.',
+          currentVersion: existing.version,
+        });
+      }
+    }
+    if (existing.supersededAt) {
+      return res.status(409).json({
+        error: 'SUPERSEDED',
+        code: 'SUPERSEDED',
+        message: 'This certification is already superseded by a newer correction.',
+        parentCertificationId: existing.parentCertificationId,
+      });
+    }
+    const certifyWhere = expectedVersion !== undefined && expectedVersion !== null
+      ? { id, status: existing.status, version: expectedVersion, supersededAt: null }
+      : { id, supersededAt: null };
+    const updateResult = await prisma.billingCertification.updateMany({
+      where: certifyWhere,
       data: {
         status: 'CERTIFIED',
         certifiedById: req.employeeId,
@@ -1200,8 +1310,16 @@ router.post('/:id/certify', requireFreshAdmin, asyncHandler(async (req, res) => 
         // in the history; the status flip + cleared disputeReason is
         // the live signal.
         disputeReason: null,
+        version: { increment: 1 },
       },
     });
+    if (updateResult.count !== 1) {
+      return res.status(409).json({
+        error: 'VERSION_CONFLICT',
+        code: 'VERSION_CONFLICT',
+        message: 'This certification was modified by another action. Please refresh and try again.',
+      });
+    }
     const full = await prisma.billingCertification.findUnique({
       where: { id },
       include: {
@@ -1221,6 +1339,160 @@ router.post('/:id/certify', requireFreshAdmin, asyncHandler(async (req, res) => 
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to certify billing certification' });
+  }
+}));
+
+// ─── POST /api/billing-certifications/:id/correct ──────────────────────────
+// DR-019 (audit 2026-09-08) — the missing "draft correction" path.
+//
+// A CERTIFIED row's prior amounts / PDF / certification metadata must be
+// retained verbatim (the audit's "retain prior amounts, reasons and
+// actors" requirement). We don't edit the original — we create a NEW
+// DRAFT row that points back at the original via parentCertificationId,
+// stamp supersededAt on the original so the list / aggregates no longer
+// count it, and let the admin edit + (re-)certify the correction as if
+// it were a fresh row. The history chain is walkable via the parent FK.
+//
+// What gets carried forward to the new row:
+//   projectId, contractorName, billNumber, billDate, invoiceNo,
+//   poContractRef, claimedAmount, deductedAmount, certifiedAmount,
+//   gstAmount, poValue, balanceValue, remarks.
+//
+// What is RESET on the new row:
+//   status → DRAFT (the correction starts in editable state)
+//   certifiedById / certifiedAt → null (the correction is uncertified)
+//   disputedAt / disputeReason → null (no dispute on the new row yet)
+//   uploadedAt → null (no attachment copied — the admin re-uploads if
+//     the new COP PDF differs; same intent-binding contract applies)
+//
+// What STAYS on the original (and is preserved in the row's history):
+//   certifiedById, certifiedAt, disputeReason, all amounts, blobPath,
+//   uploadedAt, the disputedAt timestamp, and the original's id (which
+//   the new row's parentCertificationId FK points at).
+//
+// The original's supersededAt is stamped in the same transaction as the
+// correction row's create — so the list filter `supersededAt IS NULL`
+// can never observe a state where the correction exists but the
+// original hasn't been stamped yet.
+router.post('/:id/correct', requireFreshAdmin, asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+  const { id } = req.params;
+  if (!isValidUuid(id)) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'id must be a UUID' });
+  }
+  // [DR-019] Optional `expectedVersion` — pin the read so a stale caller
+  // doesn't end up forking off a parent that another writer has
+  // already superseded. Legacy callers can omit it and fall back to
+  // the unconditional read.
+  const expectedVersion = req.body && req.body.expectedVersion;
+  if (expectedVersion !== undefined && expectedVersion !== null) {
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        message: 'expectedVersion must be a non-negative integer',
+      });
+    }
+  }
+
+  try {
+    const existing = await prisma.billingCertification.findUnique({ where: { id } });
+    if (!existing || existing.deletedAt) {
+      return res.status(404).json({ error: 'CERTIFICATION_NOT_FOUND', code: 'CERTIFICATION_NOT_FOUND', message: 'Billing certification not found' });
+    }
+    // An already-superseded row cannot be re-corrected — the chain
+    // already has a newer successor. The admin's path is to open the
+    // successor and correct THAT instead.
+    if (existing.supersededAt) {
+      return res.status(409).json({
+        error: 'SUPERSEDED',
+        code: 'SUPERSEDED',
+        message: 'This certification is already superseded by a newer correction.',
+        parentCertificationId: existing.parentCertificationId,
+      });
+    }
+    if (expectedVersion !== undefined && expectedVersion !== null && existing.version !== expectedVersion) {
+      return res.status(409).json({
+        error: 'VERSION_CONFLICT',
+        code: 'VERSION_CONFLICT',
+        message: 'This certification was modified by another action. Please refresh and try again.',
+        currentVersion: existing.version,
+      });
+    }
+
+    // Create the correction + stamp the original in one transaction so
+    // the list filter can never observe the in-between state where the
+    // correction exists but the original hasn't been superseded yet.
+    const newId = randomUUID();
+    const correction = await prisma.$transaction(async (tx) => {
+      const created = await tx.billingCertification.create({
+        data: {
+          id: newId,
+          projectId: existing.projectId,
+          contractorName: existing.contractorName,
+          billNumber: existing.billNumber,
+          billDate: existing.billDate,
+          invoiceNo: existing.invoiceNo,
+          poContractRef: existing.poContractRef,
+          claimedAmount: existing.claimedAmount,
+          deductedAmount: existing.deductedAmount,
+          certifiedAmount: existing.certifiedAmount,
+          gstAmount: existing.gstAmount,
+          poValue: existing.poValue,
+          balanceValue: existing.balanceValue,
+          remarks: existing.remarks,
+          // status, certifiedById/At, disputedAt/Reason, blobPath,
+          // filename, contentType, sizeBytes, uploadIntentUlid all
+          // deliberately default to DRAFT / null — see header comment.
+          status: 'DRAFT',
+          recordedById: req.employeeId,
+          parentCertificationId: existing.id,
+          version: 0,
+        },
+      });
+      // [DR-019] LPR-008 race fix — pin the original's status AND
+      // version on the conditional WHERE. A concurrent writer who
+      // already advanced the original's version (or already flipped
+      // it to DISPUTED) blocks the supersede; the caller can refetch
+      // and retry. Mirrors the /certify / /dispute conditional shape.
+      const supersedeResult = await tx.billingCertification.updateMany({
+        where: { id: existing.id, version: existing.version, supersededAt: null },
+        data: { supersededAt: new Date(), version: { increment: 1 } },
+      });
+      if (supersedeResult.count !== 1) {
+        throw Object.assign(new Error('version conflict on supersede'), { code: 'P2025' });
+      }
+      return created;
+    });
+
+    const full = await prisma.billingCertification.findUnique({
+      where: { id: correction.id },
+      include: {
+        project: { select: { id: true, name: true, code: true } },
+        recordedBy: { select: { id: true, name: true, designation: true } },
+        certifiedBy: { select: { id: true, name: true, designation: true } },
+      },
+    });
+    res.status(201).json(serializeBillingCertification(full));
+  } catch (err) {
+    if (err && err.code === 'P2025') {
+      return res.status(409).json({
+        error: 'VERSION_CONFLICT',
+        code: 'VERSION_CONFLICT',
+        message: 'This certification was modified by another action. Please refresh and try again.',
+      });
+    }
+    console.error('[billing-certifications] correct failed', {
+      employeeHash: hashIdentifier(req.employeeId),
+      certificationId: id,
+      errCode: err?.code,
+      errMessage: err?.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to create correction' });
   }
 }));
 
@@ -1265,14 +1537,55 @@ router.post('/:id/dispute', requireFreshAdmin, asyncHandler(async (req, res) => 
         message: 'Cannot dispute a DRAFT certification. Edit the amounts or delete and recreate.',
       });
     }
-    await prisma.billingCertification.update({
-      where: { id },
+    // [DR-019] Optimistic-concurrency pin — match the /certify shape.
+    // Pinning on (status, version) prevents two admins from racing each
+    // other into DISPUTED on the same approved row, AND prevents a
+    // stale tab whose read happened BEFORE the row was superseded from
+    // silently writing onto the new correction's predecessor.
+    const expectedVersion = req.body && req.body.expectedVersion;
+    if (expectedVersion !== undefined && expectedVersion !== null) {
+      if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'expectedVersion must be a non-negative integer',
+        });
+      }
+      if (existing.version !== expectedVersion) {
+        return res.status(409).json({
+          error: 'VERSION_CONFLICT',
+          code: 'VERSION_CONFLICT',
+          message: 'This certification was modified by another action. Please refresh and try again.',
+          currentVersion: existing.version,
+        });
+      }
+    }
+    if (existing.supersededAt) {
+      return res.status(409).json({
+        error: 'SUPERSEDED',
+        code: 'SUPERSEDED',
+        message: 'This certification is already superseded by a newer correction.',
+        parentCertificationId: existing.parentCertificationId,
+      });
+    }
+    const disputeWhere = expectedVersion !== undefined && expectedVersion !== null
+      ? { id, status: existing.status, version: expectedVersion, supersededAt: null }
+      : { id };
+    const updateResult = await prisma.billingCertification.updateMany({
+      where: disputeWhere,
       data: {
         status: 'DISPUTED',
         disputedAt: new Date(),
         disputeReason: reason,
+        version: { increment: 1 },
       },
     });
+    if (updateResult.count !== 1) {
+      return res.status(409).json({
+        error: 'VERSION_CONFLICT',
+        code: 'VERSION_CONFLICT',
+        message: 'This certification was modified by another action. Please refresh and try again.',
+      });
+    }
     const full = await prisma.billingCertification.findUnique({
       where: { id },
       include: {
