@@ -252,14 +252,41 @@ export default function VariationOrderDetail() {
               </li>
             )}
             {variation.status === 'APPROVED' && variation.approvedAt && (
+              // [DR-027] Distinguish "internal approval" from "client
+              // authorization" — a VO whose clientApprovalRequired flag
+              // is true still needs a separate client decision before
+              // the variation can be invoiced. The previous timeline
+              // simply said "Approved", which the audit flagged as
+              // ambiguous: a user seeing the green badge could read it
+              // as 'safe to bill'. The label now splits cleanly into
+              // internal approval (admin) vs client decision (separate
+              // step). The "client approval pending" footer surfaces
+              // the auth gap so it isn't silently skipped.
               <li style={{ padding: '0.25rem 0 0.5rem 1rem', position: 'relative' }}>
                 <span style={{ position: 'absolute', left: -5, top: 8, width: 8, height: 8, borderRadius: 4, background: 'var(--success, #16a34a)' }} aria-hidden="true" />
                 <div style={{ fontSize: '0.85rem' }}>
-                  <strong>Approved</strong> by {variation.approvedBy?.name || '—'}
+                  <strong>{variation.clientApprovalRequired ? 'Internal approval' : 'Approved'}</strong>
+                  {' '}by {variation.approvedBy?.name || '—'}
                 </div>
                 <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
                   {formatIndianDateTime(variation.approvedAt)}
                 </div>
+                {variation.clientApprovalRequired && (
+                  <div
+                    style={{
+                      marginTop: '0.35rem',
+                      padding: '0.4rem 0.6rem',
+                      background: '#fffbeb',
+                      border: '1px solid #fde68a',
+                      borderLeft: '3px solid #d97706',
+                      borderRadius: 4,
+                      fontSize: '0.78rem',
+                      color: '#78350f',
+                    }}
+                  >
+                    Client decision pending — this variation cannot be invoiced until the client authorises the change.
+                  </div>
+                )}
               </li>
             )}
             {variation.status === 'REJECTED' && variation.rejectedAt && (
@@ -284,9 +311,21 @@ export default function VariationOrderDetail() {
           <dt><ClockIcon size={13} /> Created:</dt>
           <dd>{formatIndianDateTime(variation.createdAt)}</dd>
           {variation.clientApprovalRequired !== undefined && (
+            // [DR-027] Make the client-approval requirement a first-class
+            // fact in the metadata block, not a tiny greyed-out label.
+            // When the row is APPROVED but client authorisation hasn't
+            // been captured, the label upgrades to 'Required — pending'
+            // so a billing engineer reading the row understands the
+            // status gap.
             <>
               <dt><ClockIcon size={13} /> Client approval:</dt>
-              <dd>{variation.clientApprovalRequired ? 'Required' : 'Not required'}</dd>
+              <dd>
+                {variation.clientApprovalRequired
+                  ? (variation.status === 'APPROVED'
+                      ? <span style={{ color: '#d97706', fontWeight: 600 }}>Required — pending decision</span>
+                      : 'Required')
+                  : 'Not required'}
+              </dd>
             </>
           )}
         </dl>
