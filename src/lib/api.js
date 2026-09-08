@@ -33,15 +33,24 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = DEFAULT_TIMEOUT_MS) 
   try {
     return await fetch(url, { ...opts, signal: controller.signal });
   } catch (err) {
+    // [DR-030] Network-level errors (timeout, offline, DNS failure)
+    // are TRANSIENT — mark them so refresh-aware callers can preserve
+    // the session instead of cascading a logout. The user's identity
+    // is fine; only the wire between us and the API is down.
+    const transientErr = (msg, code) => {
+      const e = new ApiError(msg, 0, code);
+      e.transient = true;
+      return e;
+    };
     if (err && err.name === 'AbortError') {
-      throw new ApiError('The request took too long. Please try again.', 0, 'TIMEOUT');
+      throw transientErr('The request took too long. Please try again.', 'TIMEOUT');
     }
     // S5 (audit): replace the developer-oriented "is the server running?"
     // copy with something a non-technical user can act on. The internal
     // `code` stays as 'NETWORK_ERROR' so the cold-start retry at
     // api.js:request() and any error.code === 'NETWORK_ERROR' branches
     // in callers keep working unchanged.
-    throw new ApiError("Couldn't reach the server. Check your internet connection and try again.", 0, 'NETWORK_ERROR');
+    throw transientErr("Couldn't reach the server. Check your internet connection and try again.", 'NETWORK_ERROR');
   } finally {
     clearTimeout(timeoutId);
   }
@@ -95,7 +104,22 @@ function doRefresh() {
   }, REFRESH_TIMEOUT_MS)
     .then(async (res) => {
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new ApiError(data.error || 'Refresh failed', res.status, data.code);
+      if (!res.ok) {
+        // [DR-030] Tag the failure as transient when the server returned
+        // a 5xx (or the network timed out below). The route's catch
+        // block preserves the session and lets the next call retry.
+        // Only a 4xx from /auth/refresh is treated as definitive — the
+        // refresh token was revoked, expired, replayed, or unknown —
+        // and that path dispatches auth:logout as before.
+        const transient = res.status >= 500 || res.status === 0;
+        const err = new ApiError(
+          data.error || 'Refresh failed',
+          res.status,
+          data.code,
+        );
+        if (transient) err.transient = true;
+        throw err;
+      }
       // DR-011: drop the response if the session identity changed
       // while we were waiting. Throwing here funnels the caller into
       // the same error path as a refresh failure, so AuthContext's
@@ -214,8 +238,26 @@ async function request(method, path, body, token, { _retried, _networkRetried, i
         const newToken = await api.refreshToken();
         return request(method, path, body, newToken, { _retried: true, idempotencyKey });
       } catch (refreshErr) {
-        // Refresh itself failed — fall through to the normal error path
-        // but tell the app to log out (single-fire to avoid toast spam).
+        // [DR-030] Distinguish a transient refresh outage (server
+        // returned 5xx, network timed out, fetch threw) from a
+        // definitive invalid-refresh (4xx — token revoked, expired,
+        // replayed). The audit found the previous code logged out on
+        // every refresh failure, including transient infra blips,
+        // which forced re-login and orphaned any draft the user
+        // was editing mid-submit. We now preserve the session during
+        // transient failures and let the next request retry; only a
+        // definitive 4xx ends the session.
+        const isTransient = refreshErr?.transient === true;
+        if (isTransient) {
+          // Surface the connectivity gap so the user knows WHY a
+          // request failed without killing the session.
+          throw new ApiError(
+            refreshErr.message || 'Connection problem — please retry.',
+            refreshErr.status || 503,
+            'REFRESH_TRANSIENT',
+          );
+        }
+        // Definitive invalid-refresh (4xx) — clear the session.
         dispatchLogoutOnce('refresh_failed');
         throw new ApiError('Session expired. Please sign in again.', 401, data.code);
       }
