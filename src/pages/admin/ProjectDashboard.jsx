@@ -41,7 +41,15 @@ const TILE_META = {
   },
   'dpr.pendingReview': {
     label: 'DPRs Pending Review',
-    loader: (p, t) => api.getDprs({ ...projectFilters(p), status: 'UNDER_REVIEW', limit: 10 }, t).then((d) => d.dprs || []),
+    // DR-014: KPI tile's `pendingReviewCount` is the SUM of SUBMITTED +
+    // UNDER_REVIEW (admin queue size), so the drill must include both
+    // statuses — otherwise the tile reads "5" but the panel shows the
+    // UNDER_REVIEW subset (typically 1-2) and the user thinks the page
+    // is blank. Two parallel fetches (5+5) keep the panel ≤10 rows.
+    loader: (p, t) => Promise.all([
+      api.getDprs({ ...projectFilters(p), status: 'SUBMITTED', limit: 5 }, t).then((d) => d.dprs || []),
+      api.getDprs({ ...projectFilters(p), status: 'UNDER_REVIEW', limit: 5 }, t).then((d) => d.dprs || []),
+    ]).then(([a, b]) => [...a, ...b]),
     viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
   },
   'dpr.approved': {
@@ -358,6 +366,12 @@ export default function ProjectDashboard() {
   // so the mental model is consistent.
   const [searchParams, setSearchParams] = useSearchParams();
   const urlTile = searchParams.get('tile') || '';
+  // DR-014: `?project=<id-or-name>` deep-link from the registry
+  // (ProjectsAdmin → "Open dashboard" on row click) was previously
+  // ignored — the dashboard auto-selected the first registered project
+  // instead. Read it as the canonical selection once the project list
+  // lands; until then we fall back to the existing auto-select.
+  const urlProject = searchParams.get('project') || '';
   const [expandedTile, setExpandedTile] = useState(urlTile || null);
   // Mirror URL → state when the user lands on a tile=… link or
   // back-navigates to one. Same pattern as DprDashboard.jsx:70-81.
@@ -412,6 +426,26 @@ export default function ProjectDashboard() {
       if (mountedRef.current) setLoadingProjects(false);
     }
   }, [accessToken, toast, selectedProject]);
+
+  // DR-014: consume `?project=<id-or-name>` after the project list lands.
+  // Matches in two passes — exact UUID against `projects`, then
+  // exact-decoded name against `discovered` (registry link uses
+  // encodeURIComponent(name)). When matched, this REPLACES the
+  // auto-selected first project so the URL controls the dashboard.
+  // Empty / no-match `?project=` falls through to the auto-select.
+  useEffect(() => {
+    if (!urlProject) return;
+    if (projects.length === 0 && discovered.length === 0) return;
+    const reg = projects.find((p) => p.id === urlProject);
+    if (reg) {
+      setSelectedProject({ id: reg.id, name: reg.name, isRegistered: true });
+      return;
+    }
+    const disc = discovered.find((d) => encodeURIComponent(d.name) === urlProject);
+    if (disc) {
+      setSelectedProject({ id: null, name: disc.name, isRegistered: false });
+    }
+  }, [urlProject, projects, discovered]);
 
   // KPI fetch — depends on (selectedProject, days). Aborts on unmount.
   const loadKpis = useCallback(async () => {
