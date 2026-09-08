@@ -837,6 +837,57 @@ export default function DprList() {
                 <div className="portal-auth-error">{expandedError}</div>
               ) : (
                 <>
+                  {/* [DR-026] Rejected-DPR contract. The previous detail
+                      modal silently omitted the rejection reason — only
+                      the bell notification carried it, so an employee
+                      opening the detail page from their "My DPRs" list
+                      saw "REJECTED" without a single word of WHY.
+                      Backend treats REJECTED as a terminal state
+                      (backend/src/routes/dpr.js:1593 — 409 on PUT after
+                      REJECTED), so correction happens by filing a NEW
+                      report for a DIFFERENT reportDate. We say so here
+                      instead of forcing the user to discover the
+                      constraint via a 409. */}
+                  {expandedDpr.status === 'REJECTED' && (
+                    <div
+                      role="alert"
+                      style={{
+                        marginBottom: '1rem',
+                        padding: '0.75rem 0.875rem',
+                        background: '#fef2f2',
+                        border: '1px solid #fecaca',
+                        borderLeft: '3px solid var(--danger, #dc2626)',
+                        borderRadius: 6,
+                        fontSize: '0.875rem',
+                        color: '#7f1d1d',
+                      }}
+                    >
+                      <div style={{ fontWeight: 700, marginBottom: '0.25rem' }}>
+                        Rejected by reviewer
+                      </div>
+                      {expandedDpr.rejectionReason && (
+                        <div style={{ marginBottom: expandedDpr.adminNotes ? '0.4rem' : 0 }}>
+                          {expandedDpr.rejectionReason}
+                        </div>
+                      )}
+                      {expandedDpr.adminNotes && (
+                        <div style={{ fontSize: '0.8rem', color: '#991b1b', fontStyle: 'italic' }}>
+                          Admin note: {expandedDpr.adminNotes}
+                        </div>
+                      )}
+                      <div
+                        style={{
+                          marginTop: '0.6rem',
+                          paddingTop: '0.6rem',
+                          borderTop: '1px solid #fecaca',
+                          fontSize: '0.78rem',
+                          color: '#7f1d1d',
+                        }}
+                      >
+                        This report is closed — please file a new report for a different date, or message your reviewer to reopen it.
+                      </div>
+                    </div>
+                  )}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem 1.5rem', marginBottom: '1rem', fontSize: '0.9rem' }}>
                     <div><strong>Status:</strong> <StatusBadge status={expandedDpr.status} map={DPR_STATUS_MAP} /></div>
                     <div><strong>Work Type:</strong> {expandedDpr.workType || 'N/A'}</div>
