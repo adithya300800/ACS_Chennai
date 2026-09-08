@@ -1155,9 +1155,14 @@ function CertificationFormModal({
         claimedAmount: parseFloat(form.claimedAmount) || 0,
         deductedAmount: form.deductedAmount === '' ? 0 : (parseFloat(form.deductedAmount) || 0),
         certifiedAmount: parseFloat(form.certifiedAmount) || 0,
-        gstAmount: form.gstAmount === '' ? null : (parseFloat(form.gstAmount) || null),
-        poValue: form.poValue === '' ? null : (parseFloat(form.poValue) || null),
-        balanceValue: form.balanceValue === '' ? null : (parseFloat(form.balanceValue) || null),
+        // [DR-028] Don't coerce zero to null — `parseFloat('0') || null`
+        // would record absence instead of zero. Blank input → null;
+        // numeric input (including legitimate 0) → the parsed number.
+        // The backend's `parseAmount` rejects NaN with 400
+        // INVALID_CLAIMED so a typed-in garbage string still bounces.
+        gstAmount: form.gstAmount === '' ? null : parseFloat(form.gstAmount),
+        poValue: form.poValue === '' ? null : parseFloat(form.poValue),
+        balanceValue: form.balanceValue === '' ? null : parseFloat(form.balanceValue),
         remarks: form.remarks ? form.remarks.trim() : null,
         ...(attachment || {}),
       };
