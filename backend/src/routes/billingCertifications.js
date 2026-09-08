@@ -90,6 +90,15 @@ const {
   withRecordTransaction,
   photoBindingLostResponse,
 } = require('../lib/uploadIntentBinding');
+// [DR-020] Durable DB-backed idempotency. Locks the request slot
+// BEFORE side-effects so concurrent same-key retries cannot both create
+// rows. The legacy in-memory cache (tryReplay/recordSuccess) is still
+// used by dpr.js — billing + inspection use this path going forward.
+const {
+  reserve: reserveIdempotency,
+  complete: completeIdempotency,
+  release: releaseIdempotency,
+} = require('../lib/idempotency');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -907,6 +916,43 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
     }
   }
 
+  // [DR-020] Durable idempotency reservation. Locks the request slot
+  // BEFORE any DB writes so concurrent same-key retries cannot both
+  // create a billing-cert row. Behaviour mirrors dpr.js's in-memory
+  // cache (5-min TTL) but survives a process restart and is shared
+  // across replicas when the Prisma request_dedupe table is wired.
+  // On a hit we return the cached response (replay) or 409
+  // (mismatch / conflict). The reservation is released on user error
+  // (4xx) so the client can fix the payload and retry; failed on
+  // server error so a retry with the same body doesn't loop.
+  const idempotencyReservation = await reserveIdempotency({
+    prisma,
+    route: 'billingCertification.create',
+    req,
+  });
+  if (idempotencyReservation.replay && idempotencyReservation.cached) {
+    return res
+      .set('Idempotent-Replay', 'true')
+      .status(idempotencyReservation.cached.status || 200)
+      .json(idempotencyReservation.cached.body);
+  }
+  if (idempotencyReservation.mismatch) {
+    return res.status(409).json({
+      error: 'IDEMPOTENCY_MISMATCH',
+      code: 'IDEMPOTENCY_MISMATCH',
+      message: 'Idempotency-Key reused with a different body',
+    });
+  }
+  if (idempotencyReservation.conflict) {
+    return res.status(409).json({
+      error: 'IDEMPOTENCY_CONFLICT',
+      code: 'IDEMPOTENCY_CONFLICT',
+      message: idempotencyReservation.poisoned
+        ? 'A previous request with this Idempotency-Key failed. Use a new key.'
+        : 'A concurrent request with this Idempotency-Key is in flight. Retry shortly.',
+    });
+  }
+
   // [DR-001] Validate the upload intent BEFORE we touch any rows when
   // an attachment is being submitted. Same single-element-array adapter
   // as drawings.js / projectAttachments.js.
@@ -919,7 +965,12 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
       photos: intentWrapper,
       context: 'billingCertification.create',
     });
-    if (intentErr) return res.status(intentErr.status).json(intentErr.body);
+    if (intentErr) {
+      // [DR-020] Intent validation is a recoverable 4xx — drop the
+      // PENDING slot so the client can retry with a fresh upload.
+      await releaseIdempotency({ prisma, reservation: idempotencyReservation });
+      return res.status(intentErr.status).json(intentErr.body);
+    }
   }
 
   // Project must exist + be active. Mirrors drawing.js#POST.
@@ -928,6 +979,9 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
     select: { id: true, isActive: true },
   });
   if (!project || !project.isActive) {
+    // [DR-020] Project-not-found is a recoverable 4xx — drop the
+    // PENDING slot so the client can retry with a corrected projectId.
+    await releaseIdempotency({ prisma, reservation: idempotencyReservation });
     return res.status(400).json({
       error: 'PROJECT_NOT_FOUND',
       code: 'PROJECT_NOT_FOUND',
@@ -1003,6 +1057,17 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
       },
     });
     res.status(201).json(serializeBillingCertification(full));
+    // [DR-020] Mark the reservation COMPLETED so a retry with the same
+    // Idempotency-Key + body returns the cached 201 instead of trying
+    // to create a duplicate row.
+    await completeIdempotency({
+      prisma,
+      reservation: idempotencyReservation,
+      status: 201,
+      body: serializeBillingCertification(full),
+      recordKind: 'billingCertification',
+      recordId: row.id,
+    });
   } catch (err) {
     // [DR-001] Lost upload claim → 409, never 500. Same envelope as
     // dpr.js — the client knows what to do.
@@ -1013,6 +1078,9 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
         expected: err.expected,
         bound: err.bound,
       });
+      // [DR-020] Drop the PENDING slot so the client can retry with
+      // a fresh upload (binding-lost is a recoverable 4xx).
+      await releaseIdempotency({ prisma, reservation: idempotencyReservation });
       return res.status(bindingLost.status).json(bindingLost.body);
     }
     console.error('[billing-certifications] create failed', {
@@ -1022,7 +1090,16 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
       errMessage: err?.message?.split('\n')[0],
     });
     const mapped = mapPrismaError(err);
-    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    if (mapped) {
+      // [DR-020] A mapped 4xx (e.g. duplicate project/contractor/billNo
+      // uniqueness) is a recoverable error — drop the slot so the
+      // client can fix the payload and retry. 5xx stays PENDING so
+      // retries don't loop into the same wall.
+      if (mapped.status >= 400 && mapped.status < 500) {
+        await releaseIdempotency({ prisma, reservation: idempotencyReservation });
+      }
+      return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    }
     res.status(500).json({ error: 'Failed to create billing certification' });
   }
 }));

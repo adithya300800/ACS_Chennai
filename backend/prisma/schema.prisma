@@ -1447,6 +1447,15 @@ model BillingCertification {
   version               Int                        @default(0) @map("version")
   parentCertificationId String?                    @map("parent_certification_id")
   supersededAt          DateTime?                  @map("superseded_at")
+  // [DR-020] Idempotency-Key stamped at create-time when the client
+  // supplied one. The route reserves a `request_dedupe` row BEFORE
+  // the create (so concurrent same-key requests are rejected at the
+  // gate), then back-fills this column on the committed row for
+  // admin forensic lookups ("which COP came from this client retry?").
+  // NULL when the client didn't send a header (the audit's
+  // business-identity fallback — projectId + contractorName +
+  // billNumber — still applies).
+  idempotencyKey        String?                    @map("idempotency_key")
   createdAt             DateTime                   @default(now()) @map("created_at")
   updatedAt             DateTime                   @updatedAt @map("updated_at")
 
@@ -1478,6 +1487,12 @@ model BillingCertification {
   // Active-rows filter (`WHERE superseded_at IS NULL` on the list /
   // aggregates endpoints).
   @@index([supersededAt])
+  // [DR-020] Idempotency-Key forensic lookup ("which COP came from
+  // this client retry?"). Mirrors the uploadIntentUlid index above —
+  // sparse index on a nullable column, low cardinality in practice
+  // (only retries populate it), but a single-row lookup is the entire
+  // point of the column.
+  @@index([idempotencyKey])
   @@map("billing_certification")
 }
 
@@ -1554,4 +1569,71 @@ model BoqExecution {
   @@index([boqItemId, executedAt])
   @@index([stage])
   @@map("boq_execution")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [DR-020] Durable request-key deduplication.
+//
+// Audit verdict (Code review by SOL/ACS-Portal-Workflow-Completeness-Review-
+// 2026-09-08-5c61cd8.md, lines 312-322):
+//
+//   "A COP POST retried after a lost response generates another UUID with
+//    no business-identity or request-key deduplication. Separately,
+//    inspection idempotency caches post-success results but does not
+//    reserve an in-flight owner/route/key; concurrent same-key, no-photo
+//    requests can both create records."
+//
+// Repair: reserve the key BEFORE any side-effects (not just cache the
+// response after the fact). The previous round-10 idempotency cache
+// (backend/src/lib/idempotency.js) was in-memory + post-success; a
+// concurrent retry that landed while the original handler was still
+// running saw a cache miss and proceeded to create a duplicate record.
+// The new helper reserves PENDING inside the same request lifecycle
+// that commits the row, so a second concurrent writer hits the PK
+// collision and gets 409. Restart-safe because the reservation row is
+// in Postgres (not process memory).
+//
+// State machine:
+//   PENDING    — handler is running, key is locked
+//   COMPLETED  — handler returned 2xx; result_body cached for replays
+//   FAILED     — handler returned 4xx; slot is poisoned so a retry
+//                with the same body doesn't loop forever (still
+//                rejected; the client should fix the payload, not retry)
+//
+// `key` is namespaced by lib/idempotency.js as `${route}:${employeeId}:${rawKey}`
+// so two writers on different routes can never collide on the same
+// client-chosen string. PK is the namespaced key directly — no
+// surrogate id, because the lookup-by-key is the only hot read path.
+// ─────────────────────────────────────────────────────────────────────────────
+model RequestDedupe {
+  // Namespaced key: `${route}:${employeeId}:${rawKey}`. Capped at 255
+  // in lib/idempotency.js so the PK index stays bounded even with a
+  // malicious megabyte header.
+  key          String    @id @map("key")
+  // sha256(canonicalJsonStringify(body)) — same contract as
+  // lib/idempotency.js canonicalJsonStringify. The security pin:
+  // same key + different body MUST return 409 IDEMPOTENCY_MISMATCH.
+  payloadHash  String    @map("payload_hash")
+  // PENDING | COMPLETED | FAILED — CHECK constraint at the DB level.
+  state        String    @map("state")
+  // Cached response shape so a same-key replay returns the original
+  // row's serialized body without re-reading the business table.
+  resultStatus Int?      @map("result_status")
+  resultBody   Json?     @map("result_body")
+  // Best-effort reference back to the row the handler committed.
+  // NOT a FK on purpose: the dedupe row must outlive a hard-delete
+  // (the audit's "ONE logical record" guarantee means a deleted COP
+  // must still reject same-key retries).
+  recordKind   String?   @map("record_kind")
+  recordId     String?   @map("record_id")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  // Janitor target — populated when COMPLETED; admin query can DELETE
+  // WHERE expires_at < now() to bound the table. PENDING slots are
+  // GC'd separately by the state_created_at index.
+  expiresAt    DateTime? @map("expires_at")
+
+  @@index([recordKind, recordId])
+  @@index([state, createdAt])
+  @@map("request_dedupe")
 }
