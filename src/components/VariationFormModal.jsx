@@ -25,6 +25,10 @@ function formatRupees(value) {
   return `${n < 0 ? '−' : ''}₹${formatted}`;
 }
 
+// DR-017: `projects` is OPTIONAL. The detail page mounts the modal
+// without a projects list (the project is locked in once the draft is
+// created), so a non-optional array would crash on `.map()` at render.
+// Edit mode renders the project as a read-only chip instead of a picker.
 export default function VariationFormModal({
   open,
   onClose,
@@ -38,6 +42,15 @@ export default function VariationFormModal({
   editing = null,
 }) {
   const toast = useToast();
+  const isEdit = !!(editing && editing.id);
+  const safeProjects = Array.isArray(projects) ? projects : [];
+  // In edit mode the project is immutable; pre-resolve the display
+  // name from the editing row so we don't need a `projects` prop to
+  // render the modal. The create flow still uses the picker.
+  const editingProjectName =
+    editing?.project?.name ||
+    (safeProjects.find((p) => p && p.id === editing?.projectId) || {}).name ||
+    '';
   const [projectId, setProjectId] = useState(initialProjectId);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -71,7 +84,11 @@ export default function VariationFormModal({
   }, [open, editing, initialProjectId]);
 
   const liveError = useMemo(() => {
-    if (!projectId) return 'Project is required.';
+    // projectId is only required for the CREATE flow — the backend
+    // refuses PATCH attempts to re-bind a variation to a different
+    // project (see ALLOWED_UPDATE_FIELDS in variations.js). In edit
+    // mode the project is locked in and shown as a read-only chip.
+    if (!isEdit && !projectId) return 'Project is required.';
     if (title.trim().length === 0) return 'Title is required.';
     if (title.length > MAX_TITLE_LEN) return `Title must be at most ${MAX_TITLE_LEN} characters.`;
     if (description.length > MAX_DESCRIPTION_LEN) return `Description must be at most ${MAX_DESCRIPTION_LEN} characters.`;
@@ -81,7 +98,28 @@ export default function VariationFormModal({
       return `Delta amount must be a finite number in [${DELTA_AMOUNT_MIN}, ${DELTA_AMOUNT_MAX}].`;
     }
     return '';
-  }, [projectId, title, description, deltaAmountRaw]);
+  }, [isEdit, projectId, title, description, deltaAmountRaw]);
+
+  // DR-017: build a mode-correct payload. PATCH refuses unknown fields
+  // (variations.js returns 400 UNKNOWN_FIELDS for any non-allowlisted
+  // key, including `projectId`); the edit command must therefore omit
+  // the immutable identity that the create command requires.
+  const buildPayload = () => {
+    const payload = {
+      title: title.trim(),
+      description: description.trim() || null,
+      // Send the raw number (not Number()) — backend parses either
+      // shape; matches the wire contract for /api/variations POST/PATCH.
+      deltaAmount: deltaAmountRaw === '' ? null : Number(deltaAmountRaw),
+      clientApprovalRequired,
+      // Round-29: referenceRfiId removed from payload — the RFI feature
+      // is gone. VOs are standalone work items.
+    };
+    if (!isEdit) {
+      payload.projectId = projectId;
+    }
+    return payload;
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -92,19 +130,9 @@ export default function VariationFormModal({
     setSubmitting(true);
     setFormError('');
     try {
-      const payload = {
-        projectId,
-        title: title.trim(),
-        description: description.trim() || null,
-        // Send the raw number (not Number()) — backend parses either
-        // shape; matches the wire contract for /api/variations POST/PATCH.
-        deltaAmount: deltaAmountRaw === '' ? null : Number(deltaAmountRaw),
-        clientApprovalRequired,
-        // Round-29: referenceRfiId removed from payload — the RFI feature
-        // is gone. VOs are standalone work items.
-      };
+      const payload = buildPayload();
       let result;
-      if (editing?.id) {
+      if (isEdit) {
         result = await api.updateVariation(editing.id, payload, accessToken);
         toast.push('Variation draft updated.', 'success');
       } else {
@@ -146,20 +174,39 @@ export default function VariationFormModal({
 
       <form onSubmit={handleSubmit} noValidate>
         <div className="form-group">
-          <label htmlFor="variation-form-project">Project</label>
-          <select
-            id="variation-form-project"
-            className="form-input"
-            value={projectId}
-            onChange={(e) => setProjectId(e.target.value)}
-            disabled={!!editing} // disallow moving a DRAFT across projects
-            required
-          >
-            <option value="">Select a project…</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
+          {/* DR-017: edit mode renders the project as a read-only chip.
+              PATCH refuses immutable identity (projectId is NOT in
+              ALLOWED_UPDATE_FIELDS), so the create-only picker is
+              hidden on edit. The detail page also does not pass
+              `projects`, so a non-optional `.map()` would crash here. */}
+          {isEdit ? (
+            <>
+              <label htmlFor="variation-form-project-readonly">Project</label>
+              <input
+                id="variation-form-project-readonly"
+                className="form-input"
+                value={editingProjectName || '—'}
+                readOnly
+                aria-readonly="true"
+              />
+            </>
+          ) : (
+            <>
+              <label htmlFor="variation-form-project">Project</label>
+              <select
+                id="variation-form-project"
+                className="form-input"
+                value={projectId}
+                onChange={(e) => setProjectId(e.target.value)}
+                required
+              >
+                <option value="">Select a project…</option>
+                {safeProjects.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </>
+          )}
         </div>
 
         <div className="form-group">
