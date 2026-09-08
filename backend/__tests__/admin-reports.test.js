@@ -114,6 +114,15 @@ function buildApp({ adminIsAdmin = true, userIsAdmin = false, employeeExists = t
           if (where.projectId && r.projectId !== where.projectId) return false;
           if (where.uploadedById && r.uploadedById !== where.uploadedById) return false;
           if (where.type && r.type !== where.type) return false;
+          // [DR-012] Prisma's relational filter — when no projectId is
+          // pinned the unscoped list adds `project: { isActive: true }`
+          // so attachments for archived projects are excluded.
+          if (where.project && typeof where.project === 'object') {
+            const proj = projectRows.get(r.projectId);
+            if (!proj) return false;
+            if (where.project.isActive === true && !proj.isActive) return false;
+            if (where.project.isActive === false && proj.isActive) return false;
+          }
           if (where.uploadedAt) {
             const { gte, lte } = where.uploadedAt;
             const ts = r.uploadedAt instanceof Date ? r.uploadedAt.getTime() : new Date(r.uploadedAt).getTime();
@@ -172,6 +181,13 @@ function buildApp({ adminIsAdmin = true, userIsAdmin = false, employeeExists = t
           if (where.projectId && r.projectId !== where.projectId) return false;
           if (where.uploadedById && r.uploadedById !== where.uploadedById) return false;
           if (where.type && r.type !== where.type) return false;
+          // [DR-012] Same relational filter as findMany — see comment above.
+          if (where.project && typeof where.project === 'object') {
+            const proj = projectRows.get(r.projectId);
+            if (!proj) return false;
+            if (where.project.isActive === true && !proj.isActive) return false;
+            if (where.project.isActive === false && proj.isActive) return false;
+          }
           if (where.uploadedAt) {
             const { gte, lte } = where.uploadedAt;
             const ts = r.uploadedAt instanceof Date ? r.uploadedAt.getTime() : new Date(r.uploadedAt).getTime();
@@ -446,5 +462,111 @@ describe('R36 — Admin Project Reports: validation', () => {
       .set('Authorization', adminJwt());
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_CURSOR');
+  });
+});
+
+// ─── DR-012 — Archive filter on unscoped reports list ─────────────────────
+// Audit symptom: the admin dashboard listed a report for a project that
+// had been archived (isActive=false), but Download returned 404 with
+// "Linked project does not exist or is archived". The fix: the unscoped
+// list now applies `project: { isActive: true }` so an archived project's
+// attachments never surface in the admin reports registry.
+describe('DR-012 — unscoped admin reports exclude archived-project attachments', () => {
+  const ARCHIVED = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const ARCHIVED_ATT = '99999999-9999-4999-8999-aaaaaaaaaaaa';
+
+  function buildAppWithArchived() {
+    const env = buildApp();
+    // Add a third project that is archived (isActive=false), plus one
+    // attachment against it. The seeded PROJECT_A + PROJECT_B remain
+    // isActive=true so the regression-guard test can still see them.
+    env.projectRows.set(ARCHIVED, {
+      id: ARCHIVED,
+      name: 'Archived Site',
+      code: 'ARCH',
+      isActive: false,
+    });
+    // Seed three active attachments on PROJECT_A and one on PROJECT_B
+    // so the unscoped list has known-active rows to render — the
+    // original buildApp() does not pre-seed attachments, so each
+    // historical test calls seed() directly. For the DR-012 cases we
+    // need a populated active set as the regression baseline.
+    const ACTIVE_ATT_A1 = '99999999-9999-4999-8999-aaa111111111';
+    const ACTIVE_ATT_A2 = '99999999-9999-4999-8999-aaa222222222';
+    const ACTIVE_ATT_A3 = '99999999-9999-4999-8999-aaa333333333';
+    const ACTIVE_ATT_B1 = '99999999-9999-4999-8999-bbb111111111';
+    for (const [id, projectId] of [
+      [ACTIVE_ATT_A1, PROJECT_A],
+      [ACTIVE_ATT_A2, PROJECT_A],
+      [ACTIVE_ATT_A3, PROJECT_A],
+      [ACTIVE_ATT_B1, PROJECT_B],
+    ]) {
+      env.attachmentRows.set(id, {
+        id,
+        projectId,
+        type: 'WEEKLY_REPORT',
+        filename: `${id}.pdf`,
+        contentType: 'application/pdf',
+        sizeBytes: 1000,
+        blobPath: `projects/${projectId}/${id}.pdf`,
+        uploadedById: USER_ID,
+        uploadedAt: new Date('2026-09-01T10:00:00Z'),
+        deletedAt: null,
+        title: `Active ${id}`,
+      });
+    }
+    env.attachmentRows.set(ARCHIVED_ATT, {
+      id: ARCHIVED_ATT,
+      projectId: ARCHIVED,
+      type: 'WEEKLY_REPORT',
+      filename: 'archived.pdf',
+      contentType: 'application/pdf',
+      sizeBytes: 1234,
+      blobPath: 'projects/ARCHIVED/w1.pdf',
+      uploadedById: USER_ID,
+      uploadedAt: new Date('2026-09-01T10:00:00Z'),
+      deletedAt: null,
+      title: 'Archived weekly',
+    });
+    return env;
+  }
+
+  it('18. unscoped list excludes attachments whose parent project is archived', async () => {
+    const { app } = buildAppWithArchived();
+    const res = await request(app)
+      .get('/api/admin/reports')
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    const projectIds = res.body.reports.map((r) => r.projectId);
+    // The archived project's attachment must NOT surface — the row is
+    // un-downloadable (per-project scope 404s), and the audit verdict
+    // was that this orphan row confused the admin UI.
+    expect(projectIds).not.toContain(ARCHIVED);
+    // Active projects still surface (regression guard).
+    expect(projectIds).toContain(PROJECT_A);
+    expect(projectIds).toContain(PROJECT_B);
+  });
+
+  it('19. unscoped total count also excludes archived-project attachments', async () => {
+    const { app } = buildAppWithArchived();
+    const res = await request(app)
+      .get('/api/admin/reports')
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    // The seeded env has 4 active attachments (3 on A, 1 on B) plus 1
+    // archived on ARCHIVED. After DR-012, total = 4.
+    expect(res.body.total).toBe(4);
+  });
+
+  it('20. ?projectId=<archived uuid> still 404s (resolveProjectParam unchanged)', async () => {
+    const { app } = buildAppWithArchived();
+    const res = await request(app)
+      .get(`/api/admin/reports?projectId=${ARCHIVED}`)
+      .set('Authorization', adminJwt());
+    // The resolveProjectParam helper still rejects an explicit archived
+    // UUID with 404 — DR-012 only added the unscoped list filter, did
+    // not change the pinned-projectId path.
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('PROJECT_NOT_FOUND');
   });
 });

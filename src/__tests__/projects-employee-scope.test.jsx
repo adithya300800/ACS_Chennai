@@ -44,4 +44,20 @@ describe('Round-31 — My Projects (employee-facing) project scope', () => {
     expect(appSrc).toMatch(/path=["']projects["']/);
     expect(appSrc).toMatch(/path=["']projects\/:id["']/);
   });
+
+  test('Projects.jsx merges the curated + discovered lists without a client-side archive filter (DR-012 contract)', () => {
+    // The DR-012 archive-rediscover fix lives entirely server-side
+    // (backend/src/routes/projects.js filters discovered names against
+    // archived Project rows before returning). The frontend merges
+    // curated + discovered from the response and trusts the server's
+    // filter — pinning that here means a future "let me filter
+    // archived on the client" PR can't silently double-filter or skip
+    // the server's response.
+    expect(projectsSrc).toMatch(/data\.projects/);
+    expect(projectsSrc).toMatch(/data\.discovered/);
+    // The merge happens by concatenation of the two server-provided
+    // arrays; there is no extra predicate against `isActive` on the
+    // discovered side (the server already does that).
+    expect(projectsSrc).not.toMatch(/discovered\.filter\([^)]*isActive[^)]*\)/);
+  });
 });

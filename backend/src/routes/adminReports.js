@@ -318,9 +318,19 @@ router.get('/', async (req, res) => {
   }
 
   // ─── Build where + fetch ──────────────────────────────────────────
+  // [DR-012] When the caller did NOT pin a projectId, exclude attachments
+  // whose parent project is archived. The download endpoint already
+  // 404s on an archived project (per-project scope check), so leaving
+  // archived-project rows in this unscoped list would surface
+  // un-downloadable rows — the audit symptom was exactly that. When
+  // the caller DID pin projectId via resolveProjectParam, that helper
+  // already returned 'invalid' for an archived UUID (404 above), so the
+  // relation filter is only needed for the no-projectId path.
   const where = {
     deletedAt: null,
-    ...(projectScope.projectId ? { projectId: projectScope.projectId } : {}),
+    ...(projectScope.projectId
+      ? { projectId: projectScope.projectId }
+      : { project: { isActive: true } }),
     ...(uploadedById ? { uploadedById } : {}),
     ...(type ? { type } : {}),
     ...(fromDate || toDate ? {
