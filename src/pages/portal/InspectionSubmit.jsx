@@ -103,6 +103,11 @@ function saveDraftForEmployee(employeeId, payload) {
       caption: p.caption,
       location: p.location,
       takenAt: p.takenAt,
+      // SOL DR-006: preserve the SAS readUrl when the photo was
+      // rehydrated from a server-side draft. See DprSubmit.jsx for the
+      // full rationale — the serializer just passes it through if
+      // present so a reload can render the preview without refetching.
+      ...(p.readUrl ? { readUrl: p.readUrl } : {}),
     })),
   };
   saveScopedDraft(DRAFT_BASE, employeeId, safe);
@@ -156,6 +161,13 @@ export default function InspectionSubmit() {
   // POST /:id/submit instead of POST /.
   const [editingId, setEditingId] = useState(null);
   const [draftLoadedFromServer, setDraftLoadedFromServer] = useState(false);
+  // SOL DR-006: defense-in-depth guard against the hydration effect
+  // re-running when only its context deps change (toast push, token
+  // rotation). See DprSubmit.jsx for the full rationale — the same
+  // lastHydratedDraftIdRef pattern keeps dirty form state intact when
+  // a sibling toast push or auth-context re-render fires after a
+  // successful initial load.
+  const lastHydratedDraftIdRef = useRef(null);
 
   // Reusable YYYY-MM-DD normaliser. The backend serialises reportDate
   // as a Date that JSON.stringify renders as ISO datetime on some
@@ -422,6 +434,14 @@ export default function InspectionSubmit() {
   // PUT-touched.
   useEffect(() => {
     if (!draftId || !accessToken) return;
+    // SOL DR-006: skip re-hydration when only the toast/token
+    // identity changes. We only re-run when the target draftId changes.
+    if (lastHydratedDraftIdRef.current === draftId) return;
+    // Mark in-flight BEFORE the await so a sibling re-render
+    // (project picker resolving, today-inspections fetch etc.)
+    // doesn't fire a second GET against the same row. Mirrors
+    // DprSubmit.jsx — see comment there for the full rationale.
+    lastHydratedDraftIdRef.current = draftId;
     let cancelled = false;
     (async () => {
       try {
@@ -430,6 +450,7 @@ export default function InspectionSubmit() {
         if (d.status !== 'DRAFT') {
           toast.push(`This inspection is no longer a draft (status: ${d.status}).`, 'warning');
           navigate('/portal/inspection/my', { replace: true });
+          lastHydratedDraftIdRef.current = null;
           return;
         }
         setEditingId(d.id);
@@ -454,15 +475,31 @@ export default function InspectionSubmit() {
             addedAt: null,
           });
         }
-        // Photo ULIDs from the server are preserved as references — no
-        // preview blobs possible from the readUrls (they're SAS URLs we
-        // can't re-upload through). User can re-add photos in the
-        // editor if needed.
-        setPhotos([]);
+        // SOL DR-006: restore server-side photo references (ULIDs +
+        // read URLs) into the local photos state. The previous
+        // `setPhotos([])` after every resume dropped the prior
+        // evidence chain on every server-side load and silently lost
+        // any newly added photo the engineer had uploaded before the
+        // resume. SAS read URLs are read-only — we keep them as
+        // `readUrl` so the renderer can show a preview without a
+        // local blob.
+        const serverPhotos = Array.isArray(d.photos) ? d.photos : [];
+        setPhotos(serverPhotos.map((p) => ({
+          ulid: p.ulid,
+          container: p.container,
+          filename: p.filename,
+          contentType: p.contentType,
+          sizeBytes: p.sizeBytes,
+          caption: p.caption || null,
+          location: p.location || null,
+          takenAt: p.takenAt || null,
+          readUrl: p.readUrl || null,
+        })));
         setShowDraftBanner(false); // suppress local-autosave banner
         setDraftLoadedFromServer(true);
       } catch (err) {
         if (!cancelled) toast.push(err.message || 'Failed to load draft', 'error');
+        lastHydratedDraftIdRef.current = null;
       }
     })();
     return () => { cancelled = true; };
