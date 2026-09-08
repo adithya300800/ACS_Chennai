@@ -55,6 +55,12 @@ export default function VariationOrdersAdmin() {
   const [projects, setProjects] = useState([]);
   // Round-29: rfis state REMOVED — RFI feature is gone.
   const [loading, setLoading] = useState(true);
+  // [DR-022] Cursor-paginated load-more. The backend already returns
+  // `nextCursor`; the previous implementation fetched the default 20
+  // and discarded the rest, silently hiding rows 21+ forever.
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState(null);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState({
     status: '',
@@ -99,13 +105,17 @@ export default function VariationOrdersAdmin() {
     setLoading(true);
     setError('');
     try {
-      const params = {};
+      const params = { limit: '20' };
       if (filter.status) params.status = filter.status;
       if (filter.projectId) params.projectId = filter.projectId;
       if (filter.from) params.from = filter.from;
       if (filter.to) params.to = filter.to;
       const data = await api.getVariations(params, accessToken);
       setVariations(data.variations || []);
+      // [DR-022] Honour the server's `nextCursor` so 21+ VOs are
+      // reachable via "Load more".
+      setNextCursor(data?.nextCursor || null);
+      setHasMore(!!data?.nextCursor);
     } catch (err) {
       setError(err.message || 'Failed to load variation orders.');
       if (err.status !== 401) {
@@ -115,6 +125,28 @@ export default function VariationOrdersAdmin() {
       setLoading(false);
     }
   }, [accessToken, filter, toast]);
+
+  // [DR-022] Load-more cursor walk. One round trip per click; stops
+  // when the server's nextCursor is null.
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const params = { limit: '20', cursor: nextCursor };
+      if (filter.status) params.status = filter.status;
+      if (filter.projectId) params.projectId = filter.projectId;
+      if (filter.from) params.from = filter.from;
+      if (filter.to) params.to = filter.to;
+      const data = await api.getVariations(params, accessToken);
+      setVariations((prev) => [...prev, ...(data.variations || [])]);
+      setNextCursor(data?.nextCursor || null);
+      setHasMore(!!data?.nextCursor);
+    } catch (err) {
+      toast.push(err.message || 'Failed to load more variations.', 'error');
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore, filter, accessToken, toast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -357,6 +389,22 @@ export default function VariationOrdersAdmin() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* [DR-022] Load more — paginates by the server's nextCursor so
+          21+ VOs are reachable. Hidden when the server reports no more
+          pages. */}
+      {!loading && hasMore && (
+        <div style={{ textAlign: 'center', margin: '1rem 0' }}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={loadMore}
+            disabled={loadingMore}
+          >
+            {loadingMore ? 'Loading…' : 'Load more'}
+          </button>
         </div>
       )}
 

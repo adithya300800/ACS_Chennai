@@ -121,74 +121,33 @@ export default function ReportsAdmin() {
   }, [accessToken]);
 
   // ─── Fetch reports (page 1 or load more) ───────────────────────────
-  // The backend ignores empty-string filters (it builds the where clause
-  // conditionally), so passing every field on every request is safe —
-  // the URL is the same shape every time and the empty filters don't
-  // narrow the result set.
-  const buildParams = useCallback((cursor) => {
-    const params = { limit: String(DEFAULT_LIMIT) };
-    if (projectId) params.projectId = projectId;
-    if (activeTypes.length > 0) params.type = activeTypes.join(','); // backend takes single enum → ignore for multi; see fetchReports
-    if (uploadedById) params.uploadedById = uploadedById;
-    if (fromDate) params.from = fromDate;
-    if (toDate) params.to = toDate;
-    if (cursor) params.cursor = cursor;
-    return params;
-  }, [projectId, activeTypes, uploadedById, fromDate, toDate]);
-
   const fetchReports = useCallback(async ({ append = false, cursor = null } = {}) => {
     if (append) setLoadingMore(true); else setLoading(true);
     setError('');
     try {
-      // Backend's ?type= accepts a single enum value. For multi-select
-      // chips we send one request per active type and merge the pages
-      // in-memory — admin registry pages are small (<= a few hundred
-      // rows) and the union-with-dedupe-by-id keeps the wire shape
-      // simple. If the dataset grows past a few hundred rows this can
-      // be lifted into a backend ?types=A,B,C clause; for now the
-      // client-side union is fine.
-      let items = [];
-      let lastCursor = null;
-      let totalFromBackend = 0;
-      const typesToFetch = activeTypes.length > 0 ? activeTypes : [undefined];
-      for (const t of typesToFetch) {
-        const params = { limit: String(DEFAULT_LIMIT) };
-        if (projectId) params.projectId = projectId;
-        if (t) params.type = t;
-        if (uploadedById) params.uploadedById = uploadedById;
-        if (fromDate) params.from = fromDate;
-        if (toDate) params.to = toDate;
-        if (cursor) params.cursor = cursor;
-        const data = await api.getAdminReports(params, accessToken);
-        items = items.concat(data?.reports || []);
-        totalFromBackend += data?.total || 0;
-        // Only honour nextCursor on the FIRST type (the others all share
-        // the same cursor concept within their type's pages).
-        if (!lastCursor) lastCursor = data?.nextCursor || null;
-      }
-      // Dedupe by id (multi-type requests can overlap if a row's type
-      // matches more than one chip — currently impossible since type is
-      // a single enum, but defensive against future enum multi-pick).
-      const seen = new Set();
-      const deduped = items.filter((r) => {
-        if (seen.has(r.id)) return false;
-        seen.add(r.id);
-        return true;
-      });
-      // Re-sort merged result by uploadedAt desc, id desc (the per-type
-      // requests each return already-sorted pages).
-      deduped.sort((a, b) => {
-        const at = new Date(a.uploadedAt).getTime();
-        const bt = new Date(b.uploadedAt).getTime();
-        if (at !== bt) return bt - at;
-        return b.id < a.id ? -1 : b.id > a.id ? 1 : 0;
-      });
-      // Truncate to DEFAULT_LIMIT rows on first page; on load-more we
-      // append the next chunk untouched.
-      const finalItems = append ? deduped : deduped.slice(0, DEFAULT_LIMIT);
-      setReports((prev) => (append ? [...prev, ...finalItems] : finalItems));
-      setNextCursor(lastCursor);
-      setTotal(append ? total : totalFromBackend);
+      // [DR-022] Backend now accepts `?types=A,B,C` (CSV) — the
+      // multi-type chip case used to issue one request per type and
+      // merge in-memory, silently truncating to 50 rows on page 1 and
+      // keeping only the first type's nextCursor. The CSV form is one
+      // round trip, the order is server-stable, and the nextCursor we
+      // forward is the union's, not one bucket's. The previous
+      // truncation (`deduped.slice(0, DEFAULT_LIMIT)`) is gone — every
+      // matching ID is reachable across pages.
+      const params = { limit: String(DEFAULT_LIMIT) };
+      if (projectId) params.projectId = projectId;
+      if (activeTypes.length > 0) params.types = activeTypes.join(',');
+      if (uploadedById) params.uploadedById = uploadedById;
+      if (fromDate) params.from = fromDate;
+      if (toDate) params.to = toDate;
+      if (cursor) params.cursor = cursor;
+      const data = await api.getAdminReports(params, accessToken);
+      const items = data?.reports || [];
+      setReports((prev) => (append ? [...prev, ...items] : items));
+      setNextCursor(data?.nextCursor || null);
+      // total is the unsplit filtered count from the first page; on
+      // subsequent pages we keep what we already had so the header
+      // stat stays stable.
+      if (!append) setTotal(data?.total ?? items.length);
     } catch (err) {
       setError(err?.message || 'Failed to load reports');
       if (!append) {

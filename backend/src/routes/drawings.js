@@ -292,6 +292,13 @@ router.get('/', asyncHandler(async (req, res) => {
 
   // Cursor decode — DR-008 codec gives us (date, id). For drawings we key
   // on issuedDate (date-only, matching the @db.Date column) and id.
+  //
+  // [DR-022] The codec now carries null dates (Drawing.issuedDate is a
+  // nullable `@db.Date` column). With NULLS LAST in the ordering, a
+  // null-cursor means "previous page ended in the null tail"; the seek
+  // predicate for that case narrows to `(issuedDate IS NULL AND id <
+  // cursor.id)`. For non-null cursors the seek stays the classic two-
+  // branch keyset form.
   let cursorWhere = {};
   if (cursor) {
     let decoded;
@@ -303,13 +310,16 @@ router.get('/', asyncHandler(async (req, res) => {
       }
       return res.status(400).json({ error: 'INVALID_CURSOR', message: 'Cursor could not be decoded' });
     }
-    // Half-open (issuedDate < decoded) OR (issuedDate = decoded AND id < decoded.id).
-    cursorWhere = {
-      OR: [
-        { issuedDate: { lt: decoded.date } },
-        { issuedDate: decoded.date, id: { lt: decoded.id } },
-      ],
-    };
+    if (decoded.date === null) {
+      cursorWhere = { issuedDate: null, id: { lt: decoded.id } };
+    } else {
+      cursorWhere = {
+        OR: [
+          { issuedDate: { lt: decoded.date } },
+          { issuedDate: decoded.date, id: { lt: decoded.id } },
+        ],
+      };
+    }
   }
 
   const where = {
@@ -321,7 +331,16 @@ router.get('/', asyncHandler(async (req, res) => {
   try {
     const rows = await prisma.drawing.findMany({
       where,
-      orderBy: [{ issuedDate: 'desc' }, { id: 'desc' }],
+      // [DR-022] NULLS LAST — legacy rows whose `issuedDate` was never
+      // stamped still surface, but at the END of the list rather than
+      // silently first. Without `nulls: 'last'`, Postgres sorts nulls
+      // first under DESC and the first 20 rows of every list are nulls;
+      // the cursor then encodes Date(0) and the seek predicate
+      // (`issuedDate < Date(0)`) matches nothing on the next page —
+      // null rows were unreachable. With NULLS LAST, the cursor can
+      // carry `date: null` into the seek and the null tail stays
+      // scrollable.
+      orderBy: [{ issuedDate: { sort: 'desc', nulls: 'last' } }, { id: 'desc' }],
       take: take + 1,
     });
 
@@ -357,12 +376,11 @@ router.get('/', asyncHandler(async (req, res) => {
     const lastItem = withCounts[withCounts.length - 1];
     if (hasMore && lastItem) {
       try {
-        // issuedDate is @db.Date — serialize the JS Date (UTC midnight)
-        // back to its calendar day for the cursor payload.
-        const dateForCursor = lastItem.issuedDate
-          ? new Date(`${lastItem.issuedDate}T00:00:00.000Z`)
-          : new Date(0); // issuedDate-asc fallback for legacy rows
-        nextCursor = encodeCursor(dateForCursor, lastItem.id);
+        // [DR-022] Carry `null` through to the codec so the next page's
+        // seek predicate can stay in the null bucket. The previous
+        // fallback coerced null to `Date(0)` which broke the seek
+        // (Postgres never matches `issuedDate < 1970-01-01`).
+        nextCursor = encodeCursor(lastItem.issuedDate || null, lastItem.id);
       } catch (e) {
         console.error('Drawing cursor encode failed', { err: e.message });
         nextCursor = null;

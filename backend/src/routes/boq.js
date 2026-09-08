@@ -173,9 +173,18 @@ router.get('/variance', asyncHandler(async (req, res) => {
 }));
 
 // ─── List ────────────────────────────────────────────────────────────────────
+// [DR-022] Cursor-paginated on (projectName ASC, itemCode ASC). The
+// previous `take` cap silently dropped every row past 100 — the audit
+// found a project with 101 lines whose 101st was unreachable. The fix:
+// take+1 + opaque base64url(JSON) cursor, same wire shape as
+// adminReports.js so the SPA loads the rest via "Load more".
+//
+//   200 → { items: [...], nextCursor?: string|null }
+//   400 → VALIDATION_ERROR (bad cursor, bad limit, bad isActive)
+//   503 → DB unavailable
 router.get('/', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
-  const { projectName, projectId, isActive, limit = '50' } = req.query;
+  const { projectName, projectId, isActive, limit = '50', cursor } = req.query;
 
   const take = Math.min(parseInt(limit) || 50, LIST_MAX);
 
@@ -203,11 +212,51 @@ router.get('/', asyncHandler(async (req, res) => {
     where.isActive = isActive === 'true';
   }
 
+  // [DR-022] Cursor codec — base64url(JSON({ projectName, itemCode })).
+  // Tiny inline shape because the shared cursor codec is date+id;
+  // re-using it here would loosen the wire contract for every other
+  // caller for a one-file consumer.
+  let cursorPredicate = null;
+  if (cursor) {
+    if (typeof cursor !== 'string') {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_CURSOR',
+        message: 'cursor must be a string',
+      });
+    }
+    let decoded;
+    try {
+      const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('bad shape');
+      if (typeof parsed.projectName !== 'string' || parsed.projectName.length === 0 || parsed.projectName.length > 200) {
+        throw new Error('bad projectName');
+      }
+      if (typeof parsed.itemCode !== 'string' || parsed.itemCode.length === 0 || parsed.itemCode.length > 60) {
+        throw new Error('bad itemCode');
+      }
+      decoded = parsed;
+    } catch {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_CURSOR',
+        message: 'cursor is malformed',
+      });
+    }
+    // (projectName > decoded.projectName) OR (projectName = decoded AND itemCode > decoded.itemCode).
+    cursorPredicate = {
+      OR: [
+        { projectName: { gt: decoded.projectName } },
+        { projectName: decoded.projectName, itemCode: { gt: decoded.itemCode } },
+      ],
+    };
+  }
+
   try {
-    const items = await prisma.boqItem.findMany({
-      where,
+    const rows = await prisma.boqItem.findMany({
+      where: { ...where, ...(cursorPredicate || {}) },
       orderBy: [{ projectName: 'asc' }, { itemCode: 'asc' }],
-      take,
+      take: take + 1,
       include: {
         createdBy: { select: { id: true, name: true, email: true } },
         // [N1] Project summary on the list endpoint so admin tables can
@@ -215,7 +264,16 @@ router.get('/', asyncHandler(async (req, res) => {
         project: { select: { id: true, name: true, code: true } },
       },
     });
-    res.json({ items });
+    const hasMore = rows.length > take;
+    const page = hasMore ? rows.slice(0, take) : rows;
+    const last = page[page.length - 1];
+    const nextCursor = hasMore && last
+      ? Buffer.from(JSON.stringify({
+          projectName: last.projectName,
+          itemCode: last.itemCode,
+        }), 'utf8').toString('base64url')
+      : null;
+    res.json({ items: page, nextCursor });
   } catch (err) {
     console.error('BOQ list error', {
       prismaCode: err.code,

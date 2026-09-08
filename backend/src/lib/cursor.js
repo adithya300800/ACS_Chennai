@@ -74,11 +74,20 @@ function decodeCursor(cursor) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new InvalidCursorError('cursor JSON must be an object');
   }
-  if (typeof parsed.date !== 'string') {
-    throw new InvalidCursorError('cursor.date must be a string');
+  if (typeof parsed.date !== 'string' && parsed.date !== null) {
+    throw new InvalidCursorError('cursor.date must be a string or null');
   }
   if (typeof parsed.id !== 'string' || parsed.id.length === 0 || parsed.id.length > 128) {
     throw new InvalidCursorError('cursor.id must be a non-empty string (max 128 chars)');
+  }
+
+  // [DR-022] Allow `date: null` so nullable columns (Drawing.issuedDate)
+  // can carry the seek predicate into the trailing null rows. A null
+  // date means "the previous page ended in the null tail"; the caller
+  // branches its where-clause on `decoded.date === null` to seek by id
+  // alone inside the null bucket.
+  if (parsed.date === null) {
+    return { date: null, id: parsed.id };
   }
 
   const date = parseDateOnly(parsed.date);
@@ -119,6 +128,12 @@ class InvalidCursorError extends Error {
  * the contract is date-only on the wire.
  */
 function toDateOnlyString(value) {
+  // [DR-022] Allow null dates in the cursor so endpoints whose sort
+  // column is nullable (Drawing.issuedDate is the original culprit) can
+  // seek past the last non-null row into the null rows at the end of a
+  // `NULLS LAST` ordering. The decoder mirrors this — `date: null` in
+  // the JSON round-trips back to JS null instead of throwing.
+  if (value === null || value === undefined) return null;
   if (value instanceof Date) {
     if (isNaN(value.getTime())) {
       throw new InvalidCursorError('date must be a valid Date');
@@ -137,7 +152,7 @@ function toDateOnlyString(value) {
     }
     return value;
   }
-  throw new InvalidCursorError('date must be a Date or YYYY-MM-DD string');
+  throw new InvalidCursorError('date must be a Date, YYYY-MM-DD string, or null');
 }
 
 /**

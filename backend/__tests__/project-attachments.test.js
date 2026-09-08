@@ -236,7 +236,10 @@ describe('R35 — Project Reports: GET /api/projects/:projectId/attachments', ()
       .get(`/api/projects/${PROJECT_ID}/attachments`)
       .set('Authorization', userJwt());
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ attachments: [] });
+    // [DR-022] Empty list now includes `nextCursor: null` so the SPA can
+    // blindly read `res.body.nextCursor` and walk until null without
+    // special-casing the first page.
+    expect(res.body).toEqual({ attachments: [], nextCursor: null });
   });
 
   it('2. GET with ?type=WEEKLY_REPORT honors the filter', async () => {
@@ -543,7 +546,8 @@ describe('R35.1 — Auto-create project on free-text name in URL', () => {
       .get(`/api/projects/${encodeURIComponent(DISCOVERED_NAME)}/attachments`)
       .set('Authorization', userJwt());
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ attachments: [] });
+    // [DR-022] Empty list includes nextCursor: null.
+    expect(res.body).toEqual({ attachments: [], nextCursor: null });
     expect(prisma.project.create).not.toHaveBeenCalled();
   });
 

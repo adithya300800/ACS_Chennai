@@ -293,10 +293,21 @@ router.use(requireProjectScope);
 
 // ─── GET /api/projects/:projectId/attachments ───────────────────────────────
 // List attachments for a project, newest first. Excludes soft-deleted
-// rows. ?type= filter narrows to one of the 5 enum values.
+// rows. ?type= filter narrows to one of the 5 enum values. ?types=A,B,C
+// accepts a CSV so the admin Reports page can send one round trip for a
+// multi-type chip selection.
 //
-// 200 → { attachments: [...] }
-// 400 → VALIDATION_ERROR (bad projectId UUID, unknown ?type)
+// [DR-022] Cursor-paginated on (uploadedAt DESC, id DESC). The previous
+// `take: 100` cap silently dropped every record past row 100, and the
+// X-Total-Count header reflected only the returned slice — making a
+// project with >100 attachments unlistable from the My Projects
+// accordion. The fix: take+1 with a keyset cursor mirroring
+// adminReports.js (same keyset shape so a future move to a shared codec
+// is cheap). The wire surface keeps `attachments: [...]` for the legacy
+// caller and adds `nextCursor` so the SPA can load more.
+//
+// 200 → { attachments: [...], nextCursor?: string|null }
+// 400 → VALIDATION_ERROR (bad projectId UUID, unknown ?type, bad cursor)
 // 404 → PROJECT_NOT_FOUND
 // 503 → DB_UNAVAILABLE
 router.get('/', asyncHandler(async (req, res) => {
@@ -306,15 +317,82 @@ router.get('/', asyncHandler(async (req, res) => {
   }
 
   const projectId = readProjectId(req);
-  const { type } = req.query;
+  const { type, types, cursor, limit } = req.query;
 
-  if (type && !VALID_REPORT_TYPES.has(type)) {
-    return res.status(400).json({
-      error: 'VALIDATION_ERROR',
-      code: 'INVALID_TYPE',
-      message: `type must be one of: ${Array.from(VALID_REPORT_TYPES).join(', ')}`,
-    });
+  // [DR-022] Resolve the type filter — accept either `?type=` (single
+  // enum, legacy callers) or `?types=A,B,C` (CSV, admin Reports page).
+  // CSV takes precedence when both are supplied; an unknown value in
+  // either shape is a 400 INVALID_TYPE.
+  const requestedTypes = [];
+  if (types) {
+    if (typeof types !== 'string') {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_TYPE',
+        message: 'types must be a comma-separated string',
+      });
+    }
+    for (const t of types.split(',').map((s) => s.trim()).filter(Boolean)) {
+      if (!VALID_REPORT_TYPES.has(t)) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          code: 'INVALID_TYPE',
+          message: `types contains unknown value: ${t}`,
+        });
+      }
+      requestedTypes.push(t);
+    }
   }
+  if (type) {
+    if (!VALID_REPORT_TYPES.has(type)) {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_TYPE',
+        message: `type must be one of: ${Array.from(VALID_REPORT_TYPES).join(', ')}`,
+      });
+    }
+    if (!requestedTypes.length) requestedTypes.push(type);
+  }
+
+  // [DR-022] Cursor codec — base64url(JSON({ uploadedAt: ISO, id })).
+  // Mirrors adminReports.js so we could lift it into a shared helper
+  // next; today it stays inline because the admin route's comment
+  // explains why we don't yet share with this one (different cursors
+  // for DPR / Inspection / Drawing / BOQ mean a shared helper needs
+  // care). For now: tiny inline codec, opaque to clients.
+  let cursorPredicate = null;
+  if (cursor) {
+    if (typeof cursor !== 'string') {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_CURSOR',
+        message: 'cursor must be a string',
+      });
+    }
+    let decoded;
+    try {
+      const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('bad shape');
+      const ts = new Date(parsed.uploadedAt);
+      if (typeof parsed.uploadedAt !== 'string' || Number.isNaN(ts.getTime())) throw new Error('bad ts');
+      if (typeof parsed.id !== 'string' || parsed.id.length === 0 || parsed.id.length > 128) throw new Error('bad id');
+      decoded = { uploadedAt: ts, id: parsed.id };
+    } catch {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_CURSOR',
+        message: 'cursor is malformed',
+      });
+    }
+    cursorPredicate = {
+      OR: [
+        { uploadedAt: { lt: decoded.uploadedAt } },
+        { uploadedAt: decoded.uploadedAt, id: { lt: decoded.id } },
+      ],
+    };
+  }
+
+  const take = Math.min(parseInt(limit, 10) > 0 ? parseInt(limit, 10) : 50, 100);
 
   try {
     // A null projectId means the URL carried a free-text name with no
@@ -324,19 +402,35 @@ router.get('/', asyncHandler(async (req, res) => {
     // what we want for "no reports yet" on a discovered card.
     if (projectId == null) {
       res.setHeader('X-Total-Count', 0);
-      return res.json({ attachments: [] });
+      return res.json({ attachments: [], nextCursor: null });
     }
+    const where = {
+      projectId,
+      deletedAt: null,
+      ...(requestedTypes.length === 1 ? { type: requestedTypes[0] } : {}),
+      ...(requestedTypes.length > 1 ? { type: { in: requestedTypes } } : {}),
+      ...(cursorPredicate || {}),
+    };
     const rows = await prisma.projectAttachment.findMany({
-      where: {
-        projectId,
-        deletedAt: null,
-        ...(type ? { type } : {}),
-      },
+      where,
       orderBy: [{ uploadedAt: 'desc' }, { id: 'desc' }],
-      take: 100,
+      take: take + 1,
     });
-    res.setHeader('X-Total-Count', rows.length);
-    res.json({ attachments: rows.map(serializeProjectAttachment) });
+    const hasMore = rows.length > take;
+    const page = hasMore ? rows.slice(0, take) : rows;
+    const last = page[page.length - 1];
+    const nextCursor = hasMore && last
+      ? Buffer.from(JSON.stringify({
+          uploadedAt: last.uploadedAt instanceof Date ? last.uploadedAt.toISOString() : String(last.uploadedAt),
+          id: last.id,
+        }), 'utf8').toString('base64url')
+      : null;
+    res.setHeader('X-Total-Count', String(page.length));
+    res.setHeader('X-Has-More', hasMore ? 'true' : 'false');
+    res.json({
+      attachments: page.map(serializeProjectAttachment),
+      nextCursor,
+    });
   } catch (err) {
     console.error('[project-attachments] list failed', {
       employeeHash: hashIdentifier(req.employeeId),

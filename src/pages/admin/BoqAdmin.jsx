@@ -513,6 +513,13 @@ export default function BoqAdmin() {
 
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  // [DR-022] Cursor-paginated load-more. The BOQ backend used to cap
+  // the response at 100 rows with no `nextCursor` — a project with 101
+  // BOQ lines had its 101st silently clipped. The backend now returns
+  // `nextCursor`; we consume it via "Load more".
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState(null);
   const [error, setError] = useState('');
   const [projectNameFilter, setProjectNameFilter] = useState('');
   // [N1 Phase B] Exact-match projectId filter — applied immediately on
@@ -578,12 +585,35 @@ export default function BoqAdmin() {
       if (projectIdFilter) params.projectId = projectIdFilter;
       const data = await api.getBoqItems(params, accessToken);
       setItems(data.items || []);
+      // [DR-022] Honour the server's `nextCursor`; "Load more" walks it.
+      setNextCursor(data?.nextCursor || null);
+      setHasMore(!!data?.nextCursor);
     } catch (err) {
       setError(err.message || 'Failed to load BOQ items');
     } finally {
       setLoading(false);
     }
   }, [accessToken, appliedFilter, projectIdFilter]);
+
+  // [DR-022] Load-more cursor walk. One round trip per click; stops
+  // when the server's nextCursor is null.
+  const loadMoreItems = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const params = { isActive: 'true', limit: '100', cursor: nextCursor };
+      if (appliedFilter) params.projectName = appliedFilter;
+      if (projectIdFilter) params.projectId = projectIdFilter;
+      const data = await api.getBoqItems(params, accessToken);
+      setItems((prev) => [...prev, ...(data.items || [])]);
+      setNextCursor(data?.nextCursor || null);
+      setHasMore(!!data?.nextCursor);
+    } catch (err) {
+      toast.push(err.message || 'Failed to load more BOQ items.', 'error');
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore, appliedFilter, projectIdFilter, accessToken, toast]);
 
   // Variance only matters for projects — we fetch it when the user has
   // applied a project filter so the variance column can show real

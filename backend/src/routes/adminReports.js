@@ -217,14 +217,43 @@ router.get('/', async (req, res) => {
   }
 
   // ─── Validate query params ────────────────────────────────────────
-  const { projectId, uploadedById, type, from, to } = req.query;
+  const { projectId, uploadedById, type, types, from, to } = req.query;
 
-  if (type && !VALID_TYPES.has(type)) {
-    return res.status(400).json({
-      error: 'VALIDATION_ERROR',
-      code: 'INVALID_TYPE',
-      message: `type must be one of: ${Array.from(VALID_TYPES).join(', ')}`,
-    });
+  // [DR-022] Resolve the type filter — accept either `?type=` (single
+  // enum, legacy callers) or `?types=A,B,C` (CSV, the admin Reports
+  // page when multiple chips are active). CSV takes precedence when
+  // both are supplied; an unknown value in either shape is a 400
+  // INVALID_TYPE. The legacy single-type path is preserved for
+  // back-compat with any consumer still using ?type=.
+  const requestedTypes = [];
+  if (types) {
+    if (typeof types !== 'string') {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_TYPE',
+        message: 'types must be a comma-separated string',
+      });
+    }
+    for (const t of types.split(',').map((s) => s.trim()).filter(Boolean)) {
+      if (!VALID_TYPES.has(t)) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          code: 'INVALID_TYPE',
+          message: `types contains unknown value: ${t}`,
+        });
+      }
+      requestedTypes.push(t);
+    }
+  }
+  if (type) {
+    if (!VALID_TYPES.has(type)) {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_TYPE',
+        message: `type must be one of: ${Array.from(VALID_TYPES).join(', ')}`,
+      });
+    }
+    if (!requestedTypes.length) requestedTypes.push(type);
   }
 
   let fromDate = null;
@@ -332,7 +361,8 @@ router.get('/', async (req, res) => {
       ? { projectId: projectScope.projectId }
       : { project: { isActive: true } }),
     ...(uploadedById ? { uploadedById } : {}),
-    ...(type ? { type } : {}),
+    ...(requestedTypes.length === 1 ? { type: requestedTypes[0] } : {}),
+    ...(requestedTypes.length > 1 ? { type: { in: requestedTypes } } : {}),
     ...(fromDate || toDate ? {
       uploadedAt: {
         ...(fromDate ? { gte: fromDate } : {}),

@@ -66,6 +66,39 @@ const DRAWING_STATUS_MAP = {
 // fold any of them.
 const SECTION_IDS = ['overview', 'boq', 'dprs', 'inspections', 'drawings', 'reports'];
 
+// [DR-022] Per-accordion cap on the Reports section render. The
+// per-project attachments endpoint is now cursor-paginated (no more
+// silent 100-row clip), but the accordion still has to stay snappy
+// even when a project has hundreds of weekly reports. Walk the cursor
+// until this cap is hit OR the server has no more pages, whichever
+// comes first. Raising this is fine; lowering it just hides older
+// rows behind the +N more affordance.
+const REPORTS_ACCORDION_CAP = 200;
+
+// [DR-022] Walk `/api/projects/:projectId/attachments` until the
+// server's `nextCursor` is null or the local cap is hit. The previous
+// single-shot fetch silently lost everything past row 100. The helper
+// is scoped to this file because the BOQ / DPR / Inspections sub-
+// sections each have their own pagination contract — keeping the
+// walker co-located avoids a leaky abstraction in `lib/api.js`.
+async function fetchAllAttachments(projectKey, accessToken, cap) {
+  const PAGE_SIZE = 100; // matches the server's MAX_LIMIT cap.
+  const collected = [];
+  let cursor = null;
+  while (collected.length < cap) {
+    const params = { limit: String(PAGE_SIZE) };
+    if (cursor) params.cursor = cursor;
+    const resp = await api.getProjectAttachments(projectKey, params, accessToken);
+    const rows = resp?.attachments || resp?.items || (Array.isArray(resp) ? resp : []);
+    if (!Array.isArray(rows) || rows.length === 0) break;
+    collected.push(...rows);
+    const next = resp?.nextCursor;
+    if (!next) break;
+    cursor = next;
+  }
+  return collected.slice(0, cap);
+}
+
 export default function ProjectExpandedPanel({ project, accessToken, onClose, onOpenProjectDetail }) {
   const mountedRef = useRef(true);
   // R35: Reports upload needs the current employee id (delete-perm gate)
@@ -209,15 +242,26 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
     // for both `projectKey` shapes — a discovered card now uploads
     // against its projectName and materialises the Project row on the
     // server.
+    //
+    // [DR-022] Walk the cursor until exhausted (or the per-project
+    // accordion cap, whichever hits first). The previous single-shot
+    // fetch capped at the server's `take: 100` and dropped every
+    // attachment past row 100. Cap here mirrors the per-section cap
+    // the other sub-sections use (DPR / Inspections / BOQ / Drawings
+    // all cap to 25 or 50) so a single large project can't blow up
+    // the accordion render. The cap is the *display* limit, not the
+    // server's reachability limit — admins with >200 attachments on a
+    // project get the first 200 plus a "+N more" note.
     if (projectKey) {
       tasks.push(
-        api.getProjectAttachments(projectKey, { limit: 50 }, accessToken)
-          .then((resp) => {
-            if (!mountedRef.current) return;
-            const rows = resp?.attachments || resp?.items || (Array.isArray(resp) ? resp : []);
-            setReports({ status: 'ready', data: rows });
-          })
-          .catch((err) => mountedRef.current && setReports({ status: 'error', error: err?.message || 'Failed to load' })),
+        (async () => {
+          try {
+            const all = await fetchAllAttachments(projectKey, accessToken, REPORTS_ACCORDION_CAP);
+            if (mountedRef.current) setReports({ status: 'ready', data: all });
+          } catch (err) {
+            if (mountedRef.current) setReports({ status: 'error', error: err?.message || 'Failed to load' });
+          }
+        })(),
       );
     } else {
       setReports({ status: 'ready', data: [] });
@@ -250,16 +294,13 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
   // Same shape as the drawings effect — skip the initial mount, only
   // refetch when the user-triggered key bumps. R35.1 dropped the
   // `isRegistered` gate so discovered projects (projectKey = name) also
-  // refetch after an upload.
+  // refetch after an upload. [DR-022] walks the cursor instead of
+  // fetching a single 50-row slice.
   useEffect(() => {
     if (reportsRefreshKey === 0) return;
     if (!projectKey) return;
-    api.getProjectAttachments(projectKey, { limit: 50 }, accessToken)
-      .then((resp) => {
-        if (!mountedRef.current) return;
-        const rows = resp?.attachments || resp?.items || (Array.isArray(resp) ? resp : []);
-        setReports({ status: 'ready', data: rows });
-      })
+    fetchAllAttachments(projectKey, accessToken, REPORTS_ACCORDION_CAP)
+      .then((rows) => { if (mountedRef.current) setReports({ status: 'ready', data: rows }); })
       .catch((err) => {
         if (!mountedRef.current) return;
         setReports({ status: 'error', error: err?.message || 'Failed to load' });
