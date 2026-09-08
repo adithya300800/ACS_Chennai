@@ -1386,6 +1386,24 @@ router.put('/:id', async (req, res) => {
     if (rejectIfFutureReportDate(req, res, fields.reportDate, 'dpr.update')) return;
   }
 
+  // SOL DR-004 (audit 2026-09-08): load and authorize the existing DPR
+  // BEFORE any dependent-link validation runs. The previous layout read
+  // `existing` inside the boqItemId branch (via resolveTargetProjectName)
+  // while `existing` was still `const`-declared further down — a TDZ
+  // ReferenceError that surfaced as 500 for any valid same-project BOQ
+  // PUT. Hoisting the load (and the 404/403 checks) here makes the BOQ
+  // validator safe and matches the POST handler's pattern (see
+  // /api/dpr/:id/submit below).
+  //
+  // Only owner can update
+  const existing = await prisma.dPR.findUnique({ where: { id } });
+  if (!existing) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
+  }
+  if (existing.submittedById !== req.employeeId) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Only owner can update' });
+  }
+
   // N7 (round-28): boqItemId PUT validation. Same contract as POST —
   // must exist + be active + match the (possibly-updated) projectName.
   // boqItemId may also be set to null to unlink a DPR.
@@ -1454,15 +1472,6 @@ router.put('/:id', async (req, res) => {
     }
     // kind === 'discovered' / 'missing' → keep the typed projectName;
     // the FK stays NULL on the row (legacy contract preserved).
-  }
-
-  // Only owner can update
-  const existing = await prisma.dPR.findUnique({ where: { id } });
-  if (!existing) {
-    return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
-  }
-  if (existing.submittedById !== req.employeeId) {
-    return res.status(403).json({ error: 'FORBIDDEN', message: 'Only owner can update' });
   }
 
   // [N3] Phase E: drawingId PUT validation. Same shape as POST — drawing
