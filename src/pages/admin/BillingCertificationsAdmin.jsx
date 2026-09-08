@@ -110,7 +110,7 @@ function buildListParams({
 
 export default function BillingCertificationsAdmin() {
   useDocumentTitle('Billing Certifications');
-  const { accessToken } = useAuth();
+  const { employee, accessToken } = useAuth();
   const toast = useToast();
 
   // Filter state.
@@ -145,6 +145,7 @@ export default function BillingCertificationsAdmin() {
 
   // ─── Loaders ────────────────────────────────────────────────────────
   useEffect(() => {
+    if (!employee?.isAdmin) return;
     let cancelled = false;
     (async () => {
       try {
@@ -187,13 +188,15 @@ export default function BillingCertificationsAdmin() {
   }, [projectId, status, contractorName, fromDate, toDate, accessToken]);
 
   useEffect(() => {
+    if (!employee?.isAdmin) return;
     fetchCerts();
-  }, [fetchCerts]);
+  }, [fetchCerts, employee?.isAdmin]);
 
   // Aggregates (per-project totals) — fetched in the background whenever
   // the project filter changes. Kept separate from the list so a heavy
   // status filter doesn't reset the aggregates view.
   useEffect(() => {
+    if (!employee?.isAdmin) return;
     let cancelled = false;
     (async () => {
       try {
@@ -310,6 +313,25 @@ export default function BillingCertificationsAdmin() {
   }
 
   // ─── Render ─────────────────────────────────────────────────────────
+  // DR-018 fix (frontend half): admin-only ledger — non-admins get a clear
+  // "access required" state instead of the admin shell with admin actions.
+  // Mirrors the DprDashboard.jsx render-time guard. The three useEffect
+  // loaders above also early-return on `!employee?.isAdmin` so a non-admin
+  // direct-navigation here doesn't fire any 401-bound fetches.
+  if (!employee?.isAdmin) {
+    return (
+      <div className="dpr-page">
+        <div className="dpr-card" style={{ textAlign: 'center', padding: '3rem' }}>
+          <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>🔒</div>
+          <h2 style={{ color: 'var(--navy)', marginBottom: '0.5rem' }}>Admin Access Required</h2>
+          <p style={{ color: 'var(--steel)' }}>
+            You need admin privileges to access the Billing Certifications register.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="dpr-page">
       <div className="dpr-page-header">

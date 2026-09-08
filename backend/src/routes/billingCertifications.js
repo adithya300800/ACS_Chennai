@@ -295,7 +295,15 @@ async function getAssignedProjectIds(prisma, employeeId) {
 }
 
 async function applyScopeFilter(where, { scope, prisma, employeeId, isAdmin }) {
-  if (scope !== 'assigned' || isAdmin) return where;
+  if (isAdmin) return where;
+  // Non-admin: ?scope=assigned is mandatory by contract. If the param is
+  // absent or empty, default to 'assigned' so a non-admin can't widen
+  // scope by simply omitting the query parameter. The `resolveScope`
+  // validator has already rejected any non-'assigned' value with 400
+  // before this point, so an unexpected value here falls through to an
+  // unrestricted `where` only in the no-longer-possible bypass edge case.
+  const effectiveScope = scope === undefined || scope === '' ? 'assigned' : scope;
+  if (effectiveScope !== 'assigned') return where;
   // Employee + scope=assigned → narrow to their assigned projects.
   // An employee with no filed child records returns an empty list, not
   // the org-wide registry.
