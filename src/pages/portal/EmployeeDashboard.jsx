@@ -97,6 +97,15 @@ export default function EmployeeDashboard() {
   const [leaves, setLeaves] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [error, setError] = useState('');
+  // [DR-034] Per-widget fetch state so a failed request renders as
+  // "Couldn't load — retry" rather than as a healthy empty card. The
+  // previous code's `.catch(() => ({...empty}))` swallowed failures
+  // and made an outage look like "no drafts" / "no training due".
+  // `null` = not yet fetched, `'ok'` = fetched (possibly empty),
+  // `'error'` = fetch failed.
+  const [widgetStatus, setWidgetStatus] = useState({
+    today: null, draft: null, training: null, leaves: null, notifications: null,
+  });
 
   const today = getBusinessToday();
   const navigate = useNavigate();
@@ -105,20 +114,30 @@ export default function EmployeeDashboard() {
     if (showSpinner) setLoading(true);
     setError('');
     try {
-      // Parallel fetch — failures on individual widgets are tolerated
-      // (catch + empty) so a slow endpoint can't blank the page.
+      // [DR-034] Parallel fetch — failures on individual widgets are
+      // tolerated so a slow endpoint can't blank the page, but each
+      // widget records its own ok/error status. A failed render
+      // displays "Couldn't load — retry" rather than masquerading as
+      // a healthy empty card.
       const [todayRes, draftsRes, trainingRes, leavesRes, notifRes] = await Promise.all([
-        api.get(`/attendance/today?localDate=${today}`, accessToken).catch(() => null),
-        api.getDprs({ status: 'DRAFT', my: 'true', limit: '1' }, accessToken).catch(() => ({ dprs: [] })),
-        api.getMyTraining({}, accessToken).catch(() => ({ enrollments: [] })),
-        api.getMyLeaves(accessToken).catch(() => ({ requests: [] })),
-        api.getNotifications(null, accessToken).catch(() => ({ notifications: [] })),
+        api.get(`/attendance/today?localDate=${today}`, accessToken).then((v) => ({ ok: true, v }), () => ({ ok: false })),
+        api.getDprs({ status: 'DRAFT', my: 'true', limit: '1' }, accessToken).then((v) => ({ ok: true, v }), () => ({ ok: false })),
+        api.getMyTraining({}, accessToken).then((v) => ({ ok: true, v }), () => ({ ok: false })),
+        api.getMyLeaves(accessToken).then((v) => ({ ok: true, v }), () => ({ ok: false })),
+        api.getNotifications(null, accessToken).then((v) => ({ ok: true, v }), () => ({ ok: false })),
       ]);
-      setTodayRecord(todayRes);
-      setDraft(draftsRes.dprs?.[0] ?? null);
-      setTraining(trainingRes.enrollments || []);
-      setLeaves(leavesRes.requests || []);
-      setNotifications(notifRes.notifications || []);
+      setTodayRecord(todayRes.ok ? todayRes.v : null);
+      setDraft(draftsRes.ok ? draftsRes.v.dprs?.[0] ?? null : null);
+      setTraining(trainingRes.ok ? trainingRes.v.enrollments || [] : []);
+      setLeaves(leavesRes.ok ? leavesRes.v.requests || [] : []);
+      setNotifications(notifRes.ok ? notifRes.v.notifications || [] : []);
+      setWidgetStatus({
+        today: todayRes.ok ? 'ok' : 'error',
+        draft: draftsRes.ok ? 'ok' : 'error',
+        training: trainingRes.ok ? 'ok' : 'error',
+        leaves: leavesRes.ok ? 'ok' : 'error',
+        notifications: notifRes.ok ? 'ok' : 'error',
+      });
     } catch (err) {
       setError(err.message || 'Failed to load dashboard');
     } finally {
@@ -201,6 +220,18 @@ export default function EmployeeDashboard() {
               <Skeleton w="60%" h={28} />
               <div style={{ marginTop: 12 }}><Skeleton w="40%" h={14} /></div>
             </>
+          ) : widgetStatus.today === 'error' ? (
+            // [DR-034] Honest failure state — don't claim "not checked in"
+            // when the request actually failed. A retry button lets the
+            // user recover without a hard page refresh.
+            <>
+              <div className="dashboard-attendance-state">
+                <span className="dashboard-state-pill muted">Couldn't load attendance</span>
+              </div>
+              <button type="button" className="btn btn-secondary" onClick={() => refresh()} style={{ marginTop: 16, minHeight: 44 }}>
+                Retry
+              </button>
+            </>
           ) : hasAnySession && firstCheckIn ? (
             <>
               <div className="dashboard-attendance-state">
@@ -261,6 +292,14 @@ export default function EmployeeDashboard() {
           </header>
           {loading ? (
             <Skeleton w="80%" h={14} />
+          ) : widgetStatus.draft === 'error' ? (
+            // [DR-034] Honest failure — don't pretend "no drafts".
+            <div className="dashboard-card-body">
+              <p className="dashboard-card-empty">Couldn't load drafts.</p>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => refresh()} style={{ marginTop: 8 }}>
+                Retry
+              </button>
+            </div>
           ) : draft ? (
             <div className="dashboard-card-body">
               <div className="dashboard-card-primary">
@@ -296,6 +335,14 @@ export default function EmployeeDashboard() {
           </header>
           {loading ? (
             <Skeleton w="70%" h={14} />
+          ) : widgetStatus.training === 'error' ? (
+            // [DR-034] Honest failure — don't pretend "nothing due".
+            <div>
+              <p className="dashboard-card-empty">Couldn't load training.</p>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => refresh()} style={{ marginTop: 8 }}>
+                Retry
+              </button>
+            </div>
           ) : overdueTraining.length === 0 && dueSoonTraining.length === 0 ? (
             <p className="dashboard-card-empty">Nothing due in the next week.</p>
           ) : (
@@ -329,6 +376,14 @@ export default function EmployeeDashboard() {
           </header>
           {loading ? (
             <Skeleton w="60%" h={14} />
+          ) : widgetStatus.leaves === 'error' ? (
+            // [DR-034] Honest failure — don't pretend "no leave history".
+            <div>
+              <p className="dashboard-card-empty">Couldn't load leave.</p>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => refresh()} style={{ marginTop: 8 }}>
+                Retry
+              </button>
+            </div>
           ) : leaves.length === 0 ? (
             <p className="dashboard-card-empty">No leave history yet.</p>
           ) : (
@@ -358,6 +413,14 @@ export default function EmployeeDashboard() {
           </header>
           {loading ? (
             <Skeleton w="90%" h={14} />
+          ) : widgetStatus.notifications === 'error' ? (
+            // [DR-034] Honest failure — don't pretend "no updates yet".
+            <div>
+              <p className="dashboard-card-empty">Couldn't load notifications.</p>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => refresh()} style={{ marginTop: 8 }}>
+                Retry
+              </button>
+            </div>
           ) : notifications.length === 0 ? (
             <p className="dashboard-card-empty">No updates yet. Submit a DPR or inspection to see live status here.</p>
           ) : (

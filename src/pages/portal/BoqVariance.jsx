@@ -177,6 +177,22 @@ export default function BoqVariance() {
           <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>⏳</div>
           Loading variance...
         </div>
+      ) : error ? (
+        // [DR-034] Don't render the friendly "No BOQ items" empty state
+        // when the request actually failed — the auth-error banner
+        // above carries the message, but a stray "No BOQ items" card
+        // beside it would imply the registry is empty. Show a focused
+        // error card with a retry button instead.
+        <div className="dpr-list-empty">
+          <div style={{ marginBottom: '1rem', color: 'var(--steel)', fontSize: '2rem' }}>⚠️</div>
+          <h3 style={{ color: 'var(--navy)', marginBottom: '0.5rem' }}>Couldn't load variance</h3>
+          <p style={{ color: 'var(--steel)', marginBottom: '1.5rem' }}>
+            {error}
+          </p>
+          <button type="button" className="btn btn-secondary" onClick={load}>
+            Retry
+          </button>
+        </div>
       ) : items.length === 0 ? (
         <div className="dpr-list-empty">
           <div style={{ marginBottom: '1rem', color: 'var(--steel)', fontSize: '2rem' }}>📭</div>

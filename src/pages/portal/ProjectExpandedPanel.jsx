@@ -647,9 +647,14 @@ function OverviewSection({ project, parties, isRegistered }) {
 
   if (!hasContent) {
     return (
+      // [DR-034] Removed the "add contract value" instruction — the
+      // admin ProjectForm does NOT expose a contractValue input
+      // (only name/code/client/location/dates/assignments), so the
+      // promise was unimplementable. Now lists only fields an admin
+      // can actually author from the registry.
       <div style={{ padding: '0.875rem 0', fontSize: '0.85rem', color: 'var(--steel, #64748b)' }}>
-        No overview details yet — an admin can add client, location, and contract value in
-        the project registry.
+        No overview details yet — an admin can add client and location
+        in the project registry.
       </div>
     );
   }
