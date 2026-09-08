@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
 
 const ToastCtx = createContext(null);
 
@@ -61,8 +61,18 @@ export function ToastProvider({ children }) {
     setToasts((t) => t.filter((x) => x.id !== id));
   }, []);
 
+  // SOL DR-006: memoize the context value so a `push` that only mutates
+  // the `toasts` array (a sibling state) does not invalidate the value
+  // object identity. Without this, every toast push re-renders every
+  // `useToast()` consumer — and any useEffect in those consumers whose
+  // deps include `toast` (e.g. DprSubmit's draft-hydration effect) fires
+  // again, silently clobbering dirty unsaved edits. `push` and `dismiss`
+  // are already stable via useCallback; the wrapper object was the
+  // culprit.
+  const value = useMemo(() => ({ push, dismiss }), [push, dismiss]);
+
   return (
-    <ToastCtx.Provider value={{ push, dismiss }}>
+    <ToastCtx.Provider value={value}>
       {children}
       <div
         className="toast-stack"

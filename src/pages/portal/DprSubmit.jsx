@@ -152,6 +152,12 @@ function saveDraftForEmployee(currentEmployeeId, payload) {
       caption: p.caption,
       location: p.location,
       takenAt: p.takenAt,
+      // SOL DR-006: preserve the SAS readUrl when the photo was
+      // rehydrated from a server-side draft. New uploads from the
+      // editor won't have this field; the serializer just passes it
+      // through if present so the next mount (after a reload) can
+      // render the preview without refetching.
+      ...(p.readUrl ? { readUrl: p.readUrl } : {}),
     })),
   });
 }
@@ -300,17 +306,45 @@ export default function DprSubmit() {
   const [editingId, setEditingId] = useState(null);
   const [editingVersion, setEditingVersion] = useState(null);
   const [draftLoadedFromServer, setDraftLoadedFromServer] = useState(false);
+  // SOL DR-006: defense-in-depth guard against the hydration effect
+  // re-running when only its context deps change (toast push, token
+  // rotation). The audit pinpointed ToastContext.jsx:21-64 — the value
+  // object was un-memoized so every push invalidated the value identity
+  // and re-ran this effect. We've since memoized that value, but this
+  // ref still lets us skip a redundant GET when the user revisits the
+  // same draftId (or when auth context rotates the access token after
+  // the initial load already succeeded).
+  //
+  // The second ref is a monotonically-incrementing run id. The cleanup
+  // runs on every effect call (toast push, token rotate, unmount alike),
+  // and a naive `cancelled` flag would abort the in-flight hydration
+  // before it can apply state. By stamping each hydration with a run id
+  // and only applying state when the latest run still matches, we let
+  // the in-flight fetch complete cleanly while still allowing a future
+  // draftId change to supersede it.
+  const lastHydratedDraftIdRef = useRef(null);
+  const hydrationRunIdRef = useRef(0);
 
   useEffect(() => {
     if (!draftId || !accessToken) return;
-    let cancelled = false;
+    if (lastHydratedDraftIdRef.current === draftId) return;
+    // Mark synchronously so a sibling re-render that re-runs this
+    // effect short-circuits at the ref guard above. We stamp with a
+    // monotonically-incrementing run id and only apply state when the
+    // latest run still matches — so a re-run for the same draftId is
+    // a true no-op (the closure's await still completes but its
+    // results are discarded), while a future draftId change cleanly
+    // supersedes the in-flight one.
+    lastHydratedDraftIdRef.current = draftId;
+    const myRunId = ++hydrationRunIdRef.current;
     (async () => {
       try {
         const d = await api.getDpr(draftId, accessToken);
-        if (cancelled) return;
+        if (hydrationRunIdRef.current !== myRunId) return;
         if (d.status !== 'DRAFT') {
           toast.push(`This report is no longer a draft (status: ${d.status}).`, 'warning');
           navigate('/portal/dpr/my', { replace: true });
+          lastHydratedDraftIdRef.current = null;
           return;
         }
         setEditingId(d.id);
@@ -359,17 +393,36 @@ export default function DprSubmit() {
         // already ran with the *empty* initial value, so this effect
         // runs the parser again now that the real data is here.
         setManpowerRows(parseManpowerSummary(d.manpowerSummary || ''));
-        // Photo ULIDs from the server are preserved as references — no preview
-        // blobs possible from the readUrls (they're SAS URLs we can't re-upload
-        // through). User can re-add photos in the editor if needed.
-        setPhotos([]);
+        // SOL DR-006: photo state previously initialized empty after
+        // the server load which dropped previously-attached evidence on
+        // every resume and let the next typed-in photo be silently lost.
+        // Server-side photos are read-only references (SAS URLs we can't
+        // re-upload through), but their ULID + container survive into
+        // the next PUT. We keep `readUrl` on the row so the renderer can
+        // show a preview even without a local blob.
+        const serverPhotos = Array.isArray(d.photos) ? d.photos : [];
+        setPhotos(serverPhotos.map((p) => ({
+          ulid: p.ulid,
+          container: p.container,
+          filename: p.filename,
+          contentType: p.contentType,
+          sizeBytes: p.sizeBytes,
+          caption: p.caption || null,
+          location: p.location || null,
+          takenAt: p.takenAt || null,
+          readUrl: p.readUrl || null,
+        })));
         setShowDraftBanner(false); // suppress local-autosave banner
         setDraftLoadedFromServer(true);
       } catch (err) {
-        if (!cancelled) toast.push(err.message || 'Failed to load draft', 'error');
+        if (hydrationRunIdRef.current !== myRunId) return;
+        toast.push(err.message || 'Failed to load draft', 'error');
+        // Reset so a transient failure can be retried by navigating
+        // away + back (or by a future deps change).
+        lastHydratedDraftIdRef.current = null;
       }
     })();
-    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftId, accessToken, toast, navigate]);
 
   // Persist draft on every meaningful change. 750ms debounce matches the

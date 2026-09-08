@@ -1235,6 +1235,24 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
     }
 
+    // SOL DR-006: quarantine unattributed legacy drafts. A DPR with
+    // `submittedById === null` is a pre-FK draft that no employee
+    // currently owns. Returning 200 + a record-shaped response would let
+    // the first reader (whichever user happens to hit ?draftId=…) load
+    // it into their editor and silently attribute the row to
+    // themselves on the next save. Returning 404 (instead of 403) hides
+    // the existence of the row from non-admins — they cannot probe
+    // unattributed IDs, and an admin can still recover the row via the
+    // dashboard. The audit (lines 128-138) called this out specifically:
+    // "old unowned drafts can be attributed to their first reader."
+    if (dpr.submittedById == null) {
+      const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
+      const isAdmin = employee && employee.isAdmin;
+      if (!isAdmin) {
+        return res.status(404).json({ error: 'NOT_FOUND', message: 'DPR not found' });
+      }
+    }
+
     // Auth: owner or admin
     const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
     const isAdmin = employee && employee.isAdmin;

@@ -1128,6 +1128,18 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Inspection record not found' });
     }
 
+    // SOL DR-006: quarantine unattributed legacy inspection drafts (same
+    // rationale as the equivalent guard in dpr.js:1206). A pre-FK row
+    // with `submittedById == null` cannot be safely attributed to the
+    // first reader, so we hide its existence from non-admins with a 404.
+    if (record.submittedById == null) {
+      const owner = await prisma.employee.findUnique({ where: { id: req.employeeId } });
+      const isAdmin = owner && owner.isAdmin;
+      if (!isAdmin) {
+        return res.status(404).json({ error: 'NOT_FOUND', message: 'Inspection record not found' });
+      }
+    }
+
     const employee = await prisma.employee.findUnique({ where: { id: req.employeeId } });
     const isAdmin = employee && employee.isAdmin;
     if (record.submittedById !== req.employeeId && !isAdmin) {
