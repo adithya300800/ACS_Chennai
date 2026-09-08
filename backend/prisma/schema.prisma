@@ -86,6 +86,7 @@ model Employee {
   // audit trail. Mirror with the inspect/dpr back-relations above so the
   // prisma client offers the navigation in both directions.
   boqsCreated                BoqItem[]               @relation("BoqCreator")
+  boqExecutionsRecorded      BoqExecution[]          @relation("BoqExecutionRecorder")
   variationsRaised           VariationOrder[]        @relation("VariationRaiser")
   variationsApproved         VariationOrder[]        @relation("VariationApprover")
   // [R37] COP / Billing Certification Register. Two named relations:
@@ -489,6 +490,8 @@ model BoqItem {
   dprs        DPR[]
   inspections InspectionRecord[]
   project     Project?           @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  // DR-015 (audit 2026-09-08): back-relation to the BOQ execution ledger.
+  executions  BoqExecution[]
 
   @@unique([projectId, itemCode])
   @@index([projectName])
@@ -1481,4 +1484,40 @@ model VariationOrder {
   @@index([projectId])
   @@index([status])
   @@map("variation_order")
+}
+
+// DR-015 (audit 2026-09-08): BOQ execution ledger — source of truth for
+// the variance report's "executed quantity". The legacy DPR-quantity
+// placeholder that v1 of the variance query used to sum is gone; DPR
+// has no quantity column. Contract (variance = contract_qty - executed_qty)
+// is unchanged; the data source is what's new.
+//
+// `accepted` is the gate the variance report sums on (default true). An
+// admin who records a row can flip it to false to retract a bad entry
+// without losing the audit trail.
+
+enum BoqExecutionStage {
+  ISSUED
+  INSTALLED
+  PAID
+}
+
+model BoqExecution {
+  id               String            @id @default(uuid())
+  boqItemId        String            @map("boq_item_id")
+  executedQuantity Float             @map("executed_quantity")
+  executedAt       DateTime          @default(now()) @map("executed_at")
+  stage            BoqExecutionStage @default(INSTALLED)
+  accepted         Boolean           @default(true) @map("accepted")
+  notes            String?           @map("notes")
+  recordedById     String            @map("recorded_by_id")
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+
+  boqItem    BoqItem  @relation(fields: [boqItemId], references: [id], onDelete: Cascade)
+  recordedBy Employee @relation("BoqExecutionRecorder", fields: [recordedById], references: [id], onDelete: Restrict)
+
+  @@index([boqItemId, executedAt])
+  @@index([stage])
+  @@map("boq_execution")
 }

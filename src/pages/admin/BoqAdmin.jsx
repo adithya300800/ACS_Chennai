@@ -324,6 +324,147 @@ function BoqFormModal({ open, initial, onClose, onSave }) {
   );
 }
 
+// ─── Record-execution modal (DR-015) ────────────────────────────────────────
+// The variance report's "executed quantity" is now summed from this
+// ledger instead of the legacy DPR-quantity placeholder (see the
+// backend /variance route header). One modal per item; admin only.
+function RecordExecutionModal({ open, item, onClose, onSave }) {
+  const [form, setForm] = useState({
+    executedQuantity: '',
+    stage: 'INSTALLED',
+    accepted: true,
+    notes: '',
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    setForm({ executedQuantity: '', stage: 'INSTALLED', accepted: true, notes: '' });
+    setError('');
+    setSaving(false);
+  }, [open, item]);
+
+  const handleChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    setForm((f) => ({ ...f, [name]: type === 'checkbox' ? checked : value }));
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (saving) return;
+    setError('');
+    const qty = Number(form.executedQuantity);
+    if (!Number.isFinite(qty) || qty < 0) {
+      return setError('Executed quantity must be a non-negative number');
+    }
+    if (form.notes && form.notes.length > 1000) {
+      return setError('Notes must be 1000 characters or fewer');
+    }
+    setSaving(true);
+    try {
+      await onSave({
+        executedQuantity: qty,
+        stage: form.stage,
+        accepted: form.accepted,
+        notes: form.notes ? form.notes.trim() : null,
+      });
+      onClose();
+    } catch (err) {
+      setError(err?.message || 'Failed to record execution');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} ariaLabel="Record BOQ execution" maxWidth={520}>
+      <h2 style={{ margin: '0 0 0.25rem', color: 'var(--navy)' }}>Record execution</h2>
+      <p style={{ margin: '0 0 1rem', fontSize: '0.85rem', color: 'var(--steel)' }}>
+        <strong style={{ fontFamily: 'monospace' }}>{item?.itemCode}</strong> — {item?.description}
+        {item && (
+          <span style={{ marginLeft: '0.5rem', color: 'var(--steel)' }}>
+            (contract qty: {Number(item.quantity).toLocaleString('en-IN', { maximumFractionDigits: 2 })} {item.unit})
+          </span>
+        )}
+      </p>
+      <form onSubmit={handleSubmit}>
+        <div className="form-row">
+          <div className="form-group" style={{ flex: 1 }}>
+            <label htmlFor="exec-quantity">Executed quantity *</label>
+            <input
+              id="exec-quantity"
+              name="executedQuantity"
+              type="number"
+              min="0"
+              step="0.01"
+              className="form-input"
+              value={form.executedQuantity}
+              onChange={handleChange}
+              placeholder="0"
+              required
+            />
+          </div>
+          <div className="form-group" style={{ flex: 1 }}>
+            <label htmlFor="exec-stage">Stage</label>
+            <select
+              id="exec-stage"
+              name="stage"
+              className="form-input"
+              value={form.stage}
+              onChange={handleChange}
+            >
+              <option value="ISSUED">Issued to site</option>
+              <option value="INSTALLED">Installed</option>
+              <option value="PAID">Paid / certified</option>
+            </select>
+          </div>
+        </div>
+        <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <input
+            id="exec-accepted"
+            name="accepted"
+            type="checkbox"
+            checked={!!form.accepted}
+            onChange={handleChange}
+          />
+          <label htmlFor="exec-accepted" style={{ margin: 0, cursor: 'pointer' }}>
+            Count toward variance (uncheck to record without billing)
+          </label>
+        </div>
+        <div className="form-group">
+          <label htmlFor="exec-notes">Notes (optional)</label>
+          <textarea
+            id="exec-notes"
+            name="notes"
+            className="form-input"
+            rows={2}
+            value={form.notes}
+            onChange={handleChange}
+            placeholder="e.g. Villa 4 GF slab, RAB-05 batch"
+            style={{ resize: 'vertical', minHeight: 60 }}
+          />
+        </div>
+
+        {error && (
+          <div className="portal-auth-error" role="alert" style={{ marginTop: '0.75rem' }}>
+            {error}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginTop: '1rem' }}>
+          <button type="button" className="btn btn-secondary" onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={saving}>
+            {saving ? 'Recording…' : 'Record execution'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 // ─── Confirm-delete dialog ─────────────────────────────────────────────────
 function ConfirmDeleteModal({ open, item, onClose, onConfirm }) {
   const [busy, setBusy] = useState(false);
@@ -395,6 +536,8 @@ export default function BoqAdmin() {
   const [formOpen, setFormOpen] = useState(false);
   const [formInitial, setFormInitial] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  // DR-015: "Record execution" modal target. null = closed.
+  const [executionTarget, setExecutionTarget] = useState(null);
 
   // Round-34 Feature 4: read ?projectId= from the URL so an admin
   // landing on the page from ProjectDashboard's "View all →" link
@@ -517,6 +660,17 @@ export default function BoqAdmin() {
     await api.softDeleteBoqItem(confirmDelete.id, accessToken);
     toast.push('BOQ item deleted.', 'success');
     await fetchItems();
+    await fetchVariance();
+  };
+
+  // DR-015: handler for the Record-execution modal. The new execution
+  // row contributes to the variance sum on the next refetch; we
+  // refetch the variance map immediately so the row's badge updates
+  // without a manual reload.
+  const handleRecordExecution = async (payload) => {
+    if (!executionTarget) return;
+    await api.recordBoqExecution(executionTarget.id, payload, accessToken);
+    toast.push('Execution recorded.', 'success');
     await fetchVariance();
   };
 
@@ -728,6 +882,16 @@ export default function BoqAdmin() {
                   <button
                     type="button"
                     className="btn btn-ghost btn-sm"
+                    style={{ color: '#16a34a' }}
+                    onClick={() => setExecutionTarget(item)}
+                    aria-label={`Record BOQ execution for ${item.itemCode}`}
+                    title={`Executed ${v ? Number(v.executedQty || 0).toLocaleString('en-IN') : 0} of ${Number(item.quantity).toLocaleString('en-IN')} ${item.unit}`}
+                  >
+                    Record exec
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
                     style={{ color: 'var(--danger)' }}
                     onClick={() => setConfirmDelete(item)}
                     aria-label={`Delete BOQ item ${item.itemCode}`}
@@ -757,6 +921,12 @@ export default function BoqAdmin() {
         item={confirmDelete}
         onClose={() => setConfirmDelete(null)}
         onConfirm={handleDelete}
+      />
+      <RecordExecutionModal
+        open={!!executionTarget}
+        item={executionTarget}
+        onClose={() => setExecutionTarget(null)}
+        onSave={handleRecordExecution}
       />
     </div>
   );

@@ -86,6 +86,7 @@ const boqRouter = require('../src/routes/boq');
 const boqStore = new Map();
 const dprStore = new Map();
 const inspectionStore = new Map();
+const boqExecutionStore = new Map();
 const employeeStore = new Map();
 
 const EMPLOYEE_ID = 'emp-boq-1';
@@ -254,6 +255,72 @@ function buildApp() {
         return rows;
       }),
     },
+    boqExecution: {
+      create: jest.fn(async ({ data }) => {
+        const id = `exec-${Math.random().toString(36).slice(2, 8)}`;
+        const row = {
+          id,
+          boqItemId: data.boqItemId,
+          executedQuantity: Number(data.executedQuantity) || 0,
+          executedAt: data.executedAt || new Date(),
+          stage: data.stage || 'INSTALLED',
+          accepted: data.accepted !== undefined ? data.accepted : true,
+          notes: data.notes || null,
+          recordedById: data.recordedById,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        boqExecutionStore.set(id, row);
+        return row;
+      }),
+      findMany: jest.fn(async ({ where = {}, orderBy, take = 200 } = {}) => {
+        let rows = [...boqExecutionStore.values()];
+        if (where.boqItemId !== undefined) rows = rows.filter((r) => r.boqItemId === where.boqItemId);
+        if (orderBy) {
+          const sorts = Array.isArray(orderBy) ? orderBy : [orderBy];
+          rows.sort((a, b) => {
+            for (const s of sorts) {
+              const k = Object.keys(s)[0];
+              const dir = s[k] === 'desc' ? -1 : 1;
+              if (a[k] < b[k]) return -1 * dir;
+              if (a[k] > b[k]) return 1 * dir;
+            }
+            return 0;
+          });
+        }
+        return rows.slice(0, take);
+      }),
+      findUnique: jest.fn(async ({ where }) => {
+        if (!where || !where.id) return null;
+        return boqExecutionStore.get(where.id) || null;
+      }),
+      delete: jest.fn(async ({ where }) => {
+        const row = boqExecutionStore.get(where.id);
+        if (!row) {
+          const err = new Error('Record not found');
+          err.code = 'P2025';
+          throw err;
+        }
+        boqExecutionStore.delete(where.id);
+        return row;
+      }),
+      groupBy: jest.fn(async ({ where = {} } = {}) => {
+        let rows = [...boqExecutionStore.values()];
+        if (where.boqItemId !== undefined && where.boqItemId && typeof where.boqItemId === 'object' && 'in' in where.boqItemId) {
+          rows = rows.filter((r) => where.boqItemId.in.includes(r.boqItemId));
+        }
+        if (where.accepted !== undefined) {
+          rows = rows.filter((r) => r.accepted === where.accepted);
+        }
+        const groups = new Map();
+        for (const r of rows) {
+          const g = groups.get(r.boqItemId) || { boqItemId: r.boqItemId, _sum: { executedQuantity: 0 } };
+          g._sum.executedQuantity += Number(r.executedQuantity) || 0;
+          groups.set(r.boqItemId, g);
+        }
+        return [...groups.values()];
+      }),
+    },
     inspectionRecord: {
       create: jest.fn(async ({ data, include }) => {
         const id = `ins-${Math.random().toString(36).slice(2, 8)}`;
@@ -381,6 +448,7 @@ function authHeader(employeeId = EMPLOYEE_ID) {
 beforeEach(() => {
   boqStore.clear();
   dprStore.clear();
+  boqExecutionStore.clear();
   inspectionStore.clear();
 });
 
@@ -660,27 +728,19 @@ describe('N7 — Variance report', () => {
     const item1 = seedBoq({ projectName: 'Project Alpha', itemCode: '2.3.1', quantity: 100, rate: 5000 });
     seedBoq({ projectName: 'Project Alpha', itemCode: '2.3.2', quantity: 50, rate: 4000 });
 
-    // Simulate two DPRs linked to item1 (executed = 30) and one DPR
-    // linked to item2 (executed = 10). The DPR model doesn't have a
-    // `quantity` column in the real schema yet, so the mock uses the
-    // explicit `quantity` field we set in `seedDpr` style — but to keep
-    // the test self-contained we instead pre-populate the dprStore
-    // directly with the `boqItemId` + `quantity` the variance handler
-    // reads.
-    dprStore.set('dpr-1', {
-      id: 'dpr-1',
-      projectName: 'Project Alpha',
-      boqItemId: item1.id,
-      quantity: 30,
+    // DR-015 (audit, 2026-09-08): variance now sums accepted BoqExecution
+    // rows — NOT DPR.quantity (DPR has no quantity column, that path 500'd
+    // in production). Seed two accepted INSTALLED executions on item1
+    // (executed = 30 total), one NOT-accepted row (must be ignored), and
+    // zero executions on item2.
+    boqExecutionStore.set('exec-1', {
+      id: 'exec-1', boqItemId: item1.id, executedQuantity: 20, accepted: true, stage: 'INSTALLED', recordedById: ADMIN_ID, executedAt: new Date(), createdAt: new Date(), updatedAt: new Date(),
     });
-    dprStore.set('dpr-2', {
-      id: 'dpr-2',
-      projectName: 'Project Alpha',
-      boqItemId: item1.id,
-      quantity: 0, // re-cast (executed 30 already covered)
-      reportDate: new Date(),
-      status: 'DRAFT',
-      submittedById: EMPLOYEE_ID,
+    boqExecutionStore.set('exec-2', {
+      id: 'exec-2', boqItemId: item1.id, executedQuantity: 10, accepted: true, stage: 'INSTALLED', recordedById: ADMIN_ID, executedAt: new Date(), createdAt: new Date(), updatedAt: new Date(),
+    });
+    boqExecutionStore.set('exec-3', {
+      id: 'exec-3', boqItemId: item1.id, executedQuantity: 99, accepted: false, stage: 'INSTALLED', recordedById: ADMIN_ID, executedAt: new Date(), createdAt: new Date(), updatedAt: new Date(),
     });
 
     const res = await request(app)
@@ -695,7 +755,7 @@ describe('N7 — Variance report', () => {
     const item2Row = res.body.items.find((i) => i.id !== item1.id);
     expect(item1Row).toMatchObject({
       contractQty: 100,
-      executedQty: 30,
+      executedQty: 30,        // 20 + 10 accepted; 99 NOT accepted excluded
       varianceQty: 70,
       contractAmount: 500000,
       executedAmount: 150000,
@@ -706,10 +766,9 @@ describe('N7 — Variance report', () => {
       varianceQty: 50,
     });
 
-    // Ensure the prisma.dPR.findMany was called with the right where
-    // clause (projectName filter + boqItemId NOT NULL).
-    const dprCalls = prisma.dPR.findMany.mock.calls;
-    expect(dprCalls.some((c) => c[0] && c[0].where && c[0].where.projectName === 'Project Alpha')).toBe(true);
+    // DR-015: route now reads BoqExecution.groupBy, not DPR.findMany.
+    const execCalls = prisma.boqExecution.groupBy.mock.calls;
+    expect(execCalls.length).toBeGreaterThan(0);
   });
 
   it('returns 400 when projectName is missing', async () => {

@@ -14,21 +14,26 @@
 //   GET    /api/boq/:id                            — detail
 //   PATCH  /api/boq/:id                            — update (creator or admin)
 //   DELETE /api/boq/:id                            — soft-delete (creator or admin)
+//   POST   /api/boq/:boqItemId/executions          — record execution (admin)
+//   GET    /api/boq/:boqItemId/executions          — list item executions (auth)
+//   DELETE /api/boq/executions/:id                 — delete execution (admin)
 //
 // Auth model
 // ----------
-//   - Read endpoints (list / detail / variance): requireAuth (any employee).
-//   - Write endpoints (create / update / delete): requireAuth. Update / delete
-//     additionally gated on (createdById === req.employeeId || isAdmin).
+//   - Read endpoints (list / detail / variance / executions list): requireAuth
+//     (any employee).
+//   - Write endpoints (create / update / delete / record / delete execution):
+//     requireAuth. Update / delete on BoqItem additionally gated on
+//     (createdById === req.employeeId || isAdmin). Execution writes
+//     (record + delete) are admin-only.
 //
 // Variance calculation
 // --------------------
-//   executedQty per BOQ item is the SUM of DPR quantities linked to it. The
-//   DPR `workEntries` JSON does not currently carry an executed-quantity per
-//   sub-work type, so v1 of the variance report sums the DPR `quantity` field
-//   on linked rows — a placeholder. Round-29 will replace this with the
-//   CubeTest / InspectionTypeFields executed-quantity roll-up once those
-//   land. The contract (variance = contract_qty - executed_qty) is stable.
+//   executedQty per BOQ item is the SUM of BoqExecution.executedQuantity
+//   rows where accepted = true (DR-015, audit 2026-09-08). The legacy
+//   `DPR.quantity` placeholder that v1 used to sum is gone — DPR has
+//   no quantity column. Contract (variance = contract_qty - executed_qty)
+//   is unchanged.
 //
 // Storage of `amount`
 // -------------------
@@ -113,28 +118,26 @@ router.get('/variance', asyncHandler(async (req, res) => {
       orderBy: { itemCode: 'asc' },
     });
 
-    // SUM(dpr.quantity) grouped by boq_item_id. v1 of the variance model
-    // uses the DPR.quantity field as a placeholder for "executed
-    // quantity" — see the file header for the round-29 swap-in.
-    //
-    // Done in JS (not Prisma groupBy) so we can keep the route
-    // dependency-free of Prisma's groupBy raw-shape decisions, and so a
-    // missing item (zero DPR rows) lands as executedQty=0 not "absent
-    // from the map".
-    const linkedDprs = await prisma.dPR.findMany({
-      where: {
-        projectName,
-        boqItemId: { not: null },
-      },
-      select: { boqItemId: true, quantity: true },
-    });
-
+    // DR-015 (audit, 2026-09-08): the v1 variance query used to SUM
+    // `dPR.quantity`, which does NOT exist on the DPR model — the route
+    // 500'd in production and the employee saw "No BOQ items" even when
+    // rows were present. The execution ledger (`boq_execution`) is the
+    // new source of truth: an `accepted = true` row contributes its
+    // `executedQuantity` to the variance sum.
     const executedByItem = new Map();
-    for (const d of linkedDprs) {
-      executedByItem.set(
-        d.boqItemId,
-        (executedByItem.get(d.boqItemId) || 0) + (Number(d.quantity) || 0),
-      );
+    if (items.length > 0) {
+      const itemIds = items.map((i) => i.id);
+      const rows = await prisma.boqExecution.groupBy({
+        by: ['boqItemId'],
+        where: {
+          boqItemId: { in: itemIds },
+          accepted: true,
+        },
+        _sum: { executedQuantity: true },
+      });
+      for (const r of rows) {
+        executedByItem.set(r.boqItemId, Number(r._sum.executedQuantity) || 0);
+      }
     }
 
     const report = items.map((it) => {
@@ -363,6 +366,175 @@ router.post('/', asyncHandler(async (req, res) => {
       return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     }
     res.status(500).json({ error: 'Failed to create BOQ item' });
+  }
+}));
+
+// ─── Execution ledger (DR-015) ──────────────────────────────────────────────
+// Three new endpoints:
+//   POST   /api/boq/:boqItemId/executions  admin only — record an event
+//   GET    /api/boq/:boqItemId/executions  any auth  — list an item's events
+//   DELETE /api/boq/executions/:id         admin only — hard-delete (audit row stays as accepted=false)
+//
+// Authorization
+// -------------
+// Writes (POST + DELETE) require admin. Reads (GET) require auth (any
+// employee can see the execution history for a BOQ item they can see).
+// We re-read `isAdmin` from the DB rather than trusting the JWT claim,
+// the same defence-in-depth as the BOQ PATCH / DELETE handlers.
+
+const EXECUTION_STAGES = ['ISSUED', 'INSTALLED', 'PAID'];
+
+// POST /api/boq/:boqItemId/executions
+router.post('/:boqItemId/executions', asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  const { boqItemId } = req.params;
+  const {
+    executedQuantity,
+    executedAt,
+    stage,
+    accepted,
+    notes,
+  } = req.body || {};
+
+  const fresh = await prisma.employee.findUnique({
+    where: { id: req.employeeId },
+    select: { isAdmin: true },
+  });
+  if (!fresh || !fresh.isAdmin) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Only an admin can record a BOQ execution' });
+  }
+
+  const item = await prisma.boqItem.findUnique({ where: { id: boqItemId } });
+  if (!item) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'BOQ item not found' });
+  }
+
+  if (!Number.isFinite(executedQuantity) || executedQuantity < 0) {
+    return res.status(400).json({ error: 'executedQuantity must be a non-negative number' });
+  }
+
+  let normalisedStage = 'INSTALLED';
+  if (stage !== undefined && stage !== null) {
+    if (typeof stage !== 'string' || !EXECUTION_STAGES.includes(stage)) {
+      return res.status(400).json({
+        error: `stage must be one of ${EXECUTION_STAGES.join(', ')}`,
+      });
+    }
+    normalisedStage = stage;
+  }
+
+  let normalisedExecutedAt;
+  if (executedAt !== undefined && executedAt !== null && executedAt !== '') {
+    const d = new Date(executedAt);
+    if (Number.isNaN(d.getTime())) {
+      return res.status(400).json({ error: 'executedAt must be a valid date' });
+    }
+    normalisedExecutedAt = d;
+  }
+
+  let normalisedAccepted = true;
+  if (accepted !== undefined && accepted !== null) {
+    if (typeof accepted !== 'boolean') {
+      return res.status(400).json({ error: 'accepted must be a boolean' });
+    }
+    normalisedAccepted = accepted;
+  }
+
+  if (notes !== undefined && notes !== null && (typeof notes !== 'string' || notes.length > 1000)) {
+    return res.status(400).json({ error: 'notes must be a string up to 1000 chars' });
+  }
+
+  try {
+    const data = {
+      boqItemId: item.id,
+      executedQuantity,
+      stage: normalisedStage,
+      accepted: normalisedAccepted,
+      notes: notes || null,
+      recordedById: req.employeeId,
+    };
+    if (normalisedExecutedAt) data.executedAt = normalisedExecutedAt;
+
+    const created = await prisma.boqExecution.create({
+      data,
+      include: {
+        recordedBy: { select: { id: true, name: true, email: true } },
+      },
+    });
+    res.status(201).json(created);
+  } catch (err) {
+    console.error('BOQ execution create error', {
+      employeeHash: require('../lib/pii').hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to record BOQ execution' });
+  }
+}));
+
+// GET /api/boq/:boqItemId/executions
+router.get('/:boqItemId/executions', asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  const { boqItemId } = req.params;
+
+  const item = await prisma.boqItem.findUnique({ where: { id: boqItemId } });
+  if (!item) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'BOQ item not found' });
+  }
+
+  try {
+    const rows = await prisma.boqExecution.findMany({
+      where: { boqItemId: item.id },
+      orderBy: [{ executedAt: 'desc' }, { createdAt: 'desc' }],
+      include: {
+        recordedBy: { select: { id: true, name: true, email: true } },
+      },
+      take: 200,
+    });
+    res.json({ items: rows });
+  } catch (err) {
+    console.error('BOQ execution list error', {
+      employeeHash: req.employeeId ? require('../lib/pii').hashIdentifier(req.employeeId) : undefined,
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to list BOQ executions' });
+  }
+}));
+
+// DELETE /api/boq/executions/:id
+router.delete('/executions/:id', asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  const { id } = req.params;
+
+  const fresh = await prisma.employee.findUnique({
+    where: { id: req.employeeId },
+    select: { isAdmin: true },
+  });
+  if (!fresh || !fresh.isAdmin) {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Only an admin can delete a BOQ execution' });
+  }
+
+  try {
+    const existing = await prisma.boqExecution.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'BOQ execution not found' });
+    }
+    await prisma.boqExecution.delete({ where: { id } });
+    res.json({ id, deleted: true });
+  } catch (err) {
+    console.error('BOQ execution delete error', {
+      employeeHash: require('../lib/pii').hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to delete BOQ execution' });
   }
 }));
 

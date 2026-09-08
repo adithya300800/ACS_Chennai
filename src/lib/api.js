@@ -681,6 +681,19 @@ export const api = {
   getBoqVariance: (projectName, token) =>
     api.get(`/boq/variance?projectName=${encodeURIComponent(projectName)}`, token),
 
+  // DR-015 (audit 2026-09-08): BOQ execution ledger. The variance
+  // report's executed-qty column now sums these `accepted = true` rows
+  // instead of the legacy DPR-quantity placeholder. Three wire shapes
+  // mirror backend/src/routes/boq.js (declared BEFORE /:id so Express
+  // doesn't route the literal "executions" through the BOQ detail
+  // handler — same pattern as /variance).
+  recordBoqExecution: (boqItemId, data, token) =>
+    api.post(`/boq/${boqItemId}/executions`, data, token),
+  listBoqExecutions: (boqItemId, token) =>
+    api.get(`/boq/${boqItemId}/executions`, token),
+  deleteBoqExecution: (id, token) =>
+    api.delete(`/boq/executions/${id}`, token),
+
   // Round-29: RFI endpoints REMOVED. /api/rfis is gone — VOs are now
   // standalone work items (no escalation-from-RFI flow).
 
