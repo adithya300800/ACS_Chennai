@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
-import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatDateOnly, formatFullDate, formatShortDate, formatTime } from '../../lib/format.js';
 import { getBusinessToday } from '../../lib/businessDate.js';
@@ -90,7 +89,6 @@ const Skeleton = ({ w = '60%', h = 16 }) => (
 export default function EmployeeDashboard() {
   useDocumentTitle('Dashboard');
   const { accessToken, employee } = useAuth();
-  const { push } = useToast();
 
   const [loading, setLoading] = useState(true);
   const [todayRecord, setTodayRecord] = useState(null);
@@ -99,10 +97,9 @@ export default function EmployeeDashboard() {
   const [leaves, setLeaves] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [error, setError] = useState('');
-  const [actionLoading, setActionLoading] = useState('');
-  const [checkInError, setCheckInError] = useState('');
 
   const today = getBusinessToday();
+  const navigate = useNavigate();
 
   const refresh = useCallback(async (showSpinner = true) => {
     if (showSpinner) setLoading(true);
@@ -154,23 +151,18 @@ export default function EmployeeDashboard() {
     return sorted[0];
   })();
 
-  const handleCheckIn = async () => {
-    setCheckInError('');
-    setActionLoading('checkin');
-    try {
-      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-      await api.post('/attendance/check-in', {
-        clientTime: new Date().toISOString(),
-        clientTimezone: tz,
-      }, accessToken);
-      push('Checked in for today', 'success');
-      refresh(false);
-    } catch (err) {
-      setCheckInError(err.message || 'Check-in failed');
-      push(err.message || 'Check-in failed', 'error');
-    } finally {
-      setActionLoading('');
-    }
+  // DR-023 (SOL audit 2026-09-08): the dashboard shortcut used to post
+  // /attendance/check-in with clientTime + clientTimezone but WITHOUT
+  // mandatory coordinates — the endpoint correctly rejects those with
+  // 400 "latitude and longitude are required". The dedicated
+  // /portal/attendance page is the single source of truth for the GPS
+  // flow, so the dashboard shortcut now navigates there and lets the
+  // dedicated handler obtain + send real coordinates. The shared
+  // `?action=check-in` URL hint causes the Attendance page to
+  // auto-trigger Mark Attendance after mount so the user lands one
+  // click away from a successful check-in.
+  const handleCheckInShortcut = () => {
+    navigate('/portal/attendance?action=check-in');
   };
 
   const overdueTraining = training.filter(isOverdue);
@@ -238,16 +230,12 @@ export default function EmployeeDashboard() {
               <button
                 type="button"
                 className="btn btn-primary"
-                onClick={handleCheckIn}
-                disabled={actionLoading === 'checkin'}
+                onClick={handleCheckInShortcut}
                 style={{ marginTop: 16, minHeight: 44 }}
               >
-                {actionLoading === 'checkin' ? 'Checking in…' : 'Check in now'}
+                Check in now
               </button>
             </>
-          )}
-          {checkInError && (
-            <p className="dashboard-attendance-error" role="alert">{checkInError}</p>
           )}
         </div>
         <aside className="dashboard-attendance-aside">

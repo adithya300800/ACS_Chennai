@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatDate, formatFullDate, formatMonthLabel, formatTime, getMapUrl, formatCoords, getCurrentIstMonth } from '../../lib/format.js';
@@ -32,6 +33,13 @@ export default function Attendance() {
   const [selectedRecord, setSelectedRecord] = useState(null);
   const modalRef = useRef(null);
   const closeButtonRef = useRef(null);
+  // DR-023 (SOL audit 2026-09-08): the dashboard "Check in now" shortcut
+  // navigates here with `?action=check-in`. The page consumes the hint
+  // once (and then strips it from the URL so reload doesn't re-fire the
+  // GPS prompt). We refuse to auto-fire while a check-in is already in
+  // flight so a stale hint cannot race with a manual click.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const autoCheckInFiredRef = useRef(false);
 
   // Focus trap for modal
   useEffect(() => {
@@ -111,6 +119,26 @@ export default function Attendance() {
     fetchToday();
     fetchMonth();
   }, [fetchToday, fetchMonth]);
+
+  // DR-023: dashboard shortcut auto-trigger. We consume the hint AFTER
+  // the first /attendance/today fetch resolves so we never fire a check-in
+  // when an open session already exists for today. The hint is stripped
+  // from the URL so a refresh or back-nav does not re-fire the GPS prompt.
+  useEffect(() => {
+    if (autoCheckInFiredRef.current) return;
+    if (searchParams.get('action') !== 'check-in') return;
+    if (status !== 'idle') return; // mid-check-in or post-check-in
+    if (!todayRecord) return; // still loading
+    if (hasOpenSession) return; // already done — just drop the hint
+    autoCheckInFiredRef.current = true;
+    // Strip the param in place; replace() keeps the user on the page
+    // (vs push which would add a back-button entry).
+    const next = new URLSearchParams(searchParams);
+    next.delete('action');
+    setSearchParams(next, { replace: true });
+    handleCheckIn();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [todayRecord, searchParams]);
 
   // Merge today's record into month display only if the dates match.
   // DR-023: a stale "yesterday" row can otherwise stick in component state
