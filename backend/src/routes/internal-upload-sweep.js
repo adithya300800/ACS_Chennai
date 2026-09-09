@@ -415,20 +415,43 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
    * referenced by a Photo row. We compute that here so the count is honest
    * (`preservedByPhotoRef`), and in dry-run mode we do NOT call updateMany
    * or deleteBlob — we just account for what would have happened.
+   *
+   * SOL DR-033: each pass tracks the set of candidate ids it has already
+   * visited (preserved / failed / dry-run / swept) and excludes them from
+   * the next batch's `findMany`. Without this, a full page of protected or
+   * dry-run candidates would be re-selected by the next query — the
+   * cursor never advances, later real orphans can never be reached, and
+   * the per-pass budget is wasted re-reading the same row. Tie-break by
+   * `id` after `createdAt` so equal timestamps visit each row exactly once.
    */
   async function runExpiryPass({ name, buildWhere, guardWhere, onFlip, onPreservedByPhotoRef }) {
     let sweptRows = 0;
+    // DR-033: stable (createdAt, id) seek progression. Visited-id set
+    // advances the cursor past every candidate we have already touched
+    // in this pass — preserved, dry-run, failed, or successfully swept —
+    // so the next `findMany` returns the *next* untouched row.
+    const visitedIds = new Set();
     outer: while (true) {
       if (actions() >= PER_RUN_MAX) { stoppedReason = 'per_run_max'; break; }
       if (Date.now() - startTime >= RUN_BUDGET_MS) { stoppedReason = 'time_budget'; break; }
 
       batches += 1;
+      const baseWhere = buildWhere();
+      // DR-033: exclude already-visited candidates so the next batch
+      // advances rather than re-reading the same head of the queue.
+      const where = visitedIds.size > 0
+        ? { ...baseWhere, id: { notIn: [...visitedIds] } }
+        : baseWhere;
       const candidates = await prisma.uploadIntent.findMany({
-        where: buildWhere(),
+        where,
         // Oldest first: a row that has been orphaned for a week is
         // reclaimed before one orphaned for an hour, so a persistent
         // backlog drains in age order across fires instead of starving.
-        orderBy: { createdAt: 'asc' },
+        // DR-033: secondary sort on `id` makes the traversal stable when
+        // multiple rows share the same createdAt — otherwise Prisma's
+        // tie-break is undefined and the same row can be re-selected
+        // across batches while its timestamp-sibling is skipped.
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         take: PER_BATCH,
       });
 
@@ -437,6 +460,11 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
       for (const intent of candidates) {
         if (actions() >= PER_RUN_MAX) { stoppedReason = 'per_run_max'; break outer; }
         if (Date.now() - startTime >= RUN_BUDGET_MS) { stoppedReason = 'time_budget'; break outer; }
+        // DR-033: visit each candidate exactly once per pass. Marking
+        // here (before the per-row body) means every exit branch —
+        // preserved, dry-run, failed, swept, even the per-run cap /
+        // time-budget break — still advances the cursor past the row.
+        visitedIds.add(intent.id);
 
         // SOL DR-002 / DR-001: per-row defence. Even if a candidate
         // matches the batch predicate (buildWhere already excludes
@@ -588,19 +616,31 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
   // SOL DR-002: pass 3 already targets rows that pass 1/2 already retired,
   // so their bytes have been removed; the photo-referenced set does not
   // apply here. Dry-run mode still skips the delete and the stamp.
+  //
+  // SOL DR-033: same (createdAt, id) seek progression as passes 1/2 —
+  // dry-run and failed retries do not advance the row's status, so a
+  // full page of dry-run candidates or repeatedly-failing rows would
+  // otherwise be re-selected by every batch and starve later real work.
   let blobsVerified = 0;
+  // DR-033: stable (createdAt, id) seek progression — see runExpiryPass
+  // above for the same pattern + rationale.
+  const visitedVerifyIds = new Set();
   verifyLoop: while (true) {
     if (actions() + blobsVerified >= PER_RUN_MAX) { stoppedReason = stoppedReason || 'per_run_max'; break; }
     if (Date.now() - startTime >= RUN_BUDGET_MS) { stoppedReason = stoppedReason || 'time_budget'; break; }
 
     batches += 1;
+    const baseWhere = {
+      status: 'EXPIRED',
+      boundAt: null,
+      createdAt: { lt: new Date(Date.now() - EXPIRED_VERIFY_AFTER_MS) },
+    };
+    const where = visitedVerifyIds.size > 0
+      ? { ...baseWhere, id: { notIn: [...visitedVerifyIds] } }
+      : baseWhere;
     const stale = await prisma.uploadIntent.findMany({
-      where: {
-        status: 'EXPIRED',
-        boundAt: null,
-        createdAt: { lt: new Date(Date.now() - EXPIRED_VERIFY_AFTER_MS) },
-      },
-      orderBy: { createdAt: 'asc' },
+      where,
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: PER_BATCH,
     });
     if (stale.length === 0) break;
@@ -608,6 +648,9 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
     for (const intent of stale) {
       if (actions() + blobsVerified >= PER_RUN_MAX) { stoppedReason = stoppedReason || 'per_run_max'; break verifyLoop; }
       if (Date.now() - startTime >= RUN_BUDGET_MS) { stoppedReason = stoppedReason || 'time_budget'; break verifyLoop; }
+      // DR-033: visit each candidate exactly once per pass; advance the
+      // cursor past every row we touch regardless of outcome.
+      visitedVerifyIds.add(intent.id);
 
       if (dryRun) {
         blobsWouldClean += 1;

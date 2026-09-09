@@ -46,7 +46,16 @@ function buildPrisma({ intents = [], dprPhotos = [], inspectionPhotos = [] } = {
   const updateManyCalls = [];
   const matches = (row, where) => {
     if (!where) return true;
-    if (where.id !== undefined && row.id !== where.id) return false;
+    // where.id can be a string (exact match, used by updateMany guards)
+    // or an object like { notIn: [...] } (used by the DR-033 visited-id
+    // exclusion). Handle both shapes.
+    if (where.id !== undefined) {
+      if (typeof where.id === 'string') {
+        if (row.id !== where.id) return false;
+      } else if (where.id && Array.isArray(where.id.notIn)) {
+        if (where.id.notIn.includes(row.id)) return false;
+      }
+    }
     if (where.status !== undefined) {
       const allowed = Array.isArray(where.status.in) ? where.status.in : [where.status];
       if (!allowed.includes(row.status)) return false;
