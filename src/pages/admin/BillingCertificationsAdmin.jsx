@@ -96,6 +96,54 @@ function formatAmount(value) {
   return formatINR(value);
 }
 
+// [DR-016] Build the initial form state for the certification modal.
+// In create mode it returns the empty defaults (today's date, all
+// numeric fields blank). In edit mode it pre-fills from the DRAFT
+// row's stored values, including the existing attachment metadata
+// (carried separately so the file input shows the current PDF and a
+// "Replace" prompt).
+function initialiseFormState(initialCert, mode) {
+  if (mode !== 'edit' || !initialCert) {
+    return {
+      projectId: '',
+      contractorName: '',
+      billNumber: '',
+      billDate: todayLocalDate(),
+      invoiceNo: '',
+      poContractRef: '',
+      claimedAmount: '',
+      deductedAmount: '',
+      certifiedAmount: '',
+      gstAmount: '',
+      poValue: '',
+      balanceValue: '',
+      remarks: '',
+    };
+  }
+  const c = initialCert;
+  return {
+    projectId: c.projectId || '',
+    contractorName: c.contractorName || '',
+    billNumber: c.billNumber || '',
+    // billDate is a YYYY-MM-DD string in the API; the date input
+    // expects the same shape so we pass it through verbatim.
+    billDate: c.billDate || todayLocalDate(),
+    invoiceNo: c.invoiceNo || '',
+    poContractRef: c.poContractRef || '',
+    // The form stores amounts as strings so the user can clear /
+    // retype them. Empty string → null on the wire; finite number
+    // → the number. The backend's parseAmount rejects NaN with
+    // 400 INVALID_* so a partial edit doesn't silently record 0.
+    claimedAmount: c.claimedAmount != null ? String(c.claimedAmount) : '',
+    deductedAmount: c.deductedAmount != null ? String(c.deductedAmount) : '',
+    certifiedAmount: c.certifiedAmount != null ? String(c.certifiedAmount) : '',
+    gstAmount: c.gstAmount != null ? String(c.gstAmount) : '',
+    poValue: c.poValue != null ? String(c.poValue) : '',
+    balanceValue: c.balanceValue != null ? String(c.balanceValue) : '',
+    remarks: c.remarks || '',
+  };
+}
+
 // Build the project / recordedBy / certifiedBy filter URL params. Same
 // shape the backend takes — empty filters are ignored by the server.
 function buildListParams({
@@ -165,6 +213,16 @@ export default function BillingCertificationsAdmin() {
   const [disputeOpen, setDisputeOpen] = useState(null);
   const [disputeReason, setDisputeReason] = useState('');
   const [disputeSubmitting, setDisputeSubmitting] = useState(false);
+  // [DR-016] Edit-correction / abandon-correction modal state.
+  // `editingCert` opens the shared form modal in edit mode prefilled
+  // from the correction DRAFT. `abandoningCert` confirms the
+  // user-initiated discard of a correction DRAFT (does NOT restore
+  // the original — closing the modal without abandoning is NOT a
+  // silent cancel; the original stays superseded until the chain
+  // runs again).
+  const [editingCert, setEditingCert] = useState(null);
+  const [abandoningCert, setAbandoningCert] = useState(null);
+  const [abandoning, setAbandoning] = useState(false);
 
   // ─── Loaders ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -414,6 +472,70 @@ export default function BillingCertificationsAdmin() {
       toast.push(err?.message || 'Failed to archive', 'error');
     } finally {
       setDeleting(false);
+    }
+  }
+
+  // [DR-016] Correction lifecycle helpers — make the DRAFT correction
+  // editable, reachable, and reversible from the admin UI. The
+  // correction row already exists (POST /:id/correct minted it in the
+  // same transaction that superseded the original); these handlers
+  // close the loop the audit flagged:
+  //   • Edit: re-opens the same form in PATCH mode, prefilled from the
+  //     DRAFT, with the displayed version pinned (DR-015 wire shape)
+  //     so a stale tab cannot overwrite a concurrent PATCH / certify /
+  //     dispute on the same DRAFT.
+  //   • View original: re-loads the detail modal onto the parent row so
+  //     the admin can walk the correction chain forward and backward.
+  //   • Abandon correction: soft-deletes the DRAFT. The original stays
+  //     superseded (the supersede stamp does NOT auto-revert) — the
+  //     audit's "concurrent undo/approval cannot restore the wrong
+  //     version" requirement is satisfied because the soft-delete is
+  //     a one-shot tombstone on this DRAFT, not a fork that competes
+  //     with future certifies. To re-activate the original after an
+  //     abandon, correct it again from the successor row.
+
+  function openEdit(cert) {
+    setEditingCert(cert);
+  }
+
+  async function openOriginal(cert) {
+    if (!cert?.parentCertificationId) return;
+    const parentId = cert.parentCertificationId;
+    setDetailLoading(true);
+    try {
+      const parent = await api.getBillingCertification(parentId, accessToken);
+      // Walk to the parent row in-place — keeps the modal open, just
+      // swaps the cert it shows. The back-link to the child is
+      // preserved on the loaded parent (its parentCertificationId
+      // points at the cert we came from).
+      setDetailCert(parent);
+    } catch (err) {
+      toast.push(err?.message || 'Failed to load parent certification', 'error');
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  async function handleAbandon() {
+    if (!abandoningCert) return;
+    setAbandoning(true);
+    try {
+      await api.deleteBillingCertification(abandoningCert.id, accessToken);
+      toast.push(
+        `Correction DRAFT for bill ${abandoningCert.billNumber} abandoned. The original row stays superseded — correct it again from the latest successor to re-activate.`,
+        'warning',
+      );
+      setAbandoningCert(null);
+      // Close the detail modal if it was open on this row.
+      if (detailCert && detailCert.id === abandoningCert.id) setDetailCert(null);
+      await fetchCerts();
+      // [DR-029] Abandoning removes the DRAFT from the aggregate set
+      // (it was a row in the project; soft-delete hides it).
+      await fetchAggregates();
+    } catch (err) {
+      toast.push(err?.message || 'Failed to abandon correction', 'error');
+    } finally {
+      setAbandoning(false);
     }
   }
 
@@ -1060,6 +1182,59 @@ export default function BillingCertificationsAdmin() {
                     Superseded
                   </span>
                 )}
+                {/* [DR-016] Edit the correction DRAFT — the audit caught
+                    that opening a correction switched to a read-only
+                    detail view with no way to edit the copied amounts.
+                    This re-opens the same form modal in PATCH mode,
+                    prefilled from the DRAFT and version-pinned to
+                    `detailCert.version` so a concurrent PATCH / certify
+                    / dispute on this row cannot be silently overwritten. */}
+                {detailCert.status === 'DRAFT' && !detailCert.supersededAt && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={transitionPending}
+                    onClick={() => openEdit(detailCert)}
+                    data-testid="bc-edit-draft"
+                    title="Edit this DRAFT (amend amounts / replace PDF / add remarks)."
+                  >
+                    Edit DRAFT
+                  </button>
+                )}
+                {/* [DR-016] Walk the correction chain backward. The
+                    original CERTIFIED row remains reachable from its
+                    successor — load it back into this modal in place. */}
+                {detailCert.parentCertificationId && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={transitionPending}
+                    onClick={() => openOriginal(detailCert)}
+                    data-testid="bc-view-original"
+                    title="Open the parent row this correction was forked from."
+                  >
+                    View original
+                  </button>
+                )}
+                {/* [DR-016] Abandon the correction DRAFT. Soft-deletes
+                    this row only — the original stays superseded (the
+                    supersede stamp does not auto-revert) and any
+                    concurrent approve / save on this DRAFT will 404.
+                    This makes "closing the modal without abandoning"
+                    unambiguously NOT a silent cancellation. */}
+                {detailCert.status === 'DRAFT' && !detailCert.supersededAt && detailCert.parentCertificationId && (
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ background: '#7f1d1d', color: 'white', border: 'none' }}
+                    disabled={transitionPending}
+                    onClick={() => setAbandoningCert(detailCert)}
+                    data-testid="bc-abandon-correction"
+                    title="Discard this correction DRAFT. The original row stays superseded."
+                  >
+                    Abandon correction
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -1114,6 +1289,86 @@ export default function BillingCertificationsAdmin() {
           </div>
         </div>
       )}
+
+      {/* ─── [DR-016] Edit correction DRAFT modal ───────────────────────── */}
+      {editingCert && (
+        <CertificationFormModal
+          accessToken={accessToken}
+          projects={projects}
+          projectsLoading={projectsLoading}
+          mode="edit"
+          initialCert={editingCert}
+          expectedVersion={editingCert?.version ?? null}
+          onClose={() => setEditingCert(null)}
+          onSaved={async (saved) => {
+            setEditingCert(null);
+            toast.push(`Bill ${saved.billNumber} updated.`, 'success');
+            // The detail modal may have been open on this same row —
+            // swap it to the saved row in place so the admin sees the
+            // post-edit amounts / version immediately. If the detail
+            // modal was on the parent row, leave it alone.
+            if (detailCert && detailCert.id === saved.id) setDetailCert(saved);
+            await fetchCerts();
+            // [DR-029] An edit can move certifiedAmount / claimedAmount
+            // and so changes the per-project aggregates.
+            await fetchAggregates();
+          }}
+          onError={(msg) => toast.push(msg, 'error')}
+        />
+      )}
+
+      {/* ─── [DR-016] Abandon correction confirm ──────────────────────── */}
+      {abandoningCert && (
+        <div
+          role="alertdialog"
+          aria-labelledby="abandon-bc-title"
+          aria-describedby="abandon-bc-desc"
+          data-testid="bc-abandon-confirm"
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 100, padding: '1rem',
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget && !abandoning) setAbandoningCert(null); }}
+        >
+          <div
+            style={{
+              background: '#fff', borderRadius: 12, maxWidth: 460, width: '100%',
+              padding: '1.5rem', boxShadow: '0 20px 60px rgba(15,23,42,0.3)',
+            }}
+          >
+            <h2 id="abandon-bc-title" style={{ margin: '0 0 0.5rem', color: 'var(--navy)' }}>
+              Abandon correction DRAFT?
+            </h2>
+            <p id="abandon-bc-desc" style={{ margin: '0 0 1rem', fontSize: '0.9rem', color: 'var(--steel)' }}>
+              <strong>Bill {abandoningCert.billNumber}</strong>
+              {' — '}{abandoningCert.contractorName}
+              {' — '}{abandoningCert.project?.name || 'unknown project'}
+            </p>
+            <p style={{ margin: '0 0 1rem', fontSize: '0.85rem', color: 'var(--steel)' }}>
+              The correction DRAFT will be discarded. The original row stays
+              <strong> superseded</strong> — abandoning a correction does not
+              restore the original. To re-activate the original, correct it
+              again from the latest successor in the chain.
+            </p>
+            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-secondary" onClick={() => setAbandoningCert(null)} disabled={abandoning}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{ background: '#7f1d1d', color: 'white', border: 'none' }}
+                disabled={abandoning}
+                onClick={handleAbandon}
+                data-testid="bc-abandon-confirm-btn"
+              >
+                {abandoning ? 'Abandoning…' : 'Abandon correction'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1128,30 +1383,31 @@ function DetailRow({ label, value }) {
   );
 }
 
-// ─── Create form modal ────────────────────────────────────────────────────
+// ─── Create / edit form modal ────────────────────────────────────────────
 // Mirrors components/DrawingFormModal.jsx — same 4-step upload pipeline
 // (mint SAS, PUT bytes, confirm-upload, POST row) but with the `billing/`
 // blob-path prefix. Embedded in this file so we ship only one new file
 // instead of three (page + form + form-upload-helper).
+//
+// [DR-016] Same modal doubles as the correction DRAFT editor. In
+// `mode === 'edit'` it pre-fills from the DRAFT row (which already
+// carries the parent row's amounts forward verbatim) and submits via
+// PATCH instead of POST. If the user doesn't pick a new file, the
+// existing attachment is left untouched (the backend PATCH only writes
+// attachment fields when one of them is present in the body) — the
+// replacement-upload identity is the new upload intent only when
+// actually uploaded.
 function CertificationFormModal({
-  accessToken, projects, projectsLoading, onClose, onSaved, onError,
+  accessToken, projects, projectsLoading,
+  onClose, onSaved, onError,
+  // [DR-016] edit-mode props. `mode` is 'create' (default) or 'edit'.
+  // `initialCert` is the DRAFT row being edited; `expectedVersion` is
+  // the version pin (DR-015) so a stale tab cannot overwrite a
+  // concurrent PATCH / certify / dispute on the same DRAFT.
+  mode = 'create', initialCert = null, expectedVersion = null,
 }) {
   const fileInputRef = useRef(null);
-  const [form, setForm] = useState({
-    projectId: '',
-    contractorName: '',
-    billNumber: '',
-    billDate: todayLocalDate(),
-    invoiceNo: '',
-    poContractRef: '',
-    claimedAmount: '',
-    deductedAmount: '',
-    certifiedAmount: '',
-    gstAmount: '',
-    poValue: '',
-    balanceValue: '',
-    remarks: '',
-  });
+  const [form, setForm] = useState(() => initialiseFormState(initialCert, mode));
   const [errors, setErrors] = useState({});
   const [serverError, setServerError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -1159,12 +1415,14 @@ function CertificationFormModal({
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadPhase, setUploadPhase] = useState(''); // 'sas'|'uploading'|'confirming'|''
 
-  // Auto-select project if only one exists.
+  // Auto-select project if only one exists (create mode only — edit
+  // mode pre-fills from the existing row).
   useEffect(() => {
+    if (mode !== 'create') return;
     if (!form.projectId && projects.length === 1) {
       setForm((f) => ({ ...f, projectId: projects[0].id }));
     }
-  }, [projects, form.projectId]);
+  }, [projects, form.projectId, mode]);
 
   function validate(f) {
     const e = {};
@@ -1270,10 +1528,15 @@ function CertificationFormModal({
         poValue: form.poValue === '' ? null : parseFloat(form.poValue),
         balanceValue: form.balanceValue === '' ? null : parseFloat(form.balanceValue),
         remarks: form.remarks ? form.remarks.trim() : null,
+        // [DR-015] version pin on PATCH so a stale tab cannot overwrite
+        // a concurrent write on the same DRAFT.
+        ...(mode === 'edit' && expectedVersion != null ? { expectedVersion } : {}),
         ...(attachment || {}),
       };
-      const created = await api.createBillingCertification(payload, accessToken);
-      await onSaved(created);
+      const saved = mode === 'edit'
+        ? await api.updateBillingCertification(initialCert.id, payload, accessToken)
+        : await api.createBillingCertification(payload, accessToken);
+      await onSaved(saved);
     } catch (err) {
       setServerError(err?.message || 'Failed to save certification');
       setSubmitting(false);
@@ -1290,9 +1553,9 @@ function CertificationFormModal({
   }, [uploadPhase, uploadProgress, submitting]);
 
   return (
-    <Modal open onClose={onClose} ariaLabel="Add certification" maxWidth={720} dismissable={!submitting}>
+    <Modal open onClose={onClose} ariaLabel={mode === 'edit' ? 'Edit certification' : 'Add certification'} maxWidth={720} dismissable={!submitting}>
       <h2 style={{ margin: '0 0 1rem', color: 'var(--navy)' }}>
-        Add billing certification
+        {mode === 'edit' ? `Edit correction DRAFT — Bill ${initialCert?.billNumber || ''}` : 'Add billing certification'}
       </h2>
       <form onSubmit={handleSubmit}>
         <div className="form-row">
@@ -1305,7 +1568,7 @@ function CertificationFormModal({
               value={form.projectId}
               onChange={handleChange}
               required
-              disabled={projectsLoading || submitting}
+              disabled={projectsLoading || submitting || mode === 'edit'}
             >
               <option value="">— Select project —</option>
               {projects.map((p) => (
@@ -1360,6 +1623,11 @@ function CertificationFormModal({
               placeholder="e.g. RAB 05"
               disabled={submitting}
             />
+            {mode === 'edit' && (
+              <div style={{ fontSize: '0.72rem', color: 'var(--steel)', marginTop: '0.15rem' }}>
+                Locked to the original bill — correction keeps the same bill identity.
+              </div>
+            )}
             {errors.billNumber && <div className="form-field-error" role="alert">{errors.billNumber}</div>}
           </div>
         </div>
@@ -1504,7 +1772,9 @@ function CertificationFormModal({
         </div>
 
         <div className="form-group">
-          <label htmlFor="bc-form-file">COP PDF (optional)</label>
+          <label htmlFor="bc-form-file">
+            COP PDF {mode === 'edit' ? '(replace optional)' : '(optional)'}
+          </label>
           <input
             id="bc-form-file"
             ref={fileInputRef}
@@ -1516,7 +1786,14 @@ function CertificationFormModal({
           />
           {pendingFile && (
             <div style={{ marginTop: '0.4rem', fontSize: '0.8rem', color: 'var(--steel)' }}>
-              📄 {pendingFile.name} · {formatBytes(pendingFile.size)}
+              📄 New: {pendingFile.name} · {formatBytes(pendingFile.size)}
+            </div>
+          )}
+          {mode === 'edit' && initialCert?.filename && !pendingFile && (
+            <div style={{ marginTop: '0.4rem', fontSize: '0.8rem', color: 'var(--steel)' }}>
+              📄 Current: {initialCert.filename}
+              {initialCert.sizeBytes ? ` · ${formatBytes(initialCert.sizeBytes)}` : ''}
+              {' '}— leave the field empty to keep this attachment.
             </div>
           )}
           <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>
@@ -1545,7 +1822,7 @@ function CertificationFormModal({
             Cancel
           </button>
           <button type="submit" className="btn btn-primary" disabled={submitting}>
-            {submitting ? (submittingLabel || 'Saving…') : 'Record certification'}
+            {submitting ? (submittingLabel || 'Saving…') : (mode === 'edit' ? 'Save correction' : 'Record certification')}
           </button>
         </div>
       </form>
