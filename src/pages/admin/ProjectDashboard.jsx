@@ -14,30 +14,64 @@ import StatusBadge from '../../components/StatusBadge.jsx';
 // still navigates to the full admin queue so admins can drill deeper.
 //
 // Endpoint contract (per api.js):
-//   getDprs        — /dpr        ?projectName=&projectId=&status=&limit=
-//   getInspections — /inspection ?projectName=&projectId=&status=&limit=
-//   getBoqItems    — /boq        ?projectName=&projectId=&limit=
+//   getDprs        — /dpr        ?projectName=&projectId=&exactProjectName=&status=&from=&to=&limit=
+//   getInspections — /inspection ?projectId=&status=&from=&to=&limit=
+//   getBoqItems    — /boq        ?projectId=&limit=
 //   getVariations  — /variations ?projectId=&status=&limit=
 //
-// We prefer `projectName` over `projectId` for the drill loader. The
-// N1 migration left legacy DPR rows with `projectId = null` but a
-// populated `projectName`, so a FK filter returns zero rows for those
-// (live regression: KPI tile shows 2 submitted, but drill panel
-// showed 0). The KPI endpoint itself counts by projectName, so the
-// drill rows must use the same filter to line up. Inspection / BOQ
-// rows have populated FKs so `projectName` still matches them; we
-// stay consistent across buckets so the loader is one branch.
-function projectFilters(p) {
+// DR-013: exact identity is load-bearing — the KPI counts rows by
+// exact `projectName` (KPI handler at projects.js:1534) so the drill
+// rows must use the same exact scope; otherwise "Tower" leaks into a
+// "Tower Annex" bucket. Two paths:
+//   1. Registered project → use projectId FK (exact match, no name join).
+//   2. Discovered project → use projectName + exactProjectName=1 so the
+//      backend's DPR list switches from `contains` to `equals` (mode
+//      insensitive). Without this flag, a substring match leaks rows
+//      from similarly named projects.
+function drillScope(p) {
   if (!p) return {};
-  if (p.name) return { projectName: p.name };
   if (p.id) return { projectId: p.id };
+  if (p.name) return { projectName: p.name, exactProjectName: '1' };
   return {};
 }
+
+// DR-013: the KPI window is a half-open [fromDay, toDayExclusive) range
+// over UTC-midnight Dates (projects.js computeKpiWindow). The DPR /
+// Inspection list endpoints take inclusive YYYY-MM-DD `from` / `to`. We
+// translate deliberately: fromDay passes through, toDayExclusive must
+// become the previous calendar day so the inclusive `to` does not pull
+// in rows from the next day. `null` / missing bounds stay omitted so a
+// "View all" link without window opens the full queue.
+//
+// Inspection "OPEN" tile is intentionally all-date (the OPEN backlog is
+// the org-wide "what's waiting on me" tile, see kpiHandler:1562). The
+// loader ignores `from`/`to` for that tile only.
+function drillWindow(kpis, tileKey) {
+  if (tileKey === 'inspection.open') return {};
+  const w = kpis?.window;
+  if (!w || !w.from || !w.to) return {};
+  // `to` is exclusive in the KPI response — convert to inclusive YYYY-MM-DD
+  // by stepping back one calendar day. parseStrictISODate keeps us in UTC
+  // (no local-tz drift).
+  const toDay = new Date(`${w.to}T00:00:00.000Z`);
+  toDay.setUTCDate(toDay.getUTCDate() - 1);
+  const toInclusive = toDay.toISOString().slice(0, 10);
+  return { from: w.from, to: toInclusive };
+}
+
 const TILE_META = {
   'dpr.submitted': {
     label: 'Submitted DPRs',
-    loader: (p, t) => api.getDprs({ ...projectFilters(p), status: 'SUBMITTED', limit: 10 }, t).then((d) => d.dprs || []),
-    viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
+    loader: (p, t, kpis) => {
+      const w = drillWindow(kpis, 'dpr.submitted');
+      return api.getDprs({ ...drillScope(p), status: 'SUBMITTED', limit: 10, ...w }, t).then((d) => d.dprs || []);
+    },
+    viewAll: (p, kpis) => {
+      const w = drillWindow(kpis, 'dpr.submitted');
+      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
+      const qs = new URLSearchParams({ projectId: idParam, status: 'SUBMITTED', ...w }).toString();
+      return `/portal/admin/dpr?${qs}`;
+    },
   },
   'dpr.pendingReview': {
     label: 'DPRs Pending Review',
@@ -46,41 +80,87 @@ const TILE_META = {
     // statuses — otherwise the tile reads "5" but the panel shows the
     // UNDER_REVIEW subset (typically 1-2) and the user thinks the page
     // is blank. Two parallel fetches (5+5) keep the panel ≤10 rows.
-    loader: (p, t) => Promise.all([
-      api.getDprs({ ...projectFilters(p), status: 'SUBMITTED', limit: 5 }, t).then((d) => d.dprs || []),
-      api.getDprs({ ...projectFilters(p), status: 'UNDER_REVIEW', limit: 5 }, t).then((d) => d.dprs || []),
-    ]).then(([a, b]) => [...a, ...b]),
-    viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
+    loader: (p, t, kpis) => {
+      const w = drillWindow(kpis, 'dpr.pendingReview');
+      const scope = drillScope(p);
+      return Promise.all([
+        api.getDprs({ ...scope, status: 'SUBMITTED', limit: 5, ...w }, t).then((d) => d.dprs || []),
+        api.getDprs({ ...scope, status: 'UNDER_REVIEW', limit: 5, ...w }, t).then((d) => d.dprs || []),
+      ]).then(([a, b]) => [...a, ...b]);
+    },
+    viewAll: (p, kpis) => {
+      const w = drillWindow(kpis, 'dpr.pendingReview');
+      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
+      const qs = new URLSearchParams({ projectId: idParam, ...w }).toString();
+      return `/portal/admin/dpr?${qs}`;
+    },
   },
   'dpr.approved': {
     label: 'Approved DPRs',
-    loader: (p, t) => api.getDprs({ ...projectFilters(p), status: 'APPROVED', limit: 10 }, t).then((d) => d.dprs || []),
-    viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}&status=APPROVED`,
+    loader: (p, t, kpis) => {
+      const w = drillWindow(kpis, 'dpr.approved');
+      return api.getDprs({ ...drillScope(p), status: 'APPROVED', limit: 10, ...w }, t).then((d) => d.dprs || []);
+    },
+    viewAll: (p, kpis) => {
+      const w = drillWindow(kpis, 'dpr.approved');
+      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
+      const qs = new URLSearchParams({ projectId: idParam, status: 'APPROVED', ...w }).toString();
+      return `/portal/admin/dpr?${qs}`;
+    },
   },
   'dpr.rejected': {
     label: 'Rejected DPRs',
-    loader: (p, t) => api.getDprs({ ...projectFilters(p), status: 'REJECTED', limit: 10 }, t).then((d) => d.dprs || []),
-    viewAll: (p) => `/portal/admin/dpr?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}&status=REJECTED`,
+    loader: (p, t, kpis) => {
+      const w = drillWindow(kpis, 'dpr.rejected');
+      return api.getDprs({ ...drillScope(p), status: 'REJECTED', limit: 10, ...w }, t).then((d) => d.dprs || []);
+    },
+    viewAll: (p, kpis) => {
+      const w = drillWindow(kpis, 'dpr.rejected');
+      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
+      const qs = new URLSearchParams({ projectId: idParam, status: 'REJECTED', ...w }).toString();
+      return `/portal/admin/dpr?${qs}`;
+    },
   },
   'inspection.total': {
     label: 'Inspections',
-    loader: (p, t) => api.getInspections({ ...projectFilters(p), limit: 10 }, t).then((d) => d.inspections || d.records || []),
-    viewAll: (p) => `/portal/admin/inspection?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
+    loader: (p, t, kpis) => {
+      const w = drillWindow(kpis, 'inspection.total');
+      return api.getInspections({ ...drillScope(p), limit: 10, ...w }, t).then((d) => d.inspections || d.records || []);
+    },
+    viewAll: (p, kpis) => {
+      const w = drillWindow(kpis, 'inspection.total');
+      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
+      const qs = new URLSearchParams({ projectId: idParam, ...w }).toString();
+      return `/portal/admin/inspection?${qs}`;
+    },
   },
   'inspection.open': {
+    // DR-013: OPEN backlog is intentionally all-date (org-wide "what's
+    // waiting on me" — see kpiHandler:1562). The drill ignores the KPI
+    // window so old OPEN inspections stay visible.
     label: 'Open Inspections',
-    loader: (p, t) => api.getInspections({ ...projectFilters(p), status: 'OPEN', limit: 10 }, t).then((d) => d.inspections || d.records || []),
-    viewAll: (p) => `/portal/admin/inspection?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}&status=OPEN`,
+    loader: (p, t) => api.getInspections({ ...drillScope(p), status: 'OPEN', limit: 10 }, t).then((d) => d.inspections || d.records || []),
+    viewAll: (p) => {
+      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
+      const qs = new URLSearchParams({ projectId: idParam, status: 'OPEN' }).toString();
+      return `/portal/admin/inspection?${qs}`;
+    },
   },
   'boq.items': {
     label: 'BOQ Items',
-    loader: (p, t) => api.getBoqItems({ ...projectFilters(p), limit: 10 }, t).then((d) => d.items || d.boq || []),
-    viewAll: (p) => `/portal/admin/boq?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
+    loader: (p, t) => api.getBoqItems({ ...drillScope(p), limit: 10 }, t).then((d) => d.items || d.boq || []),
+    viewAll: (p) => {
+      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
+      return `/portal/admin/boq?projectId=${idParam}`;
+    },
   },
   'boq.variance': {
     label: 'BOQ Variance Items',
-    loader: (p, t) => api.getBoqItems({ ...projectFilters(p), varianceOnly: true, limit: 10 }, t).then((d) => d.items || d.boq || []),
-    viewAll: (p) => `/portal/admin/boq?projectId=${encodeURIComponent(p.id || `name:${p.name}`)}`,
+    loader: (p, t) => api.getBoqItems({ ...drillScope(p), varianceOnly: true, limit: 10 }, t).then((d) => d.items || d.boq || []),
+    viewAll: (p) => {
+      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
+      return `/portal/admin/boq?projectId=${idParam}`;
+    },
   },
 };
 
@@ -897,6 +977,7 @@ function ProjectKpiView({ kpis, loading, selectedProject, days, expandedTile, se
         expandedTile={expandedTile}
         setExpandedTile={setExpandedTile}
         project={project}
+        kpis={kpis}
         accessToken={accessToken}
       >
         <StatTile
@@ -950,6 +1031,7 @@ function ProjectKpiView({ kpis, loading, selectedProject, days, expandedTile, se
         expandedTile={expandedTile}
         setExpandedTile={setExpandedTile}
         project={project}
+        kpis={kpis}
         accessToken={accessToken}
       >
         <StatTile
@@ -1023,6 +1105,7 @@ function ProjectKpiView({ kpis, loading, selectedProject, days, expandedTile, se
         expandedTile={expandedTile}
         setExpandedTile={setExpandedTile}
         project={project}
+        kpis={kpis}
         accessToken={accessToken}
       >
         <StatTile
@@ -1111,7 +1194,7 @@ function ProjectKpiView({ kpis, loading, selectedProject, days, expandedTile, se
 //
 // `tileKeys` is the list of accordion keys this section owns —
 // required so a single expandedTile only renders in one section.
-function TileSection({ title, tileKeys, expandedTile, setExpandedTile, project, accessToken, children }) {
+function TileSection({ title, tileKeys, expandedTile, setExpandedTile, project, kpis, accessToken, children }) {
   const expandedInSection = expandedTile && tileKeys && tileKeys.includes(expandedTile);
   return (
     <section>
@@ -1164,6 +1247,7 @@ function TileSection({ title, tileKeys, expandedTile, setExpandedTile, project, 
             <InlineDrillPanel
               tileKey={expandedTile}
               project={project}
+              kpis={kpis}
               accessToken={accessToken}
               onClose={() => setExpandedTile(null)}
             />
@@ -1183,11 +1267,15 @@ function TileSection({ title, tileKeys, expandedTile, setExpandedTile, project, 
 // that picks the fields each bucket exposes (date / subject /
 // status / amount).
 //
+// DR-013: drill loaders now take `kpis` so they can pass the same
+// window + status + exact-project scope as the tile. View-all links
+// carry the same params so the queue page opens pre-filtered.
+//
 // Stale-response guard: each load stores a per-tile epoch counter in
 // a ref. A tile click while a previous load is still in flight just
 // increments the epoch, so the older load's then() bails out instead
 // of overwriting the fresh state.
-function InlineDrillPanel({ tileKey, project, accessToken, onClose }) {
+function InlineDrillPanel({ tileKey, project, kpis, accessToken, onClose }) {
   const meta = TILE_META[tileKey];
   const [rows, setRows] = useState([]);
   const [status, setStatus] = useState('idle'); // idle | loading | ready | error
@@ -1200,7 +1288,7 @@ function InlineDrillPanel({ tileKey, project, accessToken, onClose }) {
     setStatus('loading');
     setErrorMsg('');
     setRows([]);
-    meta.loader(project, accessToken)
+    meta.loader(project, accessToken, kpis)
       .then((data) => {
         if (myEpoch !== epochRef.current) return; // stale
         setRows(Array.isArray(data) ? data : []);
@@ -1213,10 +1301,10 @@ function InlineDrillPanel({ tileKey, project, accessToken, onClose }) {
       });
     // We intentionally re-bind on tileKey so flipping between tiles
     // re-fetches. project/accessToken are stable per selection.
-  }, [tileKey, project?.id, project?.name, accessToken, meta]);
+  }, [tileKey, project?.id, project?.name, accessToken, kpis, meta]);
 
   if (!meta) return null;
-  const viewAllHref = meta.viewAll(project);
+  const viewAllHref = meta.viewAll(project, kpis);
 
   return (
     <div
@@ -1265,7 +1353,15 @@ function InlineDrillPanel({ tileKey, project, accessToken, onClose }) {
 // show reportDate + status, Inspection rows show reportDate + type +
 // status, BOQ rows show itemDescription + variance%. We deliberately
 // keep this small (no second-level action buttons) — drill-through
-// happens by clicking the row link to the detail/edit page.
+// happens by clicking the row link to the matching queue/detail page.
+//
+// DR-013: drill rows open real mounted routes with a `focus=<id>`
+// consumer so the destination queue auto-scrolls to + highlights the
+// row. Invented `/admin/dpr/:id` etc. were 404s; the existing mounted
+// surfaces are the admin DPR / Inspection / BOQ queues (focus consumer)
+// and the existing `/portal/inspection/:id` detail page (no admin-only
+// duplicate exists). Project + window + status travel in the URL so the
+// queue opens pre-filtered.
 function DrillRow({ row, tileKey }) {
   const isDpr = tileKey.startsWith('dpr.');
   const isInspection = tileKey.startsWith('inspection.');
@@ -1277,17 +1373,23 @@ function DrillRow({ row, tileKey }) {
   let statusLabel = '';
 
   if (isDpr) {
-    detailHref = `/portal/admin/dpr/${row.id}`;
+    // Real mounted queue with focus highlight — admin/dpr is DprDashboard.jsx.
+    detailHref = `/portal/admin/dpr?focus=${encodeURIComponent(row.id)}`;
     primary = row.subject || `DPR ${String(row.id).slice(0, 8)}`;
     secondary = row.reportDate ? formatShortDate(row.reportDate) : '';
     statusLabel = row.status || '';
   } else if (isInspection) {
-    detailHref = `/portal/admin/inspection/${row.id}`;
+    // Inspection has a real detail route at /portal/inspection/:id
+    // (InspectionDetail.jsx). It renders for admins as well as the
+    // submitter — the existing detail surface already carries all the
+    // inspection metadata + photos.
+    detailHref = `/portal/inspection/${row.id}`;
     primary = row.subject || prettyInspectionType(row.subWorkType || row.type) || `Inspection ${String(row.id).slice(0, 8)}`;
     secondary = row.reportDate ? formatShortDate(row.reportDate) : '';
     statusLabel = row.status || '';
   } else if (isBoq) {
-    detailHref = `/portal/admin/boq/${row.id}`;
+    // BoqAdmin has no /:id detail — open the queue with focus highlight.
+    detailHref = `/portal/admin/boq?focus=${encodeURIComponent(row.id)}`;
     primary = row.itemDescription || row.description || `Item ${String(row.id).slice(0, 8)}`;
     secondary = row.contractValue ? `Contract ₹${Number(row.contractValue).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '';
     statusLabel = row.variancePercent != null ? `${Number(row.variancePercent).toFixed(1)}%` : '';

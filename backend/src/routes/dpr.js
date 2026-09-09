@@ -857,7 +857,14 @@ router.get('/', asyncHandler(async (req, res) => {
   // result set server-side — a 500+ row org doesn't need to ship everything
   // to the browser just so the client can filter. submittedById is the
   // canonical cuid; projectName is a free-text contains search.
-  const { cursor, limit = '20', status: statusFilter, from, to, my, projectName, projectId, submittedById: submittedByIdFilter, month } = req.query;
+  // DR-013: `exactProjectName=1` flips the projectName filter from a
+  // substring search to a case-insensitive equality match. KPI drilldowns
+  // (ProjectDashboard → tile) and discovered-project deep-links need the
+  // exact identity, not a contains-match that would leak "Tower" rows into
+  // a "Tower Annex" scope. The substring behaviour stays the default so
+  // the existing admin filter panel (DprAll.jsx) keeps its free-text
+  // search.
+  const { cursor, limit = '20', status: statusFilter, from, to, my, projectName, projectId, submittedById: submittedByIdFilter, month, exactProjectName } = req.query;
 
   const take = Math.min(parseInt(limit) || 20, 100);
 
@@ -953,7 +960,11 @@ router.get('/', asyncHandler(async (req, res) => {
       ...(restrictToSelf ? { submittedById: req.employeeId } : {}),
       ...(statusFilter ? { status: statusFilter } : {}),
       ...(submittedByIdFilter && !restrictToSelf ? { submittedById: submittedByIdFilter } : {}),
-      ...(projectName ? { projectName: { contains: projectName, mode: 'insensitive' } } : {}),
+      ...(projectName
+        ? (exactProjectName === '1' || exactProjectName === 'true'
+          ? { projectName: { equals: projectName, mode: 'insensitive' } }
+          : { projectName: { contains: projectName, mode: 'insensitive' } })
+        : {}),
       // [N1] Optional projectId FK filter on the list endpoint. Mirrors
       // the free-text projectName filter above; admin UI may pass either
       // depending on whether the picker gave back the curated id or the
@@ -1664,6 +1675,32 @@ router.put('/:id', async (req, res) => {
     if (intentErr) return res.status(intentErr.status).json(intentErr.body);
   }
 
+  // SOL DR-004: server-side dedupe by `(dprId, container, ulid)`. The
+  // audit's exact symptom was "an existing one-photo DPR became a
+  // two-photo DPR after changing only notes and saving. Both rows
+  // referenced the same ULID." — that came from the frontend re-sending
+  // the previously-persisted photo in every Save payload. We can't
+  // trust the client to have filtered (a stale page that rehydrates
+  // server-side photos as plain ulids without the persisted marker will
+  // leak them through), so the server filters at this layer too. Any
+  // photo whose `(container, ulid)` is already a row on this DPR is
+  // silently dropped from the addition set — it stays a single row,
+  // the user keeps their evidence, and no duplicate is created.
+  const incomingPhotos = Array.isArray(fields.photos) ? fields.photos : [];
+  let dedupedPhotos = incomingPhotos;
+  if (incomingPhotos.length > 0) {
+    const existingPhotos = await prisma.dPRPhoto.findMany({
+      where: { dprId: id },
+      select: { ulid: true, container: true },
+    });
+    const existingKeys = new Set(
+      existingPhotos.map((p) => `${p.container}::${p.ulid}`),
+    );
+    dedupedPhotos = incomingPhotos.filter(
+      (p) => p && !existingKeys.has(`${p.container}::${p.ulid}`),
+    );
+  }
+
   try {
     // DR-006 (round-20) + LPR-008: tighten the conditional update WHERE
     // to pin the CLIENT-supplied `version` (so a stale reader's update
@@ -1680,9 +1717,16 @@ router.put('/:id', async (req, res) => {
     // photo rows and the row bump commit together, OR the whole edit is
     // rejected with P2025 → 409 VERSION_CONFLICT — the user never sees a
     // half-saved state where evidence landed but the narrative didn't.
-    const photoWrites = Array.isArray(fields.photos) && fields.photos.length > 0
+    //
+    // SOL DR-004: the entire edit — conditional update + photo nested
+    // create + upload-intent binding — now runs inside ONE transaction.
+    // A short binding count (the sweep retired a CONFIRMED intent
+    // mid-edit) throws and rolls back the row bump AND the just-created
+    // photo rows. The user gets 409 PHOTO_BINDING_LOST and the original
+    // record's content/version/photo-count is preserved exactly.
+    const photoWrites = dedupedPhotos.length > 0
       ? {
-          create: fields.photos.map((p) => ({
+          create: dedupedPhotos.map((p) => ({
             ulid: p.ulid,
             container: p.container,
             filename: p.filename,
@@ -1698,57 +1742,62 @@ router.put('/:id', async (req, res) => {
     // so it MUST be stripped before the data spread — otherwise Prisma
     // would try to set a non-existent `photos` scalar on the DPR row.
     const { photos: _photoControlField, ...fieldsForUpdate } = fields;
-    const updated = await prisma.dPR.update({
-      where: {
-        id,
-        version,
-        status: existing.status,
-      },
-      data: {
-        ...fieldsForUpdate,
-        version: { increment: 1 },
-        updatedAt: new Date(),
-        ...(photoWrites ? { photos: photoWrites } : {}),
-      },
-      include: {
-        photos: true,
-        submittedBy: { select: { id: true, name: true, email: true } },
-        inspections: { select: { id: true, inspectionType: true, status: true, severity: true } },
-        // N7 (round-28): BOQ summary on PUT response, mirror of POST.
-        boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
-        // [N1] Project summary on PUT response, mirror of POST.
-        project: { select: { id: true, name: true, code: true } },
-        // [N3] Drawing summary on PUT response, mirror of POST.
-        drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
-      },
-    });
 
-    // SOL DR-005: claim the intents for the newly-persisted photo rows.
-    // Wrapped in `withRecordTransaction` so a sweep that retires a row
-    // mid-edit rolls back the photo rows we just created (the tx-level
-    // helper throws on a short count, equivalent to the POST path). The
-    // row update itself already committed above — that is a known
-    // gap in the strongest-atomicity sense, but it mirrors how POST
-    // handles photos today and matches the audit's "support photo
-    // additions deliberately" guidance. We re-fetch the row so the
-    // response includes the freshly-bound photo summary.
-    if (photoWrites) {
-      await withRecordTransaction(prisma, 'dPR', async (db) => {
+    const updated = await withRecordTransaction(prisma, 'dPR', async (db) => {
+      const u = await db.dPR.update({
+        where: {
+          id,
+          version,
+          status: existing.status,
+        },
+        data: {
+          ...fieldsForUpdate,
+          version: { increment: 1 },
+          updatedAt: new Date(),
+          ...(photoWrites ? { photos: photoWrites } : {}),
+        },
+        include: {
+          photos: true,
+          submittedBy: { select: { id: true, name: true, email: true } },
+          inspections: { select: { id: true, inspectionType: true, status: true, severity: true } },
+          // N7 (round-28): BOQ summary on PUT response, mirror of POST.
+          boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
+          // [N1] Project summary on PUT response, mirror of POST.
+          project: { select: { id: true, name: true, code: true } },
+          // [N3] Drawing summary on PUT response, mirror of POST.
+          drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
+        },
+      });
+
+      // SOL DR-004: bind the intents for the deduped-new photo rows in
+      // the SAME transaction as the row bump. A short count throws and
+      // the entire transaction rolls back — the row stays at its
+      // pre-edit version, content, and photo count, which is the
+      // "stale version/short binding leaves original content unchanged"
+      // acceptance criterion. Empty dedupedPhotos (e.g. the client sent
+      // only already-persisted ulids) short-circuits — no intent check,
+      // no write — so an unchanged Save keeps the existing photo count.
+      if (dedupedPhotos.length > 0) {
         await assertPhotoIntentsBindable({
           tx: db,
           employeeId: req.employeeId,
-          photos: fields.photos,
+          photos: dedupedPhotos,
         });
         await bindPhotoIntentsTx({
           tx: db,
           employeeId: req.employeeId,
-          photos: fields.photos,
+          photos: dedupedPhotos,
           boundType: 'dpr',
           recordId: id,
         });
-      });
-      // Re-fetch so the response carries the complete photos list
-      // (including the rows we just created).
+      }
+
+      return u;
+    });
+
+    // Re-fetch so the response carries the complete photos list
+    // (including any rows we just added).
+    if (dedupedPhotos.length > 0) {
       const refetched = await prisma.dPR.findUnique({
         where: { id },
         include: {
@@ -1765,6 +1814,18 @@ router.put('/:id', async (req, res) => {
 
     res.json(updated);
   } catch (err) {
+    // SOL DR-004: a lost photo claim is not a server fault — the tx
+    // rolled back, the row is unchanged, and the client can recover by
+    // re-uploading. 409, never 500, and never the generic prisma mapping.
+    const bindingLost = photoBindingLostResponse(err);
+    if (bindingLost) {
+      console.warn('DPR update rolled back — photo binding lost', {
+        employeeHash: hashIdentifier(req.employeeId),
+        expected: err.expected,
+        bound: err.bound,
+      });
+      return res.status(bindingLost.status).json(bindingLost.body);
+    }
     // PII redaction (P1-7) — log Prisma code only
     console.error('DPR update error', {
       employeeHash: hashIdentifier(req.employeeId),

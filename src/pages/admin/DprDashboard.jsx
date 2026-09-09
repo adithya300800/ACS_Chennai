@@ -71,14 +71,39 @@ export default function DprDashboard() {
   // the ProjectDashboard drills straight into a project-scoped queue.
   // The filter dropdown also reflects this so the admin can see the
   // scope they entered with.
+  //
+  // DR-013: also consume ?from= ?to= ?status= ?focus= so the same
+  // window / status / selected row that the tile displayed travels
+  // into the queue. status drives the top-tab filter; from/to apply
+  // as a date range alongside the existing filter panel; focus scrolls
+  // to + highlights the row so the user lands on the intended record.
   const [searchParams, setSearchParams] = useSearchParams();
   const urlProjectId = searchParams.get('projectId') || '';
+  const urlFrom = searchParams.get('from') || '';
+  const urlTo = searchParams.get('to') || '';
+  const urlFocus = searchParams.get('focus') || '';
   const [projectFilter, setProjectFilter] = useState(urlProjectId);
+  const [fromFilter, setFromFilter] = useState(urlFrom);
+  const [toFilter, setToFilter] = useState(urlTo);
+  // Seed the status tab from the URL exactly once so a manual status
+  // change by the user doesn't get clobbered by an empty `?status=`
+  // echo on subsequent renders.
+  const [statusSeeded, setStatusSeeded] = useState(false);
   // Keep state in sync with the URL — when the admin clicks a different
   // project tile, the URL changes and we mirror it.
   useEffect(() => {
     setProjectFilter(urlProjectId);
-  }, [urlProjectId]);
+    setFromFilter(urlFrom);
+    setToFilter(urlTo);
+  }, [urlProjectId, urlFrom, urlTo]);
+  useEffect(() => {
+    if (statusSeeded) return;
+    const urlStatus = searchParams.get('status');
+    if (urlStatus && ['SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'].includes(urlStatus)) {
+      setFilter(urlStatus);
+    }
+    setStatusSeeded(true);
+  }, [searchParams, statusSeeded]);
   // DR-029 (round-20): stats now come from /api/dpr/stats — a single
   // request that returns six explicit aggregate counts against the indexed
   // reportDate / status / approvedAt / reviewedAt columns. Replaces the
@@ -122,9 +147,14 @@ export default function DprDashboard() {
   const loadDprs = useCallback(async () => {
     const params = { status: filter };
     if (projectFilter) params.projectId = projectFilter;
+    // DR-013: tile-derived window travels into the queue via ?from/?to.
+    // Empty strings are omitted so a "View all" link without window opens
+    // the full unfiltered queue.
+    if (fromFilter) params.from = fromFilter;
+    if (toFilter) params.to = toFilter;
     const data = await api.getDprs(params, accessToken);
     return data.dprs || [];
-  }, [accessToken, filter, projectFilter]);
+  }, [accessToken, filter, projectFilter, fromFilter, toFilter]);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -163,11 +193,11 @@ export default function DprDashboard() {
     } finally {
       setLoading(false);
     }
-  }, [accessToken, filter, projectFilter, loadDprs, toast]);
+  }, [accessToken, filter, projectFilter, fromFilter, toFilter, loadDprs, toast]);
 
   useEffect(() => {
     loadAll();
-  }, [filter, projectFilter, loadAll]);
+  }, [filter, projectFilter, fromFilter, toFilter, loadAll]);
 
   // When the filter changes, the previously selected IDs may no longer be
   // visible — clear them so the floating action bar doesn't show "3 selected"
@@ -487,6 +517,10 @@ export default function DprDashboard() {
             const isSelectable = dpr.status === 'SUBMITTED' || dpr.status === 'UNDER_REVIEW';
             const isSelected = selectedIds.has(dpr.id);
             const isReviewing = reviewing === dpr.id;
+            // DR-013: focus highlight when the URL carries ?focus=<id> from
+            // the ProjectDashboard drill. Inline style on the dpr-card so
+            // the focus ring is obvious without a new CSS class.
+            const isFocused = urlFocus && dpr.id === urlFocus;
             // Improvement #1 (round-28): admin review queue cards are now
             // clickable as a whole — the click target opens the same detail
             // modal that /portal/dpr/all uses (DR-015 deep-link pattern).
@@ -502,9 +536,12 @@ export default function DprDashboard() {
             return (
             <div
               key={dpr.id}
+              data-dpr-id={dpr.id}
+              ref={isFocused ? (el) => { if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } : undefined}
               role={isReviewing ? undefined : 'button'}
               tabIndex={isReviewing ? -1 : 0}
               className={`dpr-card${isSelected ? ' dpr-card-selected' : ''}${!isReviewing ? ' dpr-card-clickable' : ''}`}
+              style={isFocused ? { boxShadow: '0 0 0 3px rgba(0,102,255,0.45)', borderColor: 'var(--blue, #0066FF)' } : undefined}
               onClick={handleCardOpen}
               onKeyDown={(e) => {
                 if (isReviewing) return;

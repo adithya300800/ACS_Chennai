@@ -62,17 +62,28 @@ export default function InspectionDashboard() {
   const [nextCursor, setNextCursor] = useState(null);
   const [filterStatus, setFilterStatus] = useState('OPEN');
   const [filterType, setFilterType] = useState('');
-  const [filterFrom, setFilterFrom] = useState('');
-  const [filterTo, setFilterTo] = useState('');
   // Round-28 Bug 2b: ?projectId= on the URL scopes the queue to one
   // project (drill-through from ProjectDashboard tiles). Mirrors the
   // DprDashboard pattern.
+  //
+  // DR-013: also consume ?from= ?to= ?status= ?focus= so the same
+  // window / status / selected row that the tile displayed travels
+  // into the queue. status drives the top-tab filter; from/to apply
+  // as a date range alongside the existing filter panel; focus scrolls
+  // to + highlights the row so the user lands on the intended record.
   const [searchParams, setSearchParams] = useSearchParams();
   const urlProjectId = searchParams.get('projectId') || '';
+  const urlFrom = searchParams.get('from') || '';
+  const urlTo = searchParams.get('to') || '';
+  const urlFocus = searchParams.get('focus') || '';
   const [projectFilter, setProjectFilter] = useState(urlProjectId);
+  const [filterFrom, setFilterFrom] = useState(urlFrom);
+  const [filterTo, setFilterTo] = useState(urlTo);
   useEffect(() => {
     setProjectFilter(urlProjectId);
-  }, [urlProjectId]);
+    setFilterFrom(urlFrom);
+    setFilterTo(urlTo);
+  }, [urlProjectId, urlFrom, urlTo]);
   // DR-029 (round-20): stats now come from /api/inspection/stats — a
   // single request that returns six explicit aggregate counts. Replaces the
   // previous "fetch limit=1 paginated lists, use response.length" pattern
@@ -515,12 +526,18 @@ export default function InspectionDashboard() {
           {inspections.map((insp) => {
             const isSelectable = REVIEWABLE_STATUSES.has(insp.status);
             const isSelected = selectedIds.has(insp.id);
+            // DR-013: focus highlight when the URL carries ?focus=<id> from
+            // the ProjectDashboard drill.
+            const isFocused = urlFocus && insp.id === urlFocus;
             return (
             <Link
               key={insp.id}
               to={`/portal/inspection/${insp.id}`}
+              ref={isFocused ? (el) => { if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } : undefined}
               className={`dpr-card${isSelected ? ' inspection-card-selected' : ''}`}
-              style={{ textDecoration: 'none', color: 'inherit', display: 'block', position: 'relative' }}
+              style={isFocused
+                ? { textDecoration: 'none', color: 'inherit', display: 'block', position: 'relative', boxShadow: '0 0 0 3px rgba(0,102,255,0.45)', borderColor: 'var(--blue, #0066FF)' }
+                : { textDecoration: 'none', color: 'inherit', display: 'block', position: 'relative' }}
             >
               {/* Round-17 B-06: per-card checkbox. Only rendered for reviewable
                   statuses; CLOSED/REJECTED cards keep their layout untouched.

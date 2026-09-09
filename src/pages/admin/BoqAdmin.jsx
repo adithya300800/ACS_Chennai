@@ -558,6 +558,9 @@ export default function BoqAdmin() {
   // kinds.
   const [searchParams] = useSearchParams();
   const urlProjectId = searchParams.get('projectId') || '';
+  // DR-013: consume ?focus=<id> from ProjectDashboard drill so the BOQ
+  // queue scrolls to + highlights the row the admin just clicked.
+  const urlFocus = searchParams.get('focus') || '';
   const [urlSeeded, setUrlSeeded] = useState(false);
   useEffect(() => {
     if (urlSeeded || !urlProjectId) return;
@@ -854,11 +857,17 @@ export default function BoqAdmin() {
 
           {items.map((item) => {
             const v = varianceByItem[item.id];
+            // DR-013: focus highlight when the URL carries ?focus=<id>
+            // from the ProjectDashboard drill.
+            const isFocused = urlFocus && item.id === urlFocus;
             return (
               <div
                 key={item.id}
+                ref={isFocused ? (el) => { if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } : undefined}
                 className="dpr-list-item"
-                style={{ display: 'flex' }}
+                style={isFocused
+                  ? { display: 'flex', boxShadow: '0 0 0 3px rgba(0,102,255,0.45)', borderColor: 'var(--blue, #0066FF)' }
+                  : { display: 'flex' }}
               >
                 <div style={{ flex: '0 0 110px', fontFamily: 'monospace', color: 'var(--navy)' }}>
                   {item.itemCode}
