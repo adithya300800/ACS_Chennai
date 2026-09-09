@@ -103,6 +103,24 @@ function buildApp({ uploadIntentRows = [], resolvedAllowlist = { 'dpr-documents'
         Object.assign(row, data);
         return row;
       }),
+      // [DR-018] confirm-upload uses updateMany with a
+      // {id, status, expiresAt} predicate and expects a {count}. The
+      // mock honours every filter so the race-safety guard fires
+      // correctly when the test backdates expiresAt.
+      updateMany: jest.fn(async ({ where, data }) => {
+        const matches = (row) => {
+          if (!where) return true;
+          if (where.id !== undefined && row.id !== where.id) return false;
+          if (where.status !== undefined && row.status !== where.status) return false;
+          if (where.expiresAt && where.expiresAt.gt) {
+            if (!(row.expiresAt instanceof Date) || row.expiresAt <= where.expiresAt.gt) return false;
+          }
+          return true;
+        };
+        const hits = Array.from(rows.values()).filter(matches);
+        for (const row of hits) Object.assign(row, data);
+        return { count: hits.length };
+      }),
     },
   };
   app.set('prisma', prisma);

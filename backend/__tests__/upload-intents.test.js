@@ -94,6 +94,24 @@ function buildIntentStore() {
         byKey.set(k, next);
         return next;
       }),
+      // [DR-018] The confirm-upload CAS uses updateMany with a
+      // {id, status, expiresAt} predicate and expects a {count}.
+      // Honour every filter so the route's race-safety guard fires
+      // correctly when the test backdates expiresAt.
+      updateMany: jest.fn(async ({ where, data }) => {
+        const rows = Array.from(byKey.values());
+        const hits = rows.filter((row) => {
+          if (!where) return true;
+          if (where.id !== undefined && row.id !== where.id) return false;
+          if (where.status !== undefined && row.status !== where.status) return false;
+          if (where.expiresAt && where.expiresAt.gt) {
+            if (!(row.expiresAt instanceof Date) || row.expiresAt <= where.expiresAt.gt) return false;
+          }
+          return true;
+        });
+        for (const row of hits) Object.assign(row, data);
+        return { count: hits.length };
+      }),
       // For test assertions
       _get: (employeeId, ulid) => byKey.get(keyOf(employeeId, ulid)) || null,
       _size: () => byKey.size,

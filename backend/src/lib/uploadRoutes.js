@@ -354,42 +354,20 @@ function mountUploadRoutes(router, config = {}) {
 
     const pendingKey = `${req.employeeId}:${ulid}`;
 
-    // LPR-012: durable ownership + lifecycle check FIRST. The DB row is
-    // the source of truth — a cleared/evicted in-process Map entry must
-    // not be allowed to invalidate a still-valid intent (e.g. after a
-    // process restart, or after the first successful confirm-upload
-    // already deleted the Map entry below).
+    // [DR-018] The durable UploadIntent is the authoritative source of
+    // truth. The in-process `pendingUploads` Map is a hot-path cache
+    // ONLY — it is never consulted to invalidate a still-valid intent.
+    // After a process restart, replica switch, or any eviction that
+    // drops the in-process entry, the DB row alone must be sufficient
+    // to drive a successful confirm before the intent's expiresAt.
     const prisma = req.app && req.app.get('prisma');
+    let intent = null;
+    let intentLookupFailed = false;
     if (prisma?.uploadIntent) {
       try {
-        const intent = await prisma.uploadIntent.findUnique({
+        intent = await prisma.uploadIntent.findUnique({
           where: { employeeId_ulid: { employeeId: req.employeeId, ulid } },
         });
-        if (!intent) {
-          // No DB row at all — fall back to the in-process Map for
-          // back-compat (deployments before LPR-012 migration applied,
-          // or unit tests that don't wire the intent store).
-          const pending = pendingUploads.get(pendingKey);
-          if (!pending || pending.employeeId !== req.employeeId) {
-            return res.status(404).json({ error: 'BLOB_NOT_FOUND', message: 'Upload not found or unauthorized' });
-          }
-        } else if (intent.status === 'CONFIRMED') {
-          // Idempotent re-confirm — bytes are already attached to a
-          // business record; respond 200 rather than 5xx. Matters
-          // because a flaky network can retry /confirm-upload after
-          // the server already accepted it.
-          return res.json({ verified: true, alreadyConfirmed: true });
-        } else if (intent.status === 'EXPIRED' || intent.expiresAt.getTime() < Date.now()) {
-          return res.status(410).json({ error: 'INTENT_EXPIRED', message: 'Upload intent has expired; please restart the upload' });
-        } else {
-          // PENDING — also require the Map entry as defence-in-depth
-          // (a future refactor that clears the Map on /sas-url MUST
-          // update this branch).
-          const pending = pendingUploads.get(pendingKey);
-          if (!pending || pending.employeeId !== req.employeeId) {
-            return res.status(404).json({ error: 'BLOB_NOT_FOUND', message: 'Upload not found or unauthorized' });
-          }
-        }
       } catch (err) {
         console.error('[upload/intent] lookup failed', {
           employeeHash: hashIdentifier(req.employeeId),
@@ -397,38 +375,120 @@ function mountUploadRoutes(router, config = {}) {
           errCode: err?.code,
           errMessage: err?.message?.split('\n')[0],
         });
-        return res.status(503).json({ error: 'UPLOAD_INTENT_LOOKUP_FAILED', message: 'Could not validate upload intent' });
+        intentLookupFailed = true;
       }
-    } else {
-      // No prisma wired (unit tests that don't care about intents).
-      const pending = pendingUploads.get(pendingKey);
-      if (!pending || pending.employeeId !== req.employeeId) {
-        return res.status(404).json({ error: 'BLOB_NOT_FOUND', message: 'Upload not found or unauthorized' });
+      if (intentLookupFailed) {
+        return res.status(503).json({ error: 'UPLOAD_INTENT_LOOKUP_FAILED', message: 'Could not validate upload intent' });
       }
     }
 
-    // Server-side blob verification — derive the same scoped blob
-    // name and confirm the bytes actually landed with the claimed
-    // size + content-type.
-    //
-    // [DR-016] The blob name is read from the persisted pending
-    // entry (intent + Map) instead of being reconstructed as
-    // `${employeeId}/${ulid}.${ext}`. The mint stage is the
-    // canonical owner of the key shape (including any
-    // `allowedPathPrefixesPerContainer` prefix) and every
-    // subsequent confirm / read / binding helper must consume
-    // what was issued — never re-derive independently. Falling
-    // back to the legacy shape when the entry is missing keeps
-    // pre-LPR-012 / no-prisma-stub test paths green.
+    if (intent) {
+      // Idempotent re-confirm — bytes are already attached to a
+      // business record; respond 200 rather than 5xx. Matters because
+      // a flaky network can retry /confirm-upload after the server
+      // already accepted it.
+      if (intent.status === 'CONFIRMED') {
+        return res.json({ verified: true, alreadyConfirmed: true });
+      }
+      // EXPIRED status or expired-by-time → 410.
+      if (intent.status === 'EXPIRED' || intent.expiresAt.getTime() < Date.now()) {
+        return res.status(410).json({ error: 'INTENT_EXPIRED', message: 'Upload intent has expired; please restart the upload' });
+      }
+      // PENDING — validate the untrusted request fields against the
+      // durable record. The intent owns the canonical container, blob
+      // path, and content type; the request is never allowed to
+      // override them.
+      if (intent.container !== container) {
+        return res.status(400).json({ error: 'CONTAINER_MISMATCH', message: 'Container does not match upload intent' });
+      }
+      if (intent.contentType !== contentType) {
+        return res.status(400).json({ error: 'CONTENT_TYPE_MISMATCH', message: 'Content-type does not match upload intent' });
+      }
+
+      // CAS: atomic PENDING → CONFIRMED with an expiry guard. If the
+      // count is not exactly 1, another confirm already won the race
+      // OR expiresAt crossed NOW() between the check above and the
+      // CAS. Either way, refuse with 410 — the lost-expiry race must
+      // never return a successful confirmation.
+      let casCount;
+      try {
+        const cas = await prisma.uploadIntent.updateMany({
+          where: {
+            id: intent.id,
+            status: 'PENDING',
+            expiresAt: { gt: new Date() },
+          },
+          data: { status: 'CONFIRMED', confirmedAt: new Date() },
+        });
+        casCount = cas.count || 0;
+      } catch (err) {
+        console.error('[upload/intent] CAS failed', {
+          employeeHash: hashIdentifier(req.employeeId),
+          ulid,
+          errCode: err?.code,
+          errMessage: err?.message?.split('\n')[0],
+        });
+        return res.status(503).json({ error: 'UPLOAD_INTENT_CONFIRM_FAILED', message: 'Could not confirm upload intent' });
+      }
+
+      if (casCount !== 1) {
+        return res.status(410).json({ error: 'INTENT_EXPIRED', message: 'Upload intent has expired; please restart the upload' });
+      }
+
+      // Server-side blob verification. The blobName is derived from
+      // the durable intent record — the canonical owner of the key
+      // shape (including any `allowedPathPrefixesPerContainer`
+      // prefix). NEVER reconstructed from untrusted request fields.
+      try {
+        const props = await verifyBlobExists(intent.container, intent.blobPath);
+        if (!props.exists) {
+          return res.status(404).json({ error: 'BLOB_NOT_UPLOADED', message: 'Photo bytes not found in storage' });
+        }
+        if (props.contentType && props.contentType !== contentType) {
+          return res.status(400).json({ error: 'CONTENT_TYPE_MISMATCH', message: 'Uploaded content-type does not match request' });
+        }
+        if (Math.abs((props.contentLength || 0) - sizeBytes) > SIZE_TOLERANCE_BYTES) {
+          return res.status(400).json({ error: 'SIZE_MISMATCH', message: 'Uploaded size does not match declared size' });
+        }
+      } catch (err) {
+        console.error('Upload blob verification failed', {
+          employeeHash: hashIdentifier(req.employeeId),
+          container: intent.container, ulid,
+          errMessage: err.message?.split('\n')[0],
+        });
+        return res.status(502).json({ error: 'BLOB_VERIFICATION_FAILED', message: 'Could not verify upload' });
+      }
+
+      // Refresh the in-process Map cache AFTER successful confirmation
+      // so subsequent same-process calls can short-circuit. The Map
+      // is NEVER consulted above to invalidate an intent.
+      pendingUploads.set(pendingKey, {
+        employeeId: req.employeeId,
+        container: intent.container,
+        filename,
+        contentType: intent.contentType,
+        blobName: intent.blobPath,
+        pathPrefix: null,
+      });
+
+      return res.json({ verified: true });
+    }
+
+    // No durable intent found — fall back to the in-process Map for
+    // back-compat (deployments before LPR-012 migration applied, or
+    // unit tests that don't wire the intent store). The Map is the
+    // source of truth in this branch ONLY.
+    const pending = pendingUploads.get(pendingKey);
+    if (!pending || pending.employeeId !== req.employeeId) {
+      return res.status(404).json({ error: 'BLOB_NOT_FOUND', message: 'Upload not found or unauthorized' });
+    }
+
+    // Back-compat blob verification using the Map entry's blobName
+    // (the server-issued key), falling back to the legacy shape only
+    // when no entry exists — kept for pre-LPR-012 / no-prisma-stub
+    // test paths.
     try {
-      const pendingEntry = pendingUploads.get(`${req.employeeId}:${ulid}`);
-      const intentRow = prisma?.uploadIntent
-        ? await prisma.uploadIntent.findUnique({
-            where: { employeeId_ulid: { employeeId: req.employeeId, ulid } },
-            select: { blobPath: true },
-          }).catch(() => null)
-        : null;
-      const blobName = pendingEntry?.blobName || intentRow?.blobPath || `${req.employeeId}/${ulid}.${CONTENT_TYPE_EXT[contentType] || 'bin'}`;
+      const blobName = pending.blobName || `${req.employeeId}/${ulid}.${CONTENT_TYPE_EXT[contentType] || 'bin'}`;
       const props = await verifyBlobExists(container, blobName);
       if (!props.exists) {
         return res.status(404).json({ error: 'BLOB_NOT_UPLOADED', message: 'Photo bytes not found in storage' });
@@ -449,30 +509,6 @@ function mountUploadRoutes(router, config = {}) {
     }
 
     pendingUploads.delete(pendingKey);
-
-    // LPR-012: mark the intent CONFIRMED so a future confirm-upload
-    // call returns idempotently and so the orphan-cleanup cron knows
-    // this blob is bound to a business record.
-    if (prisma?.uploadIntent) {
-      try {
-        await prisma.uploadIntent.update({
-          where: { employeeId_ulid: { employeeId: req.employeeId, ulid } },
-          data: { status: 'CONFIRMED', confirmedAt: new Date() },
-        });
-      } catch (err) {
-        // Log but do not fail the response — the bytes are verified,
-        // the client got what they needed. The next orphan sweep will
-        // see the intent as PENDING and skip the blob (status !=
-        // EXPIRED, and we don't sweep CONFIRMED-but-still-referenced).
-        console.warn('[upload/intent] mark-confirmed failed', {
-          employeeHash: hashIdentifier(req.employeeId),
-          ulid,
-          errCode: err?.code,
-          errMessage: err?.message?.split('\n')[0],
-        });
-      }
-    }
-
     res.json({ verified: true });
   });
 }
