@@ -13,6 +13,15 @@ export default function Attendance() {
   useDocumentTitle('My Attendance');
   const { accessToken } = useAuth();
   const [todayRecord, setTodayRecord] = useState(null);
+  // DR-024 (SOL audit 2026-09-08): track fetch status separately from
+  // `todayRecord` so we can tell "still loading" from "loaded but no
+  // record today" (which the backend returns as `null` — the same shape
+  // the loading state used to leave the variable in). Without this
+  // distinction, the dashboard `?action=check-in` hint was consumed on
+  // the success-with-record branch but NEVER on the success-no-record
+  // branch — the page sat perpetually "loading" and the GPS prompt
+  // never fired.
+  const [fetchStatus, setFetchStatus] = useState('loading');
   const [monthRecords, setMonthRecords] = useState([]);
   // S3-12 (round-27 audit): default to the IST month so a user west of
   // UTC whose browser-local clock has rolled into the next month before
@@ -75,6 +84,10 @@ export default function Attendance() {
 
   // Fetch today's attendance
   const fetchToday = useCallback(async () => {
+    // DR-024: mark the fetch as in-flight before kicking off so the
+    // dashboard-shortcut useEffect can re-evaluate against the previous
+    // "success" state and not fire twice in a row.
+    setFetchStatus('loading');
     try {
       // LPR-006: send the IST business day. The backend now rejects a
       // localDate that does not equal the server's business today with
@@ -97,11 +110,14 @@ export default function Attendance() {
           returned: data.date,
         });
         setTodayRecord(null);
+        setFetchStatus('success');
         return;
       }
-      setTodayRecord(data);
+      setTodayRecord(data); // null is a valid "no record today" payload
+      setFetchStatus('success');
     } catch {
       setTodayRecord(null);
+      setFetchStatus('error');
     }
   }, [accessToken]);
 
@@ -120,15 +136,25 @@ export default function Attendance() {
     fetchMonth();
   }, [fetchToday, fetchMonth]);
 
-  // DR-023: dashboard shortcut auto-trigger. We consume the hint AFTER
-  // the first /attendance/today fetch resolves so we never fire a check-in
-  // when an open session already exists for today. The hint is stripped
-  // from the URL so a refresh or back-nav does not re-fire the GPS prompt.
+  // DR-023 + DR-024 (SOL audit 2026-09-08): dashboard shortcut
+  // auto-trigger. We consume the hint AFTER the first /attendance/today
+  // fetch resolves so we never fire a check-in when an open session
+  // already exists for today. The hint is stripped from the URL so a
+  // refresh or back-nav does not re-fire the GPS prompt.
+  //
+  // DR-024: the previous check `if (!todayRecord) return;` was wrong
+  // because `todayRecord` is null in three different states — still
+  // loading, success with no record today (the API returns `null`), and
+  // fetch error. Treating "success + no record" as "still loading" left
+  // the hint perpetually unconsumed. `fetchStatus === 'success'`
+  // disambiguates them: on success-with-no-record the hint fires the
+  // existing real-GPS handler; on error the user can manually retry
+  // via the Mark Attendance button.
   useEffect(() => {
-    if (autoCheckInFiredRef.current) return;
+    if (autoCheckInFiredRef.current) return; // hintConsumed
     if (searchParams.get('action') !== 'check-in') return;
     if (status !== 'idle') return; // mid-check-in or post-check-in
-    if (!todayRecord) return; // still loading
+    if (fetchStatus !== 'success') return; // still loading OR fetch error
     if (hasOpenSession) return; // already done — just drop the hint
     autoCheckInFiredRef.current = true;
     // Strip the param in place; replace() keeps the user on the page
@@ -138,7 +164,7 @@ export default function Attendance() {
     setSearchParams(next, { replace: true });
     handleCheckIn();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [todayRecord, searchParams]);
+  }, [todayRecord, searchParams, fetchStatus]);
 
   // Merge today's record into month display only if the dates match.
   // DR-023: a stale "yesterday" row can otherwise stick in component state
