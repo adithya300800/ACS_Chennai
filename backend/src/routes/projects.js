@@ -403,10 +403,16 @@ const PROJECT_WITH_ASSIGNMENTS_INCLUDE = {
 //     that doesn't already exist;
 //   * deletes rows for every existing (projectId, employeeId) pair that
 //     isn't in `desired`;
-//   * leaves existing rows alone (their role is NOT updated — the spec
-//     treats assignments as set membership, not a writable field after
-//     creation). This keeps the diff idempotent (PATCH twice → still one
-//     row, see round-25d scope-bleed lesson on transactions).
+//   * updates the role on every (projectId, employeeId) pair that
+//     appears in BOTH sets when the desired role differs from the
+//     stored role (preserves id + assignedAt + assignedById — DR-010).
+//
+// The role update closes the silent-success hole in the prior contract
+// where a role edit would PATCH200 and the change would be discarded
+// silently because the diff saw the row as unchanged. The update is
+// idempotent — re-sending the same payload is a no-op; a PATCH with the
+// same assignments array twice → still one row (see round-25d
+// scope-bleed lesson on transactions).
 //
 // `assignedById` is derived from `req.employeeId` — the request body is
 // never consulted, even on PATCH where the user could otherwise
@@ -442,18 +448,31 @@ async function syncProjectAssignments(tx, projectId, desired, req) {
   // Existing rows for this project.
   const existingRows = await tx.projectAssignment.findMany({
     where: { projectId },
-    select: { id: true, employeeId: true },
+    select: { id: true, employeeId: true, role: true },
   });
-  const existingByEmp = new Map(existingRows.map((r) => [r.employeeId, r.id]));
+  const existingByEmp = new Map(existingRows.map((r) => [r.employeeId, r]));
   const desiredByEmp = new Map(desired.map((a) => [a.employeeId, a]));
 
   // Diff.
   const toCreate = [];
   const toDelete = [];
-  for (const [empId, _row] of desiredByEmp.entries()) {
-    if (!existingByEmp.has(empId)) toCreate.push(empId);
+  // [DR-010] — for retained employeeIds, queue an UPDATE when the
+  // desired role differs from the stored role. The previous contract
+  // silently dropped role edits (the row was unchanged in the set-diff,
+  // so the role diff was never seen). Re-using the same id/assignedAt
+  // /assignedById means the audit trail stays intact; only `role` is
+  // written. `desiredRole === storedRole` (incl. both null) is a no-op
+  // so PATCH-with-same-payload stays idempotent.
+  const toUpdate = [];
+  for (const [empId, desiredRow] of desiredByEmp.entries()) {
+    const existing = existingByEmp.get(empId);
+    if (!existing) {
+      toCreate.push(empId);
+    } else if ((existing.role ?? null) !== (desiredRow.role ?? null)) {
+      toUpdate.push({ id: existing.id, employeeId: empId, role: desiredRow.role });
+    }
   }
-  for (const [empId, _id] of existingByEmp.entries()) {
+  for (const [empId, _row] of existingByEmp.entries()) {
     if (!desiredByEmp.has(empId)) toDelete.push(empId);
   }
 
@@ -469,6 +488,17 @@ async function syncProjectAssignments(tx, projectId, desired, req) {
         assignedById: req.employeeId,
       })),
     });
+  }
+  if (toUpdate.length) {
+    // Per-row update preserves id + assignedAt + assignedById; only
+    // role is rewritten. updateMany would skip rows where role is
+    // already null (a legitimate target), so per-row is safer.
+    for (const row of toUpdate) {
+      await tx.projectAssignment.update({
+        where: { id: row.id },
+        data: { role: row.role },
+      });
+    }
   }
   if (toDelete.length) {
     await tx.projectAssignment.deleteMany({
@@ -1156,6 +1186,49 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
         err.code = 'PROJECT_NOT_FOUND';
         throw err;
       }
+
+      // [DR-011] Rename guard. Project identity is coupled to mutable
+      // display names today — renaming a curated Project silently
+      // breaks KPI rollups that group by DPR.projectName (see
+      // kpiHandler below: `where: { projectName }`). When any child
+      // table still references this projectId, refuse the rename and
+      // tell the admin to create a new project for the new identity.
+      // Same-name "renames" (e.g. client typo correction that resolves
+      // back to the same canonical name) and non-name fields (code,
+      // client, location, ...) are NOT guarded — see the test matrix
+      // in backend/__tests__/projects.dr011.test.js.
+      if (
+        projectData.name !== undefined
+        && projectData.name !== existing.name
+      ) {
+        const [dprC, inspectionC, boqC, voC, drawingC, assignmentC] = await Promise.all([
+          tx.dPR.count({ where: { projectId: id } }),
+          tx.inspectionRecord.count({ where: { projectId: id } }),
+          tx.boqItem.count({ where: { projectId: id } }),
+          tx.variationOrder.count({ where: { projectId: id } }),
+          tx.drawing.count({ where: { projectId: id } }),
+          tx.projectAssignment.count({ where: { projectId: id } }),
+        ]);
+        const counts = {
+          dpr: dprC,
+          inspection: inspectionC,
+          boq: boqC,
+          vo: voC,
+          drawing: drawingC,
+          assignment: assignmentC,
+        };
+        const total = dprC + inspectionC + boqC + voC + drawingC + assignmentC;
+        if (total > 0) {
+          const err = new Error(
+            `Cannot rename project with ${total} child record(s); create a new project for the new identity`,
+          );
+          err.code = 'PROJECT_HAS_CHILD_RECORDS';
+          err.status = 409;
+          err.counts = counts;
+          throw err;
+        }
+      }
+
       const baseUpdate = await tx.project.update({
         where: { id },
         data: projectData,
@@ -1187,6 +1260,16 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
     }
     if (err && err.code === 'PROJECT_NOT_FOUND') {
       return res.status(404).json({ error: 'PROJECT_NOT_FOUND', code: 'PROJECT_NOT_FOUND', message: 'Project not found' });
+    }
+    // [DR-011] Rename guard. The transaction throws this when any child
+    // table still references the projectId — surface the counts so the
+    // admin sees the per-table attribution.
+    if (err && err.code === 'PROJECT_HAS_CHILD_RECORDS') {
+      return res.status(409).json({
+        error: err.message,
+        code: 'PROJECT_HAS_CHILD_RECORDS',
+        counts: err.counts,
+      });
     }
     console.error('Projects update error', {
       employeeHash: hashIdentifier(req.employeeId),

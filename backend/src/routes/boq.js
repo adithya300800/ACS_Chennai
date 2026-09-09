@@ -698,6 +698,17 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     //   - projectName supplied → resolveProject() promotes typed name to
     //     a curated FK when one exists (legacy back-compat path).
     //   - Cross-check: if BOTH supplied and they disagree, reject.
+    //
+    //   [DR-011] Reparent guard — the projectName-only branch must
+    //   refuse to silently rewrite projectId when the BOQ is already
+    //   bound to a DIFFERENT curated project. The legitimate back-
+    //   compat path (the one DR-011 explicitly preserves: "Legacy-
+    //   name fallback must be limited to reconciled null-FK records,
+    //   never records bound to a different project") only applies to
+    //   rows whose existing projectId is null. Same-project name
+    //   changes (resolveProject returns the SAME id) are still allowed
+    //   — admins may re-type the canonical name and we just rewrite
+    //   to the canonical casing.
     if (fields.projectId !== undefined && fields.projectId !== null) {
       if (typeof fields.projectId !== 'string' || !fields.projectId) {
         return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'VALIDATION_ERROR', message: 'projectId must be a string or null' });
@@ -716,15 +727,49 @@ router.patch('/:id', asyncHandler(async (req, res) => {
       }
       fields.projectName = p.name;
     } else if (fields.projectName !== undefined && typeof fields.projectName === 'string' && fields.projectName.trim()) {
-      const result = await resolveProject(prisma, fields.projectName.trim());
-      if (result.kind === 'project') {
-        if (!result.project.isActive) {
-          return res.status(400).json({ error: 'PROJECT_INACTIVE', code: 'PROJECT_INACTIVE', message: 'Project is archived (isActive=false)' });
+      // [DR-011] Name-only reparent. The caller did NOT supply
+      // projectId, but the row is already bound to a curated project —
+      // a typed name that resolves to a DIFFERENT project would
+      // silently rewrite the FK. Two allowed paths:
+      //   (a) existing.projectId is null — this is the legitimate
+      //       "promote a discovered-name row to curated via name
+      //       resolution" path. Carry on with the resolve.
+      //   (b) resolved project.id === existing.projectId — same-
+      //       project rename (e.g. canonical-case fix). Carry on.
+      // Otherwise 409 with the existing binding so the admin can
+      // either keep it or supply an explicit projectId to reparent.
+      if (existing.projectId) {
+        const result = await resolveProject(prisma, fields.projectName.trim());
+        if (result.kind === 'project' && result.project.id !== existing.projectId) {
+          return res.status(409).json({
+            error: 'BOQ is bound to a different project; supply explicit projectId to reparent',
+            code: 'PROJECT_REPARENT_REQUIRES_ID',
+            boundTo: existing.projectId,
+          });
         }
-        fields.projectId = result.project.id;
-        fields.projectName = result.project.name;
+        // Same project (or name resolved to discovered/missing) —
+        // fall through and let the same logic below normalise.
+        if (result.kind === 'project') {
+          fields.projectId = result.project.id;
+          fields.projectName = result.project.name;
+        }
+        // result.kind === 'discovered' / 'missing' → row keeps its
+        // existing curated projectId + the typed projectName. Don't
+        // rewrite projectId back to null — that would also be a
+        // silent re-parent.
+      } else {
+        // Null-FK row: the existing logic promotes the typed name to
+        // a curated FK when one exists.
+        const result = await resolveProject(prisma, fields.projectName.trim());
+        if (result.kind === 'project') {
+          if (!result.project.isActive) {
+            return res.status(400).json({ error: 'PROJECT_INACTIVE', code: 'PROJECT_INACTIVE', message: 'Project is archived (isActive=false)' });
+          }
+          fields.projectId = result.project.id;
+          fields.projectName = result.project.name;
+        }
+        // kind === 'discovered' / 'missing' → keep typed projectName; projectId stays NULL.
       }
-      // kind === 'discovered' / 'missing' → keep typed projectName; projectId stays NULL.
     }
 
     // Server recomputes amount on every write — see the create route's

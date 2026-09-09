@@ -108,6 +108,19 @@ function makePrisma() {
         },
         findMany: async () => projectRows,
       },
+      // [DR-011] The PATCH /api/projects/:id rename guard runs inside
+      // the transaction and counts child rows across six models. The
+      // DR-012 scenario ("rename + list reflects new name") models a
+      // project with NO child records, so the count stubs return 0
+      // and the rename is allowed through. This mirrors the test 6
+      // assertion path (status 200 + new name on the curated list) on
+      // top of the DR-011 contract.
+      dPR: { count: async () => 0 },
+      inspectionRecord: { count: async () => 0 },
+      boqItem: { count: async () => 0 },
+      variationOrder: { count: async () => 0 },
+      drawing: { count: async () => 0 },
+      projectAssignment: { count: async () => 0 },
     })),
     project: {
       // GET /api/projects curated-list findMany — also filtered by
