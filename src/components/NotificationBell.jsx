@@ -315,11 +315,35 @@ useLayoutEffect(() => {
       // location.state.selectedDprId and opens the detail modal — see
       // src/pages/portal/DprList.jsx for the consumer.
       navigate('/portal/dpr/my', { state: { selectedDprId: notif.dprId } });
+    } else if (notif.inspectionId) {
+      // SOL DR-021: route inspection notifications to the inspection
+      // detail page. We pass the id in BOTH location.state (so the
+      // /my list can pre-open the detail consumer if present) AND
+      // /:id segment (so the detail page itself receives it via useParams
+      // — the existing InspectionDetail.jsx reads useParams().id). Using
+      // the segment route means deleted inspections degrade safely to
+      // the detail page's own "not found" path instead of silently
+      // landing on the empty list.
+      navigate(`/portal/inspection/${notif.inspectionId}`);
+    } else if (notif.trainingEnrollmentId) {
+      // SOL DR-021: route training notifications to the enrolled-course
+      // detail page. The training detail page renders the enrollment's
+      // current state (assigned / cancelled / in-progress / completed)
+      // and is the single authorized surface for the user.
+      navigate(`/portal/training/${notif.trainingEnrollmentId}`);
+    } else if (notif.leaveRequestId) {
+      // SOL DR-021: route leave notifications to the My Leave page. The
+      // employee portal has no per-request leave detail page; landing
+      // on the list with the id in state keeps the same handoff shape
+      // as dprId / inspectionId so a future detail page can pick it up
+      // without breaking the bell.
+      navigate('/portal/leave', { state: { selectedLeaveRequestId: notif.leaveRequestId } });
     } else {
       // No typed target? Stay where we are (the bell dropdown itself
       // acts as the read surface) and surface the message inline.
-      // Future target types (INSPECTION / LEAVE / TRAINING) will
-      // route to their own pages with the same handoff pattern.
+      // Old notification rows pre-dating DR-021 fall into this branch
+      // because their typed target id is null. Per the DR-021 rollout,
+      // we do NOT parse old notification prose to invent targets.
     }
     setOpen(false);
   };

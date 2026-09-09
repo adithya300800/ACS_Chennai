@@ -2155,16 +2155,26 @@ router.post('/:id/review', requireFreshAdmin, async (req, res) => {
       });
 
       notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was reviewed. ${adminNotes || ''}`.trim();
-      await tx.notification.create({
+      // SOL DR-021: capture the persisted notification row's real UUID
+      // so the SSE emit below carries the same id /list returns.
+      const notificationRow = await tx.notification.create({
         data: {
           employeeId: dpr.submittedById,
           type: 'DPR_REVIEWED',
           dprId: id,
           message: notifMessage,
         },
+        select: {
+          id: true,
+          type: true,
+          dprId: true,
+          message: true,
+          createdAt: true,
+          isRead: true,
+        },
       });
 
-      return tx.dPR.findUnique({
+      const dprRow = await tx.dPR.findUnique({
         where: { id },
         include: {
           photos: true,
@@ -2172,24 +2182,31 @@ router.post('/:id/review', requireFreshAdmin, async (req, res) => {
           reviewedBy: { select: { id: true, name: true, email: true } },
         },
       });
+      return { dpr: dprRow, notification: notificationRow };
     });
 
-    emitNotification(dpr.submittedById, 'notification', {
-      id: Date.now(),
-      type: 'DPR_REVIEWED',
-      dprId: id,
-      message: `Your DPR for ${dpr.projectName} was reviewed`,
-      createdAt: new Date().toISOString(),
-    });
-    fanOutEmail({
-      id: null, // tx-row id not returned by the create; EmailLog.notificationId is SetNull-able
+    // SOL DR-021: emit the persisted notification DTO (real UUID id).
+    if (updated.notification) {
+      emitNotification(dpr.submittedById, 'notification', {
+        id: updated.notification.id,
+        type: updated.notification.type,
+        dprId: updated.notification.dprId,
+        message: updated.notification.message,
+        createdAt: updated.notification.createdAt instanceof Date
+          ? updated.notification.createdAt.toISOString()
+          : new Date(updated.notification.createdAt).toISOString(),
+        isRead: !!updated.notification.isRead,
+      });
+    }
+    fanOutEmail(updated.notification || {
+      id: null,
       employeeId: dpr.submittedById,
       type: 'DPR_REVIEWED',
       dprId: id,
       message: notifMessage,
     }, prisma, { projectName: dpr.projectName, reportDate: formatReportDate(dpr.reportDate) });
 
-    res.json(updated);
+    res.json(updated.dpr);
   } catch (err) {
     console.error('DPR review error', {
       employeeHash: hashIdentifier(req.employeeId),
@@ -2263,16 +2280,29 @@ router.post('/:id/approve', requireFreshAdmin, async (req, res) => {
       });
 
       notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was approved. ${adminNotes || ''}`.trim();
-      await tx.notification.create({
+      // SOL DR-021: capture the persisted notification row's real UUID
+      // so the SSE emit below carries the same id /list returns. The
+      // previous flow dropped the row on the floor and emitted a
+      // numeric `Date.now()` id — which broke `markNotificationRead`
+      // (404 on numeric id) and the bell's stream/list dedupe.
+      const notificationRow = await tx.notification.create({
         data: {
           employeeId: dpr.submittedById,
           type: 'DPR_APPROVED',
           dprId: id,
           message: notifMessage,
         },
+        select: {
+          id: true,
+          type: true,
+          dprId: true,
+          message: true,
+          createdAt: true,
+          isRead: true,
+        },
       });
 
-      return tx.dPR.findUnique({
+      const dprRow = await tx.dPR.findUnique({
         where: { id },
         include: {
           photos: true,
@@ -2280,16 +2310,29 @@ router.post('/:id/approve', requireFreshAdmin, async (req, res) => {
           approvedBy: { select: { id: true, name: true, email: true } },
         },
       });
+      return { dpr: dprRow, notification: notificationRow };
     });
 
-    emitNotification(dpr.submittedById, 'notification', {
-      id: Date.now(),
-      type: 'DPR_APPROVED',
-      dprId: id,
-      message: `Your DPR for ${dpr.projectName} was approved`,
-      createdAt: new Date().toISOString(),
-    });
-    fanOutEmail({
+    // SOL DR-021: emit the persisted notification DTO (real UUID id, not
+    // `Date.now()`). The bell's stream/list dedupe keys on this id —
+    // using the persisted UUID lets a subsequent /list refresh collapse
+    // the SSE-pushed row with the persisted row instead of duplicating it.
+    if (updated.notification) {
+      emitNotification(dpr.submittedById, 'notification', {
+        id: updated.notification.id,
+        type: updated.notification.type,
+        dprId: updated.notification.dprId,
+        message: updated.notification.message,
+        createdAt: updated.notification.createdAt instanceof Date
+          ? updated.notification.createdAt.toISOString()
+          : new Date(updated.notification.createdAt).toISOString(),
+        isRead: !!updated.notification.isRead,
+      });
+    }
+    // DR-021: pass the actual persisted notification row id to
+    // fanOutEmail so EmailLog.notificationId is real (not the legacy
+    // `null` placeholder).
+    fanOutEmail(updated.notification || {
       id: null,
       employeeId: dpr.submittedById,
       type: 'DPR_APPROVED',
@@ -2297,7 +2340,8 @@ router.post('/:id/approve', requireFreshAdmin, async (req, res) => {
       message: notifMessage,
     }, prisma, { projectName: dpr.projectName, reportDate: formatReportDate(dpr.reportDate) });
 
-    res.json(updated);
+    const updatedDpr = updated.dpr;
+    res.json(updatedDpr);
   } catch (err) {
     console.error('DPR approve error', {
       employeeHash: hashIdentifier(req.employeeId),
@@ -2381,12 +2425,27 @@ router.post('/:id/reject', requireFreshAdmin, async (req, res) => {
 
       const combinedNotes = [reason.trim(), adminNotes].filter(Boolean).join('\n\n');
       notifMessage = `Your DPR for ${dpr.projectName} on ${formatReportDate(dpr.reportDate)} was rejected: ${reason.trim()}${adminNotes ? `\n${adminNotes}` : ''}`.trim();
-      await tx.notification.create({
+      // SOL DR-021: persist the actual notification row (with its real
+      // UUID) so the SSE wire shape can carry the SAME id the /list
+      // endpoint returns. The previous flow created the row, returned it
+      // as `void`, and re-derived a numeric id (`Date.now()`) for the SSE
+      // payload — which broke `markNotificationRead` (404 on numeric id)
+      // AND broke the bell's stream/list dedupe (numeric vs uuid). Now
+      // the SSE payload id is the row's persisted UUID.
+      const notificationRow = await tx.notification.create({
         data: {
           employeeId: dpr.submittedById,
           type: 'DPR_REJECTED',
           dprId: id,
           message: notifMessage,
+        },
+        select: {
+          id: true,
+          type: true,
+          dprId: true,
+          message: true,
+          createdAt: true,
+          isRead: true,
         },
       });
 
@@ -2400,19 +2459,31 @@ router.post('/:id/reject', requireFreshAdmin, async (req, res) => {
       });
       // Attach the combined notes for the response so the admin UI doesn't
       // need a separate fetch.
-      return { ...result, _combinedNotes: combinedNotes };
+      return { ...result, _combinedNotes: combinedNotes, _notification: notificationRow };
     });
 
-    const { _combinedNotes, ...dprForClient } = updated;
-    emitNotification(dpr.submittedById, 'notification', {
-      id: Date.now(),
-      type: 'DPR_REJECTED',
-      dprId: id,
-      message: `Your DPR for ${dpr.projectName} was rejected`,
-      reason: _combinedNotes,
-      createdAt: new Date().toISOString(),
-    });
-    fanOutEmail({
+    const { _combinedNotes, _notification, ...dprForClient } = updated;
+    // SOL DR-021: emit the persisted notification DTO (real UUID id, not
+    // `Date.now()`). The bell's stream/list dedupe keys on this id — using
+    // the persisted UUID lets a subsequent /list refresh collapse the
+    // SSE-pushed row with the persisted row instead of duplicating it.
+    if (_notification) {
+      emitNotification(dpr.submittedById, 'notification', {
+        id: _notification.id,
+        type: _notification.type,
+        dprId: _notification.dprId,
+        message: _notification.message,
+        createdAt: _notification.createdAt instanceof Date
+          ? _notification.createdAt.toISOString()
+          : new Date(_notification.createdAt).toISOString(),
+        isRead: !!_notification.isRead,
+      });
+    }
+    // DR-021: pass the actual persisted notification row id to
+    // fanOutEmail so EmailLog.notificationId is real (not the legacy
+    // `null` placeholder). The audit trail can now trace an email back
+    // to the exact notification row that triggered it.
+    fanOutEmail(_notification || {
       id: null,
       employeeId: dpr.submittedById,
       type: 'DPR_REJECTED',
@@ -2590,25 +2661,60 @@ router.post('/bulk-review', requireFreshAdmin, async (req, res) => {
           },
         });
 
-        return { id, newStatus: nextStatus, submittedById: dpr.submittedById, projectName: dpr.projectName };
+        // SOL DR-021: re-read the persisted notification row inside the
+        // tx so the SSE emit can carry the real UUID. The previous
+        // flow returned a tiny summary and the SSE wire used a numeric
+        // `Date.now()` id — `markNotificationRead` then 404'd on that
+        // numeric id and the bell's stream/list dedupe broke (numeric
+        // vs uuid).
+        const persistedNotif = await tx.notification.findFirst({
+          where: { employeeId: dpr.submittedById, dprId: id, type: notifType },
+          orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            type: true,
+            dprId: true,
+            message: true,
+            createdAt: true,
+            isRead: true,
+          },
+        });
+
+        return {
+          id,
+          newStatus: nextStatus,
+          submittedById: dpr.submittedById,
+          projectName: dpr.projectName,
+          notification: persistedNotif,
+        };
       });
 
-      // SSE emit outside the transaction.
-      emitNotification(result.submittedById, 'notification', {
-        id: Date.now(),
-        type: `DPR_${result.newStatus === 'UNDER_REVIEW' ? 'REVIEWED' : result.newStatus}`,
-        dprId: result.id,
-        message: `Your DPR for ${result.projectName} was ${result.newStatus.toLowerCase().replace('_', ' ')}`,
-        createdAt: new Date().toISOString(),
-      });
-      // Email fan-out mirrors the SSE payload. The actual notification row
-      // id was created inside the tx and isn't returned, so we pass null —
-      // EmailLog.notificationId is nullable (SetNull on delete) so audit
-      // trails remain valid even when the underlying notification is pruned.
-      fanOutEmail({
+      // SSE emit outside the transaction. SOL DR-021: use the actual
+      // persisted notification UUID — same id /list returns, same id
+      // the bell's stream/list dedupe keys on. The previous wire shape
+      // (`id: Date.now()`) never matched the persisted UUID, which is
+      // why the bell showed duplicate notifications after a stream
+      // push followed by a /list refresh.
+      if (result.notification) {
+        emitNotification(result.submittedById, 'notification', {
+          id: result.notification.id,
+          type: result.notification.type,
+          dprId: result.notification.dprId,
+          message: result.notification.message,
+          createdAt: result.notification.createdAt instanceof Date
+            ? result.notification.createdAt.toISOString()
+            : new Date(result.notification.createdAt).toISOString(),
+          isRead: !!result.notification.isRead,
+        });
+      }
+      // DR-021: pass the actual persisted notification row id to
+      // fanOutEmail so EmailLog.notificationId is real. EmailLog FK
+      // is nullable (SetNull) so audit trails stay valid even when the
+      // underlying notification is pruned.
+      fanOutEmail(result.notification || {
         id: null,
         employeeId: result.submittedById,
-        type: `DPR_${result.newStatus === 'UNDER_REVIEW' ? 'REVIEWED' : result.newStatus}`,
+        type: `DPR_${result.newStatus === 'UNDER_REVIEW' ? 'DPR_REVIEWED' : result.newStatus}`,
         dprId: result.id,
         message: notifMessage,
       }, prisma, { projectName: result.projectName });
@@ -2678,7 +2784,15 @@ router.get('/notifications/list', async (req, res) => {
       select: {
         id: true,
         type: true,
+        // SOL DR-021: surface every typed target id so the bell can
+        // route to the right authorized detail consumer. The previous
+        // select omitted inspectionId / leaveRequestId /
+        // trainingEnrollmentId, so the bell silently fell through to
+        // "no typed target" for any row that wasn't a DPR.
         dprId: true,
+        inspectionId: true,
+        leaveRequestId: true,
+        trainingEnrollmentId: true,
         message: true,
         isRead: true,
         createdAt: true,

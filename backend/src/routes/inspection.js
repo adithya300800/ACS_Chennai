@@ -434,6 +434,10 @@ router.post('/', async (req, res) => {
   // N-4: DRAFT rows can have null data (no workEntry yet). OPEN rows
   // require a JSON object so the inspection is renderable on the admin
   // queue.
+  // DR-008: normalize a DRAFT's `data: null` to `{}` so downstream reads
+  // (admin queue render, detail page JSON.parse) don't have to special-case
+  // null. The wire shape `{ data: null }` is the barest-bones "Save as
+  // Draft" payload; storing it as a real object keeps the schema uniform.
   if (requestedStatus === 'DRAFT') {
     if (data !== null && data !== undefined
         && (typeof data !== 'object' || Array.isArray(data))) {
@@ -630,7 +634,10 @@ router.post('/', async (req, res) => {
           contractor: contractor || null,
           dprId: dprId || null,
           inspectionType,
-          data,
+          // DR-008: standardise empty DRAFT data as {} rather than null so
+          // downstream readers don't have to special-case null. OPEN rows
+          // already rejected null above, so this only affects DRAFT.
+          data: data == null ? {} : data,
           status: finalStatus,
           severity: normalisedSeverity || null,
           submittedById: req.employeeId,
@@ -1398,6 +1405,13 @@ router.put('/:id', async (req, res) => {
   // can change inspectionType in the same request, so use the new value
   // when present, otherwise the existing row's type.
   const effectiveInspectionType = fields.inspectionType || existing.inspectionType;
+  // DR-008-F: effective data for the merged-pair validation. A type-only
+  // PUT (no `data` in the body) must still satisfy the new type's required
+  // arrays against the existing data — omitting `data` cannot be a trivial
+  // bypass of the create-time check. When `data` is supplied, validate the
+  // new value; otherwise validate `existing.data` against the effective
+  // type.
+  const effectiveData = fields.data !== undefined ? fields.data : existing.data;
   // DR-009: normalised severity used at write time (same rationale as
   // the POST handler — wire top-level wins, data.severity Title Case
   // promotes into the canonical column when wire is null).
@@ -1414,27 +1428,29 @@ router.put('/:id', async (req, res) => {
         field: 'data',
       });
     }
+  }
 
-    // DR-009: required-array contract enforcement on PUT (same shape as
-    // POST). DRAFT records can have missing required arrays — that's the
-    // whole point of "Save as Draft". OPEN records (or DRAFT rows being
-    // promoted) must satisfy the contract so PUT can't be a trivial
-    // bypass of the create-time check.
-    if (existing.status !== 'DRAFT') {
-      const requiredArrays = REQUIRED_ARRAY_FIELDS_BY_TYPE[effectiveInspectionType] || [];
-      for (const fieldName of requiredArrays) {
-        const arr = fields.data[fieldName];
-        if (!Array.isArray(arr) || arr.length === 0) {
-          return res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            code: 'REQUIRED_FIELD_EMPTY',
-            message: `${fieldName} must contain at least one entry`,
-            field: `data.${fieldName}`,
-          });
-        }
+  // DR-008-F + DR-009: required-array contract enforcement on PUT. Runs
+  // whenever a non-DRAFT row's effective (type, data) pair is about to be
+  // committed — including type-only PUTs that omit `data` (the merged pair
+  // is `new type + existing data`). DRAFT rows are exempt — the barest
+  // bones is the whole point of "Save as Draft".
+  if (existing.status !== 'DRAFT') {
+    const requiredArrays = REQUIRED_ARRAY_FIELDS_BY_TYPE[effectiveInspectionType] || [];
+    for (const fieldName of requiredArrays) {
+      const arr = effectiveData && effectiveData[fieldName];
+      if (!Array.isArray(arr) || arr.length === 0) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          code: 'REQUIRED_FIELD_EMPTY',
+          message: `${fieldName} must contain at least one entry`,
+          field: `data.${fieldName}`,
+        });
       }
     }
+  }
 
+  if (fields.data !== undefined) {
     // DR-009: severity normalization on PUT. Wire top-level `severity`
     // is already allowlist-validated above (line 1332); this block
     // promotes `data.severity` (Title Case from the form selector)
@@ -1754,12 +1770,23 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
 
   let nextStatus;
   let notifType;
+  // SOL DR-021: explicit action labels so the persisted type literal
+  // (and the SSE wire `type`) reads as the human action, not a slug.
+  // The audit's `submitd` was a misspelling of SUBMIT / SUBMITTED in a
+  // downstream surface; the source fix is to keep `notifType` and the
+  // SSE payload `type` identical by reusing the same constant here.
   if (action === 'ACKNOWLEDGE') { nextStatus = 'ACKNOWLEDGED'; notifType = 'INSPECTION_ACKNOWLEDGED'; }
   else if (action === 'CLOSE') { nextStatus = 'CLOSED'; notifType = 'INSPECTION_CLOSED'; }
   else if (action === 'SUBMIT') { nextStatus = 'OPEN'; notifType = 'INSPECTION_SUBMITTED'; } // SOL DR-007: write a per-record notif to the owner with a non-null type literal (Notification.type is required). Admin fan-out still fires post-tx.
   else { nextStatus = 'REJECTED'; notifType = 'INSPECTION_REJECTED'; }
 
-  return prisma.$transaction(async (tx) => {
+  // SOL DR-021: track whether the transition actually committed. SUBMIT
+  // returns early on the OPEN replay branch (see below) — that replay
+  // must NOT emit a second SSE event nor a second email fan-out. The
+  // helper now returns `{ record, transitioned, notification }` so the
+  // caller can branch on whether to emit provider-side work.
+  const result = { record: null, transitioned: false, notification: null };
+  const txOutcome = await prisma.$transaction(async (tx) => {
     const record = await tx.inspectionRecord.findUnique({
       where: { id },
       include: INSPECTION_INCLUDE,
@@ -1798,8 +1825,11 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
     // they were moved by an admin and the owner has no business
     // re-submitting. Owner-only is enforced above so this replay
     // returns the row to its rightful owner, never to a foreign caller.
+    //
+    // DR-021: return a sentinel `{ replayed: true, record }` so the
+    // outer helper knows not to fire fan-out / SSE for the replay.
     if (action === 'SUBMIT' && record.status === 'OPEN') {
-      return record;
+      return { replayed: true, record };
     }
 
     if (!allowedFrom.has(record.status)) {
@@ -1807,6 +1837,34 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
         new Error(`Cannot move inspection from ${record.status} to ${nextStatus}`),
         { _code: 'INVALID_TRANSITION', _status: 409 }
       );
+    }
+
+    // DR-008-A/B: SUBMIT promotes DRAFT → OPEN, which has the same
+    // required-array contract as create. A draft can be cleared of its
+    // required arrays by a separate PUT between save and publish — the
+    // SUBMIT must validate the row's CURRENT data, not assume the
+    // create-time payload is still valid. Mirrors the POST handler's
+    // required-array check (inspection.js:455) so direct create, edit
+    // and publish enforce the same contract. DRAFT rows in the audit
+    // scenario never reach this branch (they would have been blocked by
+    // the create-time gate), but a row that landed here via a PUT that
+    // emptied the checklist must still be rejected.
+    if (action === 'SUBMIT') {
+      const requiredArrays = REQUIRED_ARRAY_FIELDS_BY_TYPE[record.inspectionType] || [];
+      const recordData = record.data || {};
+      for (const fieldName of requiredArrays) {
+        const arr = recordData[fieldName];
+        if (!Array.isArray(arr) || arr.length === 0) {
+          throw Object.assign(
+            new Error(`${fieldName} must contain at least one entry`),
+            {
+              _code: 'REQUIRED_FIELD_EMPTY',
+              _status: 400,
+              field: `data.${fieldName}`,
+            }
+          );
+        }
+      }
     }
 
     // Schema-driven update — no `data` allowlist (no submittedById /
@@ -1849,11 +1907,17 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
       };
     }
 
-    // Race-safe conditional update on `status` (no version column on this
-    // model). A concurrent admin action that already flipped status will
-    // throw P2025 from Prisma; we translate that to a tagged VERSION_CONFLICT.
+    // Race-safe conditional update on `status` + `updatedAt` (no version
+    // column on this model). A concurrent admin action that already
+    // flipped status, or a concurrent owner PUT that bumped updatedAt,
+    // will throw P2025 from Prisma; we translate that to a tagged
+    // VERSION_CONFLICT. DR-008-C: pinning `updatedAt` on SUBMIT closes
+    // the "concurrent invalidating edit" race the audit flagged — a
+    // draft PUT that clears the required array between our read and
+    // our update now trips the CAS instead of slipping past validation
+    // on stale content.
     const conditionalUpdate = await tx.inspectionRecord.update({
-      where: { id, status: record.status },
+      where: { id, status: record.status, updatedAt: record.updatedAt },
       data: dataPatch,
     }).catch((err) => {
       if (err.code === 'P2025') {
@@ -1874,34 +1938,70 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
     ];
     if (action === 'REJECT' && payload.reason) messageParts.push(`Reason: ${payload.reason.trim()}`);
     if (payload.adminNotes) messageParts.push(`Notes: ${payload.adminNotes}`);
-    await tx.notification.create({
+    // SOL DR-021: persist the actual notification row (with the inspection
+    // id) so the SSE wire shape can carry the SAME UUID the /list endpoint
+    // returns. The previous flow created the row, returned it as `void`,
+    // and re-derived a numeric id for the SSE payload — which broke
+    // `markNotificationRead` (404 on numeric id) AND broke the bell's
+    // stream/list dedupe (numeric vs uuid).
+    const notification = await tx.notification.create({
       data: {
         employeeId: record.submittedById,
         type: notifType,
+        inspectionId: id,
         message: messageParts.join('\n'),
+      },
+      select: {
+        id: true,
+        type: true,
+        inspectionId: true,
+        message: true,
+        createdAt: true,
+        isRead: true,
       },
     });
 
-    // Round-25: schedule email fan-out AFTER the notification row insert.
-    // The helper is fire-and-forget so the tx callback returns
-    // immediately, but the send runs once the row is durable (the send
-    // happens in the same tick of the event loop as the tx commit because
-    // the tx awaits here). For REJECT, pass the reason so the email can
-    // surface it in the body.
-    fanOutEmail({
-      id: null, // tx-row id not returned; EmailLog.notificationId is nullable
-      employeeId: record.submittedById,
-      type: notifType,
-      message: messageParts.join('\n'),
-    }, prisma, {
-      reason: action === 'REJECT' ? payload.reason?.trim() : null,
-    });
-
-    return tx.inspectionRecord.findUnique({
+    const freshRecord = await tx.inspectionRecord.findUnique({
       where: { id },
       include: INSPECTION_INCLUDE,
     });
+
+    // DR-021: tx-callback returns the fresh record + the persisted
+    // notification row. Fan-out / SSE work runs OUTSIDE the transaction
+    // (after commit) so a slow SMTP send doesn't hold the row lock, and
+    // a rollback discards the notification rather than emitting a
+    // phantom event. fanOutEmail now receives the actual persisted id
+    // so EmailLog.notificationId is real, not the old `null`.
+    return { replayed: false, record: freshRecord, notification };
   });
+
+  // DR-021: replay short-circuit. The SUBMIT-from-OPEN replay returns
+  // the record without writing anything new — caller must not emit
+  // SSE / fan-out for a replay.
+  if (txOutcome && txOutcome.replayed) {
+    result.record = txOutcome.record;
+    result.transitioned = false;
+    return result;
+  }
+
+  const { record: freshRecord, notification } = txOutcome;
+  result.record = freshRecord;
+  result.transitioned = true;
+  result.notification = notification;
+
+  // Round-25: schedule email fan-out AFTER the transaction commits.
+  // The helper is fire-and-forget so the route handler returns
+  // immediately; the send runs in the next tick of the event loop with
+  // the actual persisted notification row id, so EmailLog.notificationId
+  // is real (not the legacy `null` placeholder). For REJECT, pass the
+  // reason so the email can surface it in the body.
+  if (notification) {
+    fanOutEmail(notification, prisma, {
+      reason: action === 'REJECT' ? payload.reason?.trim() : null,
+    });
+  }
+
+  return result;
 }
 
 // Defensive: reportDate may deserialize as Date or "YYYY-MM-DD" string.
@@ -1925,7 +2025,7 @@ router.post('/:id/acknowledge', requireFreshAdmin, async (req, res) => {
   }
 
   try {
-    const updated = await transitionInspectionRecord(
+    const result = await transitionInspectionRecord(
       prisma,
       id,
       'ACKNOWLEDGE',
@@ -1933,7 +2033,10 @@ router.post('/:id/acknowledge', requireFreshAdmin, async (req, res) => {
       req.employeeId,
       { allowAdminOverride: true } // DR-027: route is req.isAdmin-gated above
     );
-    res.json(updated);
+    // SOL DR-021: `result` is now `{ record, transitioned, notification }`.
+    // Caller returns the record (wire contract unchanged) — provider work
+    // (fanOutEmail, SSE) already ran inside the helper.
+    res.json(result.record);
   } catch (err) {
     return inspectionHandleTransitionError(req, res, err, 'acknowledge');
   }
@@ -1954,7 +2057,7 @@ router.post('/:id/close', requireFreshAdmin, async (req, res) => {
   }
 
   try {
-    const updated = await transitionInspectionRecord(
+    const result = await transitionInspectionRecord(
       prisma,
       id,
       'CLOSE',
@@ -1962,7 +2065,8 @@ router.post('/:id/close', requireFreshAdmin, async (req, res) => {
       req.employeeId,
       { allowAdminOverride: true } // DR-027: route is req.isAdmin-gated above
     );
-    res.json(updated);
+    // SOL DR-021: see ACKNOWLEDGE above.
+    res.json(result.record);
   } catch (err) {
     return inspectionHandleTransitionError(req, res, err, 'close');
   }
@@ -1990,7 +2094,7 @@ router.post('/:id/reject', requireFreshAdmin, async (req, res) => {
   }
 
   try {
-    const updated = await transitionInspectionRecord(
+    const result = await transitionInspectionRecord(
       prisma,
       id,
       'REJECT',
@@ -1998,7 +2102,8 @@ router.post('/:id/reject', requireFreshAdmin, async (req, res) => {
       req.employeeId,
       { allowAdminOverride: true } // DR-027: route is req.isAdmin-gated above
     );
-    res.json(updated);
+    // SOL DR-021: see ACKNOWLEDGE above.
+    res.json(result.record);
   } catch (err) {
     return inspectionHandleTransitionError(req, res, err, 'reject');
   }
@@ -2018,18 +2123,11 @@ router.post('/:id/submit', async (req, res) => {
   const { id } = req.params;
 
   try {
-    // SOL DR-007: snapshot the row's status BEFORE the tx so the
+    // SOL DR-007/DR-021: snapshot the row's status BEFORE the tx so the
     // idempotent OPEN re-submit path can skip the admin fan-out. The
-    // early-return inside transitionInspectionRecord handles the no-op
-    // row return; this flag gates the post-tx admin email so a
-    // NETWORK_ERROR retry doesn't spam the admin inbox with a
-    // duplicate "New inspection opened by …" message.
-    const snapshot = await prisma.inspectionRecord.findUnique({
-      where: { id },
-      select: { status: true },
-    });
-    const isIdempotentReplay = !!(snapshot && snapshot.status === 'OPEN');
-
+    // helper now returns `{ record, transitioned, notification }` — the
+    // `transitioned` flag carries the same skip-fan-out signal as the
+    // old `isIdempotentReplay`, so we no longer need a separate read.
     const updated = await transitionInspectionRecord(
       prisma,
       id,
@@ -2040,34 +2138,33 @@ router.post('/:id/submit', async (req, res) => {
     );
 
     // Fan-out fires AFTER the tx commits — but only when the tx
-    // actually transitioned the row. The idempotent OPEN early-return
-    // above means the row was already in its terminal state, so
-    // admins already saw (or are about to see) the fan-out from the
-    // original submit. Skip to avoid double-emailing.
-    if (!isIdempotentReplay) {
+    // actually transitioned the row. The idempotent OPEN replay path
+    // sets `transitioned: false` so admins don't get a duplicate
+    // "New inspection opened by …" message from a NETWORK_ERROR replay.
+    if (updated.transitioned) {
       try {
         await fanOutToAdmins(
           {
             type: 'ADMIN_INSPECTION_OPENED',
-            message: `New inspection opened by ${updated.submittedBy?.name || 'an employee'}: ${updated.inspectionType || 'inspection'}`,
+            message: `New inspection opened by ${updated.record.submittedBy?.name || 'an employee'}: ${updated.record.inspectionType || 'inspection'}`,
             meta: {
-              employeeName: updated.submittedBy?.name || 'an employee',
-              recordTitle: updated.projectName || updated.inspectionType || 'an inspection',
-              inspectionType: updated.inspectionType || '',
-              inspectionId: updated.id,
+              employeeName: updated.record.submittedBy?.name || 'an employee',
+              recordTitle: updated.record.projectName || updated.record.inspectionType || 'an inspection',
+              inspectionType: updated.record.inspectionType || '',
+              inspectionId: updated.record.id,
             },
           },
           prisma,
         );
       } catch (adminErr) {
         console.error('Inspection submit fan-out error', {
-          inspectionId: updated.id,
+          inspectionId: updated.record.id,
           message: adminErr?.message?.split('\n')[0],
         });
       }
     }
 
-    res.json(updated);
+    res.json(updated.record);
   } catch (err) {
     return inspectionHandleTransitionError(req, res, err, 'submit');
   }
@@ -2081,10 +2178,15 @@ function inspectionHandleTransitionError(req, res, err, action) {
     message: err.message?.split('\n')[0],
   });
   if (err._status) {
-    return res.status(err._status).json({
+    // DR-008: surface the offending field path on the response body so the
+    // client can highlight the empty required input. Mirrors the shape the
+    // POST / PUT handlers already emit (REQUIRED_FIELD_EMPTY + `field`).
+    const body = {
       error: err.message?.split('\n')[0] || 'Transition failed',
       code: err._code,
-    });
+    };
+    if (err.field) body.field = err.field;
+    return res.status(err._status).json(body);
   }
   if (err.code === 'P2025') {
     return res.status(409).json({
@@ -2157,7 +2259,7 @@ router.post('/bulk-review', requireFreshAdmin, async (req, res) => {
 
   for (const id of uniqueIds) {
     try {
-      const record = await transitionInspectionRecord(
+      const result = await transitionInspectionRecord(
         prisma,
         id,
         action,
@@ -2165,7 +2267,15 @@ router.post('/bulk-review', requireFreshAdmin, async (req, res) => {
         req.employeeId,
         { allowAdminOverride: true } // DR-027: route is req.isAdmin-gated above
       );
-      succeeded.push({ id: record.id, newStatus: record.status });
+      // SOL DR-021: `result.record` is the post-commit record. We only
+      // report this id as a success if the transition actually committed;
+      // a SUBMIT replay (transitioned=false) is a silent no-op so it goes
+      // to neither bucket — same effect as the old code, which would have
+      // surfaced the OPEN replay as a successful row update with the
+      // same status.
+      if (result.transitioned) {
+        succeeded.push({ id: result.record.id, newStatus: result.record.status });
+      }
     } catch (err) {
       const code = err._code || (err.code === 'P2025' ? 'VERSION_CONFLICT' : 'INTERNAL');
       const status = err._status || (err.code === 'P2025' ? 409 : 500);

@@ -505,6 +505,11 @@ model Notification {
   employeeId           String   @map("employee_id")
   type                 String
   dprId                String?  @map("dpr_id")
+  // DR-021: additive nullable — new inspection transitions persist
+  // `inspectionId` so the bell can route to the inspection detail. Old
+  // rows (and old writers that never set this column) stay null; the
+  // bell degrades to the no-target message surface for those rows.
+  inspectionId         String?  @map("inspection_id")
   leaveRequestId       String?  @map("leave_request_id")
   trainingEnrollmentId String?  @map("training_enrollment_id")
   message              String
@@ -513,6 +518,11 @@ model Notification {
 
   employee           Employee            @relation(fields: [employeeId], references: [id])
   dpr                DPR?                @relation(fields: [dprId], references: [id])
+  // DR-021: no FK on inspectionId — InspectionRecord is owner-scoped via
+  // submittedById and the admin route at inspection.js gates reads, so a
+  // hard FK would orphan the row on inspection deletion. The bell uses
+  // the column as a navigation hint only; reads happen through the
+  // authorized detail endpoint, never via FK join.
   leaveRequest       LeaveRequest?       @relation(fields: [leaveRequestId], references: [id], onDelete: SetNull)
   trainingEnrollment TrainingEnrollment? @relation(fields: [trainingEnrollmentId], references: [id], onDelete: SetNull)
   // Round-25: back-relation to the email audit log. SetNull so a notification
@@ -522,6 +532,9 @@ model Notification {
   @@index([employeeId, createdAt])
   // Round-7: dpr relation is included in many read queries; index for joins.
   @@index([dprId])
+  // DR-021: mirror dprId/leaveRequestId/trainingEnrollmentId indexes so the
+  // bell's list endpoint can SELECT inspectionId without a full scan.
+  @@index([inspectionId])
   // Round-13: leave notifications join through leaveRequestId on the bell feed.
   @@index([leaveRequestId])
   // Round-14 (training module): training notifications join through
