@@ -1572,6 +1572,24 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
       throw Object.assign(new Error('Inspection record not found'), { _code: 'NOT_FOUND', _status: 404 });
     }
 
+    // SOL DR-002: SUBMIT is owner-only — check BEFORE the idempotent
+    // OPEN replay return so a foreign user with the UUID cannot read
+    // the OPEN record back through this endpoint. Normal GET denies
+    // non-owners at inspection.js:1145; this keeps the SUBMIT command
+    // consistent. SOL DR-005: even an admin token cannot promote
+    // someone else's draft — that would (a) silently bypass the owner's
+    // review of their own work and (b) trigger admin fan-out to the
+    // admin themselves, which is the queue-bypass vector the original
+    // audit flagged. We let the admin transition helpers (CLOSE/REJECT)
+    // take over from the resulting OPEN state through their own
+    // admin-gated routes.
+    if (action === 'SUBMIT' && record.submittedById !== actorEmployeeId) {
+      throw Object.assign(
+        new Error('Only the owner can submit a draft'),
+        { _code: 'NOT_OWNER', _status: 403 }
+      );
+    }
+
     // SOL DR-007: idempotent re-submit. If the row is already OPEN
     // (i.e. the owner submitted once and the request was retried after
     // the original committed), return the row as-is without writing a
@@ -1582,7 +1600,8 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
     // submit" instead of "you're already done". Only OPEN gets the
     // idempotent path; ACKNOWLEDGED/CLOSED/REJECTED still 409 because
     // they were moved by an admin and the owner has no business
-    // re-submitting.
+    // re-submitting. Owner-only is enforced above so this replay
+    // returns the row to its rightful owner, never to a foreign caller.
     if (action === 'SUBMIT' && record.status === 'OPEN') {
       return record;
     }
@@ -1591,20 +1610,6 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
       throw Object.assign(
         new Error(`Cannot move inspection from ${record.status} to ${nextStatus}`),
         { _code: 'INVALID_TRANSITION', _status: 409 }
-      );
-    }
-
-    // SOL DR-005: SUBMIT is owner-only. Even an admin token cannot promote
-    // someone else's draft — that would (a) silently bypass the owner's
-    // review of their own work and (b) trigger admin fan-out to the admin
-    // themselves, which is the queue-bypass vector the original audit
-    // flagged. We let the admin transition helpers (CLOSE/REJECT) take
-    // over from the resulting OPEN state through their own admin-gated
-    // routes.
-    if (action === 'SUBMIT' && record.submittedById !== actorEmployeeId) {
-      throw Object.assign(
-        new Error('Only the owner can submit a draft'),
-        { _code: 'NOT_OWNER', _status: 403 }
       );
     }
 
