@@ -32,6 +32,7 @@ const { requireAuth, requireAdmin, requireFreshAdmin } = require('../middleware/
 const { mapPrismaError, parseStrictISODate, toDateOnly } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
+const { istMidnightUtcFromDateString, formatDateOnly } = require('../lib/dateOnly');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -137,12 +138,22 @@ router.get('/', asyncHandler(async (req, res) => {
   if (from) {
     const d = parseStrictISODate(from);
     if (!d.ok) return res.status(400).json({ error: 'INVALID_FROM', message: 'from must be a valid YYYY-MM-DD date' });
-    dateFilter.gte = d.date;
+    // [DR-028] Inclusive lower bound: 00:00 IST of `from` = 18:30Z on
+    // the prior day. The previous UTC-midnight lower bound silently
+    // excluded VOs raised between 00:00 and 05:30 IST on `from`'s day.
+    dateFilter.gte = istMidnightUtcFromDateString(from);
   }
   if (to) {
     const d = parseStrictISODate(to);
     if (!d.ok) return res.status(400).json({ error: 'INVALID_TO', message: 'to must be a valid YYYY-MM-DD date' });
-    dateFilter.lte = d.date;
+    // [DR-028] Exclusive upper bound: 00:00 IST of the day AFTER `to`
+    // = 18:30Z on `to`. The previous `lte UTC midnight of to` hid every
+    // VO whose createdAt fell inside the displayed IST day of `to`.
+    // add 24h to a UTC-midnight Date to roll over to next calendar day
+    // (parseStrictISODate returns UTC midnight, so DST never shifts).
+    const nextDay = new Date(d.date.getTime() + 24 * 60 * 60 * 1000);
+    const nextDayStr = formatDateOnly(nextDay);
+    dateFilter.lt = istMidnightUtcFromDateString(nextDayStr);
   }
 
   try {

@@ -69,6 +69,10 @@ export default function VariationOrdersAdmin() {
     to: '',
   });
   const [showFilters, setShowFilters] = useState(false);
+  // [DR-028] Inline error for reversed date ranges ("to" before "from").
+  // Distinct from `error` (load failures) so the banner sits next to
+  // the date inputs rather than mid-page.
+  const [filterError, setFilterError] = useState('');
   const [newOpen, setNewOpen] = useState(false);
 
   // Round-34 Feature 4: read ?projectId= from the URL so an admin
@@ -168,6 +172,23 @@ export default function VariationOrdersAdmin() {
   // Round-29: getRfis directory fetch REMOVED — RFI feature is gone.
 
   const handleFilterChange = (key, value) => {
+    // [DR-028] Validate the from/to date range. Strings compare
+    // lexicographically as YYYY-MM-DD so no Date math is needed.
+    // If `to` is set before `from`, reject the input and surface an
+    // inline error — the previous behaviour silently returned the
+    // empty range, masking the bug. Equal-day is fine (single-day
+    // window).
+    if (key === 'to' && value && filter.from && value < filter.from) {
+      setFilterError(`"To" date (${value}) must be on or after "From" date (${filter.from}). Filter cleared — re-enter.`);
+      setFilter((f) => ({ ...f, to: '' }));
+      return;
+    }
+    if (key === 'from' && value && filter.to && value > filter.to) {
+      setFilterError(`"From" date (${value}) must be on or before "To" date (${filter.to}). Filter cleared — re-enter.`);
+      setFilter((f) => ({ ...f, from: '' }));
+      return;
+    }
+    if (filterError) setFilterError('');
     setFilter((f) => ({ ...f, [key]: value }));
   };
 
@@ -264,12 +285,29 @@ export default function VariationOrdersAdmin() {
               </div>
             </fieldset>
           </div>
+          {filterError && (
+            <div
+              role="alert"
+              data-testid="variation-filter-error"
+              style={{
+                marginTop: '0.75rem',
+                padding: '0.5rem 0.75rem',
+                background: 'var(--danger-bg, #fef2f2)',
+                color: 'var(--danger, #dc2626)',
+                borderRadius: '6px',
+                fontSize: '0.85rem',
+                border: '1px solid var(--danger, #dc2626)',
+              }}
+            >
+              {filterError}
+            </div>
+          )}
           {(filter.status || filter.projectId || filter.from || filter.to) && (
             <div style={{ marginTop: '0.75rem' }}>
               <button
                 type="button"
                 className="btn btn-ghost btn-sm"
-                onClick={() => setFilter({ status: '', projectId: '', from: '', to: '' })}
+                onClick={() => { setFilter({ status: '', projectId: '', from: '', to: '' }); setFilterError(''); }}
               >
                 Clear filters
               </button>
