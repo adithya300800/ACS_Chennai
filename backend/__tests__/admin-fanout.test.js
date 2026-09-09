@@ -161,6 +161,14 @@ function makePrisma({
       findMany: jest.fn(async () => []), // empty = no overlap conflict
       create: jest.fn(async (args) => leaveDefaultCreate(args)),
     },
+    // [N1] The DPR / Inspection / Leave POST routes call resolveProject()
+    // before creating the row. Tests use free-text projectName with no
+    // curated Project row registered, so both lookups return null and
+    // resolveProject falls through to kind: 'discovered'.
+    project: {
+      findUnique: jest.fn(async () => null),
+      findFirst: jest.fn(async () => null),
+    },
     __emailLogWrites: emailLogWrites,
   };
 }

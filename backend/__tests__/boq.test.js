@@ -137,6 +137,16 @@ function buildApp() {
   // routes. Anything not explicitly listed here is intentionally absent
   // (the test never exercises those paths).
   const prisma = {
+    // [N1] The BOQ/DPR/inspection routes call resolveProject(prisma, name)
+    // to look up curated Project rows before stamping the (nullable)
+    // projectId FK. These tests never register a Project — they use
+    // free-text projectName like 'Project Alpha' — so resolveProject
+    // should fall through to the "discovered" branch (kind: 'discovered',
+    // name: <input>) by returning null from both findUnique and findFirst.
+    project: {
+      findUnique: jest.fn(async () => null),
+      findFirst: jest.fn(async () => null),
+    },
     boqItem: {
       findUnique: jest.fn(async ({ where }) => {
         if (!where) return null;

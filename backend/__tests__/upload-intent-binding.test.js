@@ -119,6 +119,14 @@ function buildPrisma(intentRows = []) {
       }),
     },
     employee: { findUnique: jest.fn(async () => ({ id: EMPLOYEE_A, isAdmin: false })) },
+    // [N1] The DPR / inspection POST routes call resolveProject() before
+    // creating the row; these tests use free-text projectName ('Tower B')
+    // with no curated Project, so both lookups return null and
+    // resolveProject falls through to kind: 'discovered'.
+    project: {
+      findUnique: jest.fn(async () => null),
+      findFirst: jest.fn(async () => null),
+    },
     _intents: intents,
     _created: created,
     _updateManyCalls: updateManyCalls,

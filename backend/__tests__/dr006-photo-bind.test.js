@@ -132,6 +132,14 @@ function buildPrisma(intentRows = [], hooks = {}) {
       findUnique: jest.fn(async () => ({ id: EMPLOYEE, isAdmin: false })),
       findMany: jest.fn(async () => []),
     },
+    // [N1] The DPR / Inspection POST routes call resolveProject() before
+    // creating the row. These tests use free-text projectName with no
+    // curated Project row registered, so both lookups return null and
+    // resolveProject falls through to kind: 'discovered'.
+    project: {
+      findUnique: jest.fn(async () => null),
+      findFirst: jest.fn(async () => null),
+    },
     notification: { create: jest.fn(async () => ({})) },
     $transaction: jest.fn(async (fn) => {
       const snapshot = {
