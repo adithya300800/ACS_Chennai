@@ -276,11 +276,37 @@ export default function DprSubmit() {
     setDailyFields((f) => (f.manpowerSummary === serialized ? f : { ...f, manpowerSummary: serialized }));
   }, [manpowerRows]);
   const [customSections, setCustomSections] = useState(initialDraft?.customSections || []);
-  const [photos, setPhotos] = useState([]);
+  // SOL DR-005: seed photos from the local-draft envelope so the 750ms
+  // autosave that fires on first render cannot write `photos: []` over a
+  // previously-saved list and silently drop recoverable claims. Same
+  // malformed/quarantine guard the form-state initializer uses — a
+  // quarantined legacy draft is left empty (banner handles it). The
+  // serializer (saveDraftForEmployee above) keeps only durable fields
+  // (ulid/container/filename/caption/readUrl) and drops blob URLs, so
+  // what's loaded back is safe to render with previewUrl || readUrl.
+  const [photos, setPhotos] = useState(() => {
+    if (initialDraft?.__malformed || initialDraft?.__quarantined || !initialDraft) return [];
+    return Array.isArray(initialDraft.photos) ? initialDraft.photos : [];
+  });
   const [notes, setNotes] = useState(initialDraft?.notes || '');
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
-  const [showDraftBanner, setShowDraftBanner] = useState(!!initialDraft);
+  // SOL DR-006: if `loadDraftForEmployee` returned a quarantine sentinel
+  // (`__quarantined: true`), do NOT pre-fill the form. Show a banner
+  // instead and let the engineer discard the orphan value. The state
+  // initializers below mirror the malformed-draft pattern in
+  // InspectionSubmit.jsx so the banner survives later re-renders.
+  const initialQuarantinedReason = initialDraft?.__quarantined ? initialDraft.reason : null;
+  const [showDraftBanner, setShowDraftBanner] = useState(
+    !!initialDraft && !initialDraft.__quarantined,
+  );
+  const [quarantinedReason] = useState(initialQuarantinedReason);
+  // On mount, drop the quarantined legacy value from localStorage so the
+  // next load does not re-surface the banner. Mirrors the malformed-
+  // legacy cleanup in InspectionSubmit.jsx.
+  useEffect(() => {
+    if (quarantinedReason && currentEmployeeId) clearDraftForEmployee(currentEmployeeId);
+  }, [quarantinedReason, currentEmployeeId]);
   const [uploadStatuses, setUploadStatuses] = useState({});
   const [todayInspections, setTodayInspections] = useState([]);
   const [todayInspectionsLoaded, setTodayInspectionsLoaded] = useState(false);
@@ -413,6 +439,15 @@ export default function DprSubmit() {
         // re-upload through), but their ULID + container survive into
         // the next PUT. We keep `readUrl` on the row so the renderer can
         // show a preview even without a local blob.
+        //
+        // SOL DR-004: mark server-loaded photos `persisted: true` so the
+        // Submit handler only sends NEW additions. Without this flag
+        // every Save would re-send the already-persisted photos and
+        // (before the server-side dedupe landed) the server's nested
+        // `photos: { create: [...] }` happily duplicated each one. The
+        // flag is the additive semantic the audit asked for: persisted
+        // rows are owned by the server, additions are owned by the
+        // client, and the two never collide.
         const serverPhotos = Array.isArray(d.photos) ? d.photos : [];
         setPhotos(serverPhotos.map((p) => ({
           ulid: p.ulid,
@@ -424,6 +459,7 @@ export default function DprSubmit() {
           location: p.location || null,
           takenAt: p.takenAt || null,
           readUrl: p.readUrl || null,
+          persisted: true,
         })));
         setShowDraftBanner(false); // suppress local-autosave banner
         setDraftLoadedFromServer(true);
@@ -755,6 +791,28 @@ export default function DprSubmit() {
     setUploadStatuses((s) => ({ ...s, [tempId]: { ...(s[tempId] || {}), ...patch } }));
   };
 
+  // SOL DR-004: after a successful PUT (DRAFT or SUBMITTED), flip the
+  // `persisted` flag on the photos we just sent so the next Save treats
+  // them as server-owned. Without this, every subsequent Save re-sends
+  // the same additions and relies on server-side dedupe — which works,
+  // but trips an unnecessary dedupe round-trip and silently masks a
+  // client bug if someone disables dedupe in the future. The flag is
+  // keyed on `(container, ulid)` so a stale page that rehydrated the
+  // same photo from a different employee still flips cleanly.
+  const markPhotosPersisted = (acknowledgedPhotos) => {
+    if (!Array.isArray(acknowledgedPhotos) || acknowledgedPhotos.length === 0) return;
+    const ackKeys = new Set(
+      acknowledgedPhotos
+        .filter((p) => p && p.ulid && p.container)
+        .map((p) => `${p.container}::${p.ulid}`),
+    );
+    setPhotos((prev) => prev.map((p) => (
+      p && p.ulid && p.container && ackKeys.has(`${p.container}::${p.ulid}`)
+        ? { ...p, persisted: true }
+        : p
+    )));
+  };
+
   const handleFiles = async (files) => {
     const arr = Array.from(files);
     const valid = arr.filter(
@@ -968,8 +1026,15 @@ export default function DprSubmit() {
     setStatus('submitting');
 
     try {
+      // SOL DR-004: only send NEW additions on Save. Server-loaded
+      // photos carry `persisted: true` from the hydration path above;
+      // freshly-uploaded photos default to `persisted: false` (see
+      // handleFiles). Sending persisted rows back would force the
+      // server to dedupe them and, on a stale client, can still slip
+      // a duplicate through — the additive semantic is the safer
+      // contract and matches the audit's explicit guidance.
       const photosToSubmit = photos
-        .filter((p) => p.ulid)
+        .filter((p) => p.ulid && !p.persisted)
         .map(({ ulid, container, filename, contentType, sizeBytes, caption, location, takenAt }) => ({
           ulid, container, filename, contentType, sizeBytes, caption, location, takenAt,
         }));
@@ -1117,6 +1182,10 @@ export default function DprSubmit() {
           // succeeded — surface the same success path. Otherwise treat it
           // as the publish didn't land and stay on the form.
           if (submitted && submitted.status === 'SUBMITTED') {
+            // SOL DR-004: acknowledge the photos we just sent so the
+            // additive flag flips and any subsequent edit treats them
+            // as already persisted. Same keying as the Save branch.
+            markPhotosPersisted(photosToSubmit);
             toast.push('DPR submitted successfully.', 'success');
             lastPutVersionRef.current = null;
             navigate('/portal/dpr/my');
@@ -1147,6 +1216,14 @@ export default function DprSubmit() {
             editingVersion,
             accessToken
           );
+          // SOL DR-004: acknowledge the photos we just sent so the
+          // next Save treats them as persisted. Without this flag the
+          // same additions would be re-sent on every subsequent edit,
+          // relying solely on server-side dedupe. Flipping the flag
+          // locally makes the additive semantic observable in the UI
+          // and removes the dedupe load from the server entirely for
+          // the unchanged-Save case.
+          markPhotosPersisted(photosToSubmit);
           toast.push('Draft updated.', 'success');
           navigate('/portal/dpr/my');
         }
@@ -1299,6 +1376,36 @@ export default function DprSubmit() {
             </button>
             <button type="button" className="btn btn-secondary btn-sm" onClick={handleDiscardDraft}>
               Discard
+            </button>
+          </div>
+        )}
+
+        {/* SOL DR-006: an orphaned / unowned local draft was found in
+            storage. We cannot prove authorship, so the form is NOT pre-
+            filled — instead we surface an explicit banner explaining
+            why the draft cannot be restored and offer a Discard affordance
+            that wipes the orphaned value from localStorage. Mirrors the
+            malformed-draft banner in InspectionSubmit.jsx. */}
+        {quarantinedReason && (
+          <div
+            role="alert"
+            className="portal-auth-error"
+            style={{ marginBottom: '1rem' }}
+          >
+            <strong>We couldn't restore a previous draft.</strong>
+            <p style={{ margin: '0.5rem 0 0 0' }}>
+              An unsaved draft was found in this browser, but we can't
+              confirm who it belongs to, so its content has not been
+              loaded into the form. Start a fresh entry below, or discard
+              the orphan draft to clear this banner.
+            </p>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              style={{ marginTop: '0.75rem' }}
+              onClick={handleDiscardDraft}
+            >
+              Discard orphan draft and start fresh
             </button>
           </div>
         )}
@@ -1878,23 +1985,43 @@ export default function DprSubmit() {
 
             {photos.length > 0 && (
               <div className="photo-grid">
-                {photos.map((photo, idx) => (
-                  <div key={photo.ulid || idx} className="photo-thumb">
-                    <img src={photo.previewUrl} alt={photo.caption || 'Site photo'} />
-                    <button type="button" className="photo-remove" onClick={() => removePhoto(idx)} aria-label="Remove photo">×</button>
-                    <input
-                      className="photo-caption-input"
-                      placeholder="Caption..."
-                      value={photo.caption}
-                      onChange={(e) => {
-                        const updated = [...photos];
-                        updated[idx] = { ...updated[idx], caption: e.target.value };
-                        setPhotos(updated);
-                      }}
-                      aria-label="Photo caption"
-                    />
-                  </div>
-                ))}
+                {photos.map((photo, idx) => {
+                  // SOL DR-005: server-draft hydration supplies `readUrl`
+                  // (a short-lived SAS URL), while local picks carry
+                  // `previewUrl` (an object URL). Rendering used to read
+                  // only previewUrl, so a resumed live photo silently
+                  // disappeared. Fall back to readUrl when the blob URL
+                  // is gone, and surface an explicit "reattach" state
+                  // when neither survives (e.g. SAS expired and the
+                  // claim was deleted) instead of showing a broken
+                  // image. The descriptor (ulid/container) is kept so
+                  // Save still sends the row — only the preview is
+                  // unavailable.
+                  const previewSrc = photo.previewUrl || photo.readUrl || null;
+                  return (
+                    <div key={photo.ulid || idx} className="photo-thumb">
+                      {previewSrc ? (
+                        <img src={previewSrc} alt={photo.caption || 'Site photo'} />
+                      ) : (
+                        <div className="photo-thumb-unavailable" role="status" aria-label="Photo preview unavailable — re-attach to view">
+                          Preview unavailable
+                        </div>
+                      )}
+                      <button type="button" className="photo-remove" onClick={() => removePhoto(idx)} aria-label="Remove photo">×</button>
+                      <input
+                        className="photo-caption-input"
+                        placeholder="Caption..."
+                        value={photo.caption}
+                        onChange={(e) => {
+                          const updated = [...photos];
+                          updated[idx] = { ...updated[idx], caption: e.target.value };
+                          setPhotos(updated);
+                        }}
+                        aria-label="Photo caption"
+                      />
+                    </div>
+                  );
+                })}
               </div>
             )}
 

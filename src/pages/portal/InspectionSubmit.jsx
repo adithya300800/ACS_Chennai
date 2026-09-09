@@ -57,9 +57,18 @@ function loadDraftForEmployee(employeeId) {
   // underlying localStorage entry exists but is unreadable. `load` alone
   // collapses "no draft" and "corrupt JSON" into the same null result,
   // which silently loses the user's data instead of telling them.
-  const { value: raw, corrupt } = loadScopedDraft(DRAFT_BASE, employeeId);
+  const { value: raw, corrupt, quarantined } = loadScopedDraft(DRAFT_BASE, employeeId);
   if (corrupt) return { __malformed: true, reason: 'corrupt-storage' };
   if (raw === null) return null;
+  // SOL DR-006: when the lib flags an envelope as quarantined, the
+  // caller must NOT pre-fill the form — it might belong to a different
+  // employee or be a legacy unscoped orphan. Surface the reason via a
+  // dedicated sentinel so the banner can explain it (DR-006 acceptance
+  // bullet: "missing/malformed owner information is not treated as
+  // authorization").
+  if (quarantined && raw && raw.__quarantined) {
+    return { __quarantined: true, reason: raw.reason };
+  }
   // SOL DR-001: detect v1 drafts that lost structured workEntry.data.
   // A well-formed v2 draft always has __v === 2 and, if workEntry is set,
   // includes a `data` object. Anything else is treated as malformed so the
@@ -199,13 +208,22 @@ export default function InspectionSubmit() {
   // see empty localStorage and silently drop the malformed banner. Pinning
   // the values to state preserves the user-visible recovery state across
   // subsequent renders and state updates.
+  // SOL DR-006: also compute a quarantine flag — when the lib refuses to
+  // surface the saved envelope because we cannot verify authorship, we
+  // must NOT pre-fill the form. The form fields fall back to defaults
+  // (see `d?.__quarantined || d?.__malformed` guards below) and a banner
+  // is shown instead.
   const [malformedReason] = useState(() => {
     const d = loadDraftForEmployee(currentEmployeeId);
     return d?.__malformed ? d.reason : null;
   });
+  const [quarantinedReason] = useState(() => {
+    const d = loadDraftForEmployee(currentEmployeeId);
+    return d?.__quarantined ? d.reason : null;
+  });
   const [initialForm] = useState(() => {
     const d = loadDraftForEmployee(currentEmployeeId);
-    if (d?.__malformed || !d) {
+    if (d?.__malformed || d?.__quarantined || !d) {
       return {
         // [N1 Phase B] projectId is the new foreign-key; projectName
         // stays for legacy wire-compat. Both reset in lockstep.
@@ -237,16 +255,25 @@ export default function InspectionSubmit() {
   });
   const [initialWorkEntry] = useState(() => {
     const d = loadDraftForEmployee(currentEmployeeId);
-    if (d?.__malformed || !d) return null;
+    if (d?.__malformed || d?.__quarantined || !d) return null;
     return d.workEntry || null;
   });
   const [showDraftBannerInitial] = useState(() => {
     const d = loadDraftForEmployee(currentEmployeeId);
-    return !d?.__malformed && !!d;
+    return !d?.__malformed && !d?.__quarantined && !!d;
   });
   const [form, setForm] = useState(initialForm);
   const [workEntry, setWorkEntry] = useState(initialWorkEntry);
-  const [photos, setPhotos] = useState([]);
+  const [photos, setPhotos] = useState(() => {
+    // SOL DR-005: seed photos from the local-draft envelope so the 750ms
+    // autosave that fires on first render cannot write `photos: []` over
+    // a previously-saved list. Same malformed/quarantine guard the
+    // form-state initializer uses. DprSubmit.jsx applies the identical
+    // initializer — see that file for the full rationale.
+    const d = loadDraftForEmployee(currentEmployeeId);
+    if (d?.__malformed || d?.__quarantined || !d) return [];
+    return Array.isArray(d.photos) ? d.photos : [];
+  });
   const [status, setStatus] = useState('idle');
   // S5 audit: split single-string error into per-field + banner model.
   //   formError   — banner text for non-field errors (upload-in-flight,
@@ -303,9 +330,14 @@ export default function InspectionSubmit() {
 
   // On mount, clear any malformed legacy draft so we never show it again
   // and don't keep crashing the user on every reload.
+  // SOL DR-006: also drop the quarantined value — we kept the envelope
+  // around long enough to surface the banner, but we never want to
+  // re-surface it (and we never want the next save() to silently
+  // inherit someone else's owner stamp either).
   useEffect(() => {
     if (malformedReason && currentEmployeeId) clearDraftForEmployee(currentEmployeeId);
-  }, [malformedReason, currentEmployeeId]);
+    if (quarantinedReason && currentEmployeeId) clearDraftForEmployee(currentEmployeeId);
+  }, [malformedReason, quarantinedReason, currentEmployeeId]);
 
   // SOL DR-003: subscribe to logout / session-expiry and clear the current
   // user's draft so a Shared computer does not retain it.
@@ -483,6 +515,14 @@ export default function InspectionSubmit() {
         // resume. SAS read URLs are read-only — we keep them as
         // `readUrl` so the renderer can show a preview without a
         // local blob.
+        //
+        // SOL DR-004: mark server-loaded photos `persisted: true` so
+        // the Submit handler only sends NEW additions. Without this
+        // flag every Save would re-send the already-persisted photos
+        // and the server's nested `photos: { create: [...] }` happily
+        // duplicated each one. The flag is the additive semantic the
+        // audit asked for: persisted rows are owned by the server,
+        // additions are owned by the client, the two never collide.
         const serverPhotos = Array.isArray(d.photos) ? d.photos : [];
         setPhotos(serverPhotos.map((p) => ({
           ulid: p.ulid,
@@ -494,6 +534,7 @@ export default function InspectionSubmit() {
           location: p.location || null,
           takenAt: p.takenAt || null,
           readUrl: p.readUrl || null,
+          persisted: true,
         })));
         setShowDraftBanner(false); // suppress local-autosave banner
         setDraftLoadedFromServer(true);
@@ -687,6 +728,28 @@ export default function InspectionSubmit() {
     setUploadStatuses((s) => ({ ...s, [tempId]: { ...(s[tempId] || {}), ...patch } }));
   };
 
+  // SOL DR-004: after a successful PUT (DRAFT or SUBMITTED), flip the
+  // `persisted` flag on the photos we just sent so the next Save treats
+  // them as server-owned. Without this, every subsequent Save re-sends
+  // the same additions and relies on server-side dedupe — which works,
+  // but trips an unnecessary dedupe round-trip and silently masks a
+  // client bug if someone disables dedupe in the future. The flag is
+  // keyed on `(container, ulid)` so a stale page that rehydrated the
+  // same photo from a different employee still flips cleanly.
+  const markPhotosPersisted = (acknowledgedPhotos) => {
+    if (!Array.isArray(acknowledgedPhotos) || acknowledgedPhotos.length === 0) return;
+    const ackKeys = new Set(
+      acknowledgedPhotos
+        .filter((p) => p && p.ulid && p.container)
+        .map((p) => `${p.container}::${p.ulid}`),
+    );
+    setPhotos((prev) => prev.map((p) => (
+      p && p.ulid && p.container && ackKeys.has(`${p.container}::${p.ulid}`)
+        ? { ...p, persisted: true }
+        : p
+    )));
+  };
+
   const handleFiles = async (files) => {
     const arr = Array.from(files);
     const valid = arr.filter(
@@ -878,8 +941,15 @@ export default function InspectionSubmit() {
     setStatus('submitting');
 
     try {
+      // SOL DR-004: only send NEW additions on Save. Server-loaded
+      // photos carry `persisted: true` from the hydration path above;
+      // freshly-uploaded photos default to `persisted: false` (see
+      // handleFiles). Sending persisted rows back would force the
+      // server to dedupe them and, on a stale client, can still slip
+      // a duplicate through — the additive semantic is the safer
+      // contract and matches the audit's explicit guidance.
       const photosToSubmit = photos
-        .filter((p) => p.ulid)
+        .filter((p) => p.ulid && !p.persisted)
         .map(({ ulid, container, filename, contentType, sizeBytes, caption, location, takenAt }) => ({
           ulid, container, filename, contentType, sizeBytes, caption, location, takenAt,
         }));
@@ -908,6 +978,16 @@ export default function InspectionSubmit() {
           drawingId: form.drawingId || null,
           drawingRev: form.drawingRev || null,
           severity: null,
+          // SOL DR-004: include `photos` on PUT so newly-added evidence
+          // lands on a resumed edit. The previous inline literal omitted
+          // this field, so additions were silently dropped on every
+          // resumed edit and the server never saw them — the exact
+          // "Inspection resume computes new photo claims but omits them
+          // from PUT" path the audit flagged. Additive only: the
+          // server-side dedupe filters out any ulid already on the
+          // record, and the client's `persisted` filter above keeps
+          // previously-saved rows out of the payload entirely.
+          photos: photosToSubmit,
         };
         // PUT first so the latest structured fields land on the row.
         // Then for SUBMITTED, call the dedicated publish endpoint —
@@ -917,6 +997,10 @@ export default function InspectionSubmit() {
         if (submitStatus === 'SUBMITTED') {
           const submitted = await api.submitInspection(editingId, accessToken);
           if (submitted && submitted.status === 'OPEN') {
+            // SOL DR-004: acknowledge the photos we just sent so the
+            // additive flag flips and any subsequent edit treats them
+            // as already persisted. Same keying as the Save branch.
+            markPhotosPersisted(photosToSubmit);
             toast.push('Inspection record submitted.', 'success');
             navigate('/portal/inspection/my');
           } else {
@@ -926,6 +1010,10 @@ export default function InspectionSubmit() {
             return;
           }
         } else {
+          // SOL DR-004: acknowledge the photos we just sent so the
+          // additive flag flips and any subsequent edit treats them
+          // as already persisted.
+          markPhotosPersisted(photosToSubmit);
           toast.push('Draft updated.', 'success');
           navigate('/portal/inspection/my');
         }
@@ -1108,6 +1196,34 @@ export default function InspectionSubmit() {
               onClick={handleDiscardDraft}
             >
               Discard old draft and start fresh
+            </button>
+          </div>
+        )}
+
+        {/* SOL DR-006: an orphaned / unowned local draft was found. We
+            cannot prove authorship, so the form is NOT pre-filled — we
+            surface an explicit banner explaining why the draft cannot
+            be restored and offer a Discard affordance. */}
+        {quarantinedReason && (
+          <div
+            role="alert"
+            className="portal-auth-error"
+            style={{ marginBottom: '1rem' }}
+          >
+            <strong>We couldn't restore a previous draft.</strong>
+            <p style={{ margin: '0.5rem 0 0 0' }}>
+              An unsaved draft was found in this browser, but we can't
+              confirm who it belongs to, so its content has not been
+              loaded into the form. Start a fresh entry below, or discard
+              the orphan draft to clear this banner.
+            </p>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              style={{ marginTop: '0.75rem' }}
+              onClick={handleDiscardDraft}
+            >
+              Discard orphan draft and start fresh
             </button>
           </div>
         )}
@@ -1542,23 +1658,43 @@ export default function InspectionSubmit() {
 
             {photos.length > 0 && (
               <div className="photo-grid">
-                {photos.map((photo, idx) => (
-                  <div key={photo.ulid || idx} className="photo-thumb">
-                    <img src={photo.previewUrl} alt={photo.caption || 'Site photo'} />
-                    <button type="button" className="photo-remove" onClick={() => removePhoto(idx)} aria-label="Remove photo">×</button>
-                    <input
-                      className="photo-caption-input"
-                      placeholder="Caption..."
-                      value={photo.caption}
-                      onChange={(e) => {
-                        const updated = [...photos];
-                        updated[idx] = { ...updated[idx], caption: e.target.value };
-                        setPhotos(updated);
-                      }}
-                      aria-label="Photo caption"
-                    />
-                  </div>
-                ))}
+                {photos.map((photo, idx) => {
+                  // SOL DR-005: server-draft hydration supplies `readUrl`
+                  // (a short-lived SAS URL), while local picks carry
+                  // `previewUrl` (an object URL). Rendering used to read
+                  // only previewUrl, so a resumed live photo silently
+                  // disappeared. Fall back to readUrl when the blob URL
+                  // is gone, and surface an explicit "reattach" state
+                  // when neither survives (e.g. SAS expired and the
+                  // claim was deleted) instead of showing a broken
+                  // image. The descriptor (ulid/container) is kept so
+                  // Save still sends the row — only the preview is
+                  // unavailable. DprSubmit.jsx applies the same fix.
+                  const previewSrc = photo.previewUrl || photo.readUrl || null;
+                  return (
+                    <div key={photo.ulid || idx} className="photo-thumb">
+                      {previewSrc ? (
+                        <img src={previewSrc} alt={photo.caption || 'Site photo'} />
+                      ) : (
+                        <div className="photo-thumb-unavailable" role="status" aria-label="Photo preview unavailable — re-attach to view">
+                          Preview unavailable
+                        </div>
+                      )}
+                      <button type="button" className="photo-remove" onClick={() => removePhoto(idx)} aria-label="Remove photo">×</button>
+                      <input
+                        className="photo-caption-input"
+                        placeholder="Caption..."
+                        value={photo.caption}
+                        onChange={(e) => {
+                          const updated = [...photos];
+                          updated[idx] = { ...updated[idx], caption: e.target.value };
+                          setPhotos(updated);
+                        }}
+                        aria-label="Photo caption"
+                      />
+                    </div>
+                  );
+                })}
               </div>
             )}
 

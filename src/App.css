@@ -2591,7 +2591,11 @@ footer {
    cards alongside the StatusBadge so the filtered attributes are
    visible. Palette matches inspection semantics:
      LOW      → muted slate  (not actionable)
+     MINOR    → slate        (informational — DR-026 add)
      MEDIUM   → amber        (worth attention)
+     MAJOR    → amber        (action required — DR-026 add, replaces
+                               the inline MAJOR pill in InspectionDetail
+                               which previously failed contrast)
      HIGH     → orange       (urgent)
      CRITICAL → red          (act now)
    Foreground colors chosen for ≥4.5:1 contrast on white pill. */
@@ -2607,7 +2611,9 @@ footer {
   border: 1px solid transparent;
 }
 .severity-pill-low      { background: #f1f5f9; color: #334155; border-color: #cbd5e1; }
+.severity-pill-minor    { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
 .severity-pill-medium   { background: #fef3c7; color: #854d0e; border-color: #fcd34d; }
+.severity-pill-major    { background: #fef3c7; color: #854d0e; border-color: #fcd34d; }
 .severity-pill-high     { background: #ffedd5; color: #9a3412; border-color: #fb923c; }
 .severity-pill-critical { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
 
@@ -2745,6 +2751,24 @@ footer {
   aspect-ratio: 4/3;
   object-fit: cover;
   display: block;
+}
+
+/* SOL DR-005: placeholder shown when a recovered photo row has neither
+   a local object URL (previewUrl) nor a server-supplied SAS URL
+   (readUrl) — typically because the original upload intent expired or
+   was swept. Keeps the row visible so the engineer can remove/reattach
+   instead of silently losing the claim. */
+.photo-thumb-unavailable {
+  width: 100%;
+  aspect-ratio: 4/3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--light-gray);
+  color: var(--steel);
+  font-size: 0.75rem;
+  padding: 0.5rem;
+  text-align: center;
 }
 
 .photo-remove {
