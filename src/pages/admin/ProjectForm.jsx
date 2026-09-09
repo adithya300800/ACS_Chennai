@@ -349,17 +349,11 @@ export default function ProjectForm() {
           )}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '0.75rem' }}>
             {form.assignments.map((a) => {
-              // SOL DR-011: the backend's set-membership sync at
-              // backend/src/routes/projects.js:420-486 deliberately
-              // ignores `role` on existing assignment rows. The role
-              // input rendered for a server-loaded row would have
-              // accepted edits and returned 200 while the change was
-              // silently dropped on save. To keep the UI honest with the
-              // contract we render role as a static label for any row
-              // that already has an `id` (came back from the server).
-              // Newly added rows via "+ Add employee…" carry no `id`
-              // and remain editable so the create flow is unaffected.
-              const isExistingAssignment = Boolean(a.id);
+              // [DR-010] Role edits are now persisted on retained
+              // assignment rows (the previous contract silently dropped
+              // them — see backend/src/routes/projects.js syncProjectAssignments).
+              // Render role as an editable input for every row so the
+              // UI matches the backend contract.
               return (
                 <div
                   key={a.employeeId}
@@ -377,35 +371,16 @@ export default function ProjectForm() {
                       </span>
                     )}
                   </span>
-                  {isExistingAssignment ? (
-                    <span
-                      data-testid="assignment-role-immutable"
-                      title="Role is set during initial assignment and cannot be edited. Remove and re-add the assignment to change role."
-                      style={{
-                        flex: 1, minWidth: 160,
-                        padding: '0.5rem 0.75rem',
-                        fontSize: '0.9rem',
-                        color: 'var(--steel, #64748b)',
-                        background: 'var(--light-gray, #f8fafc)',
-                        borderRadius: 6,
-                        fontStyle: a.role ? 'normal' : 'italic',
-                      }}
-                      aria-label={`Role for ${a._employee?.name || a.employeeId} (immutable — remove and re-add to change)`}
-                    >
-                      {a.role || 'No role set'}
-                    </span>
-                  ) : (
-                    <input
-                      type="text"
-                      placeholder="Role (e.g. Site Engineer)"
-                      value={a.role}
-                      maxLength={60}
-                      onChange={(e) => updateAssignmentRole(a.employeeId, e.target.value)}
-                      className="form-input"
-                      style={{ flex: 1, minWidth: 160 }}
-                      aria-label={`Role for ${a._employee?.name || a.employeeId}`}
-                    />
-                  )}
+                  <input
+                    type="text"
+                    placeholder="Role (e.g. Site Engineer)"
+                    value={a.role}
+                    maxLength={60}
+                    onChange={(e) => updateAssignmentRole(a.employeeId, e.target.value)}
+                    className="form-input"
+                    style={{ flex: 1, minWidth: 160 }}
+                    aria-label={`Role for ${a._employee?.name || a.employeeId}`}
+                  />
                   <button
                     type="button"
                     onClick={() => removeAssignment(a.employeeId)}
