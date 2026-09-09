@@ -1269,6 +1269,12 @@ router.put('/:id', async (req, res) => {
     'boqItemId',
     // [N3] Phase E: drawing link — same allowlist extension as DPR PUT.
     'drawingId', 'drawingRev',
+    // SOL DR-004: typed additive photo additions. Mirrors the DPR PUT
+    // pattern: `photos` is a control field (NOT a column on the row),
+    // stripped before the data spread so Prisma doesn't try to set a
+    // non-existent scalar. The validation block + dedupe + binding all
+    // run below in the same transaction as the row update.
+    'photos',
   ];
   const unknown = Object.keys(fields).filter(k => !ALLOWED_UPDATE_FIELDS.includes(k));
   if (unknown.length) {
@@ -1475,6 +1481,85 @@ router.put('/:id', async (req, res) => {
     fields.drawingRev = drawingResolution.drawingRev ?? null;
   }
 
+  // SOL DR-004: typed additive photos on inspection PUT. Mirrors the
+  // POST validation block — same shape checks (ulid regex, container,
+  // content-type, size, filename, takenAt). Empty `photos: []` is the
+  // additive no-op signal; `photos` undefined means "no change" and
+  // skips the block entirely (the previous owner-edit path silently
+  // dropped newly-added photos because the editPayload never carried
+  // them through).
+  let incomingInspectionPhotos = [];
+  if (fields.photos !== undefined) {
+    const photos = fields.photos;
+    if (!Array.isArray(photos) || photos.length > 50) {
+      return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'photos must be an array (max 50)' });
+    }
+    for (let i = 0; i < photos.length; i += 1) {
+      const p = photos[i];
+      if (!p || typeof p !== 'object') {
+        return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}] must be an object` });
+      }
+      if (typeof p.ulid !== 'string' || !/^[0-9A-HJKMNP-TV-Z]{26}$/i.test(p.ulid)) {
+        return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}].ulid invalid` });
+      }
+      if (p.container !== 'inspection-photos') {
+        return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}].container must be inspection-photos` });
+      }
+      if (!CONTENT_TYPE_EXT[p.contentType]) {
+        return res.status(400).json({ error: 'INVALID_CONTENT_TYPE', message: `photos[${i}].contentType invalid` });
+      }
+      const sb = Number(p.sizeBytes);
+      if (!Number.isFinite(sb) || sb <= 0 || sb > 10 * 1024 * 1024) {
+        return res.status(413).json({ error: 'PHOTO_TOO_LARGE', message: `photos[${i}].sizeBytes must be 1..${10 * 1024 * 1024}` });
+      }
+      if (typeof p.filename !== 'string' || p.filename.length > 255 || p.filename.includes('\0') || p.filename.includes('..')) {
+        return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}].filename invalid` });
+      }
+      if (p.takenAt !== undefined && p.takenAt !== null) {
+        const td = parseISODateTime(p.takenAt);
+        if (td === null) return res.status(400).json({ error: 'VALIDATION_ERROR', message: `photos[${i}].takenAt invalid` });
+      }
+    }
+    incomingInspectionPhotos = photos;
+  }
+
+  // SOL DR-004: every photo must map to a CONFIRMED upload intent owned
+  // by THIS employee. Same pre-flight as POST — the loop above only
+  // checks the ulid's 26-char Crockford shape, which a client can
+  // trivially fabricate. Without this gate, a forged ulid could attach
+  // to an inspection PUT.
+  if (incomingInspectionPhotos.length > 0) {
+    const intentErr = await validatePhotoIntents({
+      prisma,
+      employeeId: req.employeeId,
+      photos: incomingInspectionPhotos,
+      context: 'inspection.update',
+    });
+    if (intentErr) return res.status(intentErr.status).json(intentErr.body);
+  }
+
+  // SOL DR-004: server-side dedupe by `(inspectionId, container, ulid)`.
+  // The audit's exact symptom: a one-photo inspection became two rows
+  // with the same ULID after a notes-only edit. Frontend re-sent
+  // previously-persisted photos in every Save; the schema has no
+  // unique constraint so the nested `create` happily duplicated them.
+  // Server filters here so a stale page that rehydrates server-side
+  // photos as plain ulids (without the persisted marker the client
+  // also uses) cannot leak duplicates through.
+  let dedupedInspectionPhotos = incomingInspectionPhotos;
+  if (incomingInspectionPhotos.length > 0) {
+    const existingPhotos = await prisma.inspectionPhoto.findMany({
+      where: { inspectionId: id },
+      select: { ulid: true, container: true },
+    });
+    const existingKeys = new Set(
+      existingPhotos.map((p) => `${p.container}::${p.ulid}`),
+    );
+    dedupedInspectionPhotos = incomingInspectionPhotos.filter(
+      (p) => p && !existingKeys.has(`${p.container}::${p.ulid}`),
+    );
+  }
+
   try {
     // LPR-008: pin `status` on the WHERE so a concurrent admin
     // ack/close/reject (or owner /submit promotion) between our read and
@@ -1484,31 +1569,98 @@ router.put('/:id', async (req, res) => {
     // with P2025, the catch below maps it to 409 INSPECTION_LOCKED
     // (same wire shape as the read-time check) so clients only see one
     // error code.
-    const updated = await prisma.inspectionRecord.update({
-      where: { id, status: existing.status },
-      data: {
-        ...fields,
-        // DR-009: write the normalised severity rather than the raw wire
-        // value so a PUT that arrived with `severity: null` + a clean
-        // `data.severity` still promotes to the canonical column.
-        severity: normalisedSeverity === undefined ? fields.severity : normalisedSeverity || null,
-        updatedAt: new Date(),
-      },
-      include: {
-        photos: true,
-        submittedBy: { select: { id: true, name: true, email: true } },
-        dpr: { select: { id: true, reportDate: true, projectName: true } },
-        // N7 (round-28): BOQ summary on PUT response, mirror of POST.
-        boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
-        // [N1] Project summary on PUT response, mirror of POST.
-        project: { select: { id: true, name: true, code: true } },
-        // [N3] Drawing summary on PUT response, mirror of POST.
-        drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
-      },
+    //
+    // SOL DR-004: the update + photo nested create + intent binding
+    // runs inside ONE transaction. A short binding count throws
+    // PhotoBindingLostError and the entire tx rolls back — the row
+    // stays at its pre-edit content/status and the just-created photo
+    // rows are removed. `photos` is a control field (NOT a column on
+    // the row), so it MUST be stripped before the data spread;
+    // otherwise Prisma would try to set a non-existent `photos`
+    // scalar. The conditional WHERE keeps the LPR-008 race-safety
+    // (concurrent admin transitions still P2025 to INSPECTION_LOCKED).
+    const { photos: _photoControlField, ...fieldsForUpdate } = fields;
+    const inspectionPhotoWrites = dedupedInspectionPhotos.length > 0
+      ? {
+          create: dedupedInspectionPhotos.map((p) => ({
+            ulid: p.ulid,
+            container: p.container,
+            filename: p.filename,
+            contentType: p.contentType,
+            sizeBytes: p.sizeBytes,
+            caption: p.caption || null,
+            location: p.location || null,
+            takenAt: p.takenAt ? new Date(p.takenAt) : null,
+          })),
+        }
+      : undefined;
+    const updated = await withRecordTransaction(prisma, 'inspectionRecord', async (db) => {
+      const u = await db.inspectionRecord.update({
+        where: { id, status: existing.status },
+        data: {
+          ...fieldsForUpdate,
+          // DR-009: write the normalised severity rather than the raw wire
+          // value so a PUT that arrived with `severity: null` + a clean
+          // `data.severity` still promotes to the canonical column.
+          severity: normalisedSeverity === undefined ? fields.severity : normalisedSeverity || null,
+          updatedAt: new Date(),
+          ...(inspectionPhotoWrites ? { photos: inspectionPhotoWrites } : {}),
+        },
+        include: {
+          photos: true,
+          submittedBy: { select: { id: true, name: true, email: true } },
+          dpr: { select: { id: true, reportDate: true, projectName: true } },
+          // N7 (round-28): BOQ summary on PUT response, mirror of POST.
+          boqItem: { select: { id: true, itemCode: true, description: true, unit: true } },
+          // [N1] Project summary on PUT response, mirror of POST.
+          project: { select: { id: true, name: true, code: true } },
+          // [N3] Drawing summary on PUT response, mirror of POST.
+          drawing: { select: { id: true, drawingNumber: true, revision: true, status: true } },
+        },
+      });
+
+      // SOL DR-004: bind the intents for the deduped-new photo rows in
+      // the SAME transaction as the row update. A short count throws
+      // and the entire transaction rolls back — row stays at its
+      // pre-edit content/status, no orphan photo rows are created.
+      // Empty dedupedInspectionPhotos (e.g. the client sent only
+      // already-persisted ulids) short-circuits — no intent check, no
+      // write — so an unchanged Save keeps the existing photo count.
+      if (dedupedInspectionPhotos.length > 0) {
+        await assertPhotoIntentsBindable({
+          tx: db,
+          employeeId: req.employeeId,
+          photos: dedupedInspectionPhotos,
+        });
+        await bindPhotoIntentsTx({
+          tx: db,
+          employeeId: req.employeeId,
+          photos: dedupedInspectionPhotos,
+          boundType: 'inspection',
+          recordId: id,
+        });
+      }
+
+      return u;
     });
 
     res.json(updated);
   } catch (err) {
+    // SOL DR-004: a lost photo claim is not a server fault — the tx
+    // rolled back, the row is unchanged, and the client can recover
+    // by re-uploading. 409, never 500, and never the generic prisma
+    // mapping. The INSPECTION_LOCKED P2025 branch below stays
+    // untouched so a concurrent admin transition still surfaces the
+    // same wire code as the read-time check.
+    const bindingLost = photoBindingLostResponse(err);
+    if (bindingLost) {
+      console.warn('Inspection update rolled back — photo binding lost', {
+        employeeHash: hashIdentifier(req.employeeId),
+        expected: err.expected,
+        bound: err.bound,
+      });
+      return res.status(bindingLost.status).json(bindingLost.body);
+    }
     console.error('Inspection update error', {
       employeeHash: hashIdentifier(req.employeeId),
       prismaCode: err.code,

@@ -300,6 +300,19 @@ function buildApp() {
       },
     },
     dPRPhoto: {
+      // SOL DR-004: server-side dedupe reads existing photo ulids via
+      // findMany before the nested write. The mock already populates
+      // photosByDprId, so this just projects the (ulid, container)
+      // tuple that the dedupe keys on.
+      findMany: async ({ where, select }) => {
+        const photos = photosByDprId[where.dprId] || [];
+        return photos.map((p) => {
+          const row = {};
+          if (!select || select.ulid) row.ulid = p.ulid;
+          if (!select || select.container) row.container = p.container;
+          return row;
+        });
+      },
       // Belt and braces — the PUT path lands photos via nested writes,
       // but the GET path reads them back through include: { photos: true }.
       // The mock above already populates photosByDprId; nothing extra here.
