@@ -324,6 +324,15 @@ export default function DprSubmit() {
   // draftId change to supersede it.
   const lastHydratedDraftIdRef = useRef(null);
   const hydrationRunIdRef = useRef(0);
+  // SOL DR-003: tracks the server-acknowledged version returned by the most
+  // recent successful PUT within this component lifetime. On a Submit retry
+  // (the user clicks Submit Report again after a prior attempt PUT'd but
+  // the publish call failed or its response was lost) we MUST NOT re-PUT —
+  // photo additions are already persisted on the server and a second PUT
+  // would either double-create them or waste a version increment. The ref
+  // is reset when a fresh draft is hydrated so a stale value from a
+  // previous draft can't leak across Resume sessions.
+  const lastPutVersionRef = useRef(null);
 
   useEffect(() => {
     if (!draftId || !accessToken) return;
@@ -349,6 +358,10 @@ export default function DprSubmit() {
         }
         setEditingId(d.id);
         setEditingVersion(d.version);
+        // SOL DR-003: a fresh draft load clears any stale acknowledged
+        // version from a prior session — otherwise a retry's GET would
+        // pick up the old ref'd value instead of the just-loaded version.
+        lastPutVersionRef.current = null;
         setForm({
           // [N1 Phase B] projectId is denormalized on the DPR row going
           // forward; legacy rows may have it null. When the server
@@ -983,8 +996,121 @@ export default function DprSubmit() {
         // (no behavior change), SUBMITTED calls the dedicated
         // /:id/submit command which transitions DRAFT -> SUBMITTED and
         // returns the row in its terminal state.
+        //
+        // CRITICAL DR-003 fix: when the user resumes an existing draft and
+        // then clicks Submit Report, the form may carry pending edits —
+        // newly added photos, drawing/BOQ selections, or narrative
+        // changes — that the server has never seen. The previous flow
+        // called submitDpr directly with the pre-resume version, so every
+        // pending edit was silently dropped (SUBMITTED row landed with
+        // zero photos and null drawing/BOQ references). Restructure:
+        //   1. PUT the resumed-edit payload first (same body Save Draft
+        //      uses) so the server acknowledges the additions and bumps
+        //      the version.
+        //   2. Capture the server-acknowledged version from the PUT
+        //      response — the version we LOADED is stale as soon as PUT
+        //      commits, so a submit against the pre-PUT version would
+        //      409 VERSION_CONFLICT.
+        //   3. Call submitDpr with the POST-PUT version. If PUT fails,
+        //      ABORT the submit — never publish stale draft content.
+        //   4. On a retry (PUT succeeded but submit failed or its
+        //      response was lost), do NOT re-PUT — the photo additions
+        //      are already persisted and a second PUT would either
+        //      double-create them or be a no-op that wastes a version
+        //      increment. GET the current row state to reconcile the
+        //      acknowledged version (and recognize a SUBMITTED row as
+        //      success).
         if (submitStatus === 'SUBMITTED') {
-          const submitted = await api.submitDpr(editingId, editingVersion, accessToken);
+          let versionToSubmit = editingVersion;
+
+          if (lastPutVersionRef.current != null) {
+            // Retry path: a previous attempt PUT'd successfully but the
+            // publish call (or its response) didn't land cleanly. GET the
+            // current row to (a) recognize SUBMITTED as "we already
+            // succeeded" and (b) pick up any version that advanced past
+            // our last acknowledged revision (e.g. another admin action
+            // raced in). NEVER re-PUT here — photo rows are already
+            // persisted on the server.
+            try {
+              const current = await api.getDpr(editingId, accessToken);
+              if (current && current.status === 'SUBMITTED') {
+                toast.push('DPR submitted successfully.', 'success');
+                lastPutVersionRef.current = null;
+                navigate('/portal/dpr/my');
+                return;
+              }
+              versionToSubmit = current && Number.isInteger(current.version)
+                ? current.version
+                : lastPutVersionRef.current;
+              lastPutVersionRef.current = versionToSubmit;
+            } catch (getErr) {
+              const msg = getErr.message || 'Could not verify draft state. Please refresh and try again.';
+              setError(msg);
+              setStatus('idle');
+              if (getErr.status !== 401) toast.push(msg, 'error');
+              submittingRef.current = false;
+              return;
+            }
+          } else {
+            // First attempt: PUT the resumed-edit payload so all pending
+            // additions (photos, drawings, BOQ, narrative) land on the
+            // server. Capture the acknowledged version. ABORT on failure
+            // — silently publishing stale draft content was the original
+            // DR-003 bug.
+            const resumePayload = buildDprPayload({
+              form,
+              dailyFields,
+              customSections,
+              photosToSubmit,
+              serializedManpower,
+              mode: 'resumedEdit',
+            });
+            let putResult;
+            try {
+              putResult = await api.updateDpr(
+                editingId,
+                resumePayload,
+                editingVersion,
+                accessToken,
+              );
+            } catch (putErr) {
+              // PUT failed — do NOT submit. A 409 VERSION_CONFLICT means
+              // another writer raced past us (the local draft is stale);
+              // ask the user to refresh so they don't lose their edits
+              // silently. Any other failure (network, server error)
+              // likewise means the additions never landed, so publishing
+              // the pre-PUT version would resurrect the original bug.
+              const isVersionConflict =
+                putErr?.code === 'VERSION_CONFLICT' || putErr?.status === 409;
+              const msg = isVersionConflict
+                ? 'This draft was modified elsewhere. Please refresh the page and try again.'
+                : (putErr.message || 'Could not save your edits before submitting.');
+              setError(msg);
+              setStatus('idle');
+              if (putErr.status !== 401) toast.push(msg, 'error');
+              submittingRef.current = false;
+              return;
+            }
+
+            const acknowledged = putResult && Number.isInteger(putResult.version)
+              ? putResult.version
+              : null;
+            if (acknowledged == null) {
+              // Server didn't return a version we can use. Don't guess —
+              // abort so the user knows to refresh instead of seeing a
+              // confusing 409 from a wrong-version submit.
+              const msg = 'Could not confirm saved changes. Please refresh and try again.';
+              setError(msg);
+              setStatus('idle');
+              toast.push(msg, 'error');
+              submittingRef.current = false;
+              return;
+            }
+            versionToSubmit = acknowledged;
+            lastPutVersionRef.current = acknowledged;
+          }
+
+          const submitted = await api.submitDpr(editingId, versionToSubmit, accessToken);
           // Show success ONLY for the returned terminal state. If the
           // server returned something else (e.g. an idempotent retry
           // where the row was already SUBMITTED), the round-trip still
@@ -992,6 +1118,7 @@ export default function DprSubmit() {
           // as the publish didn't land and stay on the form.
           if (submitted && submitted.status === 'SUBMITTED') {
             toast.push('DPR submitted successfully.', 'success');
+            lastPutVersionRef.current = null;
             navigate('/portal/dpr/my');
           } else {
             toast.push('Submit did not complete. Please refresh and try again.', 'error');
