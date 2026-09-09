@@ -313,8 +313,17 @@ router.get('/', asyncHandler(async (req, res) => {
     if (decoded.date === null) {
       cursorWhere = { issuedDate: null, id: { lt: decoded.id } };
     } else {
+      // [DR-019] Include the trailing null bucket in the seek from any
+      // non-null cursor. With NULLS LAST ordering, every null row sits
+      // after the last non-null row; without this third branch a full
+      // dated page (e.g. 20 rows for 2026-09-08) leaves the null tail
+      // unreachable because `null < non-null-date` is FALSE in SQL.
+      // The previous seek only fired the first two branches, so a
+      // project with N dated rows + M null rows had its M null rows
+      // permanently stuck at the bottom of page 1.
       cursorWhere = {
         OR: [
+          { issuedDate: null },
           { issuedDate: { lt: decoded.date } },
           { issuedDate: decoded.date, id: { lt: decoded.id } },
         ],
@@ -532,14 +541,29 @@ router.post('/', requireAuth, asyncHandler(async (req, res) => {
         await assertPhotoIntentsBindable({ tx: db, employeeId: req.employeeId, photos: intentWrapper });
       }
 
-      // Flip the predecessor to SUPERSEDED inside the same transaction so
-      // an admin can't end up with two ACTIVE rows for the same
-      // (project, drawingNumber).
+      // [DR-009] Claim the predecessor with a conditional update so two
+      // concurrent supersedes cannot both succeed. The `where` requires
+      // id + projectId + status='ACTIVE' — Prisma's `update` does not
+      // accept extra keys in its `where`, so we use `updateMany` (returns
+      // a count, not the row) and require count==1. On a lost race we
+      // throw so the whole tx rolls back, including the successor
+      // create/bind below — the predecessor stays ACTIVE for whichever
+      // sibling tx actually won the claim.
       if (data.supersedesId) {
-        await db.drawing.update({
-          where: { id: data.supersedesId },
+        const claim = await db.drawing.updateMany({
+          where: {
+            id: data.supersedesId,
+            projectId: data.projectId,
+            status: 'ACTIVE',
+          },
           data: { status: 'SUPERSEDED' },
         });
+        if (claim.count !== 1) {
+          throw Object.assign(new Error('Predecessor claim lost'), {
+            code: 'PREDECESSOR_CLAIM_LOST',
+            predecessorId: data.supersedesId,
+          });
+        }
       }
       // Mint the id server-side so the Prisma client doesn't try to use
       // @default(uuid()) against a non-standard client config.
@@ -588,6 +612,21 @@ router.post('/', requireAuth, asyncHandler(async (req, res) => {
         bound: err.bound,
       });
       return res.status(bindingLost.status).json(bindingLost.body);
+    }
+    // [DR-009] Concurrent supersede lost the race — another sibling tx
+    // already claimed the predecessor's ACTIVE status. Translate to
+    // 409 PREDECESSOR_NOT_ACTIVE so the client gets the same error it
+    // would have seen from the pre-transaction guard.
+    if (err && err.code === 'PREDECESSOR_CLAIM_LOST') {
+      console.warn('Drawing create rolled back — predecessor claim lost', {
+        employeeHash: hashIdentifier(req.employeeId),
+        predecessorId: err.predecessorId,
+      });
+      return res.status(409).json({
+        error: 'PREDECESSOR_NOT_ACTIVE',
+        code: 'PREDECESSOR_NOT_ACTIVE',
+        message: 'Predecessor was superseded by a concurrent request',
+      });
     }
     console.error('Drawings create error', {
       employeeHash: hashIdentifier(req.employeeId),
@@ -815,6 +854,75 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
       });
     }
 
+    // [DR-009] When PATCH tries to restore ACTIVE, do a conditional
+    // claim so a stale PATCH cannot resurrect a row that was
+    // superseded between our read and our write. Also reject when
+    // another ACTIVE row already exists for the same drawingNumber in
+    // the same project — the natural-key uniqueness on
+    // (projectId, drawingNumber, revision) does not catch this
+    // because different revisions can both be ACTIVE for the same
+    // drawingNumber. Without this guard, two ACTIVE successors from a
+    // concurrent race would persist.
+    if (data.status === 'ACTIVE') {
+      const guarded = await prisma.$transaction(async (tx) => {
+        // No other ACTIVE row for the same drawingNumber in this project.
+        const siblingActive = await tx.drawing.findFirst({
+          where: {
+            projectId: existing.projectId,
+            drawingNumber: existing.drawingNumber,
+            status: 'ACTIVE',
+            id: { not: existing.id },
+          },
+          select: { id: true },
+        });
+        if (siblingActive) {
+          return { error: {
+            status: 409,
+            body: {
+              error: 'ANOTHER_ACTIVE_REVISION',
+              code: 'ANOTHER_ACTIVE_REVISION',
+              message: `Drawing ${existing.drawingNumber} already has an active revision`,
+              currentActiveId: siblingActive.id,
+            },
+          } };
+        }
+        // Conditional update — require the row to still NOT be
+        // SUPERSEDED. If a concurrent supersede flipped it after our
+        // read, count=0 and we refuse the restore.
+        const claim = await tx.drawing.updateMany({
+          where: {
+            id: existing.id,
+            projectId: existing.projectId,
+            status: { not: 'SUPERSEDED' },
+          },
+          data: {
+            title: data.title !== undefined ? data.title : existing.title,
+            status: 'ACTIVE',
+            issuedDate: data.issuedDate !== undefined ? data.issuedDate : existing.issuedDate,
+            issuedById: data.issuedById !== undefined ? data.issuedById : existing.issuedById,
+            pdfBlobPath: data.pdfBlobPath !== undefined ? data.pdfBlobPath : existing.pdfBlobPath,
+            uploadIntentUlid: data.uploadIntentUlid !== undefined ? data.uploadIntentUlid : existing.uploadIntentUlid,
+          },
+        });
+        if (claim.count !== 1) {
+          return { error: {
+            status: 409,
+            body: {
+              error: 'DRAWING_SUPERSEDED',
+              code: 'DRAWING_SUPERSEDED',
+              message: 'Cannot resurrect a superseded drawing; create a new revision instead',
+            },
+          } };
+        }
+        const reloaded = await tx.drawing.findUnique({ where: { id: existing.id } });
+        return { drawing: reloaded };
+      });
+      if (guarded.error) {
+        return res.status(guarded.error.status).json(guarded.error.body);
+      }
+      return res.json(serializeDrawing(guarded.drawing));
+    }
+
     const updated = await prisma.drawing.update({
       where: { id },
       data: {
@@ -1031,10 +1139,36 @@ router.post('/:id/supersede', requireFreshAdmin, asyncHandler(async (req, res) =
         },
       });
 
-      const updatedPredecessor = await tx.drawing.update({
-        where: { id: predecessor.id },
+      // [DR-009] Conditional ACTIVE claim — the predecessor's status
+      // check is folded into the `where` so two concurrent supersedes
+      // can't both succeed. `update` only accepts `id` in `where`, so
+      // we use `updateMany` (returns count, not row) and require
+      // count==1. On a lost race the whole tx — successor create
+      // included — rolls back and the client gets the same 409
+      // PREDECESSOR_NOT_ACTIVE it would have seen from the in-tx
+      // status read above.
+      const claim = await tx.drawing.updateMany({
+        where: {
+          id: predecessor.id,
+          projectId: predecessor.projectId,
+          status: 'ACTIVE',
+        },
         data: { status: 'SUPERSEDED' },
       });
+      if (claim.count !== 1) {
+        return {
+          error: {
+            status: 409,
+            body: {
+              error: 'PREDECESSOR_NOT_ACTIVE',
+              code: 'PREDECESSOR_NOT_ACTIVE',
+              message: `Cannot supersede a drawing in status ${predecessor.status}`,
+              currentStatus: predecessor.status,
+            },
+          },
+        };
+      }
+      const updatedPredecessor = { ...predecessor, status: 'SUPERSEDED' };
 
       return { successor, predecessor: updatedPredecessor };
     });
