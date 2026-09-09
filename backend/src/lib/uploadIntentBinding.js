@@ -98,7 +98,7 @@ function uniqueUlids(photos) {
  *   intent store is unavailable). Otherwise an Express response envelope
  *   the caller should send verbatim.
  */
-async function validatePhotoIntents({ prisma, employeeId, photos, context }) {
+async function validatePhotoIntents({ prisma, employeeId, photos, context, expectedContainer, expectedBlobPath }) {
   if (!Array.isArray(photos) || photos.length === 0) return null;
   if (!prisma || !prisma.uploadIntent || typeof prisma.uploadIntent.findMany !== 'function') {
     return null; // see "Graceful degradation" above
@@ -107,13 +107,25 @@ async function validatePhotoIntents({ prisma, employeeId, photos, context }) {
   const ulids = uniqueUlids(photos);
   if (ulids.length === 0) return null;
 
+  // [DR-001] Path/container equality check. When the caller supplies
+  // the resolved (container, blobPath) it intends to bind, the lookup
+  // MUST also require the intent's row to match those exact values.
+  // Without this, a caller could submit *another* employee's ulid that
+  // happens to belong to them (e.g. a different bucket's intent) and
+  // bind it to a record whose `pdfBlobPath` points at the wrong blob.
+  // Both filters are optional so the existing photo callers (DPR /
+  // Inspection) keep working without changes.
+  const where = { employeeId, ulid: { in: ulids }, status: 'CONFIRMED' };
+  if (expectedContainer) where.container = expectedContainer;
+  if (expectedBlobPath) where.blobPath = expectedBlobPath;
+
   let confirmed;
   try {
     confirmed = await prisma.uploadIntent.findMany({
       // Scoped by employeeId: an intent belonging to another employee is
       // simply not found, so IDOR and "no intent at all" collapse into
       // one rejection path. Never widen this to a bare `ulid: { in }`.
-      where: { employeeId, ulid: { in: ulids }, status: 'CONFIRMED' },
+      where,
       select: { ulid: true },
     });
   } catch (err) {
@@ -335,15 +347,24 @@ async function withRecordTransaction(prisma, modelName, fn) {
  *
  * @throws {PhotoBindingLostError}
  */
-async function assertPhotoIntentsBindable({ tx, employeeId, photos }) {
+async function assertPhotoIntentsBindable({ tx, employeeId, photos, expectedContainer, expectedBlobPath }) {
   if (!Array.isArray(photos) || photos.length === 0) return;
   if (!tx || !tx.uploadIntent || typeof tx.uploadIntent.findMany !== 'function') return;
 
   const ulids = uniqueUlids(photos);
   if (ulids.length === 0) return;
 
+  // [DR-001] Same path/container equality check as `validatePhotoIntents`
+  // above. The validate step ran before the tx opened, so under the tx
+  // snapshot we re-assert with the SAME filter set — a row that
+  // matched on the outside but whose container/blobPath was swapped
+  // between calls will now fail fast and roll back the create.
+  const where = { employeeId, ulid: { in: ulids }, status: 'CONFIRMED' };
+  if (expectedContainer) where.container = expectedContainer;
+  if (expectedBlobPath) where.blobPath = expectedBlobPath;
+
   const confirmed = await tx.uploadIntent.findMany({
-    where: { employeeId, ulid: { in: ulids }, status: 'CONFIRMED' },
+    where,
     select: { ulid: true },
   });
   if (confirmed.length !== ulids.length) {
@@ -363,7 +384,7 @@ async function assertPhotoIntentsBindable({ tx, employeeId, photos }) {
  *
  * @throws {PhotoBindingLostError}
  */
-async function bindPhotoIntentsTx({ tx, employeeId, photos, boundType, recordId }) {
+async function bindPhotoIntentsTx({ tx, employeeId, photos, boundType, recordId, expectedContainer, expectedBlobPath }) {
   if (!Array.isArray(photos) || photos.length === 0) return { bound: 0, expected: 0 };
   if (!tx || !tx.uploadIntent || typeof tx.uploadIntent.updateMany !== 'function') {
     return { bound: 0, expected: 0 }; // see "Graceful degradation" above
@@ -372,9 +393,18 @@ async function bindPhotoIntentsTx({ tx, employeeId, photos, boundType, recordId 
   const ulids = uniqueUlids(photos);
   if (ulids.length === 0) return { bound: 0, expected: 0 };
 
+  // [DR-001] Same path/container equality check. The atomic updateMany
+  // guard MUST match the predicate used by `assertPhotoIntentsBindable`,
+  // otherwise a row could pass the assert (findMany) but be missed by
+  // the updateMany — exactly the silent-orphan path the transaction is
+  // trying to close.
+  const where = { employeeId, ulid: { in: ulids }, status: 'CONFIRMED' };
+  if (expectedContainer) where.container = expectedContainer;
+  if (expectedBlobPath) where.blobPath = expectedBlobPath;
+
   const result = await tx.uploadIntent.updateMany({
     // `status: 'CONFIRMED'` is the atomic guard — see the DR-006 block above.
-    where: { employeeId, ulid: { in: ulids }, status: 'CONFIRMED' },
+    where,
     data: { boundType, boundAt: new Date() },
   });
   const bound = (result && typeof result.count === 'number') ? result.count : 0;

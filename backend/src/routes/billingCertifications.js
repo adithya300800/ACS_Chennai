@@ -959,11 +959,18 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
   let intentWrapper = null;
   if (body.blobPath && body.uploadIntentUlid) {
     intentWrapper = [{ ulid: body.uploadIntentUlid }];
+    // [DR-001] Path/container equality check — billing certifications
+    // upload to `dpr-documents` (the curated document bucket, shared
+    // with drawings and project attachments). Without this equality
+    // check, a caller could reuse any of their own CONFIRMED intents
+    // and bind it to a blobPath the intent never vouched for.
     const intentErr = await validatePhotoIntents({
       prisma,
       employeeId: req.employeeId,
       photos: intentWrapper,
       context: 'billingCertification.create',
+      expectedContainer: 'dpr-documents',
+      expectedBlobPath: body.blobPath,
     });
     if (intentErr) {
       // [DR-020] Intent validation is a recoverable 4xx — drop the
@@ -1034,7 +1041,13 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
     // rolls back, the client gets 409 and re-uploads.
     const row = await withRecordTransaction(prisma, 'billingCertification', async (db) => {
       if (intentWrapper) {
-        await assertPhotoIntentsBindable({ tx: db, employeeId: req.employeeId, photos: intentWrapper });
+        await assertPhotoIntentsBindable({
+          tx: db,
+          employeeId: req.employeeId,
+          photos: intentWrapper,
+          expectedContainer: 'dpr-documents',
+          expectedBlobPath: body.blobPath,
+        });
       }
       const created = await db.billingCertification.create({ data });
       if (intentWrapper) {
@@ -1044,6 +1057,8 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
           photos: intentWrapper,
           boundType: 'billingCertification',
           recordId: created.id,
+          expectedContainer: 'dpr-documents',
+          expectedBlobPath: body.blobPath,
         });
       }
       return created;

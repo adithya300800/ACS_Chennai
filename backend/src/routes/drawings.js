@@ -520,11 +520,18 @@ router.post('/', requireAuth, asyncHandler(async (req, res) => {
   let intentWrapper = null;
   if (data.pdfBlobPath && data.uploadIntentUlid) {
     intentWrapper = [{ ulid: data.uploadIntentUlid }];
+    // [DR-001] Path/container equality check — drawings always upload
+    // to `dpr-documents` (see blobStorage.js#91), so the intent MUST
+    // claim that same bucket AND that exact blobPath. Without this,
+    // an admin could reuse another intent that happens to belong to
+    // them but lives in a different bucket/key.
     const intentErr = await validatePhotoIntents({
       prisma,
       employeeId: req.employeeId,
       photos: intentWrapper,
       context: 'drawing.create',
+      expectedContainer: 'dpr-documents',
+      expectedBlobPath: data.pdfBlobPath,
     });
     if (intentErr) return res.status(intentErr.status).json(intentErr.body);
   }
@@ -538,7 +545,13 @@ router.post('/', requireAuth, asyncHandler(async (req, res) => {
     // the whole tx rolls back, no half-saved drawing.
     const drawing = await withRecordTransaction(prisma, 'drawing', async (db) => {
       if (intentWrapper) {
-        await assertPhotoIntentsBindable({ tx: db, employeeId: req.employeeId, photos: intentWrapper });
+        await assertPhotoIntentsBindable({
+          tx: db,
+          employeeId: req.employeeId,
+          photos: intentWrapper,
+          expectedContainer: 'dpr-documents',
+          expectedBlobPath: data.pdfBlobPath,
+        });
       }
 
       // [DR-009] Claim the predecessor with a conditional update so two
@@ -593,6 +606,8 @@ router.post('/', requireAuth, asyncHandler(async (req, res) => {
           photos: intentWrapper,
           boundType: 'drawing',
           recordId: created.id,
+          expectedContainer: 'dpr-documents',
+          expectedBlobPath: data.pdfBlobPath,
         });
       }
 
