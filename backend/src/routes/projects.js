@@ -569,8 +569,20 @@ router.get('/', asyncHandler(async (req, res) => {
       // silently — meaning `?scope=mine` returned zero DPR-discovered
       // names for every employee. The fix is to filter on the real
       // column (`submittedById`).
+      //
+      // [DR-032 round-35.5] Tightened to `projectId: null` so the
+      // discovered list reflects TRUE orphans only. Previously the
+      // distinct query was over the full table — a stale non-orphan
+      // row (projectId=<other>, projectName=<source>) kept the source
+      // name in Discovered even after a merge cleared all orphan rows
+      // with that name. The merge endpoint's WHERE also locks to
+      // projectId:null, so a merge genuinely removing orphans now
+      // drops the source from this list. Behaviour for non-all scopes
+      // is unchanged in spirit (still scoped to the requester's
+      // submittedById) — only the orphan lock is added.
       scope === 'all'
         ? prisma.dPR.findMany({
+            where: { projectId: null },
             distinct: ['projectName'],
             select: { projectName: true },
             orderBy: { projectName: 'asc' },
@@ -582,8 +594,8 @@ router.get('/', asyncHandler(async (req, res) => {
             return [];
           })
         : prisma.dPR.findMany({
+            where: { projectId: null, submittedById: req.employeeId },
             distinct: ['projectName'],
-            where: { submittedById: req.employeeId },
             select: { projectName: true },
             orderBy: { projectName: 'asc' },
           }).catch((err) => {
@@ -598,15 +610,20 @@ router.get('/', asyncHandler(async (req, res) => {
       // should see that name in their dropdown, even if they never filed
       // a DPR against it. Scope=all ALSO pulls org-wide inspection names
       // so admins see a complete org-wide discovered list.
+      //
+      // [DR-032 round-35.5] Same orphan lock as the DPR query above —
+      // non-orphan rows with a stale projectName don't keep the source
+      // alive in Discovered after a merge.
       scope === 'all'
         ? prisma.inspectionRecord.findMany({
+            where: { projectId: null },
             distinct: ['projectName'],
             select: { projectName: true },
             orderBy: { projectName: 'asc' },
           }).catch(() => [])
         : prisma.inspectionRecord.findMany({
+            where: { projectId: null, submittedById: req.employeeId },
             distinct: ['projectName'],
-            where: { submittedById: req.employeeId },
             select: { projectName: true },
             orderBy: { projectName: 'asc' },
           }).catch(() => []),
