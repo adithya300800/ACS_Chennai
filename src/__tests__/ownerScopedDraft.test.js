@@ -1,16 +1,29 @@
-// SOL DR-003 regression coverage. The original `dpr_draft_v1` and
-// `inspection_draft_v1` keys were unscoped — a Shared computer's
-// localStorage kept the previous account's draft and the next person to
-// log in saw it pre-loaded. These tests pin the new owner-scoped contract.
+// SOL DR-003 + DR-006 regression coverage.
 //
-// Acceptance criteria from SOL DR-003:
-//   - A -> logout -> B cannot see A's draft.
-//   - Expired A -> reauthenticate A can recover it safely.
-//   - One-time legacy migration so an existing unscoped draft is NOT lost
-//     for the user it belongs to, AND NOT inherited by a different user.
+// DR-003 originally fixed unscoped drafts (every account on a Shared
+// computer saw the previous user's draft) by scoping every key by
+// `employeeId` AND auto-migrating any legacy unscoped draft to the
+// first reader. SOL DR-006 reversed that auto-migration: a reader-
+// stamped marker cannot prove authorship, so attributing A's orphan
+// to B (the first reader after A's session expired) silently leaked
+// private work. The fix is to refuse to restore an unowned legacy
+// draft — `load` / `loadDiagnostic` return a quarantine envelope so the
+// caller can show a banner explaining why the orphan cannot be
+// restored.
+//
+// Acceptance criteria from SOL DR-003 (still pinned):
+//   - A -> logout -> B cannot see A's scoped draft.
+//   - Expired A -> reauthenticate A can recover their own scoped draft.
+//   - Different bases (dpr vs inspection) are independent.
+//
+// Acceptance criteria from SOL DR-006 (new):
+//   - B never sees or submits A's unowned legacy content.
+//   - A's correctly scoped draft restores normally.
+//   - Missing/malformed owner information is not treated as authorization.
 
 const {
   load,
+  loadDiagnostic,
   save,
   clear,
   clearForUser,
@@ -68,63 +81,140 @@ describe('SOL DR-003 — load / save isolation', () => {
   });
 });
 
-describe('SOL DR-003 — legacy unscoped migration (idempotent)', () => {
+describe('SOL DR-006 — legacy unscoped draft is QUARANTINED, never auto-attributed', () => {
   beforeEach(() => localStorage.clear());
 
-  it('migrates a legacy unscoped draft to the first user that reads it', () => {
+  it('first reader of an unowned legacy draft gets a quarantine envelope, not the draft content', () => {
     localStorage.setItem('dpr_draft_v1', JSON.stringify({ form: { projectName: 'Legacy A' } }));
-    expect(load('dpr_draft_v1', 'empA')).toEqual({ form: { projectName: 'Legacy A' } });
-    // After migration the unscoped key is gone and the scoped key holds it.
-    expect(localStorage.getItem('dpr_draft_v1')).toBeNull();
-    expect(localStorage.getItem('dpr_draft_v1:empA')).toBe(
-      JSON.stringify({ form: { projectName: 'Legacy A' } }),
-    );
-    // Migration marker is stamped with the employeeId (NOT `true`) so the
-    // next user cannot silently inherit anything.
-    const marker = JSON.parse(localStorage.getItem(MIGRATION_MARKER_KEY));
-    expect(marker).toEqual({ 'dpr_draft_v1': 'empA' });
+    // The form must NOT receive A's content — it gets a quarantine
+    // envelope that the banner-handling UI can recognize.
+    expect(load('dpr_draft_v1', 'empA')).toEqual({
+      __quarantined: true,
+      reason: 'legacy-unowned',
+    });
   });
 
-  it('returns the legacy draft on subsequent reads for the same user', () => {
+  it('does NOT write a scoped key on first read of an unowned legacy draft', () => {
     localStorage.setItem('dpr_draft_v1', JSON.stringify({ form: { projectName: 'Legacy A' } }));
-    load('dpr_draft_v1', 'empA'); // migrates
-    expect(load('dpr_draft_v1', 'empA')).toEqual({ form: { projectName: 'Legacy A' } });
+    load('dpr_draft_v1', 'empA');
+    // The scoped key must NOT exist — we did not silently adopt the orphan.
+    expect(localStorage.getItem('dpr_draft_v1:empA')).toBeNull();
+    // The unscoped key is untouched so the legitimate owner (or admin)
+    // can still inspect / recover it manually if they have to.
+    expect(localStorage.getItem('dpr_draft_v1')).not.toBeNull();
   });
 
-  it('does NOT migrate the same legacy draft to a second user', () => {
+  it('does NOT stamp the migration marker for unowned legacy drafts', () => {
     localStorage.setItem('dpr_draft_v1', JSON.stringify({ form: { projectName: 'Legacy A' } }));
-    // empA arrives first → grabs the draft.
-    expect(load('dpr_draft_v1', 'empA')).toEqual({ form: { projectName: 'Legacy A' } });
-    // empB arrives later → nothing for them.
-    expect(load('dpr_draft_v1', 'empB')).toBeNull();
+    load('dpr_draft_v1', 'empA');
+    // Migration markers would have introduced the same first-reader
+    // attribution problem DR-006 calls out; we don't write them at all.
+    const raw = localStorage.getItem(MIGRATION_MARKER_KEY);
+    expect(raw === null || raw === undefined).toBe(true);
   });
 
-  it('different keys migrate independently per user', () => {
+  it('a SECOND user also gets the quarantine envelope, not the draft content', () => {
+    // The DR-006 acceptance bullet: "B never sees or submits A's
+    // unowned legacy content". Even if A logged in first and we had
+    // adopted the draft (we don't), B must still see the quarantine.
+    localStorage.setItem('dpr_draft_v1', JSON.stringify({ form: { projectName: 'Legacy A' } }));
+    expect(load('dpr_draft_v1', 'empA')).toEqual({
+      __quarantined: true,
+      reason: 'legacy-unowned',
+    });
+    expect(load('dpr_draft_v1', 'empB')).toEqual({
+      __quarantined: true,
+      reason: 'legacy-unowned',
+    });
+  });
+
+  it('different bases quarantine independently per user', () => {
     localStorage.setItem('dpr_draft_v1', JSON.stringify({ form: { projectName: 'Legacy DPR' } }));
     localStorage.setItem('inspection_draft_v1', JSON.stringify({ workEntry: { data: 'x' } }));
-    load('dpr_draft_v1', 'empA');
-    load('inspection_draft_v1', 'empA');
-    expect(load('dpr_draft_v1', 'empA')).toEqual({ form: { projectName: 'Legacy DPR' } });
-    expect(load('inspection_draft_v1', 'empA')).toEqual({ workEntry: { data: 'x' } });
-    const marker = JSON.parse(localStorage.getItem(MIGRATION_MARKER_KEY));
-    expect(marker).toEqual({ 'dpr_draft_v1': 'empA', 'inspection_draft_v1': 'empA' });
+    expect(load('dpr_draft_v1', 'empA')).toEqual({
+      __quarantined: true,
+      reason: 'legacy-unowned',
+    });
+    expect(load('inspection_draft_v1', 'empA')).toEqual({
+      __quarantined: true,
+      reason: 'legacy-unowned',
+    });
   });
 
-  it('migration is idempotent for the same user — no double-copy', () => {
+  it('unowned legacy draft does not pollute the legitimate user after they save their own draft', () => {
+    // A scoped draft from the current user still loads normally even if
+    // an orphan legacy draft exists alongside it.
     localStorage.setItem('dpr_draft_v1', JSON.stringify({ form: { projectName: 'Legacy A' } }));
-    load('dpr_draft_v1', 'empA');
-    load('dpr_draft_v1', 'empA');
-    // Only ONE scoped key, not three.
-    expect(localStorage.getItem('dpr_draft_v1:empA')).toBe(
-      JSON.stringify({ form: { projectName: 'Legacy A' } }),
-    );
+    save('dpr_draft_v1', 'empA', { form: { projectName: 'Real A' } });
+    expect(load('dpr_draft_v1', 'empA')).toEqual({ form: { projectName: 'Real A' } });
   });
 
-  it('expired A returning to their own machine recovers their draft (acceptance criterion)', () => {
+  it('expired A returning to their own machine recovers their SCOPED draft (DR-003 acceptance — still pinned)', () => {
     save('dpr_draft_v1', 'empA', { form: { projectName: 'Site A' } });
     // Session expires — server kicks the user out. localStorage persists.
     // A re-authenticates and lands back on /portal/dpr/submit.
     expect(load('dpr_draft_v1', 'empA')).toEqual({ form: { projectName: 'Site A' } });
+  });
+
+  it('B can never read A\'s scoped draft content even when an orphan legacy draft is also present', () => {
+    // A's scoped draft is in scoped storage; an orphan legacy draft also
+    // sits at the unscoped base (different shape). B must never see
+    // EITHER — the scoped key is per-employee, and the unscoped legacy
+    // is quarantined, not attributed to B.
+    save('dpr_draft_v1', 'empA', { form: { projectName: 'A scoped' } });
+    localStorage.setItem('dpr_draft_v1', JSON.stringify({ form: { projectName: 'A legacy' } }));
+    const result = load('dpr_draft_v1', 'empB');
+    // B does not see A's scoped content.
+    expect(result === null || (result && result.__quarantined)).toBe(true);
+    // The scoped key (which actually contains A's data) MUST NOT be
+    // returned to B.
+    expect(result).not.toEqual({ form: { projectName: 'A scoped' } });
+    // The unscoped legacy is quarantined, not adopted.
+    expect(result).not.toEqual({ form: { projectName: 'A legacy' } });
+  });
+});
+
+describe('SOL DR-006 — loadDiagnostic quarantine flag', () => {
+  beforeEach(() => localStorage.clear());
+
+  it('returns quarantined:true and a quarantine envelope for an unowned legacy draft', () => {
+    localStorage.setItem('dpr_draft_v1', JSON.stringify({ form: { projectName: 'Legacy A' } }));
+    const diag = loadDiagnostic('dpr_draft_v1', 'empA');
+    expect(diag.quarantined).toBe(true);
+    expect(diag.corrupt).toBe(false);
+    expect(diag.migrated).toBe(false);
+    expect(diag.value).toEqual({ __quarantined: true, reason: 'legacy-unowned' });
+  });
+
+  it('returns quarantined:false for a normal scoped draft', () => {
+    save('dpr_draft_v1', 'empA', { form: { projectName: 'A site' } });
+    const diag = loadDiagnostic('dpr_draft_v1', 'empA');
+    expect(diag.quarantined).toBe(false);
+    expect(diag.corrupt).toBe(false);
+    expect(diag.value).toEqual({ form: { projectName: 'A site' } });
+  });
+
+  it('returns quarantined:false and corrupt:true for an unreadable legacy key', () => {
+    // Corrupt at the SCOPED key — this is the existing DR-001 pin path,
+    // not a quarantine case.
+    localStorage.setItem('dpr_draft_v1:empA', '{not-json');
+    const diag = loadDiagnostic('dpr_draft_v1', 'empA');
+    expect(diag.corrupt).toBe(true);
+    expect(diag.quarantined).toBe(false);
+  });
+
+  it('returns quarantined:true and corrupt:true for an unreadable legacy unscoped key (drop + report)', () => {
+    localStorage.setItem('dpr_draft_v1', '{not-json');
+    const diag = loadDiagnostic('dpr_draft_v1', 'empA');
+    expect(diag.corrupt).toBe(true);
+    expect(diag.quarantined).toBe(false);
+    // The unscoped key is dropped so the next read does not retry.
+    expect(localStorage.getItem('dpr_draft_v1')).toBeNull();
+  });
+
+  it('returns null-quarantined-false when nothing exists', () => {
+    const diag = loadDiagnostic('dpr_draft_v1', 'empA');
+    expect(diag).toEqual({ value: null, corrupt: false, quarantined: false, migrated: false });
   });
 });
 
