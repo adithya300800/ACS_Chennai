@@ -209,7 +209,11 @@ export default function ProjectsAdmin() {
           discovered={discovered}
           onRequestDelete={setPendingDelete}
           onRequestMerge={setPendingMerge}
-          onGoToDashboard={(name) => navigate(`/portal/admin/project-dashboard?project=${encodeURIComponent(name)}`)}
+          // DR-012 — emit the registered Project.id in the URL (not
+          // the name) so the dashboard's URL consumer matches the
+          // exact row. Decoded-name fallback in ProjectDashboard.jsx
+          // keeps old bookmarks / shared links alive.
+          onGoToDashboard={({ id }) => navigate(`/portal/admin/project-dashboard?project=${encodeURIComponent(id)}`)}
         />
       )}
 
@@ -462,7 +466,11 @@ function ProjectsList({ projects, discovered, onRequestDelete, onRequestMerge, o
                 key={p.id}
                 project={p}
                 onRequestDelete={onRequestDelete}
-                onGoToDashboard={() => onGoToDashboard(p.name)}
+                // DR-012 — pass id + name; the parent emits the id in
+                // the URL. Name is forwarded for any consumer that
+                // still needs it (none today, but the contract is
+                // small and forward-compatible).
+                onGoToDashboard={() => onGoToDashboard({ id: p.id, name: p.name })}
               />
             ))}
           </div>

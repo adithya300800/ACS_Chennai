@@ -436,6 +436,31 @@ export default function ProjectDashboard() {
   const [loadingKpis, setLoadingKpis] = useState(false);
   const [kpisError, setKpisError] = useState('');
 
+  // DR-012 — selection churn guard. Wrap setSelectedProject so an
+  // effect-driven re-evaluation (URL match, list reload) doesn't churn
+  // state for the same canonical project. Without this, every load
+  // re-issued the selection and the mount effect re-fired loadProjects
+  // + loadKpis (15 project-list + 14 KPI requests in 2,498ms while idle).
+  const setSelectedProjectIfChanged = useCallback((next) => {
+    setSelectedProject((prev) => {
+      if (!prev) return next;
+      if (prev.id && next.id && prev.id === next.id) return prev;
+      if (!prev.id && !next.id && prev.name === next.name) return prev;
+      return next;
+    });
+  }, []);
+
+  // DR-012 — mirror the selectedProject into a ref so loadProjects can
+  // consult it without having `selectedProject` in its deps. The deps
+  // entry was the loop source: every selection churn re-bound
+  // loadProjects, which re-fired the mount effect (which calls
+  // loadProjects again). Refs keep the callback stable across selection
+  // changes.
+  const selectedProjectRef = useRef(null);
+  useEffect(() => {
+    selectedProjectRef.current = selectedProject;
+  }, [selectedProject]);
+
   // Lookback window in days. 30 = default. "all" is sent as 365 — the
   // backend clamps to 365 and we surface that in the window sub-line.
   const [days, setDays] = useState(30);
@@ -492,11 +517,15 @@ export default function ProjectDashboard() {
       setProjects(list);
       setDiscovered(disc);
       // Auto-select first project (registered wins over discovered —
-      // they have richer metadata).
-      if (!selectedProject && list.length > 0) {
-        setSelectedProject({ id: list[0].id, name: list[0].name, isRegistered: true });
-      } else if (!selectedProject && disc.length > 0) {
-        setSelectedProject({ id: null, name: disc[0].name, isRegistered: false });
+      // they have richer metadata). Reads selectedProjectRef so this
+      // callback does NOT depend on selectedProject (DR-012 — was the
+      // source of the request cycle: selection churn re-bound
+      // loadProjects, which re-fired the mount effect, which called
+      // loadProjects + loadKpis again).
+      if (!selectedProjectRef.current && list.length > 0) {
+        setSelectedProjectIfChanged({ id: list[0].id, name: list[0].name, isRegistered: true });
+      } else if (!selectedProjectRef.current && disc.length > 0) {
+        setSelectedProjectIfChanged({ id: null, name: disc[0].name, isRegistered: false });
       }
     } catch (err) {
       if (!mountedRef.current) return;
@@ -505,31 +534,53 @@ export default function ProjectDashboard() {
     } finally {
       if (mountedRef.current) setLoadingProjects(false);
     }
-  }, [accessToken, toast, selectedProject]);
+  }, [accessToken, toast, setSelectedProjectIfChanged]);
 
-  // DR-014: consume `?project=<id-or-name>` after the project list lands.
-  // Matches in two passes — exact UUID against `projects`, then
-  // exact-decoded name against `discovered` (registry link uses
-  // encodeURIComponent(name)). When matched, this REPLACES the
-  // auto-selected first project so the URL controls the dashboard.
-  // Empty / no-match `?project=` falls through to the auto-select.
+  // DR-012 — consume `?project=<id-or-name>` after the project list lands.
+  // Three passes, in priority order:
+  //   1. Exact UUID match against registered projects (preferred — this
+  //      is what the registry button now emits).
+  //   2. Decoded name match against registered projects (legacy
+  //      bookmarks / shared links emitted encoded names).
+  //   3. Decoded name match against discovered (not-yet-registered)
+  //      names. Discovered entries have no id, so name is the only key.
+  // When matched, this REPLACES the auto-selected first project so the
+  // URL controls the dashboard. setSelectedProjectIfChanged guards
+  // against re-issuing the same selection (which would re-fire the
+  // load chain). Empty / no-match `?project=` falls through to the
+  // auto-select.
   useEffect(() => {
     if (!urlProject) return;
     if (projects.length === 0 && discovered.length === 0) return;
+    const decoded = decodeURIComponent(urlProject);
     const reg = projects.find((p) => p.id === urlProject);
     if (reg) {
-      setSelectedProject({ id: reg.id, name: reg.name, isRegistered: true });
+      setSelectedProjectIfChanged({ id: reg.id, name: reg.name, isRegistered: true });
       return;
     }
-    const disc = discovered.find((d) => encodeURIComponent(d.name) === urlProject);
-    if (disc) {
-      setSelectedProject({ id: null, name: disc.name, isRegistered: false });
+    const regByName = projects.find((p) => p.name === decoded);
+    if (regByName) {
+      setSelectedProjectIfChanged({ id: regByName.id, name: regByName.name, isRegistered: true });
+      return;
     }
-  }, [urlProject, projects, discovered]);
+    const disc = discovered.find((d) => d.name === decoded);
+    if (disc) {
+      setSelectedProjectIfChanged({ id: null, name: disc.name, isRegistered: false });
+    }
+  }, [urlProject, projects, discovered, setSelectedProjectIfChanged]);
 
-  // KPI fetch — depends on (selectedProject, days). Aborts on unmount.
+  // DR-012 — KPI request epoch. Each load increments the counter; an
+  // older in-flight load bails out in its then()/catch instead of
+  // overwriting fresh state. Same pattern as InlineDrillPanel's
+  // epochRef below — applied to the top-level KPI load so a delayed
+  // response for project A can't overwrite current project B.
+  const kpiEpochRef = useRef(0);
+
+  // KPI fetch — depends on (selectedProject, days). Aborts on unmount
+  // and on superseded requests (epoch mismatch).
   const loadKpis = useCallback(async () => {
     if (!selectedProject) return;
+    const myEpoch = ++kpiEpochRef.current;
     setLoadingKpis(true);
     setKpisError('');
     try {
@@ -538,7 +589,7 @@ export default function ProjectDashboard() {
       // inside api.getProjectKpis handles spaces + slashes.
       const ref = selectedProject.id || selectedProject.name;
       const data = await api.getProjectKpis(ref, days, accessToken);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || myEpoch !== kpiEpochRef.current) return; // stale or unmounted
       setKpis(data);
       // If the backend reported warnings (a sibling roll-up failed),
       // surface the first one as a non-blocking toast. The dashboard
@@ -551,25 +602,36 @@ export default function ProjectDashboard() {
         );
       }
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || myEpoch !== kpiEpochRef.current) return; // stale or unmounted
       const msg = err?.message || 'Failed to load KPIs';
       setKpisError(msg);
       toast.push(msg, 'error');
     } finally {
-      if (mountedRef.current) setLoadingKpis(false);
+      if (mountedRef.current && myEpoch === kpiEpochRef.current) setLoadingKpis(false);
     }
   }, [selectedProject, days, accessToken, toast]);
+
+  // DR-012 — separate mount/visibility-listener ownership from
+  // selection churn. The previous effect re-bound whenever loadProjects
+  // or loadKpis changed identity, and (because selectedProject was in
+  // loadProjects' deps) every selection churn re-registered the
+  // visibility listener and re-fired the initial fetch. We now mirror
+  // the loaders into refs so this effect runs exactly once at mount.
+  const loadProjectsRef = useRef(null);
+  const loadKpisRef = useRef(null);
+  useEffect(() => { loadProjectsRef.current = loadProjects; }, [loadProjects]);
+  useEffect(() => { loadKpisRef.current = loadKpis; }, [loadKpis]);
 
   // Effects — mount guard + refresh-on-focus so a quick review + back
   // shows fresh counts without a manual reload (same pattern as
   // AdminOverview).
   useEffect(() => {
     mountedRef.current = true;
-    loadProjects();
+    loadProjectsRef.current?.();
     const onVis = () => {
       if (document.visibilityState === 'visible') {
-        loadProjects();
-        loadKpis();
+        loadProjectsRef.current?.();
+        loadKpisRef.current?.();
       }
     };
     document.addEventListener('visibilitychange', onVis);
@@ -577,10 +639,7 @@ export default function ProjectDashboard() {
       mountedRef.current = false;
       document.removeEventListener('visibilitychange', onVis);
     };
-  // We intentionally re-bind this effect when loadProjects/loadKpis
-  // identities change so the visibility handler always sees the freshest
-  // closures (avoids the "stale callback" trap after login).
-  }, [loadProjects, loadKpis]);
+  }, []);
 
   // When the selection or window changes, kick a fresh KPI load. The
   // mountedRef guard inside loadKpis prevents a race between the old
@@ -628,10 +687,10 @@ export default function ProjectDashboard() {
               if (!v) return;
               // Selector values: UUID for registered, "name:<x>" for discovered.
               if (v.startsWith('name:')) {
-                setSelectedProject({ id: null, name: v.slice(5), isRegistered: false });
+                setSelectedProjectIfChanged({ id: null, name: v.slice(5), isRegistered: false });
               } else {
                 const p = projects.find((x) => x.id === v);
-                if (p) setSelectedProject({ id: p.id, name: p.name, isRegistered: true });
+                if (p) setSelectedProjectIfChanged({ id: p.id, name: p.name, isRegistered: true });
               }
             }}
             disabled={loadingProjects}

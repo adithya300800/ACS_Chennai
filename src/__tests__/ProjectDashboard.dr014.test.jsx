@@ -33,16 +33,18 @@ const projectsAdminSource = readFileSync(projectsAdminPath, 'utf8');
 // ──── Behavioural mirror: ?project= → selectedProject resolution ──────────
 //
 // Production: loadProjects populates `projects` + `discovered`, then a
-// useEffect scans them in two passes (id match, then name match with
-// encodeURIComponent) and calls setSelectedProject. We mirror that here
-// so the test pins the resolution order without a full mount.
+// useEffect scans them in three passes (id match, decoded-name match
+// against registered, decoded-name match against discovered — DR-012)
+// and calls setSelectedProjectIfChanged. We mirror that here so the
+// test pins the resolution order without a full mount.
 function resolveProjectFromUrl(urlProject, projects, discovered) {
   if (!urlProject) return null;
+  const decoded = decodeURIComponent(urlProject);
   const reg = (projects || []).find((p) => p.id === urlProject);
   if (reg) return { id: reg.id, name: reg.name, isRegistered: true };
-  const disc = (discovered || []).find(
-    (d) => encodeURIComponent(d.name) === urlProject,
-  );
+  const regByName = (projects || []).find((p) => p.name === decoded);
+  if (regByName) return { id: regByName.id, name: regByName.name, isRegistered: true };
+  const disc = (discovered || []).find((d) => d.name === decoded);
   if (disc) return { id: null, name: disc.name, isRegistered: false };
   return null;
 }
@@ -80,24 +82,33 @@ describe('ProjectDashboard — DR-014 selection-from-URL', () => {
       // (projects + discovered) being non-empty. A regression that
       // resolves synchronously inside the render would race the
       // fetch and always auto-select.
+      // DR-012 updated the deps to also list
+      // setSelectedProjectIfChanged so the effect re-runs when the
+      // guard identity changes.
       expect(dashboardSource).toMatch(
-        /useEffect\(\s*\(\)\s*=>\s*\{[\s\S]*?urlProject[\s\S]*?projects[\s\S]*?discovered[\s\S]*?\},\s*\[urlProject,\s*projects,\s*discovered\]\s*\)/,
+        /useEffect\(\s*\(\)\s*=>\s*\{[\s\S]*?urlProject[\s\S]*?projects[\s\S]*?discovered[\s\S]*?\},\s*\[urlProject,\s*projects,\s*discovered(?:,\s*setSelectedProjectIfChanged)?\]\s*\)/,
       );
     });
 
-    test('resolves urlProject against projects by id FIRST, then discovered by encoded name', () => {
+    test('resolves urlProject against projects by id FIRST, then discovered by name (decoded)', () => {
       // The two-pass match is the contract — id first because the
       // canonical selector for registered projects is the UUID; the
-      // discovered pass only fires for the registry link's
-      // encodeURIComponent(name) form.
+      // discovered pass fires for the registry link's name form.
+      // DR-012 changed the second pass from a per-row
+      // encodeURIComponent(d.name) === urlProject check to a single
+      // upfront decodeURIComponent(urlProject) === d.name check
+      // (so the same decoded value also feeds the registered-by-name
+      // legacy pass).
       const effectBlock = dashboardSource.match(
-        /useEffect\(\s*\(\)\s*=>\s*\{[\s\S]*?urlProject[\s\S]*?\},\s*\[urlProject,\s*projects,\s*discovered\]\s*\)/,
+        /useEffect\(\s*\(\)\s*=>\s*\{[\s\S]*?urlProject[\s\S]*?\},\s*\[urlProject,\s*projects,\s*discovered(?:,\s*setSelectedProjectIfChanged)?\]\s*\)/,
       );
       expect(effectBlock).toBeTruthy();
       const body = effectBlock[0];
       // Id match precedes name match (string-index check).
       const idIdx = body.search(/projects\.find\(\s*\(p\)\s*=>\s*p\.id\s*===\s*urlProject\s*\)/);
-      const nameIdx = body.search(/discovered\.find\(\s*\(d\)\s*=>\s*encodeURIComponent/);
+      // DR-012: name match uses the up-front decoded value, not a
+      // per-row encodeURIComponent call.
+      const nameIdx = body.search(/discovered\.find\(\s*\(d\)\s*=>\s*d\.name\s*===\s*decoded\s*\)/);
       expect(idIdx).toBeGreaterThan(-1);
       expect(nameIdx).toBeGreaterThan(-1);
       expect(idIdx).toBeLessThan(nameIdx);
@@ -174,11 +185,14 @@ describe('ProjectDashboard — DR-014 dpr.pendingReview drill contract', () => {
       // Click-through acceptance: the panel footer must still navigate
       // to /portal/admin/dpr with the projectId filter. The DR-014
       // fix changes the LOADER; the link contract is preserved.
+      // Source-text pin matches the URLSearchParams object key
+      // (`projectId: idParam`) — serialization produces `projectId=`
+      // at runtime, but the source uses colon syntax.
       const tileBlock = dashboardSource.match(
         /'dpr\.pendingReview':\s*\{[\s\S]*?\},\s*\n\s*'dpr\.approved'/,
       );
       expect(tileBlock[0]).toMatch(/\/portal\/admin\/dpr\?/);
-      expect(tileBlock[0]).toMatch(/projectId=/);
+      expect(tileBlock[0]).toMatch(/projectId/);
     });
   });
 });
