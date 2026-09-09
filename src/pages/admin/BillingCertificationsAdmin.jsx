@@ -124,7 +124,22 @@ export default function BillingCertificationsAdmin() {
   const [contractorName, setContractorName] = useState('');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
-  const [aggregates, setAggregates] = useState([]); // per-project totals
+  // [DR-029] Aggregate panel state — tracks load status + the most recent
+  // good snapshot so the per-project totals refresh on every mutation
+  // (create / certify / dispute / correct / archive) and a late or failed
+  // request can't overwrite newer data. `data` is the last-known good
+  // payload, used by the panel even when the latest request errors out
+  // (so a transient 503 doesn't blank out the dashboard).
+  const [aggregateState, setAggregateState] = useState({
+    status: 'idle', // 'idle' | 'loading' | 'ok' | 'error'
+    data: [],
+    error: null,
+  });
+  // Monotonic request id — incremented on every aggregate fetch. The
+  // response handler checks `aggregateReqIdRef.current` against the id
+  // captured at request start; if a newer request fired while this one
+  // was in flight, we discard the result.
+  const aggregateReqIdRef = useRef(0);
 
   // Pagination + data state.
   const [certs, setCerts] = useState([]);
@@ -215,25 +230,45 @@ export default function BillingCertificationsAdmin() {
     fetchCerts();
   }, [fetchCerts, employee?.isAdmin]);
 
-  // Aggregates (per-project totals) — fetched in the background whenever
-  // the project filter changes. Kept separate from the list so a heavy
-  // status filter doesn't reset the aggregates view.
+  // [DR-029] Aggregates (per-project totals) — extracted from the original
+  // useEffect so the mutation handlers (create / certify / dispute /
+  // correct / archive) can invoke the same loader. Guarded by a
+  // monotonic request id so a late response from an older call can't
+  // clobber the newer one. Errors are surfaced to the UI as
+  // stale/error + Retry instead of being swallowed to the console, so a
+  // 503 doesn't leave the panel showing a 2-minute-old count.
+  const fetchAggregates = useCallback(async () => {
+    const reqId = ++aggregateReqIdRef.current;
+    setAggregateState((prev) => ({ ...prev, status: 'loading', error: null }));
+    try {
+      const params = {};
+      if (fromDate) params.from = fromDate;
+      if (toDate) params.to = toDate;
+      const data = await api.getBillingCertificationAggregates(params, accessToken);
+      // Stale-response guard: a newer request fired while this one was
+      // in flight. Discard — the newer call will own the state.
+      if (reqId !== aggregateReqIdRef.current) return;
+      setAggregateState({
+        status: 'ok',
+        data: data?.projects || [],
+        error: null,
+      });
+    } catch (err) {
+      if (reqId !== aggregateReqIdRef.current) return;
+      // Keep the last good `data` so the panel stays renderable; just
+      // mark the status as error so the banner + Retry appear.
+      setAggregateState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: err?.message || 'Failed to refresh aggregates',
+      }));
+    }
+  }, [accessToken, fromDate, toDate]);
+
   useEffect(() => {
     if (!employee?.isAdmin) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const params = {};
-        if (fromDate) params.from = fromDate;
-        if (toDate) params.to = toDate;
-        const data = await api.getBillingCertificationAggregates(params, accessToken);
-        if (!cancelled) setAggregates(data?.projects || []);
-      } catch (err) {
-        if (!cancelled) console.warn('[billing-cert] aggregates load failed', err?.message);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [accessToken, fromDate, toDate]);
+    fetchAggregates();
+  }, [fetchAggregates, employee?.isAdmin]);
 
   // ─── Filter handlers ───────────────────────────────────────────────
   function clearAllFilters() {
@@ -274,6 +309,9 @@ export default function BillingCertificationsAdmin() {
       // If the detail modal is open on this row, update it in place; otherwise refetch the list.
       if (detailCert && detailCert.id === cert.id) setDetailCert(updated);
       await fetchCerts();
+      // [DR-029] Re-pull per-project aggregates so the panel reflects
+      // the new status split without a manual reload.
+      await fetchAggregates();
     } catch (err) {
       toast.push(err?.message || 'Failed to certify', 'error');
     } finally {
@@ -303,6 +341,9 @@ export default function BillingCertificationsAdmin() {
       setDisputeOpen(null);
       setDisputeReason('');
       await fetchCerts();
+      // [DR-029] Correction creates a new DRAFT row + supersedes the
+      // original — the aggregate count and status mix both change.
+      await fetchAggregates();
     } catch (err) {
       // 409 SUPERSEDED — the original was already superseded by
       // another admin's correction. Refetch and surface a helpful
@@ -311,6 +352,8 @@ export default function BillingCertificationsAdmin() {
       if (code === 'SUPERSEDED') {
         toast.push('This certification is already superseded. Opening the latest version.', 'warning');
         await fetchCerts();
+        // [DR-029] Supersede path also mutates the project totals.
+        await fetchAggregates();
       } else {
         toast.push(err?.message || err?.body?.message || 'Failed to start correction', 'error');
       }
@@ -335,6 +378,9 @@ export default function BillingCertificationsAdmin() {
       setDisputeOpen(null);
       setDisputeReason('');
       await fetchCerts();
+      // [DR-029] Dispute moves a row from CERTIFIED → DISPUTED in the
+      // aggregate breakdown.
+      await fetchAggregates();
     } catch (err) {
       toast.push(err?.message || 'Failed to dispute', 'error');
     } finally {
@@ -352,6 +398,10 @@ export default function BillingCertificationsAdmin() {
       setConfirmDelete(null);
       if (detailCert && detailCert.id === confirmDelete.id) setDetailCert(null);
       await fetchCerts();
+      // [DR-029] Archive (soft delete) removes the row from the
+      // aggregate's active set — the panel's per-project count drops
+      // immediately, no manual reload required.
+      await fetchAggregates();
     } catch (err) {
       toast.push(err?.message || 'Failed to archive', 'error');
     } finally {
@@ -757,36 +807,80 @@ export default function BillingCertificationsAdmin() {
       )}
 
       {/* ─── Per-project aggregates (collapsible list) ─────────────────── */}
-      {aggregates.length > 0 && (
-        <details className="dpr-card" style={{ marginTop: '1rem' }}>
+      {/* [DR-029] Panel renders whenever we have data OR an error to
+          surface. A failed refresh keeps the last good totals on screen
+          and tacks on a "couldn't refresh — Retry" banner instead of
+          silently going blank. */}
+      {(aggregateState.data.length > 0 || aggregateState.status === 'error') && (
+        <details
+          className="dpr-card"
+          data-testid="bc-aggregates-panel"
+          style={{ marginTop: '1rem' }}
+        >
           <summary style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--navy)' }}>
-            Per-project totals ({aggregates.length})
+            Per-project totals ({aggregateState.data.length})
+            {aggregateState.status === 'loading' && (
+              <span style={{ marginLeft: '0.5rem', fontSize: '0.75rem', color: 'var(--steel)', fontWeight: 400 }}>
+                · refreshing…
+              </span>
+            )}
           </summary>
-          <div style={{ marginTop: '0.6rem', display: 'grid', gap: '0.4rem' }}>
-            {aggregates.map((row) => (
-              <div
-                key={row.projectId}
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '2fr repeat(4, 1fr)',
-                  gap: '0.5rem',
-                  fontSize: '0.82rem',
-                  alignItems: 'center',
-                  padding: '0.3rem 0',
-                  borderBottom: '1px solid #f1f5f9',
-                }}
+          {aggregateState.status === 'error' && (
+            <div
+              role="alert"
+              data-testid="bc-aggregates-stale"
+              style={{
+                marginTop: '0.6rem',
+                padding: '0.5rem 0.75rem',
+                background: '#fef2f2',
+                border: '1px solid #fecaca',
+                borderRadius: 6,
+                fontSize: '0.8rem',
+                color: '#7f1d1d',
+                display: 'flex',
+                gap: '0.75rem',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+              }}
+            >
+              <span>Couldn't refresh per-project totals — showing last known values. ({aggregateState.error})</span>
+              <button
+                type="button"
+                className="btn btn-sm"
+                style={{ background: '#b91c1c', color: 'white', border: 'none' }}
+                onClick={() => fetchAggregates()}
               >
-                <span style={{ color: 'var(--navy)', fontWeight: 600 }}>
-                  {row.projectName}
-                  {row.projectCode ? <span style={{ color: 'var(--steel)', fontWeight: 400 }}> ({row.projectCode})</span> : null}
-                </span>
-                <span style={{ color: 'var(--steel)' }}>{row.totals.count} bill{row.totals.count !== 1 ? 's' : ''}</span>
-                <span>{formatAmount(row.totals.totalClaimed)}</span>
-                <span style={{ color: '#b91c1c' }}>−{formatAmount(row.totals.totalDeducted)}</span>
-                <span style={{ fontWeight: 700, color: '#166534' }}>{formatAmount(row.totals.totalCertified)}</span>
-              </div>
-            ))}
-          </div>
+                Retry
+              </button>
+            </div>
+          )}
+          {aggregateState.data.length > 0 && (
+            <div style={{ marginTop: '0.6rem', display: 'grid', gap: '0.4rem' }}>
+              {aggregateState.data.map((row) => (
+                <div
+                  key={row.projectId}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '2fr repeat(4, 1fr)',
+                    gap: '0.5rem',
+                    fontSize: '0.82rem',
+                    alignItems: 'center',
+                    padding: '0.3rem 0',
+                    borderBottom: '1px solid #f1f5f9',
+                  }}
+                >
+                  <span style={{ color: 'var(--navy)', fontWeight: 600 }}>
+                    {row.projectName}
+                    {row.projectCode ? <span style={{ color: 'var(--steel)', fontWeight: 400 }}> ({row.projectCode})</span> : null}
+                  </span>
+                  <span style={{ color: 'var(--steel)' }}>{row.totals.count} bill{row.totals.count !== 1 ? 's' : ''}</span>
+                  <span>{formatAmount(row.totals.totalClaimed)}</span>
+                  <span style={{ color: '#b91c1c' }}>−{formatAmount(row.totals.totalDeducted)}</span>
+                  <span style={{ fontWeight: 700, color: '#166534' }}>{formatAmount(row.totals.totalCertified)}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </details>
       )}
 
@@ -801,6 +895,10 @@ export default function BillingCertificationsAdmin() {
             setCreateOpen(false);
             toast.push(`Bill ${created.billNumber} recorded.`, 'success');
             await fetchCerts();
+            // [DR-029] A new row joins the project aggregate (and may
+            // be the very first row for a project, in which case the
+            // aggregates panel grows by one).
+            await fetchAggregates();
           }}
           onError={(msg) => toast.push(msg, 'error')}
         />

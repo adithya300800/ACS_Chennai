@@ -233,3 +233,43 @@ describe('DR-021 — pagination-invariant summary figures (employee MyCertificat
     expect(myCertSrc).toMatch(/if\s*\(!append\)\s*\{[\s\S]*?setSummaryByStatus\([\s\S]*?setSummaryTotals\(/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DR-029 — per-project billing aggregates refresh on every mutation, with
+// request-generation guard + stale/error/Retry UI.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('DR-029 — billing aggregates refresh on mutation + stale-response guard', () => {
+  test('18. page extracts the aggregate loader as a useCallback so mutations can call it', () => {
+    expect(pageSrc).toMatch(/const\s+fetchAggregates\s*=\s*useCallback\(/);
+  });
+
+  test('19. page tracks a monotonic request id (aggregateReqIdRef) to discard late stale responses', () => {
+    expect(pageSrc).toMatch(/aggregateReqIdRef\s*=\s*useRef\(0\)/);
+    // The loader captures the id at request start, then checks it
+    // against the ref after the await — discard if a newer request
+    // fired while this one was in flight.
+    expect(pageSrc).toMatch(/const\s+reqId\s*=\s*\+\+aggregateReqIdRef\.current/);
+    expect(pageSrc).toMatch(/if\s*\(\s*reqId\s*!==\s*aggregateReqIdRef\.current\s*\)\s*return/);
+  });
+
+  test('20. each mutation handler (create, certify, dispute, correct, delete) refreshes aggregates after fetchCerts', () => {
+    // Count distinct `await fetchAggregates()` call sites — must be ≥ 6
+    // (create modal onSaved + handleCertify + handleDisputeSubmit +
+    // handleDelete + handleCorrect happy-path + handleCorrect SUPERSEDED).
+    const matches = pageSrc.match(/await\s+fetchAggregates\(\)/g) || [];
+    expect(matches.length).toBeGreaterThanOrEqual(6);
+  });
+
+  test('21. error state keeps the last good data and surfaces a Retry button without discarding unrelated panel state', () => {
+    // The panel must render when there's an error to surface, even
+    // if the latest fetch returned empty data — so a transient 503
+    // doesn't blank the dashboard.
+    expect(pageSrc).toMatch(/aggregateState\.data\.length\s*>\s*0\s*\|\|\s*aggregateState\.status\s*===\s*['"]error['"]/);
+    // The error banner with Retry button must exist.
+    expect(pageSrc).toMatch(/bc-aggregates-stale/);
+    expect(pageSrc).toMatch(/>\s*Retry\s*</);
+    // Retry button must invoke the loader again.
+    expect(pageSrc).toMatch(/onClick=\{\(\)\s*=>\s*fetchAggregates\(\)\s*\}/);
+  });
+});
