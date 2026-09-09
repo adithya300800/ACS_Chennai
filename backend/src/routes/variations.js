@@ -505,9 +505,18 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     const patchWhere = expectedVersion !== undefined && expectedVersion !== null
       ? { id, version: expectedVersion, status: 'DRAFT' }
       : { id };
+    // [DR-015] `expectedVersion` is a transport-only optimistic-concurrency
+    // pin read above to compose the conditional WHERE clause; it is NOT
+    // a model field. Prisma rejects unknown arguments, so stripping it
+    // from the data payload is required for any caller that opts into
+    // versioning (legacy callers omit it and hit the unconditional
+    // fallback path, which is unchanged). Same convention as
+    // billingCertifications.js, which builds `data` explicitly without
+    // ever spreading req.body — see ALLOWED_PATCH_FIELDS comment.
+    const { expectedVersion: _ignoredVersionPin, ...patchData } = fields;
     const updateResult = await prisma.variationOrder.updateMany({
       where: patchWhere,
-      data: { ...fields, version: { increment: 1 } },
+      data: { ...patchData, version: { increment: 1 } },
     });
     if (updateResult.count !== 1) {
       return res.status(409).json({

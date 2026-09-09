@@ -1033,16 +1033,34 @@ export const api = {
     api.post('/billing-certifications', payload, token),
   updateBillingCertification: (id, payload, token) =>
     api.patch(`/billing-certifications/${id}`, payload, token),
-  certifyBillingCertification: (id, token) =>
-    api.post(`/billing-certifications/${id}/certify`, {}, token),
-  disputeBillingCertification: (id, reason, token) =>
-    api.post(`/billing-certifications/${id}/dispute`, { reason }, token),
+  // [DR-015] Optional `expectedVersion` on certify/dispute/correct — pass
+  // the version that was DISPLAYED when the user clicked the action.
+  // A stale tab whose read happened before another admin's decision
+  // gets 409 instead of silently overwriting the new state. Same wire
+  // shape as the VO submit/approve/reject wrappers above; the server's
+  // unconditional-fallback path still works for callers that omit it.
+  certifyBillingCertification: (id, expectedVersion, token) =>
+    api.post(`/billing-certifications/${id}/certify`,
+      expectedVersion === undefined || expectedVersion === null
+        ? {}
+        : { expectedVersion },
+      token),
+  disputeBillingCertification: (id, reason, expectedVersion, token) =>
+    api.post(`/billing-certifications/${id}/dispute`,
+      { reason, ...(expectedVersion === undefined || expectedVersion === null
+        ? {}
+        : { expectedVersion }) },
+      token),
   // [DR-019] Draft correction flow. Returns the new DRAFT row (with
   // parentCertificationId set to the original's id). The caller should
   // open the new row for editing rather than treating the response as
   // a refresh of the old row — the new row carries its own id.
-  correctBillingCertification: (id, token) =>
-    api.post(`/billing-certifications/${id}/correct`, {}, token),
+  correctBillingCertification: (id, expectedVersion, token) =>
+    api.post(`/billing-certifications/${id}/correct`,
+      expectedVersion === undefined || expectedVersion === null
+        ? {}
+        : { expectedVersion },
+      token),
   deleteBillingCertification: (id, token) =>
     api.delete(`/billing-certifications/${id}`, token),
   getBillingCertificationReadSas: (id, token) =>

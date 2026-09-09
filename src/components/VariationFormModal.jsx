@@ -117,6 +117,15 @@ export default function VariationFormModal({
     };
     if (!isEdit) {
       payload.projectId = projectId;
+    } else {
+      // [DR-015] Pass the version that was DISPLAYED when the user
+      // clicked Save. The server reads it as an optimistic-concurrency
+      // pin (and strips it from the data payload — it's a transport-
+      // only field, not a model column). A concurrent writer who
+      // advanced the row between read and save gets 409 instead of
+      // silently overwriting. Defaults to 0 so legacy rows still pin
+      // (the audit's "including zero" rule).
+      payload.expectedVersion = editing?.version ?? 0;
     }
     return payload;
   };

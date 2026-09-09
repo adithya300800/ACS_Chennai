@@ -1301,6 +1301,23 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
     if (!existing || existing.deletedAt) {
       return res.status(404).json({ error: 'CERTIFICATION_NOT_FOUND', code: 'CERTIFICATION_NOT_FOUND', message: 'Billing certification not found' });
     }
+    // [DR-015] Financial/PDF PATCH is DRAFT-only. Once a certification
+    // is CERTIFIED or DISPUTED, mutating amounts / PDF in place would
+    // erase the prior approval / dispute identity (certifiedById,
+    // certifiedAt, disputedAt, disputeReason) — the "Preserve prior
+    // dispute/decision identity" rule. The correct path is POST
+    // /:id/correct, which mints a new DRAFT row with
+    // parentCertificationId set and stamps supersededAt on the
+    // original in the same transaction; that preserves both the prior
+    // identity AND the correction history chain.
+    if (existing.status !== 'DRAFT') {
+      return res.status(409).json({
+        error: 'INVALID_TRANSITION',
+        code: 'INVALID_TRANSITION',
+        message: `Cannot edit a billing certification in status ${existing.status}; use POST /:id/correct to revise approved content.`,
+        currentStatus: existing.status,
+      });
+    }
     // [DR-019] Optimistic-concurrency pin on PATCH. Optional
     // `expectedVersion` body field — when supplied, the WHERE clause
     // pins (id, version = expectedVersion, supersededAt IS NULL) so a
@@ -1333,9 +1350,15 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
         parentCertificationId: existing.parentCertificationId,
       });
     }
-    const patchWhere = expectedVersion !== undefined && expectedVersion !== null
-      ? { id, version: expectedVersion, supersededAt: null }
-      : { id };
+    // [DR-015] Pin status/version/deleted/superseded state in the WHERE,
+// including the legacy-compatibility branch (no expectedVersion). The
+// read-stage checks above catch the same conditions under single-writer
+// timing; pinning them in the WHERE closes the TOCTOU window between
+// the read and the updateMany. status: 'DRAFT' is the financial/PDF
+// gate added above (no CERTIFIED/DISPUTED rewrites).
+const patchWhere = expectedVersion !== undefined && expectedVersion !== null
+  ? { id, version: expectedVersion, status: 'DRAFT', deletedAt: null, supersededAt: null }
+  : { id, status: 'DRAFT', deletedAt: null, supersededAt: null };
     const updateResult = await prisma.billingCertification.updateMany({
       where: patchWhere,
       data: { ...data, version: { increment: 1 } },

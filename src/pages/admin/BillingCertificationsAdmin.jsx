@@ -304,7 +304,10 @@ export default function BillingCertificationsAdmin() {
   async function handleCertify(cert) {
     setTransitionPending(true);
     try {
-      const updated = await api.certifyBillingCertification(cert.id, accessToken);
+      // [DR-015] Pin the displayed version on the /certify call. A stale
+      // tab whose read happened before another admin's certify or
+      // correction gets 409 instead of silently flipping the row.
+      const updated = await api.certifyBillingCertification(cert.id, cert.version, accessToken);
       toast.push(`Bill ${updated.billNumber} marked Certified.`, 'success');
       // If the detail modal is open on this row, update it in place; otherwise refetch the list.
       if (detailCert && detailCert.id === cert.id) setDetailCert(updated);
@@ -329,7 +332,10 @@ export default function BillingCertificationsAdmin() {
     if (transitionPending) return;
     setTransitionPending(true);
     try {
-      const newRow = await api.correctBillingCertification(cert.id, accessToken);
+      // [DR-015] Pin the displayed version on the /correct call. A stale tab
+      // whose read happened before another admin's correction will get
+      // 409 instead of silently creating a duplicate correction chain.
+      const newRow = await api.correctBillingCertification(cert.id, cert.version, accessToken);
       toast.push(
         `Opened correction DRAFT for bill ${newRow.billNumber}. Edit amounts, then re-certify.`,
         'success',
@@ -370,8 +376,10 @@ export default function BillingCertificationsAdmin() {
     }
     setDisputeSubmitting(true);
     try {
+      // [DR-015] Pin the displayed version on the /dispute call. Same
+      // rationale as handleCertify — stale-tab protection.
       const updated = await api.disputeBillingCertification(
-        disputeOpen.id, disputeReason.trim(), accessToken,
+        disputeOpen.id, disputeReason.trim(), disputeOpen.version, accessToken,
       );
       toast.push(`Bill ${updated.billNumber} marked Disputed.`, 'success');
       if (detailCert && detailCert.id === disputeOpen.id) setDetailCert(updated);

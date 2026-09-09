@@ -128,6 +128,12 @@ describe('DR-017 — VariationFormModal edit mode without projects', () => {
       description: 'Original description',
       deltaAmount: 150000, // Number(deltaAmountRaw)
       clientApprovalRequired: true,
+      // [DR-015] Edit mode pins the displayed version on the PATCH so
+      // a concurrent writer advancing the row between read and save
+      // gets 409 instead of silently overwriting. `baseEditing` does
+      // not carry a version, so the form defaults to 0 (the audit's
+      // "including zero" rule).
+      expectedVersion: 0,
       // projectId MUST NOT be sent — PATCH would reject with 400 UNKNOWN_FIELDS.
     });
     expect(payloadArg).not.toHaveProperty('projectId');
