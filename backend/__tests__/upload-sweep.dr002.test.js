@@ -140,7 +140,7 @@ describe('SOL DR-002 — referenced-ulid pre-collect', () => {
     prisma.dPRPhoto.findMany.mockRejectedValueOnce(new Error('db down'));
     const app = buildApp(prisma);
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({});
     expect(res.status).toBe(503);
@@ -153,7 +153,7 @@ describe('SOL DR-002 — referenced-ulid pre-collect', () => {
     delete prisma.inspectionPhoto;
     const app = buildApp(prisma);
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({});
     expect(res.status).toBe(503);
@@ -168,7 +168,7 @@ describe('SOL DR-002 — referenced-ulid pre-collect', () => {
     });
     const app = buildApp(prisma);
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({});
     expect(res.status).toBe(200);
@@ -187,7 +187,7 @@ describe('SOL DR-002 — pass 2 photo-referenced defence', () => {
     });
     const app = buildApp(prisma);
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({});
 
@@ -211,7 +211,7 @@ describe('SOL DR-002 — pass 2 photo-referenced defence', () => {
     });
     const app = buildApp(prisma);
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({});
 
@@ -232,7 +232,7 @@ describe('SOL DR-002 — pass 2 photo-referenced defence', () => {
     });
     const app = buildApp(prisma);
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({});
 
@@ -252,7 +252,7 @@ describe('SOL DR-002 — dry-run mode', () => {
     const prisma = buildPrisma({ intents: rows });
     const app = buildApp(prisma);
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({ dryRun: true });
 
@@ -284,7 +284,7 @@ describe('SOL DR-002 — dry-run mode', () => {
     });
     const app = buildApp(prisma);
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({ dryRun: true });
 

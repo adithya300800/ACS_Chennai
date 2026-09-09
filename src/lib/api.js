@@ -315,17 +315,48 @@ export const api = {
       // with any other refresh in flight (timer-fired, 401-fired from
       // request()) instead of racing a duplicate refresh on the same
       // rotating token.
+      // [DR-023] The refresh-failure branch must distinguish a transient
+      // outage (server 5xx / network / timeout — the user's identity is
+      // fine) from a definitive 4xx (token revoked / replayed). The
+      // previous code dispatched auth:logout on every failure, including
+      // transient infra blips, which forced re-login mid-export and
+      // orphaned any draft the user was editing.
       if (res.status === 401 && token && !path.startsWith('/auth/')) {
+        let newToken;
         try {
-          const newToken = await api.refreshToken();
+          newToken = await api.refreshToken();
+        } catch (refreshErr) {
+          const isTransient = refreshErr?.transient === true;
+          if (isTransient) {
+            throw new ApiError(
+              refreshErr.message || 'Connection problem — please retry.',
+              refreshErr.status || 503,
+              'REFRESH_TRANSIENT',
+            );
+          }
+          dispatchLogoutOnce('refresh_failed');
+          throw new ApiError('Session expired. Please sign in again.', 401, 'TOKEN_EXPIRED');
+        }
+        // Retry the download with the freshly-rotated token. A network /
+        // abort failure here is also transient — surface it as a retryable
+        // error and preserve the session so the caller can try again.
+        try {
           res = await fetch(`${API_BASE}/api${path}`, {
             method: 'GET',
             headers: { Authorization: `Bearer ${newToken}` },
             signal: controller.signal,
           });
-        } catch (refreshErr) {
-          dispatchLogoutOnce('refresh_failed');
-          throw new ApiError('Session expired. Please sign in again.', 401, 'TOKEN_EXPIRED');
+        } catch (fetchErr) {
+          const isAbort = fetchErr && fetchErr.name === 'AbortError';
+          const retryErr = new ApiError(
+            isAbort
+              ? 'The download took too long. Please try again.'
+              : "Couldn't reach the server. Check your internet connection and try again.",
+            0,
+            isAbort ? 'TIMEOUT' : 'NETWORK_ERROR',
+          );
+          retryErr.transient = true;
+          throw retryErr;
         }
       }
       if (!res.ok) {
@@ -779,18 +810,23 @@ export const api = {
   // PATCH is DRAFT-only (raiser or admin). Allowed fields: title,
   // description, deltaAmount, clientApprovalRequired. Status transitions
   // route through /submit, /approve, /reject.
+  //
+  // [DR-015] `expectedVersion` (optional) is the optimistic-concurrency
+  // pin — pass the version that was DISPLAYED when the user clicked
+  // Save. If another writer raced, the server returns 409
+  // VERSION_CONFLICT rather than silently overwriting.
   updateVariation: (id, data, token) =>
     api.patch(`/variations/${id}`, data, token),
   // DRAFT → SUBMITTED (raiser or admin).
-  submitVariation: (id, token) =>
-    api.post(`/variations/${id}/submit`, {}, token),
+  submitVariation: (id, expectedVersion, token) =>
+    api.post(`/variations/${id}/submit`, { expectedVersion }, token),
   // SUBMITTED → APPROVED (admin only — requireFreshAdmin on the server).
-  approveVariation: (id, token) =>
-    api.post(`/variations/${id}/approve`, {}, token),
+  approveVariation: (id, expectedVersion, token) =>
+    api.post(`/variations/${id}/approve`, { expectedVersion }, token),
   // SUBMITTED → REJECTED (admin only). `reason` is required by the server
   // (rejected_reason column); passing null/empty will 400.
-  rejectVariation: (id, { reason }, token) =>
-    api.post(`/variations/${id}/reject`, { reason }, token),
+  rejectVariation: (id, { reason }, expectedVersion, token) =>
+    api.post(`/variations/${id}/reject`, { reason, expectedVersion }, token),
 
   // N3 (Phase F) — Drawing Revision Register frontend wiring. Backend
   // (backend/src/routes/drawings.js) shipped in Phase E; this mirrors

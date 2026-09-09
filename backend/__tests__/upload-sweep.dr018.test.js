@@ -169,7 +169,7 @@ describe('DR-018 — three-state model on the upload_intent row', () => {
     const app = buildApp(prisma);
 
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({});
 
@@ -206,7 +206,7 @@ describe('DR-018 — three-state model on the upload_intent row', () => {
 
     const app = buildApp(prisma);
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({});
 
@@ -247,7 +247,7 @@ describe('DR-018 — three-state model on the upload_intent row', () => {
     const app = buildApp(prisma);
 
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({});
 
@@ -277,7 +277,7 @@ describe('DR-018 — three-state model on the upload_intent row', () => {
 
     const app = buildApp(prisma);
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({});
 
@@ -311,7 +311,7 @@ describe('DR-018 — three-state model on the upload_intent row', () => {
     const app = buildApp(prisma);
 
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({});
 
@@ -338,7 +338,7 @@ describe('DR-018 — three-state model on the upload_intent row', () => {
 
     const app = buildApp(prisma);
     const res = await request(app)
-      .post('/api/internal/upload/sweep')
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
       .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
       .send({});
 

@@ -135,8 +135,11 @@ function buildApp(prisma) {
 }
 
 function postSweep(app) {
+  // DR-001: tests opt into destructive execution via the override query
+  // string so production behaviour (refuse without override) stays
+  // covered by the dedicated guard test below.
   return request(app)
-    .post('/api/internal/upload/sweep')
+    .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
     .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
     .send({});
 }
@@ -183,6 +186,66 @@ describe('S3-7 — sweep auth (mirrors internal-training-overdue.js:97)', () => 
     const app = buildApp(buildPrisma([]));
     const res = await request(app).post('/api/internal/upload/sweep').set('X-Internal-Token', 'wrong').send({});
     expect(res.status).toBe(403);
+  });
+});
+
+describe('DR-001 — destructive sweep is refused without explicit override', () => {
+  it('returns 503 + DR001_CONTAINMENT when dryRun is false and override is missing', async () => {
+    const rows = [seed({ status: 'PENDING', expiresAt: past(60_000), confirmedAt: null })];
+    const prisma = buildPrisma(rows);
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post('/api/internal/upload/sweep')
+      .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
+      .send({});
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('DR001_CONTAINMENT');
+    // No DB writes, no blob deletes — the guard refuses BEFORE the
+    // collectReferencedUlids / collectReferencedBlobPaths pre-collects.
+    expect(mockDeleteBlobCalls).toHaveLength(0);
+    expect(prisma._updateManyCalls).toHaveLength(0);
+  });
+
+  it('returns 503 with the wrong override value', async () => {
+    const app = buildApp(buildPrisma([]));
+    const res = await request(app)
+      .post('/api/internal/upload/sweep?override=YES_RECONCILED')
+      .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
+      .send({});
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('DR001_CONTAINMENT');
+  });
+
+  it('dry-run passes through without override (read-only path)', async () => {
+    const rows = [seed({ status: 'PENDING', expiresAt: past(60_000), confirmedAt: null })];
+    const prisma = buildPrisma(rows);
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post('/api/internal/upload/sweep')
+      .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
+      .send({ dryRun: true });
+
+    // dry-run is a rehearsal — it must NOT be blocked by the containment
+    // guard, so operators can still preview the deletion list.
+    expect(res.status).toBe(200);
+    expect(res.body.dryRun).toBe(true);
+    expect(res.body.blobsWouldClean).toBe(1);
+    expect(mockDeleteBlobCalls).toHaveLength(0);
+  });
+
+  it('real run with the documented override is allowed', async () => {
+    const rows = [seed({ status: 'PENDING', expiresAt: past(60_000), confirmedAt: null })];
+    const prisma = buildPrisma(rows);
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
+      .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.blobsCleaned).toBe(1);
+    expect(mockDeleteBlobCalls).toHaveLength(1);
   });
 });
 
@@ -318,7 +381,7 @@ describe('S3-7 — bounds', () => {
       app.set('prisma', buildPrisma(rows));
       app.use('/api/internal/upload', freshRouter);
       const res = await request(app)
-        .post('/api/internal/upload/sweep')
+        .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
         .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
         .send({});
       expect(res.status).toBe(200);

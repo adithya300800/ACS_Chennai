@@ -16,6 +16,34 @@
 
 const { ListObjectsV2Command, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 
+// DR-001 containment: drawing / report / COP / billing / certification /
+// attachment buckets MUST NOT be eligible for generic orphan cleanup. Their
+// keys are PDF / Office blobs whose `${employeeId}/${ulid}.${ext}` shape
+// does NOT match the photo regex below, so a sweep against any of these
+// buckets would treat every object as an orphan and delete it. Only the
+// uploadIntent + blobPath defences in the upload-sweep route know which of
+// these bytes are in active use; the generic object scanner does not.
+//
+// Matched by name pattern, NOT by env-var whitelist, because:
+//   1. Some operators rename the bucket (R2_BUCKET_DPR_DOCUMENTS) — the
+//      pattern must follow the role, not the default string.
+//   2. Future document buckets that share the same shape (e.g. a separate
+//      `cop-documents`) inherit the exclusion without a code change.
+//   3. Photo / video buckets (dpr-photos, inspection-photos, training-
+//      materials) do not match any pattern, so they remain sweepable.
+const DOCUMENT_BUCKET_PATTERNS = [
+  /document/i,
+  /drawing/i,
+  /report/i,
+  /\bcop\b/i,
+  /billing/i,
+  /certification/i,
+  /attachment/i,
+];
+function isDocumentBucket(name) {
+  return typeof name === 'string' && DOCUMENT_BUCKET_PATTERNS.some((re) => re.test(name));
+}
+
 // Match R2 key back to its DB row.
 //
 // R2 keys for photos look like `${employeeId}/${ulid}.${ext}` (see
@@ -59,8 +87,57 @@ async function runSweep({
   const safePageSize = Math.min(Math.max(1, Math.floor(pageSize) || 1000), 5000);
   const cutoff = new Date(now.getTime() - olderThanHours * 3600 * 1000);
 
+  // DR-001 containment: destructive orphan cleanup is disabled until
+  // ownership / history reconciliation is complete. We refuse before any
+  // DB or R2 work — no list, no per-key DB lookup, no delete — because
+  // every other step would risk touching bytes that turn out to be in
+  // active use by a Drawing / ProjectAttachment / BillingCertification row
+  // the scanner has no way to cross-reference.
+  //
+  // The flag is intentionally an explicit env var, not an argument: a cron
+  // entrypoint cannot accidentally pass it, and a future migration that
+  // completes the reconciliation can flip it on without code review.
+  // Truthy values are "1" or "true" — anything else (including unset) is
+  // treated as not reconciled. Dry-run also returns early so the
+  // operator's pre-flight dashboard reports the same zeroed-out shape the
+  // real run would, and so an over-eager --dry-run does not silently
+  // allow partial progress against an unsafe bucket list.
+  const reconciledRaw = process.env.DR001_RECONCILED;
+  const reconciled = reconciledRaw === '1' || reconciledRaw === 'true';
+  if (!reconciled) {
+    console.warn('[sweep] DR-001 containment — orphan sweep blocked', {
+      reason: 'DR001_RECONCILED env var not set to "1" or "true"',
+      dryRun,
+      bucketCount: Array.isArray(buckets) ? buckets.length : 0,
+    });
+    const stamp = { scanned: 0, orphans: 0, deleted: 0, kept: 0, skipped: 'DR-001 containment', visited: 0, oldestAgeHours: null, errors: [], dr001Contained: true };
+    return (Array.isArray(buckets) ? buckets : []).map((Bucket) => ({ Bucket, ...stamp }));
+  }
+
   const out = [];
   for (const Bucket of buckets) {
+    // DR-001 / architectural: even with DR001_RECONCILED=1, the generic
+    // object scanner MUST NOT touch drawing / report / COP / billing /
+    // certification / attachment buckets. The keys inside are PDF / Office
+    // blobs whose `${employeeId}/${ulid}.${ext}` shape does not match the
+    // photo regex below — every object in those buckets would be treated
+    // as an orphan. Only the uploadIntent + blobPath defences in
+    // internal-upload-sweep.js know which bytes are in active use.
+    if (isDocumentBucket(Bucket)) {
+      console.warn('[sweep] DR-001 — skipping document bucket', { bucket: Bucket });
+      out.push({
+        Bucket,
+        scanned: 0,
+        orphans: 0,
+        deleted: 0,
+        kept: 0,
+        skipped: 'document_bucket_excluded',
+        visited: 0,
+        oldestAgeHours: null,
+        errors: [],
+      });
+      continue;
+    }
     const summary = { Bucket, scanned: 0, orphans: 0, deleted: 0, kept: 0, skipped: 0, oldestAgeHours: null, errors: [] };
     let ContinuationToken = undefined;
     try {

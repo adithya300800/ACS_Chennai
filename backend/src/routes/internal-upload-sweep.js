@@ -315,10 +315,35 @@ router.post('/sweep', requireInternalToken, asyncHandler(async (req, res) => {
     return res.status(500).json({ error: 'Prisma not available' });
   }
 
+  // SOL DR-001: destructive document cleanup is disabled until ownership /
+  // history reconciliation is complete. A dry-run call is read-only and
+  // remains allowed so operators can still rehearse the deletion list
+  // before reconciliation lands; a real (non-dry) run requires the explicit
+  // operator override query string `?override=DR001_RECONCILED`. The same
+  // sentinel is mirrored as the DR001_RECONCILED env var that gates the
+  // orphan-blob sweep core (see scripts/_sweepOrphanUploadsCore.js) — both
+  // paths must be acknowledged before any destructive execution can run.
+  //
+  // We refuse with 503 (not 200 + skip) so an unwary cron hit surfaces
+  // loudly instead of silently leaving the backlog to grow. We log to
+  // stderr/console with the same tag every other DR-001 warning uses.
+  const isDryRun = !!(req.body && req.body.dryRun === true);
+  const hasOverride = !!(req.query && req.query.override === 'DR001_RECONCILED');
+  if (!isDryRun && !hasOverride) {
+    console.warn('[internal-upload-sweep] DR-001 containment — destructive sweep blocked', {
+      reason: 'DR001_RECONCILED not acknowledged; pass ?override=DR001_RECONCILED to enable destructive execution',
+    });
+    return res.status(503).json({
+      error: 'DESTRUCTIVE_CLEANUP_DISABLED',
+      code: 'DR001_CONTAINMENT',
+      message: 'DR-001 containment: destructive document cleanup is disabled until ownership/history reconciliation is complete. Pass ?override=DR001_RECONCILED to acknowledge and proceed.',
+    });
+  }
+
   // SOL DR-002: dry-run mode — return the same counts as a real run without
   // flipping any rows or calling R2. The body shape is the same as the
   // real call so an operator's pre-flight dashboard can render one schema.
-  const dryRun = !!(req.body && req.body.dryRun === true);
+  const dryRun = isDryRun;
 
   // SOL DR-002: precompute the set of ulids still referenced by a Photo row.
   // The sweep's CONFIRMED-orphan pass MUST exclude these — without this

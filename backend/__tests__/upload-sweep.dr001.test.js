@@ -186,8 +186,11 @@ function buildApp(prisma) {
 }
 
 function postSweep(app) {
+  // DR-001: tests opt into destructive execution via the override query
+  // string so production behaviour (refuse without override) stays
+  // covered by the dedicated guard test in upload-sweep.test.js.
   return request(app)
-    .post('/api/internal/upload/sweep')
+    .post('/api/internal/upload/sweep?override=DR001_RECONCILED')
     .set('X-Internal-Token', process.env.INTERNAL_API_TOKEN)
     .send({});
 }
