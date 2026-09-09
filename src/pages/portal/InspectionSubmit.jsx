@@ -143,7 +143,7 @@ export default function InspectionSubmit() {
   const { accessToken, employee } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const draftId = searchParams.get('draftId') || null;
   useDocumentTitle(draftId ? 'Edit Draft · Inspection Record' : 'New Inspection / Compliance Record');
   const fileInputRef = useRef(null);
@@ -170,6 +170,20 @@ export default function InspectionSubmit() {
   // POST /:id/submit instead of POST /.
   const [editingId, setEditingId] = useState(null);
   const [draftLoadedFromServer, setDraftLoadedFromServer] = useState(false);
+  // SOL DR-007 (round-23): track the in-flight hydration separately from
+  // the successfully-hydrated identity so a token rotation during the
+  // GET — which cancels this effect and re-runs it — does NOT short-
+  // circuit at the lastHydratedDraftIdRef guard and leave the form
+  // stuck in create mode on a `?draftId=<id>` URL. Three modes:
+  //   - 'idle'    — no draft URL or no fetch attempted yet
+  //   - 'loading' — fetch is in-flight, writes must be blocked
+  //   - 'loaded'  — identity (editingId) is hydrated from server
+  //   - 'error'   — fetch failed; UI surfaces Retry
+  // Saves/Submits on a draft URL refuse to proceed unless hydrationState
+  // is 'loaded' — otherwise a half-typed replacement POST could land
+  // while the original draft is still being read.
+  const [hydrationState, setHydrationState] = useState('idle');
+  const [hydrationError, setHydrationError] = useState(null);
   // SOL DR-006: defense-in-depth guard against the hydration effect
   // re-running when only its context deps change (toast push, token
   // rotation). See DprSubmit.jsx for the full rationale — the same
@@ -177,6 +191,11 @@ export default function InspectionSubmit() {
   // a sibling toast push or auth-context re-render fires after a
   // successful initial load.
   const lastHydratedDraftIdRef = useRef(null);
+  // SOL DR-007 (round-23): monotonically-incrementing run id so a
+  // cleanup-then-rehydrate race (token rotate during GET) can let the
+  // original fetch complete cleanly AND let the next fetch start a
+  // brand-new run that supersedes it. Mirrors DprSubmit.jsx.
+  const hydrationRunIdRef = useRef(0);
 
   // Reusable YYYY-MM-DD normaliser. The backend serialises reportDate
   // as a Date that JSON.stringify renders as ISO datetime on some
@@ -464,8 +483,23 @@ export default function InspectionSubmit() {
   // to OPEN/ACKNOWLEDGED/etc.), navigate back to the list with a
   // warning instead of silently editing a row that can no longer be
   // PUT-touched.
+  //
+  // DR-007 (round-23): the previous implementation set a `cancelled`
+  // flag from the cleanup callback and skipped ALL state application
+  // when set — including the success path. A token rotation during
+  // the GET cancelled the effect, the replacement re-ran and short-
+  // circuited at `lastHydratedDraftIdRef === draftId`, and the form
+  // was stuck in create mode on an explicit draft URL. The fix: use a
+  // monotonic run-id (DprSubmit.jsx pattern) so the closure's results
+  // apply when its run is still the latest, and surface a `loading` /
+  // `error` mode so Save/Submit can refuse to proceed until the GET
+  // settles. A Retry control resets the run so the user can recover
+  // from a transient failure without a full page reload.
   useEffect(() => {
-    if (!draftId || !accessToken) return;
+    if (!draftId || !accessToken) {
+      setHydrationState('idle');
+      return;
+    }
     // SOL DR-006: skip re-hydration when only the toast/token
     // identity changes. We only re-run when the target draftId changes.
     if (lastHydratedDraftIdRef.current === draftId) return;
@@ -474,15 +508,18 @@ export default function InspectionSubmit() {
     // doesn't fire a second GET against the same row. Mirrors
     // DprSubmit.jsx — see comment there for the full rationale.
     lastHydratedDraftIdRef.current = draftId;
-    let cancelled = false;
+    const myRunId = ++hydrationRunIdRef.current;
+    setHydrationState('loading');
+    setHydrationError(null);
     (async () => {
       try {
         const d = await api.getInspection(draftId, accessToken);
-        if (cancelled) return;
+        if (hydrationRunIdRef.current !== myRunId) return;
         if (d.status !== 'DRAFT') {
           toast.push(`This inspection is no longer a draft (status: ${d.status}).`, 'warning');
           navigate('/portal/inspection/my', { replace: true });
           lastHydratedDraftIdRef.current = null;
+          setHydrationState('idle');
           return;
         }
         setEditingId(d.id);
@@ -538,14 +575,18 @@ export default function InspectionSubmit() {
         })));
         setShowDraftBanner(false); // suppress local-autosave banner
         setDraftLoadedFromServer(true);
+        setHydrationState('loaded');
       } catch (err) {
-        if (!cancelled) toast.push(err.message || 'Failed to load draft', 'error');
+        if (hydrationRunIdRef.current !== myRunId) return;
+        const msg = err && err.message ? err.message : 'Failed to load draft';
+        toast.push(msg, 'error');
         lastHydratedDraftIdRef.current = null;
+        setHydrationState('error');
+        setHydrationError(msg);
       }
     })();
-    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draftId, accessToken, toast, navigate]);
+  }, [draftId, accessToken, toast, navigate, hydrationNonce]);
 
   // [N1 Phase B] Project picker — one-time fetch on mount. Same shape
   // as the DprSubmit.jsx equivalent; defensive on failure so the form
@@ -861,6 +902,31 @@ export default function InspectionSubmit() {
     if (submittingRef.current) return;
     submittingRef.current = true;
 
+    // SOL DR-007 (round-23): refuse to write on a draft URL until the
+    // server-side draft has finished hydrating. Without this guard, a
+    // fast click on Save while the GET is still in-flight would race:
+    //   - editingId is still null (hydration hasn't set it yet)
+    //   - the handler falls through to `createInspection` (POST /)
+    //   - the user ends up with a brand-new record on top of the one
+    //     they explicitly asked to Resume.
+    // Also block on hydration failure so the user must explicitly
+    // Retry rather than get a silent second POST. Mirror guard goes
+    // on DprSubmit.jsx for symmetry.
+    if (draftId && hydrationState === 'loading') {
+      submittingRef.current = false;
+      const msg = 'Loading the saved draft — please wait a moment before saving.';
+      setFormError(msg);
+      toast.push(msg, 'warning');
+      return;
+    }
+    if (draftId && hydrationState === 'error') {
+      submittingRef.current = false;
+      const msg = 'Could not load the saved draft. Please retry loading before saving.';
+      setFormError(msg);
+      toast.push(msg, 'warning');
+      return;
+    }
+
     clearErrors();
     // [DR-006 client] Refuse to submit while any photo is still uploading
     // or awaiting CONFIRMED intent. Without this, the user can submit a
@@ -1105,6 +1171,14 @@ export default function InspectionSubmit() {
   };
 
   const handleDiscardDraft = () => {
+    // SOL DR-007 (round-23): "Discard / start fresh" clears the edit
+    // identity, version, and URL `?draftId=<id>` so the next Save
+    // creates a fresh POST instead of overwriting the original draft
+    // via PUT. The audit's exact wording: "start fresh clears edit
+    // identity/version/query/claims/pending work while preserving the
+    // old saved row". We preserve the saved row server-side — we only
+    // detach the local edit session from it.
+    const wasEditingServerDraft = Boolean(editingId);
     clearDraftForEmployee(currentEmployeeId);
     setForm({
       // [N1 Phase B] reset projectId + projectName in lockstep.
@@ -1122,7 +1196,39 @@ export default function InspectionSubmit() {
     setWorkEntry(null);
     setPhotos([]);
     setShowDraftBanner(false);
+    if (wasEditingServerDraft) {
+      // Detach from the server-side draft — next Save must POST /api/inspection,
+      // not PUT /api/inspection/:editingId. Also invalidate the
+      // hydration guard so a future navigation back to the same URL
+      // re-fetches (matches DPR's discard-then-revert behaviour).
+      setEditingId(null);
+      setDraftLoadedFromServer(false);
+      lastHydratedDraftIdRef.current = null;
+      // Drop the `?draftId=<id>` query so the URL no longer claims
+      // we're editing that row. Keep any `?dpr=` / `?date=` deep-link
+      // parameters intact so the engineer doesn't lose them.
+      if (draftId) {
+        const next = new URLSearchParams(searchParams);
+        next.delete('draftId');
+        setSearchParams(next, { replace: true });
+      }
+    }
     toast.push('Draft discarded.', 'info');
+  };
+
+  // SOL DR-007 (round-23): the hydration effect can land in 'error' on a
+  // transient server/network failure. Without an explicit Retry the user
+  // would have to refresh the whole page (losing in-progress form state)
+  // or navigate away and back. The hydration effect re-runs whenever
+  // `hydrationNonce` changes; Retry bumps it. The nonce is the only
+  // safe dep-add — swapping `draftId` would re-mount the form, and
+  // `accessToken` rotation is already the bug we're guarding against.
+  const [hydrationNonce, setHydrationNonce] = useState(0);
+  const handleRetryHydration = () => {
+    lastHydratedDraftIdRef.current = null;
+    setHydrationError(null);
+    setHydrationState('loading');
+    setHydrationNonce((n) => n + 1);
   };
 
   return (
@@ -1749,13 +1855,64 @@ export default function InspectionSubmit() {
             </div>
           )}
 
+          {/* SOL DR-007 (round-23): persistent error banner on hydration
+              failure. The toast push fires-and-forgets — a user who
+              navigated past the toast would have no way to know the
+              draft never loaded. Save/Submit are also blocked above
+              (see handleSubmit guard) so this banner is the only signal
+              the user has that the form is currently in a non-editable
+              state. */}
+          {draftId && hydrationState === 'error' && (
+            <div
+              className="draft-banner"
+              style={{ marginTop: '1rem', background: '#fef2f2', borderColor: '#fca5a5', color: '#991b1b' }}
+              role="alert"
+              data-testid="dr007-hydration-error"
+            >
+              <span style={{ flex: 1 }}>
+                ⚠️ Could not load the saved draft{hydrationError ? `: ${hydrationError}` : ''}. Save and Submit are disabled until the draft loads.
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={handleRetryHydration}
+                style={{ flexShrink: 0 }}
+              >
+                Retry
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={handleDiscardDraft}
+                style={{ flexShrink: 0 }}
+              >
+                Start fresh
+              </button>
+            </div>
+          )}
+
           <div className="dpr-form-actions dpr-form-actions-sticky">
-            <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting' || hasInFlightUploads}>
-              {status === 'submitting' ? 'Saving...' : editingId ? 'Save changes' : 'Save as Draft'}
+            <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting' || hasInFlightUploads || (draftId && hydrationState === 'loading')}>
+              {status === 'submitting' ? 'Saving...' : draftId && hydrationState === 'loading' ? 'Loading draft…' : editingId ? 'Save changes' : 'Save as Draft'}
             </button>
-            <button type="button" className="btn btn-primary" onClick={() => handleSubmit('SUBMITTED')} disabled={status === 'submitting' || hasInFlightUploads}>
-              {status === 'submitting' ? 'Submitting...' : hasInFlightUploads ? 'Waiting for photos…' : editingId ? 'Submit Draft' : 'Submit Record'}
+            <button type="button" className="btn btn-primary" onClick={() => handleSubmit('SUBMITTED')} disabled={status === 'submitting' || hasInFlightUploads || (draftId && hydrationState === 'loading')}>
+              {status === 'submitting' ? 'Submitting...' : hasInFlightUploads ? 'Waiting for photos…' : draftId && hydrationState === 'loading' ? 'Loading draft…' : editingId ? 'Submit Draft' : 'Submit Record'}
             </button>
+            {/* SOL DR-007 (round-23): explicit Retry on hydration failure.
+                Saves/Submits are blocked on 'error' state until the user
+                either retries (this button) or navigates away. Without
+                this control, a transient GET failure would strand the
+                form permanently until a full page reload. */}
+            {draftId && hydrationState === 'error' && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={handleRetryHydration}
+                data-testid="dr007-retry-hydration"
+              >
+                Retry loading draft
+              </button>
+            )}
           </div>
         </div>
       </div>

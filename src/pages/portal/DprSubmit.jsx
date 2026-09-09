@@ -1278,6 +1278,14 @@ export default function DprSubmit() {
   };
 
   const handleDiscardDraft = () => {
+    // SOL DR-007 (round-23): "Discard / start fresh" must clear the
+    // edit identity, version, and URL `?draftId=<id>` so the next Save
+    // creates a fresh POST instead of overwriting the original draft
+    // via PUT. The audit's exact wording: "start fresh clears edit
+    // identity/version/query/claims/pending work while preserving the
+    // old saved row". We preserve the saved row server-side — we only
+    // detach the local edit session from it.
+    const wasEditingServerDraft = Boolean(editingId);
     clearDraftForEmployee(currentEmployeeId);
     setForm({
       // [N1 Phase B] reset both projectId + projectName in lockstep.
@@ -1308,6 +1316,24 @@ export default function DprSubmit() {
     setCustomSections([]);
     setNotes('');
     setShowDraftBanner(false);
+    if (wasEditingServerDraft) {
+      // Detach from the server-side draft — next Save must POST /api/dpr,
+      // not PUT /api/dpr/:editingId. Also invalidate the hydration
+      // guard so a future navigation back to the same URL re-fetches,
+      // and clear the acknowledged-PUT ref so a stale version doesn't
+      // leak across the new (create-mode) session.
+      setEditingId(null);
+      setEditingVersion(null);
+      lastPutVersionRef.current = null;
+      lastHydratedDraftIdRef.current = null;
+      // Drop the `?draftId=<id>` query so the URL no longer claims
+      // we're editing that row.
+      if (draftId) {
+        const next = new URLSearchParams(searchParams);
+        next.delete('draftId');
+        setSearchParams(next, { replace: true });
+      }
+    }
     toast.push('Draft discarded.', 'info');
   };
 
