@@ -151,7 +151,7 @@ export default function InspectionDetail() {
             the inspection was sent back without leaving the detail page.
             Mirror the DPR modal banner — same red-tinted alert pattern so
             the visual language is consistent across modules. */}
-        {record.status === 'REJECTED' && (record.rejectionReason || record.adminNotes) && (
+        {record.status === 'REJECTED' && (record.rejectionReason || record.rejectionNotes) && (
           <div
             role="alert"
             style={{
@@ -167,13 +167,13 @@ export default function InspectionDetail() {
           >
             <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>Rejected</div>
             {record.rejectionReason && (
-              <div style={{ marginBottom: record.adminNotes ? '0.5rem' : 0 }}>
+              <div style={{ marginBottom: record.rejectionNotes ? '0.5rem' : 0 }}>
                 {record.rejectionReason}
               </div>
             )}
-            {record.adminNotes && (
+            {record.rejectionNotes && (
               <div style={{ fontSize: '0.8rem', color: '#991b1b', fontStyle: 'italic' }}>
-                Admin note: {record.adminNotes}
+                Admin note: {record.rejectionNotes}
               </div>
             )}
           </div>

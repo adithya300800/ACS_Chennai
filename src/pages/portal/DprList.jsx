@@ -890,13 +890,13 @@ export default function DprList() {
                         Rejected by reviewer
                       </div>
                       {expandedDpr.rejectionReason && (
-                        <div style={{ marginBottom: expandedDpr.adminNotes ? '0.4rem' : 0 }}>
+                        <div style={{ marginBottom: expandedDpr.rejectionNotes ? '0.4rem' : 0 }}>
                           {expandedDpr.rejectionReason}
                         </div>
                       )}
-                      {expandedDpr.adminNotes && (
+                      {expandedDpr.rejectionNotes && (
                         <div style={{ fontSize: '0.8rem', color: '#991b1b', fontStyle: 'italic' }}>
-                          Admin note: {expandedDpr.adminNotes}
+                          Admin note: {expandedDpr.rejectionNotes}
                         </div>
                       )}
                       <div
@@ -908,7 +908,7 @@ export default function DprList() {
                           color: '#7f1d1d',
                         }}
                       >
-                        This report is closed — please file a new report for a different date, or message your reviewer to reopen it.
+                        This report is closed. Contact your reviewer for next steps.
                       </div>
                     </div>
                   )}

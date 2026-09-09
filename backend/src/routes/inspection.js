@@ -1159,7 +1159,51 @@ router.get('/:id', async (req, res) => {
       return { ...photoForClient, readUrl: sasUrl };
     }));
 
-    res.json({ ...record, photos: photosWithUrls });
+    // DR-022: surface the structured rejection decision in the GET DTO.
+    // The InspectionRecord schema has no top-level rejection columns
+    // (only `status`), so we read the latest REJECT entry from the
+    // existing `_adminNotes` JSON history (populated by the transition
+    // handler in this same file). The handler now stores `reason` on
+    // the REJECT entry, so the GET DTO has a single source of truth
+    // for `rejectionReason` / `rejectionNotes` / `rejectedBy` /
+    // `rejectedAt` without re-parsing the unrelated notification
+    // message. We resolve the reviewer `by` (cuid) into a minimal
+    // Employee row so the UI can render a name without a second fetch.
+    let rejectionReason = null;
+    let rejectionNotes = null;
+    let rejectedBy = null;
+    let rejectedAt = null;
+    if (record.status === 'REJECTED') {
+      const notes = (((record.data || {})._adminNotes) || []);
+      // Walk the history in reverse to find the most recent REJECT
+      // entry. Bulk and single paths both write to this array, so
+      // the latest REJECT always reflects the most recent decision.
+      for (let i = notes.length - 1; i >= 0; i -= 1) {
+        const entry = notes[i];
+        if (entry && entry.action === 'REJECT') {
+          rejectionReason = entry.reason || null;
+          rejectionNotes = entry.notes || null;
+          rejectedAt = entry.at || null;
+          if (entry.by) {
+            const reviewer = await prisma.employee.findUnique({
+              where: { id: entry.by },
+              select: { id: true, name: true, email: true },
+            });
+            rejectedBy = reviewer || { id: entry.by, name: null, email: null };
+          }
+          break;
+        }
+      }
+    }
+
+    res.json({
+      ...record,
+      photos: photosWithUrls,
+      rejectionReason,
+      rejectionNotes,
+      rejectedBy,
+      rejectedAt,
+    });
   } catch (err) {
     console.error('Inspection get error', {
       employeeHash: hashIdentifier(req.employeeId),
@@ -1617,20 +1661,39 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
     // submittedAt / etc. on InspectionRecord to mass-assign). We only set
     // columns we control here, and adminNotes lives on a JSON-ish payload
     // merged into the inspection record's `data` JSON.
+    //
+    // DR-022: always record a REJECT decision in `_adminNotes` even when
+    // the admin didn't supply an `adminNotes` blob, so the rejection
+    // reason + reviewer + timestamp survive in the structured note
+    // history. Without this, a reject that only carries a `reason`
+    // (the common case) writes nothing to `_adminNotes` and the GET
+    // DTO has no source for `rejectionReason` / `rejectedBy` /
+    // `rejectedAt`. Reusing the existing _adminNotes structure (rather
+    // than adding a new top-level column) keeps the audit trail
+    // co-located and forward-compatible with the existing
+    // reviewer-facing display.
     const dataPatch = {
       status: nextStatus,
     };
-    if (payload.adminNotes && typeof payload.adminNotes === 'string') {
-      // Park adminNotes inside the existing JSON `data` blob under a reserved
-      // key. Don't surface this in the inspector UI — it's audit-visible only.
+    const shouldAppendAudit =
+      action === 'REJECT' ||
+      (payload.adminNotes && typeof payload.adminNotes === 'string');
+    if (shouldAppendAudit) {
+      const auditEntry = {
+        by: actorEmployeeId,
+        action,
+        notes: payload.adminNotes || null,
+        at: new Date().toISOString(),
+      };
+      // DR-022: surface the rejection reason on the same audit entry so
+      // the GET DTO can hydrate `rejectionReason` without re-parsing
+      // the unrelated notification row.
+      if (action === 'REJECT' && payload.reason) {
+        auditEntry.reason = payload.reason.trim();
+      }
       dataPatch.data = {
         ...(record.data || {}),
-        _adminNotes: [...(((record.data || {})._adminNotes) || []), {
-          by: actorEmployeeId,
-          action,
-          notes: payload.adminNotes,
-          at: new Date().toISOString(),
-        }],
+        _adminNotes: [...(((record.data || {})._adminNotes) || []), auditEntry],
       };
     }
 

@@ -1299,10 +1299,59 @@ router.get('/:id', async (req, res) => {
     // Previously this emitted `Date.toJSON()` ("2026-09-01T00:00:00.000Z"),
     // which the input rejected as malformed and the user had to retype the
     // date by hand. Matches the PUT validator's `parseStrictISODate`.
+    //
+    // DR-022: surface the structured rejection decision in the GET DTO.
+    // The single (POST /:id/reject) and bulk (POST /bulk-review) paths
+    // already persist the reason + adminNotes in a DPR_REJECTED
+    // Notification row (the same row the bell icon reads), but neither
+    // the DPR table nor its revisions store those fields as top-level
+    // columns. Without this lookup the employee detail modal renders
+    // "REJECTED" with no reason — the exact "absent from detail" gap
+    // the audit flagged. The Notification message shape is
+    //   "Your DPR for <project> on <date> was rejected: <reason>\n<notes>"
+    // so we split on "was rejected: " and the embedded newline to
+    // recover the original reason / notes pair. Falls back to nulls
+    // for REJECTED rows that pre-date this lookup or that were
+    // produced without a notification (defensive only — production
+    // always writes the notif).
+    let rejectionReason = null;
+    let rejectionNotes = null;
+    if (dpr.status === 'REJECTED') {
+      const rejectionNotif = await prisma.notification.findFirst({
+        where: { dprId: id, type: 'DPR_REJECTED' },
+        orderBy: { createdAt: 'desc' },
+        select: { message: true },
+      });
+      if (rejectionNotif?.message) {
+        const marker = ' was rejected: ';
+        const idx = rejectionNotif.message.indexOf(marker);
+        if (idx !== -1) {
+          const tail = rejectionNotif.message.slice(idx + marker.length);
+          const newlineIdx = tail.indexOf('\n');
+          if (newlineIdx === -1) {
+            rejectionReason = tail.trim() || null;
+          } else {
+            rejectionReason = tail.slice(0, newlineIdx).trim() || null;
+            rejectionNotes = tail.slice(newlineIdx + 1).trim() || null;
+          }
+        }
+      }
+    }
+
     const responseBody = {
       ...dpr,
       reportDate: toDateOnly(dpr.reportDate),
       photos: photosWithUrls,
+      // DR-022: structured rejection surface. `rejectedBy` / `rejectedAt`
+      // map to the existing `reviewedBy` / `reviewedAt` columns — those
+      // are set on every terminal admin action and the rejection
+      // handler is the only one that fires for REJECTED rows in
+      // practice, so this is a safe reuse. `rejectionReason` /
+      // `rejectionNotes` are surfaced from the notification row.
+      rejectionReason,
+      rejectionNotes,
+      rejectedBy: dpr.status === 'REJECTED' ? (dpr.reviewedBy || null) : null,
+      rejectedAt: dpr.status === 'REJECTED' ? (dpr.reviewedAt || null) : null,
     };
 
     res.json(responseBody);
