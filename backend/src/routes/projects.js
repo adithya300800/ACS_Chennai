@@ -1226,6 +1226,141 @@ router.delete('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
   }
 }));
 
+// ─── POST /api/projects/:targetId/merge-orphan-source ──────────────────────
+// Re-attributes orphaned child rows (DPR / InspectionRecord / BoqItem) from a
+// discovered project name onto an existing curated Project row.
+//
+// Use case: an admin sees "T-Nagar" in the Discovered list (DPRs filed
+// against it but no Project row), then decides it really belongs to the
+// curated "T-Nagar Phase II" Project. The orphaned rows must follow the
+// merge so the dashboard KPI tiles stop showing zero.
+//
+// Scope (intentional YAGNI): only DPR / InspectionRecord / BoqItem are
+// touched — these are the three models whose KPI roll-up filters by exact
+// `projectName` (see kpiHandler below). VariationOrder and Drawing have no
+// `projectName` column (FK-only) and never appear in the Discovered list,
+// so they're not in scope here.
+//
+// `dryRun: true` returns the same per-table counts without committing —
+// mirrors the established pattern in internal-upload-sweep.js and
+// storage.js. The frontend preview modal uses this to confirm row counts
+// before the destructive commit.
+//
+// Auth: requireFreshAdmin — same posture as POST / PATCH / DELETE on
+// /api/projects.
+router.post('/:targetId/merge-orphan-source', requireFreshAdmin, asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  const { targetId } = req.params;
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!UUID_RE.test(targetId)) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'targetId must be a UUID' });
+  }
+
+  const sourceName = typeof req.body?.sourceName === 'string' ? req.body.sourceName.trim() : '';
+  if (!sourceName) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'sourceName is required' });
+  }
+  if (sourceName.length > 200) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'sourceName must be 200 characters or fewer' });
+  }
+
+  const dryRun = !!(req.body && req.body.dryRun === true);
+
+  try {
+    const target = await prisma.project.findUnique({ where: { id: targetId } });
+    if (!target) {
+      return res.status(404).json({
+        error: 'PROJECT_NOT_FOUND',
+        code: 'PROJECT_NOT_FOUND',
+        message: 'Target project not found',
+      });
+    }
+    if (!target.isActive) {
+      return res.status(409).json({
+        error: 'PROJECT_INACTIVE',
+        code: 'PROJECT_INACTIVE',
+        message: 'Target project is archived; re-activate before merging into it',
+      });
+    }
+
+    // Refuse a self-merge: case-insensitive equal to the target's own
+    // canonical name. The admin almost certainly meant to "Register" the
+    // discovered name (POST /api/projects/resolve), not rewrite it onto
+    // itself.
+    if (sourceName.toLowerCase() === target.name.toLowerCase()) {
+      return res.status(409).json({
+        error: 'SAME_PROJECT',
+        code: 'SAME_PROJECT',
+        message: 'sourceName matches the target project name — nothing to merge',
+      });
+    }
+
+    // Build the WHERE shape once so the dry-run and commit paths share it.
+    // Case-insensitive: a discovery listed as "T-NAGAR" merges cleanly into
+    // a curated "T-Nagar". Locked to projectId:null so we never re-stamp
+    // rows that already point at the target (idempotent re-run).
+    const whereShape = {
+      projectId: null,
+      projectName: { equals: sourceName, mode: 'insensitive' },
+    };
+
+    if (dryRun) {
+      // Three independent COUNTs — no transaction needed for a read.
+      const [dprCount, inspectionCount, boqCount] = await Promise.all([
+        prisma.dPR.count({ where: whereShape }),
+        prisma.inspectionRecord.count({ where: whereShape }),
+        prisma.boqItem.count({ where: whereShape }),
+      ]);
+      return res.json({
+        dryRun: true,
+        target: { id: target.id, name: target.name },
+        sourceName,
+        counts: { dpr: dprCount, inspection: inspectionCount, boq: boqCount },
+        total: dprCount + inspectionCount + boqCount,
+      });
+    }
+
+    // Commit path. updateMany across three tables inside one transaction so
+    // a partial failure rolls back the rest (e.g. BoqItem has a
+    // unique(projectId, itemCode) constraint — a shared itemCode across
+    // rows being merged could collide). The data shape rewrites BOTH
+    // projectId AND projectName to the target's canonical name — the KPI
+    // handler filters by exact projectName, so without the rewrite the
+    // merged rows stay invisible to the dashboard.
+    const dataShape = { projectId: target.id, projectName: target.name };
+    const [dprRes, inspectionRes, boqRes] = await prisma.$transaction([
+      prisma.dPR.updateMany({ where: whereShape, data: dataShape }),
+      prisma.inspectionRecord.updateMany({ where: whereShape, data: dataShape }),
+      prisma.boqItem.updateMany({ where: whereShape, data: dataShape }),
+    ]);
+
+    return res.json({
+      dryRun: false,
+      target: { id: target.id, name: target.name },
+      sourceName,
+      counts: {
+        dpr: dprRes.count,
+        inspection: inspectionRes.count,
+        boq: boqRes.count,
+      },
+      total: dprRes.count + inspectionRes.count + boqRes.count,
+    });
+  } catch (err) {
+    console.error('Projects merge-orphan-source error', {
+      employeeHash: hashIdentifier(req.employeeId),
+      prismaCode: err.code,
+      message: err?.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to merge orphan source' });
+  }
+}));
+
 // ─── KPI handler ────────────────────────────────────────────────────────────
 // One endpoint that returns the full dashboard payload for a project.
 //

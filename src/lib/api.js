@@ -688,6 +688,18 @@ export const api = {
   // DELETE on the id (see backend/src/routes/projects.js).
   updateProject: (id, data, token) => api.patch(`/projects/${id}`, data, token),
   softDeleteProject: (id, token) => api.delete(`/projects/${id}`, token),
+  // Merge a discovered (orphan) project name into an existing curated
+  // Project row. Re-attributes DPR / InspectionRecord / BoqItem rows that
+  // still carry `projectId = null` + the discovered name onto the target
+  // (canonicalises projectName to target.name so the exact-match KPI
+  // filter sees them). Pass `dryRun: true` to preview row counts without
+  // committing — the preview modal does this first, then re-calls with
+  // `dryRun: false` to commit. Returns `{ dryRun, target, sourceName,
+  // counts: { dpr, inspection, boq }, total }`. Admin-only on the server.
+  // Backend: backend/src/routes/projects.js POST
+  // /api/projects/:targetId/merge-orphan-source.
+  mergeOrphanSourceIntoProject: (targetId, sourceName, dryRun, token) =>
+    api.post(`/projects/${targetId}/merge-orphan-source`, { sourceName, dryRun: !!dryRun }, token),
   // getProjectKpis: dashboard payload for one project. `days` is the
   // lookback window for activity counts (default 30; backend clamps to
   // 1..365). Pass 'all' is not supported — the dashboard uses 365 for

@@ -41,6 +41,11 @@ const ICONS = {
       <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
     </svg>
   ),
+  merge: (
+    <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="6" cy="6" r="2.5" /><path d="M6 8.5v7.5" /><path d="M6 13c0-3.866 5-7 6-7" />
+    </svg>
+  ),
 };
 
 export default function ProjectsAdmin() {
@@ -57,6 +62,12 @@ export default function ProjectsAdmin() {
   // Same SOL-P0#5 confirmation pattern as DprDashboard bulk actions.
   const [pendingDelete, setPendingDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  // [merge-orphan-source] Pending merge is tracked per discovered-name;
+  // null = no dialog open. Shape:
+  //   { sourceName, targetId, counts, previewing, merging }
+  // `counts` (null until first preview) lets the modal swap between
+  // "Preview merge" and "Merge N records" CTAs without changing handlers.
+  const [pendingMerge, setPendingMerge] = useState(null);
   const mountedRef = useRef(true);
 
   const load = useCallback(async () => {
@@ -108,6 +119,45 @@ export default function ProjectsAdmin() {
     }
   }, [pendingDelete, accessToken, toast, load]);
 
+  // [merge-orphan-source] Merge a discovered project name into an existing
+  // curated Project. Two-phase: dryRun=true (commit=false) returns per-
+  // table counts; commit=true writes the re-attribution. Preview is
+  // mandatory before commit so the admin sees the row counts before any
+  // destructive update — mirrors the dryRun pattern in
+  // internal-upload-sweep.js / storage.js.
+  const handleMerge = useCallback(async (commit) => {
+    if (!pendingMerge) return;
+    if (!pendingMerge.targetId) return; // guard — modal disables the button
+    setPendingMerge((m) => ({ ...m, [commit ? 'merging' : 'previewing']: true }));
+    try {
+      const res = await api.mergeOrphanSourceIntoProject(
+        pendingMerge.targetId,
+        pendingMerge.sourceName,
+        !commit, // dryRun=true when we're previewing
+        accessToken,
+      );
+      if (!mountedRef.current) return;
+      if (commit) {
+        const total = res?.total ?? (res?.counts?.dpr + res?.counts?.inspection + res?.counts?.boq) ?? 0;
+        toast.push(
+          `Merged ${total} record${total === 1 ? '' : 's'} from "${pendingMerge.sourceName}" into "${res?.target?.name || 'target'}"`,
+          'success',
+        );
+        setPendingMerge(null);
+        load();
+      } else {
+        setPendingMerge((m) => ({ ...m, counts: res.counts, previewing: false }));
+      }
+    } catch (err) {
+      if (!mountedRef.current) return;
+      toast.push(
+        err?.message || (commit ? 'Failed to merge' : 'Failed to preview merge'),
+        'error',
+      );
+      setPendingMerge((m) => ({ ...m, previewing: false, merging: false }));
+    }
+  }, [pendingMerge, accessToken, toast, load]);
+
   return (
     <div className="dpr-page">
       <div className="dpr-page-header">
@@ -158,6 +208,7 @@ export default function ProjectsAdmin() {
           projects={projects}
           discovered={discovered}
           onRequestDelete={setPendingDelete}
+          onRequestMerge={setPendingMerge}
           onGoToDashboard={(name) => navigate(`/portal/admin/project-dashboard?project=${encodeURIComponent(name)}`)}
         />
       )}
@@ -229,6 +280,148 @@ export default function ProjectsAdmin() {
           </div>
         </div>
       ) : null}
+
+      {/* Merge-orphan-source confirmation — two-phase: pick a target, run a
+          dryRun preview to see row counts, then commit. Inline rather than
+          importing the shared Modal because this dialog owns its own
+          preview flow and keeps the page self-contained (same posture as
+          the soft-delete modal above). */}
+      {pendingMerge ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="merge-project-title"
+          style={{
+            position: 'fixed', inset: 0,
+            background: 'rgba(15,23,42,0.5)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 1000, padding: '1rem',
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !pendingMerge.previewing && !pendingMerge.merging) {
+              setPendingMerge(null);
+            }
+          }}
+        >
+          <div
+            className="dpr-card"
+            style={{ maxWidth: 480, padding: '1.25rem', background: 'white' }}
+          >
+            <h2
+              id="merge-project-title"
+              style={{
+                fontFamily: "'Plus Jakarta Sans', sans-serif",
+                fontSize: '1rem', fontWeight: 700,
+                color: 'var(--navy, #0f172a)', margin: '0 0 0.5rem',
+              }}
+            >
+              Merge &ldquo;{pendingMerge.sourceName}&rdquo; into&hellip;
+            </h2>
+            <p style={{ fontSize: '0.85rem', color: 'var(--steel, #64748b)', margin: '0 0 0.75rem', lineHeight: 1.5 }}>
+              Pick a registered project to absorb the orphaned Daily Reports, Inspections, and BOQ items from <strong style={{ color: 'var(--navy, #0f172a)' }}>{pendingMerge.sourceName}</strong>. The KPI dashboard will start counting them under the target project.
+            </p>
+            <label
+              htmlFor="merge-target"
+              style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: 'var(--steel, #64748b)', marginBottom: '0.3rem' }}
+            >
+              Target project
+            </label>
+            <select
+              id="merge-target"
+              value={pendingMerge.targetId || ''}
+              onChange={(e) => setPendingMerge((m) => m ? { ...m, targetId: e.target.value || null, counts: null } : m)}
+              disabled={pendingMerge.previewing || pendingMerge.merging}
+              style={{
+                width: '100%', padding: '0.5rem 0.625rem',
+                border: '1px solid var(--steel, #cbd5e1)', borderRadius: 6,
+                background: 'white', fontSize: '0.85rem', color: 'var(--navy, #0f172a)',
+                marginBottom: '0.75rem',
+              }}
+            >
+              <option value="">Select a project&hellip;</option>
+              {projects.filter((p) => p.isActive).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}{p.code ? ` (${p.code})` : ''}
+                </option>
+              ))}
+            </select>
+            {pendingMerge.counts ? (
+              <div
+                role="status"
+                style={{
+                  padding: '0.625rem 0.75rem',
+                  background: 'rgba(0,102,255,0.06)',
+                  border: '1px solid rgba(0,102,255,0.18)',
+                  borderRadius: 6,
+                  fontSize: '0.82rem', color: 'var(--navy, #0f172a)',
+                  lineHeight: 1.45, marginBottom: '0.75rem',
+                }}
+              >
+                <strong>{pendingMerge.counts.dpr}</strong> Daily Report{pendingMerge.counts.dpr === 1 ? '' : 's'},
+                {' '}<strong>{pendingMerge.counts.inspection}</strong> Inspection{pendingMerge.counts.inspection === 1 ? '' : 's'},
+                {' '}<strong>{pendingMerge.counts.boq}</strong> BOQ item{pendingMerge.counts.boq === 1 ? '' : 's'}
+                {' '}will be re-attributed to{' '}
+                <strong>{projects.find((p) => p.id === pendingMerge.targetId)?.name || 'the selected project'}</strong>.
+              </div>
+            ) : null}
+            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={() => setPendingMerge(null)}
+                disabled={pendingMerge.previewing || pendingMerge.merging}
+                style={{
+                  padding: '0.5rem 0.875rem', border: '1px solid var(--steel, #cbd5e1)',
+                  background: 'white', borderRadius: 8, fontSize: '0.85rem',
+                  cursor: (pendingMerge.previewing || pendingMerge.merging) ? 'not-allowed' : 'pointer',
+                  opacity: (pendingMerge.previewing || pendingMerge.merging) ? 0.6 : 1,
+                }}
+              >
+                Cancel
+              </button>
+              {!pendingMerge.counts ? (
+                <button
+                  type="button"
+                  onClick={() => handleMerge(false)}
+                  disabled={!pendingMerge.targetId || pendingMerge.previewing}
+                  style={{
+                    padding: '0.5rem 0.875rem',
+                    background: 'var(--blue, #0066FF)', color: 'white',
+                    border: 'none', borderRadius: 8, fontSize: '0.85rem',
+                    fontWeight: 600,
+                    cursor: (!pendingMerge.targetId || pendingMerge.previewing) ? 'not-allowed' : 'pointer',
+                    opacity: (!pendingMerge.targetId || pendingMerge.previewing) ? 0.6 : 1,
+                  }}
+                >
+                  {pendingMerge.previewing ? 'Counting…' : 'Preview merge'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleMerge(true)}
+                  disabled={pendingMerge.merging || (pendingMerge.counts.dpr + pendingMerge.counts.inspection + pendingMerge.counts.boq) === 0}
+                  style={{
+                    padding: '0.5rem 0.875rem',
+                    background: 'var(--blue, #0066FF)', color: 'white',
+                    border: 'none', borderRadius: 8, fontSize: '0.85rem',
+                    fontWeight: 600,
+                    cursor: (pendingMerge.merging || (pendingMerge.counts.dpr + pendingMerge.counts.inspection + pendingMerge.counts.boq) === 0) ? 'not-allowed' : 'pointer',
+                    opacity: (pendingMerge.merging || (pendingMerge.counts.dpr + pendingMerge.counts.inspection + pendingMerge.counts.boq) === 0) ? 0.6 : 1,
+                  }}
+                  title={
+                    (pendingMerge.counts.dpr + pendingMerge.counts.inspection + pendingMerge.counts.boq) === 0
+                      ? 'Nothing to merge — source has no orphaned rows against it'
+                      : undefined
+                  }
+                >
+                  {pendingMerge.merging
+                    ? 'Merging…'
+                    : `Merge ${pendingMerge.counts.dpr + pendingMerge.counts.inspection + pendingMerge.counts.boq} record${(pendingMerge.counts.dpr + pendingMerge.counts.inspection + pendingMerge.counts.boq) === 1 ? '' : 's'}`}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -237,7 +430,7 @@ export default function ProjectsAdmin() {
 // Two visual groups: registered projects (have full metadata) and
 // discovered (only a name — auto-discovered from DPR.projectName).
 // Discovered entries get a "Register" CTA inline rather than edit/delete.
-function ProjectsList({ projects, discovered, onRequestDelete, onGoToDashboard }) {
+function ProjectsList({ projects, discovered, onRequestDelete, onRequestMerge, onGoToDashboard }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
       {/* Registered projects */}
@@ -301,7 +494,11 @@ function ProjectsList({ projects, discovered, onRequestDelete, onGoToDashboard }
             }}
           >
             {discovered.map((d) => (
-              <DiscoveredRow key={d.name} name={d.name} />
+              <DiscoveredRow
+                key={d.name}
+                name={d.name}
+                onRequestMerge={onRequestMerge}
+              />
             ))}
           </div>
         </section>
@@ -430,10 +627,14 @@ function RegisteredRow({ project, onRequestDelete, onGoToDashboard }) {
   );
 }
 
-// Discovered row — name only + Register CTA. Inline so the admin can
-// promote a discovered name to a registered project without leaving
-// the list page.
-function DiscoveredRow({ name }) {
+// Discovered row — name only + Register (primary) + Merge into… (secondary).
+// "Register" promotes the discovered name to a brand-new Project row via
+// ProjectForm. "Merge into…" opens a modal picker that re-attributes the
+// orphaned DPR / Inspection / BOQ rows onto an existing curated Project —
+// use this when the discovered name is really a duplicate of an existing
+// project (typo, case drift, etc.) and the KPI dashboard should fold the
+// history into the curated target.
+function DiscoveredRow({ name, onRequestMerge }) {
   return (
     <div
       className="dpr-card"
@@ -469,19 +670,37 @@ function DiscoveredRow({ name }) {
           Not yet registered
         </div>
       </div>
-      <Link
-        to={`/portal/admin/projects/new?name=${encodeURIComponent(name)}`}
-        style={{
-          padding: '0.35rem 0.625rem',
-          background: 'var(--blue, #0066FF)', color: 'white',
-          borderRadius: 6, fontWeight: 600, fontSize: '0.78rem',
-          textDecoration: 'none',
-          display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
-        }}
-      >
-        {ICONS.plus}
-        <span>Register</span>
-      </Link>
+      <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0 }}>
+        <button
+          type="button"
+          onClick={() => onRequestMerge({ sourceName: name, targetId: null, counts: null, previewing: false, merging: false })}
+          style={{
+            padding: '0.35rem 0.625rem',
+            border: '1px solid var(--steel, #cbd5e1)',
+            borderRadius: 6, background: 'white',
+            color: 'var(--navy, #0f172a)',
+            fontWeight: 600, fontSize: '0.78rem',
+            cursor: 'pointer',
+            display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+          }}
+        >
+          {ICONS.merge}
+          <span>Merge into&hellip;</span>
+        </button>
+        <Link
+          to={`/portal/admin/projects/new?name=${encodeURIComponent(name)}`}
+          style={{
+            padding: '0.35rem 0.625rem',
+            background: 'var(--blue, #0066FF)', color: 'white',
+            borderRadius: 6, fontWeight: 600, fontSize: '0.78rem',
+            textDecoration: 'none',
+            display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+          }}
+        >
+          {ICONS.plus}
+          <span>Register</span>
+        </Link>
+      </div>
     </div>
   );
 }
