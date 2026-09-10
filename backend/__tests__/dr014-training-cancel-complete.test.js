@@ -20,6 +20,13 @@
 //     concurrent cancel + complete race produces a clean P2025
 //   - new helper `isTerminal(status)` in trainingRules covers both
 //     states and is exported
+//
+// DR-020 follow-up: the route gates are now widened from `isTerminal`
+// to `isInactive` (which also includes OVERDUE). The DR-014 contract is
+// preserved (CANCELLED is still rejected with ENROLLMENT_CANCELLED) —
+// this file's B2/C1 source-text pins were updated to reflect the wider
+// gate; the helper itself (`isTerminal`) and the cancel-route guard
+// remain as they were.
 
 process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET =
@@ -86,19 +93,19 @@ describe('SOL DR-014 — manual-complete handler enforces terminal-state', () =>
     expect(code).toMatch(/isTerminal\s*[,}]/);
   });
 
-  test('B2. manual-complete handler guards existing.status with isTerminal', () => {
-    // Find the PUT /enrollments/:id/complete handler and assert its
-    // guard uses isTerminal — not just isCompleted.
+  test('B2. manual-complete handler guards existing.status with isInactive', () => {
+    // DR-020: the gate was widened from `isTerminal` to `isInactive` so
+    // OVERDUE rows are also refused. The DR-014 contract (CANCELLED is
+    // rejected with ENROLLMENT_CANCELLED) is preserved — only the gate
+    // predicate changed. Keep this in lockstep with
+    // dr020-training-stale-state.test.js#6.
     const handlerStart = ROUTE_SRC.indexOf("router.put('/enrollments/:id/complete'");
     expect(handlerStart).toBeGreaterThan(-1);
-    // Look at the next 80 lines — the guard must be inside that scope.
     const slice = ROUTE_SRC.slice(handlerStart, handlerStart + 4000);
-    // The guard pattern: `if (isTerminal(existing.status))`.
-    expect(slice).toMatch(/if\s*\(\s*isTerminal\s*\(\s*existing\.status\s*\)\s*\)/);
-    // Negative: the old guard `if (isCompleted(existing.status))` alone
-    // is no longer in this handler — replaced by isTerminal().
-    // (The DB UPDATE notIn clause still mentions completed-states by name
-    // for the notIn set, which is fine.)
+    // The guard pattern: `if (isInactive(existing.status))`.
+    expect(slice).toMatch(/if\s*\(\s*isInactive\s*\(\s*existing\.status\s*\)\s*\)/);
+    // Negative: the pre-DR-014 narrow guard `if (isCompleted(existing.status))` alone
+    // is no longer in this handler — replaced by the wider predicate.
     const guardOnly = slice.match(/if\s*\(\s*isCompleted\s*\(\s*existing\.status\s*\)\s*\)\s*\{/g) || [];
     expect(guardOnly.length).toBe(0);
   });
@@ -123,11 +130,12 @@ describe('SOL DR-014 — manual-complete handler enforces terminal-state', () =>
 });
 
 describe('SOL DR-014 — admin-override handler enforces terminal-state', () => {
-  test('C1. admin-override handler guards existing.status with isTerminal', () => {
+  test('C1. admin-override handler guards existing.status with isInactive', () => {
+    // DR-020: same widening as B2 above. Mirrors dr020 test #8.
     const handlerStart = ROUTE_SRC.indexOf("router.post('/enrollments/:id/admin-override'");
     expect(handlerStart).toBeGreaterThan(-1);
     const slice = ROUTE_SRC.slice(handlerStart, handlerStart + 4000);
-    expect(slice).toMatch(/if\s*\(\s*isTerminal\s*\(\s*existing\.status\s*\)\s*\)/);
+    expect(slice).toMatch(/if\s*\(\s*isInactive\s*\(\s*existing\.status\s*\)\s*\)/);
   });
 
   test('C2. admin-override UPDATE notIn set includes CANCELLED', () => {

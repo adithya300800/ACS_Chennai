@@ -80,8 +80,18 @@ export default function TrainingDetail() {
       // last known position, not 0:00.
       latestRef.current = { pct: data.progressPct || 0, currentSec: data.lastWatchedSec || 0 };
     } catch (err) {
-      setError(err.message || 'Failed to load course');
-      push(err.message || 'Failed to load course', 'error');
+      // DR-020: never synthesize a completion state from a transient error.
+      // The original code mapped every 409 to status=COMPLETED/100, which
+      // is the exact bug this route is now defending against. Re-fetch
+      // once and surface the canonical state from the server; only fall
+      // back to the inline error if the refetch itself fails.
+      try {
+        const fresh = await api.getTrainingEnrollment(id, accessToken);
+        setEnrollment(fresh);
+      } catch (refetchErr) {
+        setError(err.message || 'Failed to load course');
+        push(err.message || 'Failed to load course', 'error');
+      }
     } finally {
       setLoading(false);
     }
@@ -122,22 +132,31 @@ export default function TrainingDetail() {
         // that.
         if (updated.status !== enrollment.status) {
           setEnrollment((prev) => ({ ...prev, status: updated.status, progressPct: updated.progressPct }));
-          if (isTrainingInactive(updated.status)) {
+          // DR-020: success-completion toast gated on isTrainingTerminal
+          // (not isTrainingInactive). Pre-fix the success branch fired
+          // "Course marked complete." on ANY status change into an
+          // inactive state, including CANCELLED + OVERDUE — misleading
+          // since neither is an actual completion.
+          if (isTrainingTerminal(updated.status)) {
             push('Course marked complete.', 'success');
           }
         }
       } catch (err) {
-        // 409 ENROLLMENT_LOCKED = already completed by another device; treat
-        // as success and let the local state catch up on the next refetch.
-        if (err?.code === 'ENROLLMENT_LOCKED' || err?.status === 409) {
-          setEnrollment((prev) => ({ ...prev, status: TRAINING_STATUSES.COMPLETED, progressPct: 100 }));
+        // 409 ENROLLMENT_LOCKED / ENROLLMENT_CANCELLED / ENROLLMENT_OVERDUE
+        // — server says the row is in a terminal state. DR-020: refetch
+        // the canonical row instead of synthesizing COMPLETED/100 here.
+        // The previous code mapped ANY 409 to status=COMPLETED/100,
+        // letting a stale cancelled/overdue response announce
+        // completion.
+        if (err?.code === 'ENROLLMENT_LOCKED' || err?.code === 'ENROLLMENT_CANCELLED' || err?.code === 'ENROLLMENT_OVERDUE' || err?.status === 409) {
+          try {
+            const fresh = await api.getTrainingEnrollment(id, accessToken);
+            setEnrollment(fresh);
+          } catch (refetchErr) {
+            push(refetchErr?.message || 'Could not refresh enrollment state.', 'error');
+          }
         }
         // 429 TRAINING_THROTTLED — silently skip; next tick will try again.
-        // DR-024: ENROLLMENT_CANCELLED / ENROLLMENT_OVERDUE — server says
-        // the row is now in a terminal-non-actionable state. Stop pinging
-        // and mirror the server-side state into local UI. Do NOT auto-flip
-        // to COMPLETED here (only ENROLLMENT_LOCKED means we lost a
-        // completion race — see comment above).
       }
     }, TRAINING_PROGRESS_PING_MS);
 
@@ -168,6 +187,10 @@ export default function TrainingDetail() {
   // DR-024: use `isTrainingInactive` (broader than terminal-completed) so
   // a CANCELLED or OVERDUE row whose embedded player happens to still be
   // mounted can't announce completion.
+  // DR-020: the success toast ("Course completed!") is now gated on
+  // isTrainingTerminal — only the 4 *_COMPLETED evidence states. A
+  // CANCELLED or OVERDUE response (still a 200 noop from the route's
+  // resolver) must not announce completion.
   const handleEnded = useCallback(async () => {
     if (!enrollment) return;
     if (isTrainingInactive(enrollment.status)) return;
@@ -181,7 +204,9 @@ export default function TrainingDetail() {
       );
       setEnrollment((prev) => ({ ...prev, status: updated.status, progressPct: updated.progressPct }));
       setPendingPct(100);
-      push('Course completed! 🎉', 'success');
+      if (isTrainingTerminal(updated.status)) {
+        push('Course completed! 🎉', 'success');
+      }
     } catch (err) {
       // Even if the POST failed, the UI still shows the player ended; the
       // user can hit "Mark as Complete" as the fallback.

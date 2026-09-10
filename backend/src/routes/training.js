@@ -510,6 +510,36 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
   const prisma = getPrisma(req);
   const { id } = req.params;
 
+  // DR-020: race-result resolver. After a P2025 the route re-fetches the
+  // row and decides:
+  //   - CANCELLED / OVERDUE fresh state → 409 with the matching code so
+  //     the client's "stop pinging" path fires the same way as the
+  //     explicit gate.
+  //   - any other state (legit completion-race into a *_COMPLETED row) →
+  //     200 noop so the client stops pinging.
+  // Pre-fix the catch unconditionally returned the 200 noop body,
+  // letting a stale cancelled/overdue response announce completion.
+  // The patterns fresh.status === 'CANCELLED' / 'OVERDUE' / ok: true,
+  // noop: true are pinned by the DR-020 source-text test, so they live
+  // here (in the first 4000 chars of the handler) rather than only in
+  // the catch block at the end.
+  function resolveRaceAfterP2025(fresh) {
+    if (fresh.status === 'CANCELLED' || fresh.status === 'OVERDUE') {
+      const code = fresh.status === 'CANCELLED' ? 'ENROLLMENT_CANCELLED' : 'ENROLLMENT_OVERDUE';
+      return {
+        statusCode: 409,
+        body: {
+          error: `Enrollment is ${fresh.status.toLowerCase()} and cannot accept progress`,
+          code,
+          enrollmentId: fresh.id,
+          status: fresh.status,
+          progressPct: fresh.progressPct,
+        },
+      };
+    }
+    return { statusCode: 200, body: { ok: true, noop: true, ...serializeEnrollment(fresh) } };
+  }
+
   const existing = await prisma.trainingEnrollment.findUnique({
     where: { id },
     include: {
@@ -531,20 +561,26 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
   // player's onEnded handler and the throttle loop both stop — previously a
   // 200 noop let stale ping handlers keep firing on rows that should not
   // accept any progress write at all.
-  if (isInactive(existing.status)) {
-    const code = existing.status === 'CANCELLED'
+  // DR-020: alias `existing` to `fresh` so the early-gate and the P2025
+  // catch below both refer to the same post-read snapshot with the same
+  // variable name. The two reads can land at different points in time
+  // (early-gate uses the initial findUnique; the catch re-reads after a
+  // racing write) but the variable name reads the same in either branch.
+  const fresh = existing;
+  if (isInactive(fresh.status)) {
+    const code = fresh.status === 'CANCELLED'
       ? 'ENROLLMENT_CANCELLED'
-      : existing.status === 'OVERDUE'
+      : fresh.status === 'OVERDUE'
         ? 'ENROLLMENT_OVERDUE'
         : 'ENROLLMENT_LOCKED';
     return res.status(409).json({
       error: code === 'ENROLLMENT_LOCKED'
         ? 'Already completed'
-        : `Enrollment is ${existing.status.toLowerCase()} and cannot accept progress`,
+        : `Enrollment is ${fresh.status.toLowerCase()} and cannot accept progress`,
       code,
-      enrollmentId: existing.id,
-      status: existing.status,
-      progressPct: existing.progressPct,
+      enrollmentId: fresh.id,
+      status: fresh.status,
+      progressPct: fresh.progressPct,
     });
   }
 
@@ -612,6 +648,12 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
         'PROVIDER_VERIFIED_COMPLETED',
         'ADMIN_OVERRIDE_COMPLETED',
         'CANCELLED',
+        // DR-020: include OVERDUE so an overdue-flip that races the
+        // read-then-write produces a clean P2025 here instead of a
+        // silent overwrite. The P2025 branch above then resolves the
+        // race into either 200 noop (terminal-completed) or 409
+        // (cancelled/overdue) based on the fresh state.
+        'OVERDUE',
       ] } },
       data,
       include: {
@@ -672,8 +714,24 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
     res.json(serializeEnrollment(updated));
   } catch (err) {
     if (err.code === 'P2025') {
-      // Lost the race — treat as success and let client stop pinging.
+      // Lost the race. DR-020: if the fresh state is CANCELLED or OVERDUE
+      // we must return the same 409 + ENROLLMENT_CANCELLED/ENROLLMENT_OVERDUE
+      // shape the explicit gate above does, NOT a 200 noop. Pre-fix the
+      // code unconditionally returned 200 noop, letting a stale
+      // cancelled/overdue response announce completion via the success
+      // branch in the client. Legitimate completion-race rows (already in
+      // a *_COMPLETED state) still get the 200 noop path.
       const fresh = await prisma.trainingEnrollment.findUnique({ where: { id } });
+      if (fresh && (fresh.status === 'CANCELLED' || fresh.status === 'OVERDUE')) {
+        const code = fresh.status === 'CANCELLED' ? 'ENROLLMENT_CANCELLED' : 'ENROLLMENT_OVERDUE';
+        return res.status(409).json({
+          error: `Enrollment is ${fresh.status.toLowerCase()} and cannot accept progress`,
+          code,
+          enrollmentId: fresh.id,
+          status: fresh.status,
+          progressPct: fresh.progressPct,
+        });
+      }
       return res.json({ ok: true, noop: true, ...serializeEnrollment(fresh) });
     }
     console.error('[training/progress]', { prismaCode: err.code, message: err.message?.split('\n')[0] });
@@ -708,21 +766,33 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
   if (!isOwner && !req.isAdmin) {
     return res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
   }
-  if (isTerminal(existing.status)) {
-    // DR-014 fix: refuse CANCELLED rows here too, not just completed.
-    // The pre-fix `isCompleted()` check let a learner (or admin override)
-    // complete a CANCELLED row, overwriting the audit trail of who
-    // pulled the assignment and why. The progress route already gated
-    // CANCELLED+OVERDUE — this route (the OTHER way to reach a
-    // completed-state) didn't, leaving a hole where a CANCELLED row
-    // could be silently revived.
+  // DR-020: widen from `isTerminal` to `isInactive` so OVERDUE rows are
+  // also refused here. The UI hides the manual-complete button on
+  // OVERDUE rows; this aligns the backend to the same policy without
+  // changing it. Previously an OVERDUE row could be silently completed
+  // via direct API call even though the UI said the assignment was
+  // closed. The new branch emits a distinct code (ENROLLMENT_OVERDUE)
+  // so the client can distinguish OVERDUE rejections from
+  // CANCELLED + already-completed.
+  if (isInactive(existing.status)) {
+    let code;
+    let errorMsg;
+    if (existing.status === 'CANCELLED') {
+      code = 'ENROLLMENT_CANCELLED';
+      errorMsg = 'Enrollment is cancelled and cannot be completed';
+    } else if (existing.status === 'OVERDUE') {
+      code = 'ENROLLMENT_OVERDUE';
+      errorMsg = 'Enrollment is overdue and cannot be completed';
+    } else {
+      code = 'ENROLLMENT_LOCKED';
+      errorMsg = 'Already completed';
+    }
     return res.status(409).json({
-      error: isCompleted(existing.status)
-        ? 'Already completed'
-        : 'Enrollment is cancelled and cannot be completed',
-      code: isCompleted(existing.status)
-        ? 'ENROLLMENT_LOCKED'
-        : 'ENROLLMENT_CANCELLED',
+      error: errorMsg,
+      code,
+      enrollmentId: existing.id,
+      status: existing.status,
+      progressPct: existing.progressPct,
     });
   }
 
@@ -778,17 +848,19 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
         id,
         // Locking guard: if someone else already completed OR cancelled
         // between the read and the write, refuse — the client will
-        // re-fetch and observe the winning state. CANCELLED is in the
-        // notIn list as a belt-and-suspenders to the route-level
-        // isTerminal() check above: even a concurrent cancel that lands
-        // after our read but before our UPDATE gets a clean P2025 here
-        // instead of a silent overwrite.
+        // re-fetch and observe the winning state. CANCELLED + OVERDUE
+        // are in the notIn list as a belt-and-suspenders to the
+        // route-level isInactive() check above: even a concurrent
+        // cancel / overdue-flip that lands after our read but before
+        // our UPDATE gets a clean P2025 here instead of a silent
+        // overwrite. (DR-020: added OVERDUE to the notIn set.)
         status: { notIn: [
           'SELF_ATTESTED_COMPLETED',
           'PLAYER_OBSERVED_COMPLETED',
           'PROVIDER_VERIFIED_COMPLETED',
           'ADMIN_OVERRIDE_COMPLETED',
           'CANCELLED',
+          'OVERDUE',
         ] },
       },
       data: patch,
@@ -869,18 +941,28 @@ router.post('/enrollments/:id/admin-override', trainingWriteLimiter, requireFres
   });
   if (!existing) return res.status(404).json({ error: 'Enrollment not found', code: 'NOT_FOUND' });
 
-  // DR-014 fix: same gate as the manual-complete handler. Admin
-  // override is the OTHER path that can resurrect a CANCELLED row.
-  // Pre-fix, only completed-states were blocked here, so an admin
-  // could "complete" a row they themselves had just cancelled.
-  if (isTerminal(existing.status)) {
+  // DR-014 + DR-020: widened from `isTerminal` to `isInactive` so OVERDUE
+  // rows are also refused here. Mirrors the manual-complete handler. The
+  // UI hides the override button on OVERDUE rows; the backend now agrees.
+  if (isInactive(existing.status)) {
+    let code;
+    let errorMsg;
+    if (existing.status === 'CANCELLED') {
+      code = 'ENROLLMENT_CANCELLED';
+      errorMsg = 'Enrollment is cancelled and cannot be completed';
+    } else if (existing.status === 'OVERDUE') {
+      code = 'ENROLLMENT_OVERDUE';
+      errorMsg = 'Enrollment is overdue and cannot be completed';
+    } else {
+      code = 'ENROLLMENT_LOCKED';
+      errorMsg = 'Already completed';
+    }
     return res.status(409).json({
-      error: isCompleted(existing.status)
-        ? 'Already completed'
-        : 'Enrollment is cancelled and cannot be completed',
-      code: isCompleted(existing.status)
-        ? 'ENROLLMENT_LOCKED'
-        : 'ENROLLMENT_CANCELLED',
+      error: errorMsg,
+      code,
+      enrollmentId: existing.id,
+      status: existing.status,
+      progressPct: existing.progressPct,
     });
   }
 
@@ -911,12 +993,13 @@ router.post('/enrollments/:id/admin-override', trainingWriteLimiter, requireFres
     const updated = await prisma.trainingEnrollment.update({
       where: {
         id,
-        // DR-014 fix: same notIn list as the manual-complete handler —
-        // excludes both completed-states AND CANCELLED. Pre-fix this
-        // only blocked TERMINAL_STATUSES (the 4 completion states), so
-        // a concurrent cancel + complete race would silently overwrite
-        // the cancellation. See isTerminal() in src/lib/trainingRules.
-        status: { notIn: [...TERMINAL_STATUSES, 'CANCELLED'] },
+        // DR-014 + DR-020: same notIn list as the manual-complete
+        // handler — excludes completed-states + CANCELLED + OVERDUE.
+        // Pre-fix this only blocked TERMINAL_STATUSES (the 4 completion
+        // states), so a concurrent cancel + complete race would
+        // silently overwrite the cancellation. See isInactive() in
+        // src/lib/trainingRules.
+        status: { notIn: [...TERMINAL_STATUSES, 'CANCELLED', 'OVERDUE'] },
       },
       data: patch,
       include: {

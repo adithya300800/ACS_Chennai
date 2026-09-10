@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { TRAINING_PROVIDER_LABELS, TRAINING_STATUSES, TRACKABLE_PROVIDERS, isTrainingTerminal, TRAINING_TERMINAL_STATUSES } from '../../lib/constants.js';
+import { TRAINING_PROVIDER_LABELS, TRAINING_STATUSES, TRACKABLE_PROVIDERS, isTrainingTerminal, isTrainingInactive, TRAINING_TERMINAL_STATUSES } from '../../lib/constants.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { getBusinessToday, useBusinessDateKey } from '../../lib/businessDate.js';
 import { formatShortDate } from '../../lib/format.js';
@@ -236,11 +236,15 @@ export default function Training() {
                     )}
                   </div>
                   {/* Progress bar — only when progress > 0 OR status is IN_PROGRESS/COMPLETED.
-                      We deliberately don't show 0% bars (visual noise for "haven't started"). */}
-                  {(e.progressPct > 0 || e.status !== TRAINING_STATUSES.ASSIGNED) && (
+                      We deliberately don't show 0% bars (visual noise for "haven't started").
+                      DR-020: suppress the bar for inactive rows (CANCELLED, OVERDUE) — those
+                      assignments have nothing honest to report. */}
+                  {!isTrainingInactive(e.status) && (e.progressPct > 0 || e.status !== TRAINING_STATUSES.ASSIGNED) && (
                     <div className="training-progress" aria-label={`Progress: ${e.progressPct}%`}>
                       <div className="training-progress-bar" style={{ width: `${Math.min(100, Math.max(0, e.progressPct))}%` }} />
-                      <span className="training-progress-label">{e.progressPct}% watched</span>
+                      <span className="training-progress-label">
+                        {e.status === TRAINING_STATUSES.SELF_ATTESTED_COMPLETED ? 'Self-attested' : `${e.progressPct}% watched`}
+                      </span>
                     </div>
                   )}
                 </div>
@@ -248,9 +252,9 @@ export default function Training() {
                   <Link
                     to={`/portal/training/${e.id}`}
                     className="training-btn training-btn-primary"
-                    aria-label={`${isTrainingTerminal(e.status) ? 'Replay' : 'Continue'} ${e.course?.title || 'course'}`}
+                    aria-label={`${isTrainingInactive(e.status) ? 'View details' : isTrainingTerminal(e.status) ? 'Replay' : 'Continue'} ${e.course?.title || 'course'}`}
                   >
-                    {isTrainingTerminal(e.status) ? 'Replay' : e.status === 'ASSIGNED' ? 'Start' : 'Continue'}
+                    {isTrainingInactive(e.status) ? 'View details' : isTrainingTerminal(e.status) ? 'Replay' : e.status === 'ASSIGNED' ? 'Start' : 'Continue'}
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                       <line x1="5" y1="12" x2="19" y2="12" />
                       <polyline points="12 5 19 12 12 19" />

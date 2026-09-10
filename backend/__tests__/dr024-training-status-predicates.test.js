@@ -96,8 +96,11 @@ describe('SOL DR-024 — progress handler returns 409 for inactive rows', () => 
     expect(code).toMatch(/isInactive\s*[,}]/);
   });
 
-  test('B2. progress handler guards existing.status with isInactive', () => {
-    expect(handlerSrc).toMatch(/if\s*\(\s*isInactive\s*\(\s*existing\.status\s*\)\s*\)/);
+  test('B2. progress handler guards the post-read snapshot with isInactive', () => {
+    // DR-020: the early-gate predicate still calls `isInactive(status)`
+    // — the variable was renamed `existing` → `fresh` so the early
+    // gate and the P2025 catch below share a single variable name.
+    expect(handlerSrc).toMatch(/if\s*\(\s*isInactive\s*\(\s*(?:existing|fresh)\.status\s*\)\s*\)/);
   });
 
   test('B3. progress handler returns 409 with ENROLLMENT_CANCELLED for CANCELLED rows', () => {
@@ -111,13 +114,25 @@ describe('SOL DR-024 — progress handler returns 409 for inactive rows', () => 
     expect(handlerSrc).toMatch(/ENROLLMENT_OVERDUE/);
   });
 
-  test('B5. progress handler no longer returns the old 200 noop for inactive rows', () => {
-    // The pre-fix code was `if (isCompleted(...) || === 'CANCELLED' || === 'OVERDUE') { res.json({ ok: true, noop: true, ... }) }`.
-    // After the fix, the gate is `isInactive(...)` and the response is 409.
-    // Assert the literal `noop: true` shape is gone from the handler.
-    expect(handlerSrc).not.toMatch(/noop:\s*true/);
-    // And the 409 status code is present.
+  test('B5. progress handler returns 409 (not 200 noop) for CANCELLED + OVERDUE', () => {
+    // DR-024 fix: the gate is `isInactive(...)` and the response is 409
+    // for CANCELLED / OVERDUE rows. The 200 noop shape is reserved for
+    // the LEGITIMATE completion-race (row already in a *_COMPLETED
+    // state) — DR-020 reintroduced the noop there, gated on a fresh
+    // state that is NOT CANCELLED / OVERDUE. Pin the two responses:
+    //   - 409 with ENROLLMENT_CANCELLED / ENROLLMENT_OVERDUE for the
+    //     explicit gate (inactive rows)
+    //   - 200 noop only as the resolveRaceAfterP2025 fallback (race
+    //     into a *_COMPLETED state)
+    // We can't cleanly source-text-pin "no noop for CANCELLED/OVERDUE"
+    // without the helper, so the assertion here is the positive: a 409
+    // response for the inactive path AND a noop shape for the race
+    // fallback — both present, side by side.
     expect(handlerSrc).toMatch(/res\.status\(409\)/);
+    expect(handlerSrc).toMatch(/ok:\s*true,\s*noop:\s*true/);
+    // The CANCELLED / OVERDUE branches in the P2025 resolver must
+    // surface 409, not 200 noop:
+    expect(handlerSrc).toMatch(/statusCode:\s*409/);
   });
 });
 
