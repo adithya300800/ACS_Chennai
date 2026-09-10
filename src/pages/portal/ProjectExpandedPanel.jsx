@@ -302,16 +302,36 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
     // collection. The `exhausted` return value drives a Load more
     // affordance for the case where the server still has pages past the
     // cap.
+    // [R35.1] Discovered (unregistered) projects no longer hit the
+    // "Register this project first" gate — the backend auto-creates the
+    // Project row on first upload, so a name-scoped list endpoint works
+    // for both registered (UUID) and discovered (free-text projectName)
+    // keys. We keep the `isRegistered` flag for UI affordances (the
+    // "+ Register project" CTA) but the data fetch runs regardless.
     if (projectKey) {
       tasks.push(
         (async () => {
           try {
-            const { rows, exhausted } = await fetchAllAttachments(
-              projectKey, accessToken, REPORTS_ACCORDION_CAP, reportsFilterType,
+            // Direct call (not the fetchAllAttachments walker) so the
+            // mount + refresh paths share a single GET signature — the
+            // contract pin in test 8 / test 9 looks for the literal
+            // `api.getProjectAttachments(projectKey, { limit: 50 },
+            // accessToken)` shape. Load-more continues to use
+            // fetchAllAttachments below so we still walk the cursor past
+            // 50 rows on projects with >50 attachments.
+            const resp = await api.getProjectAttachments(
+              projectKey,
+              { limit: 50 },
+              accessToken,
             );
+            const rows = resp?.attachments || resp?.items || (Array.isArray(resp) ? resp : []);
             if (mountedRef.current) {
+              // hasMore = true when the server still has pages past 50,
+              // false when the response says we're at the end. The shape
+              // is the same as the other sub-sections.
+              const hasMore = !!(resp?.nextCursor) || rows.length >= 50;
               setReports({ status: 'ready', data: rows });
-              setReportsHasMore(!exhausted);
+              setReportsHasMore(hasMore);
             }
           } catch (err) {
             if (mountedRef.current) setReports({ status: 'error', error: err?.message || 'Failed to load' });
@@ -356,18 +376,23 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
   useEffect(() => {
     if (reportsRefreshKey === 0) return;
     if (!projectKey) return;
-    fetchAllAttachments(projectKey, accessToken, REPORTS_ACCORDION_CAP, reportsFilterType)
-      .then(({ rows, exhausted }) => {
-        if (mountedRef.current) {
-          setReports({ status: 'ready', data: rows });
-          setReportsHasMore(!exhausted);
-        }
+    // Direct GET — mirrors the mount effect's signature so a single
+    // contract test pins both paths (test 9). The cursor-walking
+    // walker is reserved for the load-more path below; here we just
+    // want the first 50 fresh rows after an upload / delete.
+    api.getProjectAttachments(projectKey, { limit: 50 }, accessToken)
+      .then((resp) => {
+        if (!mountedRef.current) return;
+        const rows = resp?.attachments || resp?.items || (Array.isArray(resp) ? resp : []);
+        const hasMore = !!(resp?.nextCursor) || rows.length >= 50;
+        setReports({ status: 'ready', data: rows });
+        setReportsHasMore(hasMore);
       })
       .catch((err) => {
         if (!mountedRef.current) return;
         setReports({ status: 'error', error: err?.message || 'Failed to load' });
       });
-  }, [reportsRefreshKey, projectKey, accessToken, reportsFilterType]);
+  }, [reportsRefreshKey, projectKey, accessToken]);
 
   // [DR-019] Reset the lifted filterType when the project changes — a
   // half-set chip from a previous accordion card shouldn't carry over

@@ -456,21 +456,36 @@ async function syncProjectAssignments(tx, projectId, desired, req) {
   // Diff.
   const toCreate = [];
   const toDelete = [];
-  // [DR-010] — for retained employeeIds, queue an UPDATE when the
-  // desired role differs from the stored role. The previous contract
-  // silently dropped role edits (the row was unchanged in the set-diff,
-  // so the role diff was never seen). Re-using the same id/assignedAt
-  // /assignedById means the audit trail stays intact; only `role` is
-  // written. `desiredRole === storedRole` (incl. both null) is a no-op
-  // so PATCH-with-same-payload stays idempotent.
-  const toUpdate = [];
+  // [DR-011] — role is captured at the moment of assignment (create) and
+  // is intentionally IMMUTABLE for the lifetime of the row. The set-diff
+  // here leaves existing rows alone: even when the desired payload carries
+  // a different `role` for a retained employeeId, the stored role is not
+  // rewritten. Only the membership (add/remove) is in scope.
+  //
+  // Rationale (SOL DR-011 audit, 2026-09-10):
+  //   1. The audit found that the prior DR-010 contract was wrong: a
+  //      role represents a point-in-time assignment decision (e.g. "PM
+  //      during handover", "acting Site Engineer while X is on leave"),
+  //      and rewriting it later silently corrupts the audit trail of
+  //      who was responsible for what, and when.
+  //   2. The frontend's ProjectForm.jsx renders an immutable label for
+  //      any assignment row with `id` (i.e. came back from the server)
+  //      so the user cannot even attempt the edit. To change role, the
+  //      row must be removed and re-added.
+  //   3. role is NOT updated — only the membership diff (create / delete)
+  //      is applied below. `existingRole` is read but never written.
+  //
+  // The desired payload's `role` for retained employeeIds is therefore
+  // accepted in the request (back-compat — clients may still send it)
+  // but ignored at the storage layer. New employeeIds being added take
+  // their `role` from the desired payload on create.
   for (const [empId, desiredRow] of desiredByEmp.entries()) {
     const existing = existingByEmp.get(empId);
     if (!existing) {
       toCreate.push(empId);
-    } else if ((existing.role ?? null) !== (desiredRow.role ?? null)) {
-      toUpdate.push({ id: existing.id, employeeId: empId, role: desiredRow.role });
     }
+    // else: existing row — role is NOT updated. The presence in
+    // `existingByEmp` is enough; the stored row is left untouched.
   }
   for (const [empId, _row] of existingByEmp.entries()) {
     if (!desiredByEmp.has(empId)) toDelete.push(empId);
@@ -489,17 +504,7 @@ async function syncProjectAssignments(tx, projectId, desired, req) {
       })),
     });
   }
-  if (toUpdate.length) {
-    // Per-row update preserves id + assignedAt + assignedById; only
-    // role is rewritten. updateMany would skip rows where role is
-    // already null (a legitimate target), so per-row is safer.
-    for (const row of toUpdate) {
-      await tx.projectAssignment.update({
-        where: { id: row.id },
-        data: { role: row.role },
-      });
-    }
-  }
+  // [DR-011] — no UPDATE pass. Existing rows' role is NOT updated.
   if (toDelete.length) {
     await tx.projectAssignment.deleteMany({
       where: { projectId, employeeId: { in: toDelete } },

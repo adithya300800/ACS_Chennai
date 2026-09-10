@@ -290,22 +290,22 @@ export default function InspectionDetail() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '0.5rem' }}>
               {record.photos.map((p, i) => (
                 // SOL DR-026: the download anchor used to sit *inside* the
-                // open-lightbox <button> (axe nested-interactive). The
-                // wrapper is now a plain positioned div so the two controls
-                // are siblings, each reachable once by keyboard.
+                // open-lightbox `button` element (axe nested-interactive).
+                // The wrapper is now a plain positioned div so the two
+                // controls are siblings, each reachable once by keyboard.
                 //
                 // S6/UI-5 (2026-09-09): re-verified the nested-interactive
                 // fix holds for admin DPR / inspection photo grids too.
-                // Axe rule `nested-interactive` flags any <button>, <a>,
-                // <input>, or focusable descendant inside another such
-                // element. Here the open-lightbox <button> and the
-                // <PhotoDownloadButton> render as siblings inside a plain
-                // positioned <div> — neither is a descendant of the other,
-                // so Tab moves between them as two separate stops. Same
-                // pattern is enforced in DprDetail.jsx via the same
-                // PhotoDownloadButton import; if a future edit adds a
-                // third interactive control, it must stay a sibling of
-                // these two (or get its own dedicated trigger surface).
+                // Axe rule `nested-interactive` flags any focusable
+                // element (`button`, `a`, `input`, etc.) inside another.
+                // Here the open-lightbox button and the PhotoDownloadButton
+                // render as siblings inside a plain positioned div —
+                // neither is a descendant of the other, so Tab moves
+                // between them as two separate stops. Same pattern is
+                // enforced in DprDetail.jsx via the same PhotoDownloadButton
+                // import; if a future edit adds a third interactive
+                // control, it must stay a sibling of these two (or get
+                // its own dedicated trigger surface).
                 <div
                   key={p.id}
                   style={{

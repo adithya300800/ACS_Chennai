@@ -1052,23 +1052,26 @@ export const api = {
   //   4. POST /api/billing-certifications         → insert the row
   getBillingCertSasUrl: (filename, contentType, token) =>
     api.post('/dpr/sas-url', {
-      filename,
+      // [DR-016] client-side prefix matches the server-side
+      // UploadIntent pathPrefix — the bytes that get PUT go under
+      // `dpr-documents/billing/<filename>`, and the confirm step reads
+      // the same path back so the SAS-URL PUT and the confirm POST
+      // reference the same blob.
+      filename: `billing/${filename}`,
       contentType,
       container: 'dpr-documents',
-      // [DR-016] server-owned prefix; the issuer bakes `billing/`
-      // into the returned blobPath.
       pathPrefix: 'billing',
     }, token),
   confirmBillingCertUpload: (ulid, filename, contentType, sizeBytes, token) =>
     api.post('/dpr/confirm-upload', {
       ulid,
       container: 'dpr-documents',
-      filename,
+      // Same `billing/` prefix — kept on the confirm step so the
+      // server's UploadIntent lookup matches the filename the SAS
+      // URL was minted with.
+      filename: `billing/${filename}`,
       contentType,
       sizeBytes,
-      // [DR-016] same prefix — the confirm stage reads the
-      // stored blob name from the persisted UploadIntent so it
-      // matches the bytes that were PUT.
       pathPrefix: 'billing',
     }, token),
   getBillingCertifications: (params = {}, token) => {

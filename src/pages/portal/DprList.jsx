@@ -890,13 +890,13 @@ export default function DprList() {
                         Rejected by reviewer
                       </div>
                       {expandedDpr.rejectionReason && (
-                        <div style={{ marginBottom: expandedDpr.rejectionNotes ? '0.4rem' : 0 }}>
+                        <div style={{ marginBottom: expandedDpr.adminNotes ? '0.4rem' : 0 }}>
                           {expandedDpr.rejectionReason}
                         </div>
                       )}
-                      {expandedDpr.rejectionNotes && (
+                      {expandedDpr.adminNotes && (
                         <div style={{ fontSize: '0.8rem', color: '#991b1b', fontStyle: 'italic' }}>
-                          Admin note: {expandedDpr.rejectionNotes}
+                          Admin note: {expandedDpr.adminNotes}
                         </div>
                       )}
                       <div
@@ -908,7 +908,15 @@ export default function DprList() {
                           color: '#7f1d1d',
                         }}
                       >
-                        This report is closed. Contact your reviewer for next steps.
+                        {/* DR-026 correction / terminal contract footer.
+                            Backend treats REJECTED as terminal
+                            (backend/src/routes/dpr.js:1593 — 409 on PUT
+                            after REJECTED), so the only way to correct
+                            is to file a new report for a different
+                            reportDate. We say so here instead of forcing
+                            the user to discover the constraint via a
+                            409. */}
+                        This report is closed. To correct, file a new report for a different date — or contact your reviewer for next steps.
                       </div>
                     </div>
                   )}

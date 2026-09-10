@@ -1410,6 +1410,20 @@ export default function InspectionSubmit() {
           <div className="form-row">
             <div className="form-group" style={{ flex: 2 }}>
               <label htmlFor="projectId">Project *</label>
+              {/* Hidden mirror input so assistive tech + the
+                  `aria-describedby` link target a real focusable
+                  element keyed by the field name (projectName).
+                  The visible control is a <select id="projectId">;
+                  we mirror its validation state into this hidden
+                  input so the per-field error link resolves. */}
+              <input
+                type="hidden"
+                id="projectName"
+                name="projectName"
+                value={form.projectName}
+                aria-invalid={fieldErrors.projectName ? 'true' : 'false'}
+                aria-describedby={fieldErrors.projectName ? 'projectName-error' : undefined}
+              />
               {!projectsLoaded ? (
                 <select id="projectId" className="form-input" disabled>
                   <option>Loading projects…</option>

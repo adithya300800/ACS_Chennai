@@ -72,12 +72,25 @@ describe('DR-031 — clear-failed-migrations.js guard', () => {
 });
 
 describe('DR-031 — start.sh uses the safe predicate', () => {
-  test('3. start.sh DELETE mirrors the postinstall guard', () => {
-    // start.sh nests the JS inside a shell heredoc so the column
-    // quotes are triple-backslash escaped: \\\"finished_at\\\".
+  test('3. start.sh invokes `migrate resolve --rolled-back` for the DR-031 migration', () => {
+    // [DR-032] start.sh does NOT issue a raw DELETE against
+    // _prisma_migrations — auto-recovery is explicitly forbidden
+    // (db-recover.test.js pins this). Instead, start.sh uses
+    // `npx prisma migrate resolve --rolled-back 20260908150000_dr031_leave_constraint_correct_bound`
+    // which is the official Prisma API for clearing an errored ledger
+    // row. The `|| true` swallows the non-zero exit when the named
+    // migration is not in errored state (steady-state after the first
+    // successful recovery).
+    //
+    // DR-031 audit invariant: the predicate the postinstall hook uses
+    // (finished_at IS NULL OR applied_steps_count = 0) is enforced
+    // INSIDE prisma's `migrate resolve` — the operator-facing API
+    // already refuses to resolve a successfully-applied row, so we
+    // don't need to repeat the predicate in shell.
     expect(startShSrc).toMatch(
-      /DELETE FROM \\\\\\"_prisma_migrations\\\\\\"[\s\S]{0,400}?\\\\\\"finished_at\\\\\\"\s+IS\s+NULL\s+OR\s+\\\\\\"applied_steps_count\\\\\\"\s*=\s*0/,
+      /npx\s+prisma\s+migrate\s+resolve\s+--rolled-back\s+20260908150000_dr031_leave_constraint_correct_bound/,
     );
+    expect(startShSrc).toMatch(/\|\|\s*true/);
   });
 });
 

@@ -1,39 +1,45 @@
 /**
- * DR-010 (2026-09-08 SOL audit): "The advertised remove/re-add role
- * change still returns silent success".
+ * DR-011 (2026-09-10 SOL audit) — REVERSES DR-010.
  *
- * Background: the prior syncProjectAssignments diff in
- * backend/src/routes/projects.js treated assignments as set-membership
- * only — it created rows for new (projectId, employeeId) pairs and
- * deleted rows whose employeeId wasn't in `desired`, but it never
- * touched the role on rows that were already present. The frontend
- * shipped an "advertised workaround" (✕ remove → "+ Add employee…" re-
- * add with a new role → Save) that still hit this silent-success path:
- * the frontend's remove was a local-state change only, so on submit
- * the diff saw the existing row as "still in desired" and left it
- * alone — the new role was discarded and PATCH200 returned the old
- * role. Reload retained the old role.
+ * DR-010 originally extended syncProjectAssignments to UPDATE the role
+ * on retained employeeIds when the desired role differed from the
+ * stored role. The audit (DR-011) REVERSED that decision because a role
+ * represents a point-in-time assignment decision (e.g. "PM during
+ * handover", "acting Site Engineer while X is on leave"), and rewriting
+ * it later silently corrupts the audit trail of who was responsible for
+ * what, and when.
  *
- * Fix: extend the diff to UPDATE the role on retained employeeIds when
- * the desired role differs from the stored role. Preserves the row's
- * id, assignedAt, and assignedById so the audit trail stays intact.
+ * The new contract is: role is captured at the moment of assignment
+ * (create) and is INTENTIONALLY IMMUTABLE for the lifetime of the row.
+ * The set-diff in syncProjectAssignments leaves existing rows alone —
+ * even when the desired payload carries a different `role` for a
+ * retained employeeId, the stored role is NOT rewritten. Only the
+ * membership (add/remove) is in scope.
  *
- * Coverage matrix:
- *   1. PATCH with a changed role for a retained employee → UPDATE is
- *      called, the in-memory row reflects the new role, response
- *      payload carries the new role.
+ * To change role, the operator must remove and re-add the assignment
+ * (the frontend's ProjectForm.jsx renders an immutable <span> with a
+ * "remove and re-add to change role" tooltip — see ProjectForm.dr011
+ * for the source-text pin).
+ *
+ * Coverage matrix (DR-011 — role is NOT updated):
+ *   1. PATCH with a changed role for a retained employee → no UPDATE
+ *      is called, the in-memory row still reflects the OLD role, the
+ *      response payload carries the OLD role (the new role from the
+ *      request body is silently accepted in the payload but ignored at
+ *      the storage layer for backward compat).
  *   2. PATCH with the SAME role (no-op edit) → no UPDATE is called,
- *      idempotent (one row still).
- *   3. PATCH that clears a previously-set role to null → UPDATE is
- *      called, the row's role becomes null.
- *   4. PATCH with a new pair added + retained role edit → both an
- *      UPDATE on the retained row AND a createMany on the new pair
- *      happen in the same transaction.
- *   5. PATCH that omits a retained employee → DELETE happens AND a
- *      separate retained role update happens — no interference.
+ *      idempotent (one row still, role unchanged).
+ *   3. PATCH that clears a previously-set role to null → still no
+ *      UPDATE; the existing role is preserved (DR-011 immutability).
+ *   4. PATCH with a new pair added + retained role edit → only the
+ *      createMany runs; the retained row's role is left alone.
+ *   5. PATCH that omits a retained employee + retained role edit →
+ *      DELETE happens, no UPDATE on the retained row.
  *   6. Source-text pin: syncProjectAssignments contains the literal
- *      `[DR-010]` marker and the per-row update path. Stops a future
- *      refactor from reverting the silent-success contract.
+ *      `[DR-011]` marker + the "leaves existing rows alone" / "role is
+ *      NOT updated" rationale + the absence of a per-row update call.
+ *      Stops a future refactor from re-introducing DR-010's silent-
+ *      success contract.
  */
 
 'use strict';
@@ -251,27 +257,37 @@ function buildApp(prisma) {
 }
 
 // ─── Source-text pin ────────────────────────────────────────────────────────
-// Stops a future refactor from silently reverting the per-row update
-// path. If the marker disappears, this test fails — the source-text
-// pin is the durable contract.
-describe('DR-010 — source-text pin in syncProjectAssignments', () => {
-  it('syncProjectAssignments contains the [DR-010] marker and a per-row update call', () => {
+// DR-011 — pins the IMMUTABLE-role contract. Stops a future refactor
+// from silently re-introducing DR-010's per-row update path. If any of
+// these assertions flip, the audit invariant is broken and the
+// frontend's "immutable role" UX will silently lie to users.
+describe('DR-011 — source-text pin in syncProjectAssignments', () => {
+  it('syncProjectAssignments carries the DR-011 rationale + NO per-row update call', () => {
     const src = fs.readFileSync(
       path.join(__dirname, '..', 'src', 'routes', 'projects.js'),
       'utf8',
     );
-    // The diff comment that calls out retained-employeeIds.
-    expect(src).toMatch(/\[DR-010\][^\n]*retained[^\n]*employeeIds/i);
-    // The per-row update path — `tx.projectAssignment.update({ where: { id: row.id }, data: { role: row.role } })`.
-    expect(src).toMatch(/tx\.projectAssignment\.update\(\s*\{\s*where:\s*\{\s*id:\s*row\.id/);
-    // The role-equality short-circuit that keeps PATCH idempotent.
-    expect(src).toMatch(/existing\.role\s*\?\?\s*null\)\s*!==\s*\(desiredRow\.role\s*\?\?\s*null\)/);
+    // The audit marker + the "leaves existing rows alone" rationale.
+    expect(src).toMatch(/\[DR-011\]/);
+    expect(src).toMatch(/leaves existing rows alone/i);
+    expect(src).toMatch(/role is NOT updated/i);
+    // The per-row update path that DR-010 added — must NOT be present
+    // anywhere in the source. If a future PR reintroduces it, this
+    // assertion fires and the audit reviewer must make an explicit
+    // decision rather than silently flipping the contract.
+    expect(src).not.toMatch(/tx\.projectAssignment\.update\(\s*\{\s*where:\s*\{\s*id:\s*row\.id/);
+    // The role-equality short-circuit that DR-010 added to keep PATCH
+    // idempotent — also must NOT be present.
+    expect(src).not.toMatch(/existing\.role\s*\?\?\s*null\)\s*!==\s*\(desiredRow\.role\s*\?\?\s*null\)/);
   });
 });
 
 // ─── Behavioural coverage ───────────────────────────────────────────────────
-describe('DR-010 — PATCH assignment role change persists for retained employees', () => {
-  it('1. changed role → update is called and the in-memory row reflects the new role', async () => {
+// DR-011 — the role field is IMMUTABLE on retained rows. Each test
+// pins a different scenario where DR-010 would have UPDATED the role;
+// under DR-011 none of those updates happens.
+describe('DR-011 — PATCH assignment role change is a no-op for retained employees', () => {
+  it('1. changed role → no update; in-memory row still reflects the OLD role', async () => {
     const { prisma, assignments } = buildPrisma();
     const seedRow = assignments.find((a) => a.employeeId === EMP_ALICE);
     expect(seedRow.role).toBe('Site Engineer');
@@ -283,20 +299,18 @@ describe('DR-010 — PATCH assignment role change persists for retained employee
       .send({ assignments: [{ employeeId: EMP_ALICE, role: 'Project Manager' }] });
 
     expect(res.status).toBe(200);
-    // Per-row update was called once with the new role, preserving id.
-    expect(prisma.projectAssignment.update).toHaveBeenCalledTimes(1);
-    const updateArgs = prisma.projectAssignment.update.mock.calls[0][0];
-    expect(updateArgs.where.id).toBe(seedRow.id);
-    expect(updateArgs.data.role).toBe('Project Manager');
-    // The shared in-memory store reflects the change.
+    // DR-011 invariant: no UPDATE on retained rows.
+    expect(prisma.projectAssignment.update).not.toHaveBeenCalled();
+    // The shared in-memory store still reflects the ORIGINAL role.
     const afterRow = assignments.find((a) => a.id === seedRow.id);
-    expect(afterRow.role).toBe('Project Manager');
+    expect(afterRow.role).toBe('Site Engineer');
     expect(afterRow.id).toBe(seedRow.id);
     expect(afterRow.assignedAt).toEqual(seedRow.assignedAt);
     expect(afterRow.assignedById).toBe(ADMIN_ID);
-    // The response payload carries the new role.
+    // The response payload carries the ORIGINAL role (the desired role
+    // from the request body is ignored at the storage layer).
     const aliceRow = res.body.assignments.find((a) => a.employeeId === EMP_ALICE);
-    expect(aliceRow.role).toBe('Project Manager');
+    expect(aliceRow.role).toBe('Site Engineer');
   });
 
   it('2. same role (no-op edit) → no update, idempotent', async () => {
@@ -318,7 +332,7 @@ describe('DR-010 — PATCH assignment role change persists for retained employee
     expect(seedRow.role).toBe('Site Engineer');
   });
 
-  it('3. cleared role → update sets role to null', async () => {
+  it('3. cleared role → still no update; existing role is preserved (DR-011 immutability)', async () => {
     const { prisma, assignments } = buildPrisma();
     const seedRow = assignments.find((a) => a.employeeId === EMP_ALICE);
     expect(seedRow.role).toBe('Site Engineer');
@@ -330,14 +344,15 @@ describe('DR-010 — PATCH assignment role change persists for retained employee
       .send({ assignments: [{ employeeId: EMP_ALICE, role: null }] });
 
     expect(res.status).toBe(200);
-    expect(prisma.projectAssignment.update).toHaveBeenCalledTimes(1);
-    expect(prisma.projectAssignment.update.mock.calls[0][0].data.role).toBeNull();
-    expect(assignments.find((a) => a.id === seedRow.id).role).toBeNull();
+    expect(prisma.projectAssignment.update).not.toHaveBeenCalled();
+    // The existing role is preserved — DR-011 immutability means even
+    // a request to null out the role is silently dropped for retained rows.
+    expect(assignments.find((a) => a.id === seedRow.id).role).toBe('Site Engineer');
     const aliceRow = res.body.assignments.find((a) => a.employeeId === EMP_ALICE);
-    expect(aliceRow.role).toBeNull();
+    expect(aliceRow.role).toBe('Site Engineer');
   });
 
-  it('4. role edit + new assignee → update AND createMany in the same transaction', async () => {
+  it('4. role edit + new assignee → only createMany runs; retained role is left alone', async () => {
     const { prisma, assignments } = buildPrisma();
     const seedRow = assignments.find((a) => a.employeeId === EMP_ALICE);
     const app = buildApp(prisma);
@@ -353,8 +368,9 @@ describe('DR-010 — PATCH assignment role change persists for retained employee
       });
 
     expect(res.status).toBe(200);
-    expect(prisma.projectAssignment.update).toHaveBeenCalledTimes(1);
-    expect(prisma.projectAssignment.update.mock.calls[0][0].where.id).toBe(seedRow.id);
+    // No UPDATE on the retained Alice row — DR-011.
+    expect(prisma.projectAssignment.update).not.toHaveBeenCalled();
+    // createMany runs only for the new Bob row.
     expect(prisma.projectAssignment.createMany).toHaveBeenCalledTimes(1);
     const createArgs = prisma.projectAssignment.createMany.mock.calls[0][0];
     expect(createArgs.data.map((d) => d.employeeId)).toEqual([EMP_BOB]);
@@ -363,13 +379,16 @@ describe('DR-010 — PATCH assignment role change persists for retained employee
     expect(res.body.assignments.length).toBe(2);
     expect(assignments.filter((a) => a.projectId === PROJECT_ID).length).toBe(2);
     const byEmp = Object.fromEntries(res.body.assignments.map((a) => [a.employeeId, a]));
-    expect(byEmp[EMP_ALICE].role).toBe('Lead Engineer');
+    // Alice's role is STILL the original "Site Engineer" — DR-011
+    // immutability wins over the request body's "Lead Engineer".
+    expect(byEmp[EMP_ALICE].role).toBe('Site Engineer');
+    // Bob was newly added with the requested role.
     expect(byEmp[EMP_BOB].role).toBe('QA');
   });
 
-  it('5. omitted retained employee + retained role edit → delete AND update happen independently', async () => {
-    // Seed with TWO existing rows so we can both UPDATE one and DELETE
-    // the other in the same diff.
+  it('5. omitted retained employee + retained role edit → DELETE happens; no UPDATE on retained row', async () => {
+    // Seed with TWO existing rows so we can both ignore-UPDATE one
+    // and DELETE the other in the same diff.
     const seed = buildPrisma.bind(null, {
       initialAssignments: [
         {
@@ -397,19 +416,24 @@ describe('DR-010 — PATCH assignment role change persists for retained employee
       .patch(`/api/projects/${PROJECT_ID}`)
       .set('Authorization', adminJwt())
       .send({
-        // Alice stays, role changes; Bob is omitted → DELETE.
+        // Alice stays, role "edits" → DR-011 drops the edit. Bob is
+        // omitted → DELETE.
         assignments: [{ employeeId: EMP_ALICE, role: 'Lead Engineer' }],
       });
 
     expect(res.status).toBe(200);
-    expect(prisma.projectAssignment.update).toHaveBeenCalledTimes(1);
-    expect(prisma.projectAssignment.update.mock.calls[0][0].where.id).toBe('pa-A');
+    // No UPDATE on Alice's retained row.
+    expect(prisma.projectAssignment.update).not.toHaveBeenCalled();
+    // DELETE on Bob's omitted row.
     expect(prisma.projectAssignment.deleteMany).toHaveBeenCalledTimes(1);
     expect(prisma.projectAssignment.deleteMany.mock.calls[0][0].where.employeeId.in).toEqual([EMP_BOB]);
-    expect(assignments.find((a) => a.id === 'pa-A').role).toBe('Lead Engineer');
+    // Alice's role is STILL "Site Engineer" — DR-011 drops the edit.
+    expect(assignments.find((a) => a.id === 'pa-A').role).toBe('Site Engineer');
+    // Bob is gone.
     expect(assignments.find((a) => a.id === 'pa-B')).toBeUndefined();
+    // The response payload shows only Alice with the ORIGINAL role.
     expect(res.body.assignments.length).toBe(1);
     expect(res.body.assignments[0].employeeId).toBe(EMP_ALICE);
-    expect(res.body.assignments[0].role).toBe('Lead Engineer');
+    expect(res.body.assignments[0].role).toBe('Site Engineer');
   });
 });

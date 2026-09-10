@@ -349,11 +349,22 @@ export default function ProjectForm() {
           )}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '0.75rem' }}>
             {form.assignments.map((a) => {
-              // [DR-010] Role edits are now persisted on retained
-              // assignment rows (the previous contract silently dropped
-              // them — see backend/src/routes/projects.js syncProjectAssignments).
-              // Render role as an editable input for every row so the
-              // UI matches the backend contract.
+              // [DR-011] — role is immutable for any assignment row that
+              // came back from the server (i.e. has an `id`). The backend's
+              // syncProjectAssignments (backend/src/routes/projects.js:420-486)
+              // deliberately does NOT update `role` on existing rows — it
+              // treats role as a point-in-time assignment decision that
+              // captures who-was-responsible-when. Editing the input would
+              // silently promise a contract the server can't honour: save
+              // returns 200 but the role is dropped on the next fetch.
+              //
+              // Discriminate on `Boolean(a.id)`:
+              //   - existing row  (a.id truthy) → render an immutable <span>
+              //     carrying the role text + a `title` tooltip explaining
+              //     why it's immutable, so the user isn't confused.
+              //   - newly added   (no a.id)     → render the editable
+              //     <input> so the create flow is unaffected.
+              const isExisting = Boolean(a.id);
               return (
                 <div
                   key={a.employeeId}
@@ -371,16 +382,30 @@ export default function ProjectForm() {
                       </span>
                     )}
                   </span>
-                  <input
-                    type="text"
-                    placeholder="Role (e.g. Site Engineer)"
-                    value={a.role}
-                    maxLength={60}
-                    onChange={(e) => updateAssignmentRole(a.employeeId, e.target.value)}
-                    className="form-input"
-                    style={{ flex: 1, minWidth: 160 }}
-                    aria-label={`Role for ${a._employee?.name || a.employeeId}`}
-                  />
+                  {isExisting ? (
+                    <span
+                      data-testid="assignment-role-immutable"
+                      title="Role is set during initial assignment and cannot be edited. Remove and re-add the assignment to change role."
+                      aria-label={`Role for ${a._employee?.name || a.employeeId} (immutable — set at initial assignment, remove and re-add to change)`}
+                      style={{
+                        flex: 1, minWidth: 160, padding: '0.4rem 0.5rem',
+                        color: 'var(--steel)', fontStyle: 'italic',
+                      }}
+                    >
+                      {a.role || 'No role set'}
+                    </span>
+                  ) : (
+                    <input
+                      type="text"
+                      placeholder="Role (e.g. Site Engineer)"
+                      value={a.role}
+                      maxLength={60}
+                      onChange={(e) => updateAssignmentRole(a.employeeId, e.target.value)}
+                      className="form-input"
+                      style={{ flex: 1, minWidth: 160 }}
+                      aria-label={`Role for ${a._employee?.name || a.employeeId}`}
+                    />
+                  )}
                   <button
                     type="button"
                     onClick={() => removeAssignment(a.employeeId)}
