@@ -564,8 +564,13 @@ export default function ProjectDashboard() {
   // so a route like `#/portal/admin/project-dashboard` lands on the
   // org-wide view by default.
   const ALL_PROJECTS_ID = '__all__';
-  const isAllProjects = (selectedProject && selectedProject.id === ALL_PROJECTS_ID) || false;
   const [selectedProject, setSelectedProject] = useState({ id: ALL_PROJECTS_ID, name: 'All projects', isRegistered: false });
+  // TDZ note: `isAllProjects` MUST come AFTER the `useState` call
+  // above — it reads `selectedProject`, and `const`-declared bindings
+  // are not initialised until the line that declares them runs. Live
+  // crash on f0a574b: "Cannot access 'p' before initialization" because
+  // the declaration was above the useState. Don't reorder.
+  const isAllProjects = (selectedProject && selectedProject.id === ALL_PROJECTS_ID) || false;
 
   // KPI payload from /api/projects/:idOrName/kpis
   const [kpis, setKpis] = useState(null);

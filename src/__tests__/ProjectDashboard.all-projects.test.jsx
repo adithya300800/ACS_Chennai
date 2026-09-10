@@ -51,6 +51,25 @@ describe('R38.1 — All-projects sentinel + default selection', () => {
       /(?:const|let|var)?\s*isAllProjects\s*=\s*\(\s*selectedProject\s*&&\s*selectedProject\.id\s*===\s*ALL_PROJECTS_ID\s*\)/,
     );
   });
+
+  test('isAllProjects is declared AFTER the selectedProject useState (no TDZ)', () => {
+    // Live crash (f0a574b, 2026-09-10):
+    //   ReferenceError: Cannot access 'p' before initialization
+    //     at Ve (ProjectDashboard-…js:2:15438)
+    // Root cause: `const isAllProjects = (selectedProject && ...)`
+    // was declared on a line BEFORE `const [selectedProject, ...] =
+    // useState(...)`. `const` bindings live in the TDZ until the line
+    // that declares them runs, so the component threw on first render.
+    // This pin guarantees `isAllProjects` follows the useState in the
+    // file — reorder is a hard regression.
+    const useStateIdx = dashboardSrc.indexOf('const [selectedProject, setSelectedProject]');
+    const flagIdx = dashboardSrc.search(
+      /\b(?:const|let|var)\s+isAllProjects\s*=\s*\(\s*selectedProject\s*&&/,
+    );
+    expect(useStateIdx).toBeGreaterThan(-1);
+    expect(flagIdx).toBeGreaterThan(-1);
+    expect(flagIdx).toBeGreaterThan(useStateIdx);
+  });
 });
 
 // ─── Dropdown wiring ───────────────────────────────────────────────────────
