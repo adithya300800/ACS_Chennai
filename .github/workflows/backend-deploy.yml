@@ -5,6 +5,14 @@ on:
     branches: [ add-react-website ]
     paths:
       - 'backend/**'
+      # [DR-031-SQLFIX 2026-09-10] include the workflow file itself so
+      # edits to the deploy pipeline (bootstrap resolve step, step
+      # ordering, post-deploy verification) trigger a fresh run. Without
+      # this, a workflow-only fix can't re-trigger the deploy that the
+      # fix is meant to unblock — exactly the chicken-and-egg we hit when
+      # the bash comment-substitution bug silently broke the ledger
+      # inspection step.
+      - '.github/workflows/backend-deploy.yml'
   workflow_dispatch:
 
 permissions:
