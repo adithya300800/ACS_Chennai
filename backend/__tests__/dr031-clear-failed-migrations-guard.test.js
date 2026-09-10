@@ -149,10 +149,16 @@ describe('clear-failed-migrations — DR-031 NOT-applied guard', () => {
 
       const executes = capturedQueries.filter((q) => q.kind === 'execute');
       // KNOWN_BAD (per scripts/clear-failed-migrations.js) — pin the
-      // order so a future re-ordering shows up as a test diff.
-      expect(executes).toHaveLength(2);
+      // order so a future re-ordering shows up as a test diff. Updated
+      // for DR-031-SQLFIX 2026-09-10: the DR-031 leave-bound migration
+      // joined the allowlist after its broken `''[]''` literal was
+      // corrected; start.sh handles the one-shot bootstrap recovery so
+      // this list keeps the ledger inspection honest until the row is
+      // cleared on the next successful deploy.
+      expect(executes).toHaveLength(3);
       expect(executes[0].sql).toMatch(/20260905020000_n17_projects/);
       expect(executes[1].sql).toMatch(/20260906000000_n1_project_fk/);
+      expect(executes[2].sql).toMatch(/20260908150000_dr031_leave_constraint_correct_bound/);
     });
   });
 

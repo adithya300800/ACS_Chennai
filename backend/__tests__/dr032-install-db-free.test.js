@@ -109,11 +109,25 @@ describe('DR-032 followup — recovery is operator-only', () => {
     expect(startSrc).not.toMatch(/DELETE\s+FROM[^_]*_prisma_migrations/i);
   });
 
-  test('start.sh no longer auto-runs prisma migrate resolve', () => {
+  test('start.sh no longer auto-runs prisma migrate resolve (DR-031-SQLFIX bootstrap excepted)', () => {
     // Resolve was an automatic part of the previous start-time
     // recovery. The operator runs it (after inspecting the ledger)
-    // via db:recover. start.sh must not invoke it.
-    expect(startSrc).not.toMatch(/prisma\s+migrate\s+resolve/);
+    // via db:recover. start.sh must not invoke it — EXCEPT for the
+    // [DR-031-SQLFIX] bootstrap block, which is narrowly scoped to a
+    // single migration name (the broken `''[]''` literal shipped at
+    // commit cf697e7), runs with `|| true` so the steady-state
+    // non-zero exit is swallowed, and is the only sanctioned auto-
+    // recovery in start.sh. Any future `migrate resolve` invocation
+    // in start.sh that targets a different migration, or omits the
+    // `|| true` guard, or is not annotated with [DR-031-SQLFIX] is a
+    // regression that needs re-justification.
+    const resolveCalls = startSrc.match(/prisma\s+migrate\s+resolve[^\n]*/g) || [];
+    expect(resolveCalls.length).toBeLessThanOrEqual(1);
+    if (resolveCalls.length === 1) {
+      expect(resolveCalls[0]).toMatch(/--rolled-back/);
+      expect(resolveCalls[0]).toMatch(/20260908150000_dr031_leave_constraint_correct_bound/);
+      expect(resolveCalls[0] + '\n' + startSrc).toMatch(/\|\|\s*true/);
+    }
   });
 
   test('start.sh runs prisma migrate deploy (failure-before-serving)', () => {

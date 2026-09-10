@@ -35,6 +35,12 @@
 // KNOWN_BAD allowlist (append as new failures are discovered):
 //   - 20260905020000_n17_projects (DR-031 history)
 //   - 20260906000000_n1_project_fk (DR-031 history)
+//   - 20260908150000_dr031_leave_constraint_correct_bound (DR-031-SQLFIX
+//     2026-09-10: shipped with broken `''[]''` literal at lines 82 +
+//     113; SQL has since been corrected in place; bootstrap recovery
+//     runs `migrate resolve --rolled-back` from start.sh before
+//     `migrate deploy`; this allowlist row keeps the CI ledger
+//     inspection honest until the row is cleared.)
 
 'use strict';
 
@@ -43,6 +49,7 @@ const { PrismaClient } = require('@prisma/client');
 const KNOWN_BAD = Object.freeze([
   '20260905020000_n17_projects',     // original n17 referenced wrong FK table
   '20260906000000_n1_project_fk',    // original n1 used wrong column case
+  '20260908150000_dr031_leave_constraint_correct_bound', // DR-031-SQLFIX 2026-09-10
 ]);
 
 const CONFIRMED_ABANDONED = process.argv.includes('--confirmed-abandoned');

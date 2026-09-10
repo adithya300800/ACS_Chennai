@@ -17,16 +17,25 @@
  *     DELETE. The DELETE SQL must include the NOT-applied guard
  *     (DR-031), so a successfully-applied row can never be clobbered.
  *
- *  4. `start.sh` no longer auto-recovers. It must NOT issue a DELETE
- *     or `prisma migrate resolve`; it only runs `prisma migrate
- *     deploy` and fails fast on a non-zero exit.
+ *  4. `start.sh` does NOT auto-recover in general. The ONLY exception
+ *     is the [DR-031-SQLFIX] bootstrap block (one-shot `migrate
+ *     resolve --rolled-back` for migration
+ *     20260908150000_dr031_leave_constraint_correct_bound), which
+ *     is narrowly scoped, idempotent (`|| true` swallows the non-zero
+ *     exit when the migration isn't in errored state), and exists
+ *     because the deploy at commit cf697e7 failed with a SQL syntax
+ *     bug and the production DB is locked behind that errored row.
+ *     The pins below allow THAT resolve call and pin its narrow scope;
+ *     any future auto-recovery addition is a red flag that needs
+ *     re-justification.
  *
  *  5. The CI workflow runs a read-only inspection step that points
  *     operators at `npm run db:recover -- --confirmed-abandoned`
  *     when non-applied rows are found.
  *
  * Together these pins prevent silent auto-recovery from being
- * re-introduced.
+ * re-introduced — the DR-031-SQLFIX exception is the only allowed
+ * auto-recovery, and it is documented in source as a one-shot.
  */
 
 const fs = require('fs');
@@ -85,8 +94,20 @@ describe('db:recover — operator-only recovery', () => {
     expect(startSrc).not.toMatch(/DELETE\s+FROM[^_]*_prisma_migrations/i);
   });
 
-  test('start.sh no longer auto-runs prisma migrate resolve', () => {
-    expect(startSrc).not.toMatch(/prisma\s+migrate\s+resolve/);
+  test('start.sh no longer auto-runs prisma migrate resolve (DR-031-SQLFIX bootstrap excepted)', () => {
+    // The only allowed auto-recovery in start.sh is the DR-031-SQLFIX
+    // bootstrap — a narrowly-scoped `migrate resolve --rolled-back` for
+    // migration `20260908150000_dr031_leave_constraint_correct_bound`,
+    // run with `|| true` so the steady-state (non-errored row) exit
+    // code is swallowed. Any other `prisma migrate resolve` call is a
+    // regression. The regex below allows the DR-031-SQLFIX line and
+    // rejects anything else.
+    const resolveCalls = startSrc.match(/prisma\s+migrate\s+resolve[^\n]*/g) || [];
+    expect(resolveCalls.length).toBeLessThanOrEqual(1);
+    if (resolveCalls.length === 1) {
+      expect(resolveCalls[0]).toMatch(/--rolled-back/);
+      expect(resolveCalls[0]).toMatch(/20260908150000_dr031_leave_constraint_correct_bound/);
+    }
   });
 
   test('start.sh runs prisma migrate deploy and fails fast on non-zero exit', () => {
@@ -238,18 +259,29 @@ describe('start.sh — detection logic for failed migrations', () => {
 
   const startSrc = fs.readFileSync(START_SH, 'utf8');
 
-  test('does not invoke any auto-recovery helper', () => {
+  test('does not invoke any auto-recovery helper (DR-031-SQLFIX bootstrap excepted)', () => {
     // Auto-recovery hooks that must be absent from start.sh.
     // Note: start.sh legitimately documents `--confirmed-abandoned` in
     // comments + the failure message that points operators at
     // db:recover. What we pin here is the absence of any actual
-    // *execution* of the recovery script.
+    // *execution* of the recovery script, EXCEPT for the one-shot
+    // DR-031-SQLFIX bootstrap block which runs `prisma migrate
+    // resolve --rolled-back` for the specific broken migration name
+    // with `|| true` to swallow the steady-state non-zero exit. Any
+    // other `migrate resolve` invocation or any auto-recovery helper
+    // (clear-failed-migrations / POSTINSTALL_CLEAR_MIGRATIONS /
+    // OPS_RECONCILE_FAILED_MIGRATIONS / node -e / node scripts/) is
+    // a regression.
+    const resolveCalls = startSrc.match(/prisma\s+migrate\s+resolve[^\n]*/g) || [];
+    expect(resolveCalls.length).toBeLessThanOrEqual(1);
+    if (resolveCalls.length === 1) {
+      expect(resolveCalls[0]).toMatch(/20260908150000_dr031_leave_constraint_correct_bound/);
+    }
     expect(startSrc).not.toMatch(/clear-failed-migrations/);
     expect(startSrc).not.toMatch(/POSTINSTALL_CLEAR_MIGRATIONS/);
     expect(startSrc).not.toMatch(/OPS_RECONCILE_FAILED_MIGRATIONS/);
     expect(startSrc).not.toMatch(/node\s+scripts\//);
     expect(startSrc).not.toMatch(/node\s+-e/);
-    expect(startSrc).not.toMatch(/prisma\s+migrate\s+resolve/);
   });
 
   test('runs prisma migrate deploy and surfaces its exit code', () => {

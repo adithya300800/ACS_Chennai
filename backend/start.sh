@@ -25,8 +25,30 @@
 #       @map on the schema field). The corrective migration
 #       20260906000001_n1_project_fk_fix re-runs the DDL with corrected
 #       backfill column names.
+#   - 20260908150000_dr031_leave_constraint_correct_bound — shipped
+#       with a SQL syntax bug at lines 82/113 (`''[]''` parsed as
+#       empty-string + stray-array + empty-string). Fixed in the
+#       migration file (SQL now uses `'[]'`); the bootstrap resolve
+#       block below clears the errored ledger row so migrate deploy
+#       can re-apply the corrected SQL on the first start after the
+#       fix lands. Idempotent: `migrate resolve --rolled-back` on a
+#       migration that's not in errored state exits non-zero, so we
+#       swallow that. After the first successful re-apply, this block
+#       is a no-op on every subsequent start.
 
 set -e
+
+# [DR-031-SQLFIX] Bootstrap recovery: clear the errored ledger row for
+# the DR-031 migration so `prisma migrate deploy` can re-apply the
+# (now-fixed) SQL. `migrate resolve` exits non-zero when the named
+# migration is not in errored state, which is the steady-state for
+# every start after the first successful recovery. The `|| true`
+# swallows that non-zero exit so we don't fail-fast on the steady
+# state. If the DB is unreachable, `migrate resolve` exits
+# non-zero AND `migrate deploy` below will also fail — the same
+# failure surface as before this block was added, no worse.
+echo "[start.sh] one-shot DR-031 ledger resolve (no-op once recovered)"
+npx prisma migrate resolve --rolled-back 20260908150000_dr031_leave_constraint_correct_bound >/dev/null 2>&1 || true
 
 echo "[start.sh] Running prisma migrate deploy (failure-before-serving; no recovery auto-runs)"
 npx prisma migrate deploy

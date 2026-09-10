@@ -1,6 +1,20 @@
 -- DR-031 (audit, 2026-09-08): the round-20 fix migration
 -- 20260908140000_dr009_leave_overlap_constraint_fix used
 -- daterange("startDate", ("endDate" + 1), '[]') as the EXCLUDE bound.
+--
+-- [DR-031-SQLFIX 2026-09-10]: the original file shipped with a syntax
+-- bug at lines 82 + 113 — `position(''[]'' in current_def)` was
+-- intended as `position('[]' in current_def)` but the doubled single
+-- quotes parse as `''` (empty string) + `[]` (stray array literal) +
+-- `''` (empty string), which is invalid SQL and caused
+-- `prisma migrate deploy` to fail with `ERROR: syntax error at or
+-- near "["` (PostgreSQL error code 42601). The fix is the literal
+-- `'[]'` — the migration now correctly detects the broken combo of
+-- `+ 1` arithmetic AND `'[]'` bound literal. Confirmed locally with
+-- `pgsql-ast-parser`: the broken form is rejected at parse time and
+-- the fixed form parses cleanly. Deploy at commit cf697e7 was marked
+-- `update_failed`; recovery is the bootstrap `migrate resolve` step
+-- in start.sh (one-shot, idempotent).
 -- The '[]' bound INCLUDES the upper endpoint, so the constraint range
 -- covers startDate..endDate+1 — one day BEYOND the actual leave. A
 -- valid request for the day AFTER the existing endDate was rejected
@@ -79,7 +93,7 @@ BEGIN
     -- bound literal in the rendered definition.
     bad_definition := (
       position('+ 1' in current_def) > 0
-      AND position(''[]'' in current_def) > 0
+      AND position('[]' in current_def) > 0
     );
 
     IF bad_definition THEN
@@ -110,7 +124,7 @@ BEGIN
     FROM pg_constraint WHERE conname = 'no_overlap_leave';
 
   IF position('+ 1' in current_def) > 0
-     AND position(''[]'' in current_def) > 0 THEN
+     AND position('[]' in current_def) > 0 THEN
     RAISE EXCEPTION 'DR-031: no_overlap_leave still has broken inclusive-upper form: %', current_def;
   END IF;
 END$$;
