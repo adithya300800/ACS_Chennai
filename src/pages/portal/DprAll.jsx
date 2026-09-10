@@ -951,10 +951,14 @@ export default function DprAll() {
                   </div>
                 ) : null}
 
-                {/* Lower-priority fields — rendered as one-line each. The
-                    admin can still see these without opening the modal;
-                    for the full review (admin notes, reject reason) the
-                    existing modal handles the form fields. */}
+                {/* Lower-priority fields — rendered as one-line each so the
+                    admin can see them without opening the modal.
+                    S6/UI-2: the previous comment claimed the modal also
+                    handles admin notes / reject reason — it does NOT.
+                    <DprDetailPanel> is read-only; approve/reject with
+                    admin-notes and reject-reason fields lives exclusively
+                    at /portal/admin/dpr (DprDashboard.jsx), which is the
+                    queue this back-link in the modal header points at. */}
                 <div style={{ marginTop: '0.625rem', display: 'flex', flexDirection: 'column', gap: '0.3rem', fontSize: '0.82rem' }}>
                   {dpr.workLocation ? (
                     <div>
@@ -1084,17 +1088,30 @@ export default function DprAll() {
                   </div>
                 ) : null}
 
-                {/* Footer — Review CTA. The card itself is clickable, so
+                {/* Footer — detail CTA. The card itself is clickable, so
                     the CTA is purely a visual cue (and a focus target for
                     keyboard users) — clicking anywhere on the card opens
                     the modal. The button stops propagation so the card
-                    click handler doesn't double-fire. */}
+                    click handler doesn't double-fire.
+
+                    S6/UI-2 (phantom-button audit): this used to read
+                    "Click card to review & approve/reject" / "Review →",
+                    but <DprDetailPanel> above is READ-ONLY — it renders
+                    the rejection banner, linked inspections, approval
+                    history, fields and photos, and its only controls are
+                    Back and Close. Approve/reject lives exclusively on
+                    the admin review queue (/portal/admin/dpr →
+                    DprDashboard.jsx, which owns handleApprove /
+                    handleReject and the reject-reason validation). The
+                    labels now describe what the click actually does; the
+                    header's "← Back to admin review queue" link is the
+                    real path to the approve/reject controls. */}
                 <div style={{
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   borderTop: '1px solid #f1f5f9', paddingTop: '0.625rem', marginTop: '0.75rem',
                 }}>
                   <span style={{ fontSize: '0.72rem', color: 'var(--steel)' }}>
-                    Click card to review &amp; approve/reject
+                    Click card for full report details
                   </span>
                   <button
                     type="button"
@@ -1104,8 +1121,9 @@ export default function DprAll() {
                       lastTriggerRef.current = e.currentTarget;
                       setSelectedDpr(dpr);
                     }}
+                    aria-label={`View full details for ${dpr.project?.name || dpr.projectName || 'this report'}`}
                   >
-                    Review →
+                    View details →
                   </button>
                 </div>
               </div>

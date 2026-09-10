@@ -36,8 +36,20 @@ import { api } from '../../lib/api.js';
 import Modal from '../../components/Modal.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import { formatShortDate } from '../../lib/format.js';
 
 const UNITS = ['cum', 'sqm', 'kg', 'nos', 'rm', 'mt'];
+
+// S6/UI-2: single source of truth for the execution-stage vocabulary.
+// The "Record execution" <select> and the execution-history ledger both
+// read from here so a stage renamed in one surface can't silently keep
+// its old label in the other. Keys mirror EXECUTION_STAGES in
+// backend/src/routes/boq.js — the wire values are what the API validates.
+const EXECUTION_STAGE_LABELS = {
+  ISSUED: 'Issued to site',
+  INSTALLED: 'Installed',
+  PAID: 'Paid / certified',
+};
 
 // Format an amount in INR. The BOQ lives in lakhs/crore territory for
 // any real project, so locale formatting matters. Fall back to the raw
@@ -414,9 +426,9 @@ function RecordExecutionModal({ open, item, onClose, onSave }) {
               value={form.stage}
               onChange={handleChange}
             >
-              <option value="ISSUED">Issued to site</option>
-              <option value="INSTALLED">Installed</option>
-              <option value="PAID">Paid / certified</option>
+              {Object.entries(EXECUTION_STAGE_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
             </select>
           </div>
         </div>
@@ -465,6 +477,217 @@ function RecordExecutionModal({ open, item, onClose, onSave }) {
   );
 }
 
+// ─── Execution history + retraction (S6/UI-2) ───────────────────────────────
+// DR-015 gave admins a way to *record* an execution but no way to read the
+// ledger back or undo a mis-keyed row, so a fat-fingered quantity skewed
+// the variance column permanently — the audit's "correction journey ends
+// in a dead end" finding.
+//
+// Both backend halves already existed and were already wrapped in
+// src/lib/api.js; only the UI was missing:
+//   GET    /api/boq/:boqItemId/executions  → backend/src/routes/boq.js:654
+//   DELETE /api/boq/executions/:id         → backend/src/routes/boq.js:686
+// The DELETE is admin-gated server-side with a fresh `employee.isAdmin`
+// read (boq.js:690-696), so `canRetract` below is a UX mirror of that
+// gate, not the security boundary.
+//
+// Why the confirm step swaps this modal's BODY instead of stacking a
+// second <Modal>: Modal.jsx installs a document-level keydown handler in
+// the CAPTURE phase plus its own focus trap. Two mounted instances means
+// two traps fighting for focus, and because `stopPropagation()` doesn't
+// stop sibling listeners on the same node, one Escape press would collapse
+// both dialogs at once. One dialog, two views, no stacking.
+function ExecutionHistoryModal({ open, item, accessToken, canRetract, onClose, onRetracted }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [pendingRetract, setPendingRetract] = useState(null);
+  const [retracting, setRetracting] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!item?.id) return;
+    setLoading(true);
+    setError('');
+    try {
+      const data = await api.listBoqExecutions(item.id, accessToken);
+      setRows(data.items || []);
+    } catch (err) {
+      setError(err?.message || 'Failed to load execution history');
+    } finally {
+      setLoading(false);
+    }
+  }, [item, accessToken]);
+
+  // Reset to the list view every time the modal is opened against a new
+  // item — otherwise a confirm left pending on item A would greet the
+  // admin when they open item B.
+  useEffect(() => {
+    if (!open) return;
+    setPendingRetract(null);
+    setRetracting(false);
+    load();
+  }, [open, load]);
+
+  const handleRetract = async () => {
+    if (!pendingRetract || retracting) return;
+    setRetracting(true);
+    setError('');
+    try {
+      await api.deleteBoqExecution(pendingRetract.id, accessToken);
+      setPendingRetract(null);
+      // Reload the ledger first so the row is visibly gone, then let the
+      // page refetch variance — the % column sums these rows, so leaving
+      // it stale would show the retracted quantity still counted.
+      await load();
+      await onRetracted?.(pendingRetract);
+    } catch (err) {
+      setError(err?.message || 'Failed to retract execution');
+      setRetracting(false);
+      return;
+    }
+    setRetracting(false);
+  };
+
+  const unitLabel = item?.unit || '';
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      ariaLabel="BOQ execution history"
+      maxWidth={640}
+      // A retract is a hard delete on the server. While the confirm view
+      // is up, require the explicit Cancel button — a stray backdrop
+      // click shouldn't silently drop the admin's decision either way.
+      dismissable={!pendingRetract && !retracting}
+    >
+      <h2 style={{ margin: '0 0 0.25rem', color: 'var(--navy)' }}>Execution history</h2>
+      <p style={{ margin: '0 0 1rem', fontSize: '0.85rem', color: 'var(--steel)' }}>
+        <strong style={{ fontFamily: 'monospace' }}>{item?.itemCode}</strong> — {item?.description}
+      </p>
+
+      {error && (
+        <div className="portal-auth-error" role="alert" style={{ marginBottom: '0.75rem' }}>
+          {error}
+        </div>
+      )}
+
+      {pendingRetract ? (
+        /* ─── Confirm view ─────────────────────────────────────────────── */
+        <div>
+          <h3 style={{ margin: '0 0 0.5rem', fontSize: '1rem', color: 'var(--navy)' }}>
+            Retract this execution?
+          </h3>
+          <p style={{ margin: '0 0 0.75rem', fontSize: '0.9rem', color: 'var(--navy)' }}>
+            <strong>
+              {Number(pendingRetract.executedQuantity).toLocaleString('en-IN', { maximumFractionDigits: 2 })} {unitLabel}
+            </strong>
+            {' · '}
+            {EXECUTION_STAGE_LABELS[pendingRetract.stage] || pendingRetract.stage}
+            {pendingRetract.executedAt ? ` · ${formatShortDate(pendingRetract.executedAt)}` : ''}
+          </p>
+          <p style={{ margin: '0 0 1rem', fontSize: '0.85rem', color: 'var(--steel)' }}>
+            Unlike archiving a BOQ item, this is a permanent delete — the row
+            leaves the ledger and stops counting toward variance. Record a new
+            execution if you need to restate the quantity.
+          </p>
+          <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setPendingRetract(null)}
+              disabled={retracting}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn"
+              style={{ background: '#b91c1c', color: 'white', border: 'none' }}
+              onClick={handleRetract}
+              disabled={retracting}
+            >
+              {retracting ? 'Retracting…' : 'Retract execution'}
+            </button>
+          </div>
+        </div>
+      ) : loading ? (
+        <div style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--steel)' }}>
+          Loading execution history…
+        </div>
+      ) : rows.length === 0 ? (
+        <div style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--steel)', fontSize: '0.9rem' }}>
+          No executions recorded against this item yet.
+        </div>
+      ) : (
+        <ul role="list" style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          {rows.map((row) => (
+            <li
+              key={row.id}
+              style={{
+                border: '1px solid #e2e8f0',
+                borderRadius: 6,
+                padding: '0.625rem 0.75rem',
+                display: 'flex',
+                gap: '0.75rem',
+                alignItems: 'flex-start',
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ color: 'var(--navy)', fontWeight: 600, fontSize: '0.9rem' }}>
+                  {Number(row.executedQuantity).toLocaleString('en-IN', { maximumFractionDigits: 2 })} {unitLabel}
+                  <span style={{ marginLeft: '0.5rem', fontWeight: 400, color: 'var(--steel)', fontSize: '0.85rem' }}>
+                    {EXECUTION_STAGE_LABELS[row.stage] || row.stage}
+                  </span>
+                  {/* `accepted: false` rows are recorded but excluded from
+                      the variance sum — say so, or the ledger total won't
+                      reconcile with the % column. */}
+                  {!row.accepted && (
+                    <span
+                      className="badge"
+                      style={{ marginLeft: '0.5rem', background: '#94a3b8', color: 'white', fontSize: '0.7rem' }}
+                    >
+                      Not counted
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: '0.78rem', color: 'var(--steel)', marginTop: '0.2rem' }}>
+                  {row.executedAt ? formatShortDate(row.executedAt) : '—'}
+                  {row.recordedBy?.name ? ` · recorded by ${row.recordedBy.name}` : ''}
+                </div>
+                {row.notes && (
+                  <div style={{ fontSize: '0.8rem', color: 'var(--navy)', marginTop: '0.25rem', whiteSpace: 'pre-wrap' }}>
+                    {row.notes}
+                  </div>
+                )}
+              </div>
+              {canRetract && (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  style={{ color: '#b91c1c', flexShrink: 0 }}
+                  onClick={() => setPendingRetract(row)}
+                  aria-label={`Retract execution of ${row.executedQuantity} ${unitLabel} recorded on ${row.executedAt ? formatShortDate(row.executedAt) : 'unknown date'}`}
+                >
+                  Retract
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {!pendingRetract && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '1rem' }}>
+          <button type="button" className="btn btn-secondary" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 // ─── Confirm-archive dialog ─────────────────────────────────────────────────
 function ConfirmArchiveModal({ open, item, onClose, onConfirm }) {
   const [busy, setBusy] = useState(false);
@@ -508,7 +731,12 @@ function ConfirmArchiveModal({ open, item, onClose, onConfirm }) {
 // ─── Page ──────────────────────────────────────────────────────────────────
 export default function BoqAdmin() {
   useDocumentTitle('BOQ Registry');
-  const { accessToken } = useAuth();
+  // S6/UI-2: `isAdmin` gates the Retract affordance so we don't render a
+  // button that the server (boq.js:690-696, fresh isAdmin read) would 403.
+  // Note this route is NOT wrapped in <ProtectedRoute requireAdmin> — it's
+  // only admin-only by sidebar convention — so a non-admin who deep-links
+  // here really can reach this render path.
+  const { accessToken, isAdmin } = useAuth();
   const toast = useToast();
 
   const [items, setItems] = useState([]);
@@ -545,6 +773,10 @@ export default function BoqAdmin() {
   const [confirmArchive, setConfirmArchive] = useState(null);
   // DR-015: "Record execution" modal target. null = closed.
   const [executionTarget, setExecutionTarget] = useState(null);
+  // S6/UI-2: "Execution history" modal target (read the ledger + retract a
+  // row). Separate slot from `executionTarget` so the two dialogs are never
+  // mounted at the same time.
+  const [historyTarget, setHistoryTarget] = useState(null);
 
   // Round-34 Feature 4: read ?projectId= from the URL so an admin
   // landing on the page from ProjectDashboard's "View all →" link
@@ -712,6 +944,14 @@ export default function BoqAdmin() {
     await fetchVariance();
   };
 
+  // S6/UI-2: a retraction is a hard delete of one ledger row. The modal
+  // has already reloaded its own list; the page only has to resync the
+  // variance map, which is derived from the accepted rows.
+  const handleExecutionRetracted = async () => {
+    toast.push('Execution retracted.', 'success');
+    await fetchVariance();
+  };
+
   return (
     <div className="dpr-page">
       <div className="dpr-page-header">
@@ -857,7 +1097,9 @@ export default function BoqAdmin() {
             {appliedFilter && (
               <div style={{ flex: '0 0 130px', textAlign: 'right' }}>Variance</div>
             )}
-            <div style={{ flex: '0 0 120px', textAlign: 'right' }}>Actions</div>
+            {/* S6/UI-2: widened from 120px to fit the new History action
+                without wrapping the button row. */}
+            <div style={{ flex: '0 0 190px', textAlign: 'right' }}>Actions</div>
           </div>
 
           {items.map((item) => {
@@ -914,7 +1156,7 @@ export default function BoqAdmin() {
                     {v ? formatVariancePct(v.executedQty, v.contractQty) : '—'}
                   </div>
                 )}
-                <div style={{ flex: '0 0 120px', textAlign: 'right', display: 'flex', gap: '0.25rem', justifyContent: 'flex-end' }}>
+                <div style={{ flex: '0 0 190px', textAlign: 'right', display: 'flex', gap: '0.25rem', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
                   <button
                     type="button"
                     className="btn btn-ghost btn-sm"
@@ -932,6 +1174,18 @@ export default function BoqAdmin() {
                     title={`Executed ${v ? Number(v.executedQty || 0).toLocaleString('en-IN') : 0} of ${Number(item.quantity).toLocaleString('en-IN')} ${item.unit}`}
                   >
                     Record exec
+                  </button>
+                  {/* S6/UI-2: read the execution ledger back + retract a
+                      mis-keyed row. Always shown (not gated on `v`) — the
+                      variance map is only populated when a project filter
+                      is applied, but the ledger exists regardless. */}
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setHistoryTarget(item)}
+                    aria-label={`View execution history for BOQ item ${item.itemCode}`}
+                  >
+                    History
                   </button>
                   <button
                     type="button"
@@ -990,6 +1244,14 @@ export default function BoqAdmin() {
         item={executionTarget}
         onClose={() => setExecutionTarget(null)}
         onSave={handleRecordExecution}
+      />
+      <ExecutionHistoryModal
+        open={!!historyTarget}
+        item={historyTarget}
+        accessToken={accessToken}
+        canRetract={!!isAdmin}
+        onClose={() => setHistoryTarget(null)}
+        onRetracted={handleExecutionRetracted}
       />
     </div>
   );
