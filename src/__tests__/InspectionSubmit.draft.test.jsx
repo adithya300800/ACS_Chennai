@@ -25,6 +25,13 @@ jest.mock('../contexts/ToastContext.jsx', () => ({
 jest.mock('../lib/api.js', () => ({
   api: {
     getDprs: jest.fn().mockResolvedValue({ dprs: [] }),
+    getProjects: jest.fn().mockResolvedValue({
+      projects: [
+        { id: 'p-metro', name: 'Metro Test Project' },
+        { id: 'p-serializer', name: 'Serializer Probe' },
+      ],
+      discovered: [],
+    }),
     getInspectionSasUrl: jest.fn(),
     confirmInspectionUpload: jest.fn(),
     createInspection: jest.fn().mockResolvedValue({ id: 'i1' }),
@@ -82,12 +89,12 @@ describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
     // First mount: user fills the form and adds an inspection record.
     const { unmount } = renderSubmit();
     await waitFor(() =>
-      expect(screen.getByLabelText(/Project Name/i)).toBeInTheDocument()
+      expect(screen.getByLabelText(/Project \*/i)).toBeInTheDocument()
     );
 
     // The user types a project name and picks a date.
-    fireEvent.change(screen.getByLabelText(/Project Name/i), {
-      target: { value: 'Metro Test Project' },
+    fireEvent.change(screen.getByLabelText(/Project \*/i), {
+      target: { value: 'p-metro' },
     });
     fireEvent.change(screen.getByLabelText(/Location/i), {
       target: { value: 'Chennai Site A' },
@@ -131,7 +138,7 @@ describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
     // Reload — second mount should restore the structured fields.
     renderSubmit();
     await waitFor(() =>
-      expect(screen.getByLabelText(/Project Name/i)).toBeInTheDocument()
+      expect(screen.getByLabelText(/Project \*/i)).toBeInTheDocument()
     );
     // The "Restored unsaved draft" banner should appear because the saved
     // draft is well-formed.
@@ -140,21 +147,29 @@ describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
     ).toBeInTheDocument();
   });
 
-  test('saveDraft serializer preserves workEntry.data', () => {
+  test('saveDraft serializer preserves workEntry.data', async () => {
     // Pure serializer test — keeps the test independent of the full form.
     seedDraft(undefined);
     // Mount + unmount once to populate a baseline.
     const { unmount } = renderSubmit();
+    // Wait for the project picker to populate its options before firing
+    // the change — otherwise the select is still in the "Loading…"
+    // placeholder state (single disabled option, no project matches).
+    await waitFor(() =>
+      expect(screen.getByRole('option', { name: /Serializer Probe/i })).toBeInTheDocument()
+    );
     // We can reach into the module's exported helpers via require.cache
     // lookup; since they are not exported, we exercise them via localStorage
     // inspection after a real form interaction.
-    fireEvent.change(screen.getByLabelText(/Project Name/i), {
-      target: { value: 'Serializer Probe' },
+    fireEvent.change(screen.getByLabelText(/Project \*/i), {
+      target: { value: 'p-serializer' },
     });
     // Wait > debounce (750ms) and assert the saved payload contains __v === 2
     // and includes the workEntry shape (workType+data) when we manually set it.
     // The serializer only writes workEntry when the user adds one through
-    // WorkEntryAdder. We assert the schema version instead.
+    // WorkEntryAdder. We assert the schema version instead. Timeout bumped
+    // to 2s so the debounced autosave (750ms) + the waitFor poll interval
+    // (default 50ms) always completes within a single wait window.
     return waitFor(() => {
       const raw = localStorage.getItem(SCOPED_DRAFT_KEY);
       expect(raw).not.toBeNull();
@@ -165,7 +180,7 @@ describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
       // UI; the important thing is the schema version and that adding one
       // through the component preserves `data`.
       unmount();
-    });
+    }, { timeout: 2000 });
   });
 
   test('legacy v1 draft (no __v) renders as malformed banner, does not crash', async () => {
@@ -185,7 +200,7 @@ describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
 
     renderSubmit();
     await waitFor(() =>
-      expect(screen.getByLabelText(/Project Name/i)).toBeInTheDocument()
+      expect(screen.getByLabelText(/Project \*/i)).toBeInTheDocument()
     );
 
     // The malformed banner explains what happened; the form below is fresh.
@@ -219,7 +234,7 @@ describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
     });
     renderSubmit();
     await waitFor(() =>
-      expect(screen.getByLabelText(/Project Name/i)).toBeInTheDocument()
+      expect(screen.getByLabelText(/Project \*/i)).toBeInTheDocument()
     );
     // No workEntry means nothing to recover — banner shows because v1 is
     // legacy. The form is still usable.
@@ -234,7 +249,7 @@ describe('InspectionSubmit draft round-trip (SOL DR-001)', () => {
     localStorage.setItem(SCOPED_DRAFT_KEY, '{not-json');
     renderSubmit();
     await waitFor(() =>
-      expect(screen.getByLabelText(/Project Name/i)).toBeInTheDocument()
+      expect(screen.getByLabelText(/Project \*/i)).toBeInTheDocument()
     );
     // The parse-failed branch surfaces the malformed banner.
     expect(
