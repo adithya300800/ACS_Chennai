@@ -6,7 +6,7 @@
 //   - summary tile (per-project totals by status) at the top
 //   - card grid (auto-fill, 320px min) with status badge + project name +
 //     contractor + bill # + amounts + bill date + View + Certify/Dispute
-//     + Delete actions
+//     + Archive actions
 //   - cursor pagination via "Load more"
 //   - empty + loading states
 //
@@ -207,8 +207,8 @@ export default function BillingCertificationsAdmin() {
   const [createOpen, setCreateOpen] = useState(false);
   const [detailCert, setDetailCert] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(null);
-  const [deleting, setDeleting] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(null);
+  const [archiving, setArchiving] = useState(false);
   const [transitionPending, setTransitionPending] = useState(false);
   const [disputeOpen, setDisputeOpen] = useState(null);
   const [disputeReason, setDisputeReason] = useState('');
@@ -454,15 +454,15 @@ export default function BillingCertificationsAdmin() {
     }
   }
 
-  // ─── Delete ─────────────────────────────────────────────────────────
-  async function handleDelete() {
-    if (!confirmDelete) return;
-    setDeleting(true);
+  // ─── Archive ─────────────────────────────────────────────────────────
+  async function handleArchive() {
+    if (!confirmArchive) return;
+    setArchiving(true);
     try {
-      await api.deleteBillingCertification(confirmDelete.id, accessToken);
-      toast.push(`Bill ${confirmDelete.billNumber} archived.`, 'success');
-      setConfirmDelete(null);
-      if (detailCert && detailCert.id === confirmDelete.id) setDetailCert(null);
+      await api.deleteBillingCertification(confirmArchive.id, accessToken);
+      toast.push(`Bill ${confirmArchive.billNumber} archived.`, 'success');
+      setConfirmArchive(null);
+      if (detailCert && detailCert.id === confirmArchive.id) setDetailCert(null);
       await fetchCerts();
       // [DR-029] Archive (soft delete) removes the row from the
       // aggregate's active set — the panel's per-project count drops
@@ -471,7 +471,7 @@ export default function BillingCertificationsAdmin() {
     } catch (err) {
       toast.push(err?.message || 'Failed to archive', 'error');
     } finally {
-      setDeleting(false);
+      setArchiving(false);
     }
   }
 
@@ -887,8 +887,8 @@ export default function BillingCertificationsAdmin() {
                     ) : (
                       <span style={{ color: '#94a3b8' }}>📎 no PDF</span>
                     )}
-                    <span title={c.recordedBy?.name || c.recordedById}>
-                      👤 {c.recordedBy?.name || (c.recordedById ? c.recordedById.slice(0, 8) : '—')}
+                    <span title={c.recordedBy?.name || c.recordedBy?.email || c.recordedById}>
+                      👤 {c.recordedBy?.name || c.recordedBy?.email || '—'}
                     </span>
                   </div>
 
@@ -905,11 +905,11 @@ export default function BillingCertificationsAdmin() {
                     <button
                       type="button"
                       className="btn btn-ghost btn-sm"
-                      style={{ color: 'var(--danger)' }}
-                      onClick={() => setConfirmDelete(c)}
+                      style={{ color: 'var(--muted, #64748b)' }}
+                      onClick={() => setConfirmArchive(c)}
                       aria-label={`Archive ${c.billNumber}`}
                     >
-                      Delete
+                      Archive
                     </button>
                   </div>
                 </div>
@@ -1241,8 +1241,8 @@ export default function BillingCertificationsAdmin() {
         </Modal>
       )}
 
-      {/* ─── Delete confirm ────────────────────────────────────────────── */}
-      {confirmDelete && (
+      {/* ─── Archive confirm ────────────────────────────────────────────── */}
+      {confirmArchive && (
         <div
           role="alertdialog"
           aria-labelledby="archive-bc-title"
@@ -1252,7 +1252,7 @@ export default function BillingCertificationsAdmin() {
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             zIndex: 100, padding: '1rem',
           }}
-          onClick={(e) => { if (e.target === e.currentTarget && !deleting) setConfirmDelete(null); }}
+          onClick={(e) => { if (e.target === e.currentTarget && !archiving) setConfirmArchive(null); }}
         >
           <div
             style={{
@@ -1264,26 +1264,26 @@ export default function BillingCertificationsAdmin() {
               Archive certification?
             </h2>
             <p id="archive-bc-desc" style={{ margin: '0 0 1rem', fontSize: '0.9rem', color: 'var(--steel)' }}>
-              <strong>Bill {confirmDelete.billNumber}</strong>
-              {' — '}{confirmDelete.contractorName}
-              {' — '}{confirmDelete.project?.name || 'unknown project'}
+              <strong>Bill {confirmArchive.billNumber}</strong>
+              {' — '}{confirmArchive.contractorName}
+              {' — '}{confirmArchive.project?.name || 'unknown project'}
             </p>
             <p style={{ margin: '0 0 1rem', fontSize: '0.85rem', color: 'var(--steel)' }}>
               Soft-delete only — the row is hidden from this list but stays in the
               database for audit.
             </p>
             <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
-              <button type="button" className="btn btn-secondary" onClick={() => setConfirmDelete(null)} disabled={deleting}>
+              <button type="button" className="btn btn-secondary" onClick={() => setConfirmArchive(null)} disabled={archiving}>
                 Cancel
               </button>
               <button
                 type="button"
                 className="btn"
-                style={{ background: 'var(--danger)', color: 'white', border: 'none' }}
-                disabled={deleting}
-                onClick={handleDelete}
+                style={{ background: 'var(--muted, #64748b)', color: 'white', border: 'none' }}
+                disabled={archiving}
+                onClick={handleArchive}
               >
-                {deleting ? 'Archiving…' : 'Archive'}
+                {archiving ? 'Archiving…' : 'Archive'}
               </button>
             </div>
           </div>

@@ -465,17 +465,17 @@ function RecordExecutionModal({ open, item, onClose, onSave }) {
   );
 }
 
-// ─── Confirm-delete dialog ─────────────────────────────────────────────────
-function ConfirmDeleteModal({ open, item, onClose, onConfirm }) {
+// ─── Confirm-archive dialog ─────────────────────────────────────────────────
+function ConfirmArchiveModal({ open, item, onClose, onConfirm }) {
   const [busy, setBusy] = useState(false);
   return (
-    <Modal open={open} onClose={onClose} ariaLabel="Confirm delete" maxWidth={420}>
-      <h2 style={{ margin: '0 0 0.5rem', color: 'var(--navy)' }}>Delete BOQ item?</h2>
+    <Modal open={open} onClose={onClose} ariaLabel="Confirm archive" maxWidth={420}>
+      <h2 style={{ margin: '0 0 0.5rem', color: 'var(--navy)' }}>Archive BOQ item?</h2>
       <p style={{ margin: '0 0 1rem', fontSize: '0.9rem', color: 'var(--steel)' }}>
         <strong>{item?.itemCode}</strong> — {item?.description}
       </p>
       <p style={{ margin: '0 0 1rem', fontSize: '0.85rem', color: 'var(--steel)' }}>
-        Linked DPRs and Inspection Records keep their reference (soft-delete
+        Linked DPRs and Inspection Records keep their reference (soft-archive
         only — the row is hidden from this list but stays in the database
         for audit).
       </p>
@@ -486,7 +486,7 @@ function ConfirmDeleteModal({ open, item, onClose, onConfirm }) {
         <button
           type="button"
           className="btn"
-          style={{ background: 'var(--danger)', color: 'white', border: 'none' }}
+          style={{ background: 'var(--muted, #64748b)', color: 'white', border: 'none' }}
           disabled={busy}
           onClick={async () => {
             setBusy(true);
@@ -498,7 +498,7 @@ function ConfirmDeleteModal({ open, item, onClose, onConfirm }) {
             }
           }}
         >
-          {busy ? 'Deleting…' : 'Delete'}
+          {busy ? 'Archiving…' : 'Archive'}
         </button>
       </div>
     </Modal>
@@ -542,7 +542,7 @@ export default function BoqAdmin() {
 
   const [formOpen, setFormOpen] = useState(false);
   const [formInitial, setFormInitial] = useState(null);
-  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [confirmArchive, setConfirmArchive] = useState(null);
   // DR-015: "Record execution" modal target. null = closed.
   const [executionTarget, setExecutionTarget] = useState(null);
 
@@ -688,10 +688,10 @@ export default function BoqAdmin() {
     await fetchVariance();
   };
 
-  const handleDelete = async () => {
-    if (!confirmDelete) return;
-    await api.softDeleteBoqItem(confirmDelete.id, accessToken);
-    toast.push('BOQ item deleted.', 'success');
+  const handleArchive = async () => {
+    if (!confirmArchive) return;
+    await api.softDeleteBoqItem(confirmArchive.id, accessToken);
+    toast.push('BOQ item archived.', 'success');
     await fetchItems();
     await fetchVariance();
   };
@@ -936,11 +936,11 @@ export default function BoqAdmin() {
                   <button
                     type="button"
                     className="btn btn-ghost btn-sm"
-                    style={{ color: 'var(--danger)' }}
-                    onClick={() => setConfirmDelete(item)}
-                    aria-label={`Delete BOQ item ${item.itemCode}`}
+                    style={{ color: 'var(--muted, #64748b)' }}
+                    onClick={() => setConfirmArchive(item)}
+                    aria-label={`Archive BOQ item ${item.itemCode}`}
                   >
-                    Delete
+                    Archive
                   </button>
                 </div>
               </div>
@@ -979,11 +979,11 @@ export default function BoqAdmin() {
         onClose={() => setFormOpen(false)}
         onSave={handleSave}
       />
-      <ConfirmDeleteModal
-        open={!!confirmDelete}
-        item={confirmDelete}
-        onClose={() => setConfirmDelete(null)}
-        onConfirm={handleDelete}
+      <ConfirmArchiveModal
+        open={!!confirmArchive}
+        item={confirmArchive}
+        onClose={() => setConfirmArchive(null)}
+        onConfirm={handleArchive}
       />
       <RecordExecutionModal
         open={!!executionTarget}
