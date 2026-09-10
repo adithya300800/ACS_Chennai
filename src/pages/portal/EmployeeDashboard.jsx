@@ -212,11 +212,18 @@ export default function EmployeeDashboard() {
           Check out button hit `PUT /api/attendance/check-out/:id` with an
           empty body and returned 400 ("latitude and longitude required")
           on every click, so removing it is a strict improvement. */}
-      <section className="dashboard-attendance" aria-label="Today's attendance">
+      <section className="dashboard-attendance" aria-label="Today's attendance" aria-busy={loading}>
         <div className="dashboard-attendance-main">
           <span className="dashboard-attendance-eyebrow">Today's attendance</span>
           {loading ? (
             <>
+              {/* S6/UI-8: bare `<Skeleton aria-hidden="true">` was silent
+                  to AT — the loading arm announced nothing, so a screen
+                  reader couldn't tell loading from empty. Mirror the
+                  error/empty arms: each one has a user-facing message;
+                  loading now does too. `aria-busy` on the <section> lets
+                  AT know the region is still in flight. */}
+              <span className="sr-only" role="status">Loading today's attendance…</span>
               <Skeleton w="60%" h={28} />
               <div style={{ marginTop: 12 }}><Skeleton w="40%" h={14} /></div>
             </>
@@ -288,7 +295,7 @@ export default function EmployeeDashboard() {
       {/* Dashboard grid */}
       <div className="dashboard-grid">
         {/* Open draft */}
-        <section className="dashboard-card" aria-label="Open DPR draft">
+        <section className="dashboard-card" aria-label="Open DPR draft" aria-busy={loading}>
           <header className="dashboard-card-header">
             <h2 className="dashboard-card-title">
               <DocIcon size={16} style={{ verticalAlign: '-3px', marginRight: 6, color: 'var(--steel)' }} />
@@ -296,7 +303,12 @@ export default function EmployeeDashboard() {
             </h2>
           </header>
           {loading ? (
-            <Skeleton w="80%" h={14} />
+            <div className="dashboard-card-body">
+              {/* S6/UI-8: announce the loading state — see comment on the
+                  attendance widget. */}
+              <span className="sr-only" role="status">Loading drafts…</span>
+              <Skeleton w="80%" h={14} />
+            </div>
           ) : widgetStatus.draft === 'error' ? (
             // [DR-034] Honest failure — don't pretend "no drafts".
             <div className="dashboard-card-body">
@@ -330,7 +342,7 @@ export default function EmployeeDashboard() {
         </section>
 
         {/* Training */}
-        <section className="dashboard-card" aria-label="Training due">
+        <section className="dashboard-card" aria-label="Training due" aria-busy={loading}>
           <header className="dashboard-card-header">
             <h2 className="dashboard-card-title">
               <BookIcon size={16} style={{ verticalAlign: '-3px', marginRight: 6, color: 'var(--steel)' }} />
@@ -339,7 +351,11 @@ export default function EmployeeDashboard() {
             <Link to="/portal/training" className="dashboard-card-link">All</Link>
           </header>
           {loading ? (
-            <Skeleton w="70%" h={14} />
+            <div>
+              {/* S6/UI-8: announce loading — see attendance widget. */}
+              <span className="sr-only" role="status">Loading training…</span>
+              <Skeleton w="70%" h={14} />
+            </div>
           ) : widgetStatus.training === 'error' ? (
             // [DR-034] Honest failure — don't pretend "nothing due".
             <div>
@@ -371,7 +387,7 @@ export default function EmployeeDashboard() {
         </section>
 
         {/* Leave balance / Recent */}
-        <section className="dashboard-card" aria-label="Leave balance">
+        <section className="dashboard-card" aria-label="Leave balance" aria-busy={loading}>
           <header className="dashboard-card-header">
             <h2 className="dashboard-card-title">
               <PlaneIcon size={16} style={{ verticalAlign: '-3px', marginRight: 6, color: 'var(--steel)' }} />
@@ -380,7 +396,11 @@ export default function EmployeeDashboard() {
             <Link to="/portal/leave" className="dashboard-card-link">All</Link>
           </header>
           {loading ? (
-            <Skeleton w="60%" h={14} />
+            <div>
+              {/* S6/UI-8: announce loading — see attendance widget. */}
+              <span className="sr-only" role="status">Loading leave…</span>
+              <Skeleton w="60%" h={14} />
+            </div>
           ) : widgetStatus.leaves === 'error' ? (
             // [DR-034] Honest failure — don't pretend "no leave history".
             <div>
@@ -409,7 +429,7 @@ export default function EmployeeDashboard() {
         </section>
 
         {/* Recent notifications */}
-        <section className="dashboard-card dashboard-card-wide" aria-label="Recent notifications">
+        <section className="dashboard-card dashboard-card-wide" aria-label="Recent notifications" aria-busy={loading}>
           <header className="dashboard-card-header">
             <h2 className="dashboard-card-title">
               <BellIcon size={16} style={{ verticalAlign: '-3px', marginRight: 6, color: 'var(--steel)' }} />
@@ -417,7 +437,11 @@ export default function EmployeeDashboard() {
             </h2>
           </header>
           {loading ? (
-            <Skeleton w="90%" h={14} />
+            <div>
+              {/* S6/UI-8: announce loading — see attendance widget. */}
+              <span className="sr-only" role="status">Loading recent updates…</span>
+              <Skeleton w="90%" h={14} />
+            </div>
           ) : widgetStatus.notifications === 'error' ? (
             // [DR-034] Honest failure — don't pretend "no updates yet".
             <div>

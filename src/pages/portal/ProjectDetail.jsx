@@ -286,7 +286,12 @@ export default function ProjectDetail() {
           <span style={{ fontSize: '1.05rem' }} aria-hidden="true">🛈</span>
           <span style={{ fontSize: '0.85rem', color: 'var(--navy, #0f172a)' }}>
             <strong>Auto-discovered project.</strong> No client, location, or
-            contract details yet. An admin needs to formally register it.
+            {/* S6/UI-8: "contract details" was unimplementable copy — the
+                admin ProjectForm exposes only name / code / client /
+                location / start + expected-end dates / assignments. There
+                is no contractValue input on any portal screen, so promising
+                it here sent the user looking for a field that isn't there. */}
+            schedule details yet. An admin needs to formally register it.
           </span>
           {employee?.isAdmin && (
             <Link
@@ -407,11 +412,17 @@ function OverviewPanel({ project, parties, isRegistered }) {
         <p style={{ color: 'var(--steel, #64748b)', margin: '0 0 1rem', fontSize: '0.9rem' }}>
           {/* [DR-025] Drop the "contract value" promise — the admin ProjectForm
               does NOT expose a contractValue input (only name / code / client /
-              location / dates / assignments). Sites ARE an admin-editable
-              metadata field; keep that in the list. */}
+              location / dates / assignments).
+              [S6/UI-8] DR-025 also claimed "Sites ARE an admin-editable
+              metadata field" and kept `sites` in this list. That is wrong:
+              src/pages/admin/ProjectForm.jsx has no sites input and its PATCH
+              body (name/code/client/location/startDate/expectedEndDate/
+              assignments) never sends one. `sites` is writable over the API
+              only, so an admin following this copy would never find the
+              field. Narrowed to what the registry form can actually author. */}
           This project was discovered from an existing daily report or inspection, but
           hasn't been formally registered. Once an admin adds the project details
-          (client, location, sites), they'll show up here.
+          (client, location, dates), they'll show up here.
         </p>
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
           <Link to="/portal/dpr/submit" className="btn btn-primary btn-sm">

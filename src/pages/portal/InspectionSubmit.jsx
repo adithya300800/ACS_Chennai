@@ -642,6 +642,13 @@ export default function InspectionSubmit() {
   const handleChange = (e) => {
     const { name, value } = e.target;
     setForm((f) => ({ ...f, [name]: value }));
+    // S6/UI-10: retire this field's inline hint the moment the user edits
+    // it. `fieldErrors` is only ever populated by a submit attempt (see
+    // handleSubmit), so the hints never fire on initial render — but they
+    // used to survive the fix and stayed red until the NEXT submit, which
+    // is the same wrong-timing complaint from the other direction. The
+    // next submit re-derives the full error set from scratch.
+    setFieldErrors((prev) => (prev[name] ? { ...prev, [name]: '' } : prev));
   };
 
   // [N1 Phase B + bug fix] Project picker change handler. Mirrors the
@@ -671,6 +678,11 @@ export default function InspectionSubmit() {
     }
     const match = projects.find((p) => (p.id || p.name) === value);
     if (!match) return; // defensive: stale option
+
+    // S6/UI-10: the project select doesn't route through handleChange, so
+    // retire its inline hint here — picking a project IS the fix for
+    // "Project name is required".
+    setFieldErrors((prev) => (prev.projectName ? { ...prev, projectName: '' } : prev));
 
     // Fast path: registered row already has a UUID.
     if (match.id) {
@@ -743,6 +755,9 @@ export default function InspectionSubmit() {
       }));
       setCreateMode(false);
       setNewProjectName('');
+      // S6/UI-10: same as handleProjectChange — creating a project
+      // satisfies "Project name is required", so drop the stale hint.
+      setFieldErrors((prev) => (prev.projectName ? { ...prev, projectName: '' } : prev));
     } catch (err) {
       const code = err?.code;
       if (code === 'PROJECT_INACTIVE') {

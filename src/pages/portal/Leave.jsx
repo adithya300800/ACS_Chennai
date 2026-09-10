@@ -121,6 +121,25 @@ export default function Leave() {
     [fieldErrors]
   );
 
+  // S6/UI-10: `hasError` is ALREADY true on first paint — `reason` starts
+  // empty, so `fieldErrors.reason` is set before the user has typed a
+  // character. Wiring the submit helper straight to it printed "Fix the
+  // highlighted fields above to submit." on initial render while NOTHING
+  // was highlighted (the inline hints are gated on `touched`, the helper
+  // was not) — the copy pointed at highlights that did not exist.
+  // `hasVisibleError` gates on the same `touched` signal the inline hints
+  // use, so the helper can only appear once a highlighted field is really
+  // on screen. `hasError` itself is left alone: handleSubmit and the
+  // formError-clearing effect need the ungated "is the form valid" answer.
+  const hasVisibleError = useMemo(
+    () => !!(
+      (touched.startDate && fieldErrors.startDate)
+      || (touched.endDate && fieldErrors.endDate)
+      || (touched.reason && fieldErrors.reason)
+    ),
+    [touched, fieldErrors]
+  );
+
   // Round-26.5: clear the top-of-form alert as soon as the live validation
   // passes again. Otherwise a stale "End date must be on or after start date"
   // message lingers after the user fixes the dates (the alert was only ever
@@ -289,11 +308,11 @@ export default function Leave() {
               type="submit"
               className="leave-btn leave-btn-primary"
               disabled={submitting}
-              aria-describedby={hasError ? 'leave-submit-help' : undefined}
+              aria-describedby={hasVisibleError ? 'leave-submit-help' : undefined}
             >
               {submitting ? 'Submitting...' : 'Submit Request'}
             </button>
-            {hasError && (
+            {hasVisibleError && (
               <span id="leave-submit-help" className="leave-field-hint leave-submit-help">
                 Fix the highlighted fields above to submit.
               </span>
