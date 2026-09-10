@@ -172,8 +172,15 @@ jobs:
       # Once `20260905020000_n17_projects` is rolled back, this step is
       # harmless to keep around as a future-proofing guard — and removing
       # it requires a careful audit that the DB's `_prisma_migrations`
-      # table no longer has any `status='failed'` rows. The cost is one
+      # table no longer has any unfinished rows. The cost is one
       # ~200ms Prisma CLI invocation per deploy; acceptable.
+      #
+      # [DR-032] The raw SQL DELETE uses the NOT-applied predicate
+      # (rolled_back_at IS NULL AND (finished_at IS NULL OR
+      # applied_steps_count = 0)) — NOT the broken `status <> 'applied'`
+      # predicate, which crashes on Prisma 5 (no `status` column on
+      # `_prisma_migrations`). Mirrors start.sh and clear-failed-
+      # migrations.js so all three recovery paths use the same guard.
       - name: Resolve previously-failed migrations (LPR-029)
         continue-on-error: true
         run: |
@@ -181,11 +188,12 @@ jobs:
           # The broken `20260905020000_n17_projects` migration directory has
           # been removed from the tree (its FK referenced the wrong table
           # name). What's left in the DB may be:
-          #   (a) one or more rows in _prisma_migrations with status=failed
-          #       (from prior Render deploy attempts — the api-triggered
-          #       one in particular left a fresh failed row that the
-          #       `migrate resolve` CLI call alone wouldn't clear, because
-          #       resolve only handles the FIRST failed row by name)
+          #   (a) one or more rows in _prisma_migrations that are clearly
+          #       NOT applied (rolled back, or never finished — from prior
+          #       Render deploy attempts; the api-triggered one in
+          #       particular left a fresh failed row that the `migrate
+          #       resolve` CLI call alone wouldn't clear, because resolve
+          #       only handles the FIRST failed row by name)
           #   (b) no row at all (resolve already ran on a prior deploy)
           #
           # We belt-and-suspenders by deleting any non-applied rows via
@@ -197,8 +205,14 @@ jobs:
             const p = new PrismaClient();
             (async () => {
               try {
-                const res = await p.\$executeRawUnsafe(\"DELETE FROM \\\"_prisma_migrations\\\" WHERE migration_name = '20260905020000_n17_projects' AND status <> 'applied'\");
-                console.log('[lpr-029] deleted', res, 'failed/rolled_back rows');
+                // [DR-032] NOT-applied predicate. Prisma 5 has no
+                // `status` column on `_prisma_migrations` — a successfully
+                // applied row has finished_at NOT NULL AND
+                // applied_steps_count > 0 AND rolled_back_at IS NULL.
+                // This guard matches anything else, so a finished row
+                // is never clobbered.
+                const res = await p.\$executeRawUnsafe(\"DELETE FROM \\\"_prisma_migrations\\\" WHERE \\\"migration_name\\\" = '20260905020000_n17_projects' AND \\\"rolled_back_at\\\" IS NULL AND (\\\"finished_at\\\" IS NULL OR \\\"applied_steps_count\\\" = 0)\");
+                console.log('[lpr-029] deleted', res, 'non-applied rows');
               } catch (e) {
                 console.log('[lpr-029] raw DELETE failed (continuing):', e.message);
               } finally {

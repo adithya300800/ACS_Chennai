@@ -16,6 +16,12 @@
  * The fix narrows the WHERE clause so the DELETE only matches rows that
  * are clearly NOT applied (rolled back, or never finished).
  *
+ * [DR-032] Opt-in env var renamed from `POSTINSTALL_CLEAR_MIGRATIONS` to
+ * `OPS_RECONCILE_FAILED_MIGRATIONS`. The script is no longer wired into
+ * any npm lifecycle hook — `npm install` is DB-free. The Render deploy
+ * path is start.sh, which is the sole serialized recovery procedure.
+ * This script is operator-only: requires explicit opt-in.
+ *
  * This test loads the script with a mocked PrismaClient, lets the IIFE
  * run, and asserts the captured DELETE SQL contains the NOT-applied guard.
  */
@@ -48,13 +54,13 @@ describe('clear-failed-migrations — DR-031 NOT-applied guard', () => {
     RENDER: process.env.RENDER,
     DATABASE_URL: process.env.DATABASE_URL,
     DIRECT_DATABASE_URL: process.env.DIRECT_DATABASE_URL,
-    POSTINSTALL_CLEAR_MIGRATIONS: process.env.POSTINSTALL_CLEAR_MIGRATIONS,
+    OPS_RECONCILE_FAILED_MIGRATIONS: process.env.OPS_RECONCILE_FAILED_MIGRATIONS,
   };
 
   beforeAll(() => {
-    // The script is production-only (per the local-dev guard at lines 50-58).
-    // Pretend we're on Render so the IIFE body actually runs.
-    process.env.RENDER = 'true';
+    // [DR-032] Set the explicit operator opt-in. The script no longer
+    // auto-fires on RENDER=true — that's intentional, install is DB-free.
+    process.env.OPS_RECONCILE_FAILED_MIGRATIONS = '1';
     process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
   });
 
@@ -122,24 +128,42 @@ describe('clear-failed-migrations — DR-031 NOT-applied guard', () => {
 
     await localDisconnect;
 
-    // KNOWN_BAD (per scripts/clear-failed-migrations.js:41-47) — pin the
+    // KNOWN_BAD (per scripts/clear-failed-migrations.js) — pin the
     // order so a future re-ordering shows up as a test diff.
     expect(capturedQueries).toHaveLength(2);
     expect(capturedQueries[0]).toMatch(/20260905020000_n17_projects/);
     expect(capturedQueries[1]).toMatch(/20260906000000_n1_project_fk/);
   });
 
-  it('still short-circuits in non-Render / non-CI environments', async () => {
-    process.env.RENDER = 'false';
-    delete process.env.POSTINSTALL_CLEAR_MIGRATIONS;
+  it('short-circuits without the operator opt-in (install must be DB-free)', async () => {
+    // [DR-032] Without OPS_RECONCILE_FAILED_MIGRATIONS=1 the script must
+    // skip — even on Render, even with DB env vars. `npm install` is
+    // database-free by contract.
+    delete process.env.OPS_RECONCILE_FAILED_MIGRATIONS;
+    process.env.RENDER = 'true';
 
     jest.isolateModules(() => {
       require('../scripts/clear-failed-migrations.js');
     });
 
     // The IIFE returns BEFORE constructing PrismaClient or calling
-    // $executeRawUnsafe. Give it a tick to settle.
-    await new Promise((resolve) => setImmediate(resolve));
+    // $executeRawUnsafe. Wait a microtask so the IIFE has had a chance
+    // to run. (setImmediate is unreliable inside jest.isolateModules
+    // across versions — a queued microtask is enough.)
+    await Promise.resolve();
+
+    expect(mockExecuteRawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it('short-circuits in non-operator environments (no env vars at all)', async () => {
+    delete process.env.OPS_RECONCILE_FAILED_MIGRATIONS;
+    delete process.env.RENDER;
+
+    jest.isolateModules(() => {
+      require('../scripts/clear-failed-migrations.js');
+    });
+
+    await Promise.resolve();
 
     expect(mockExecuteRawUnsafe).not.toHaveBeenCalled();
   });

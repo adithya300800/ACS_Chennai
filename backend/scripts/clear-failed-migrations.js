@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // scripts/clear-failed-migrations.js
 //
-// [N1] Phase-A migration recovery.
+// [N1] Phase-A migration recovery — operator-only tool.
 //
 // Background.
 // ----------
@@ -17,18 +17,23 @@
 // from the Phase-4 P0 postmortem, but `migrate deploy` couldn't apply it
 // because Prisma kept seeing the original failed row.
 //
-// This script clears those failed rows directly. It runs as an
-// `npm postinstall` hook during the Render `npm install && npx prisma
-// generate` build step — the build does fire postinstall hooks, while the
-// startCommand `npx prisma migrate deploy && node src/index.js` (locked
-// in the Render dashboard) does NOT honor start.sh / Dockerfile CMD /
-// env-var overrides.
+// [DR-032] Operator-only opt-in.
+// -----------------------------
+// This script is NOT wired into any npm lifecycle hook (postinstall was
+// removed in DR-032 — `npm install` is database-free now). The Render
+// deploy path is `start.sh`, which is the SOLE serialized release/
+// operator recovery procedure. To invoke this script intentionally
+// outside that path, the operator must set
+//   OPS_RECONCILE_FAILED_MIGRATIONS=1
+// before running it. There is no RENDER auto-fire, no CI auto-fire, no
+// lifecycle auto-fire — explicit opt-in only. This guards against a
+// concurrent unfinished migration being clobbered by an unrelated
+// install/build.
 //
 // Idempotency.
 // ------------
-// The DELETE only matches `status <> 'applied'`. On a healthy DB the
-// WHERE clause matches zero rows and the script exits 0. On every cold
-// start where no migration is in the "failed" state, this is a no-op.
+// The DELETE only matches rows that are clearly NOT applied. On a healthy
+// DB the WHERE clause matches zero rows and the script exits 0.
 //
 // KNOWN_BAD is the allow-list. Add new entries as you discover migration
 // failures you can't reach via `migrate resolve --rolled-back`. Two
@@ -47,13 +52,11 @@ const KNOWN_BAD = Object.freeze([
 ]);
 
 (async () => {
-  // Local-dev guard. This script is for production deploys only — running
-  // it locally would surprise the developer by mutating their DB.
-  // Render sets `RENDER=true` automatically. Skip everywhere else.
-  // Allow opt-in via explicit env var for environments that don't set
-  // RENDER (e.g. another CI).
-  if (process.env.RENDER !== 'true' && process.env.POSTINSTALL_CLEAR_MIGRATIONS !== '1') {
-    console.log('[clear-failed-migrations] not in Render/CI render, skipping');
+  // [DR-032] Explicit operator opt-in only. No RENDER auto-fire, no CI
+  // auto-fire, no lifecycle auto-fire. `npm install` is DB-free; the
+  // Render deploy path is start.sh.
+  if (process.env.OPS_RECONCILE_FAILED_MIGRATIONS !== '1') {
+    console.log('[clear-failed-migrations] OPS_RECONCILE_FAILED_MIGRATIONS!=1, skipping (DB-free install path)');
     return;
   }
   if (!process.env.DATABASE_URL && !process.env.DIRECT_DATABASE_URL) {

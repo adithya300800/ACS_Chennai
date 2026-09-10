@@ -7,15 +7,32 @@
 # as failed it refuses to apply any new ones, blocking every subsequent
 # deploy (P3009). This script runs the recovery before migrate deploy.
 #
+# [DR-032] This is the SOLE serialized release/operator recovery path.
+# Normal `npm install` is now database-free — the previous `postinstall`
+# hook (backend/scripts/clear-failed-migrations.js) was removed because
+# install-time DDL evidence deletion clobbered unfinished rows from
+# concurrent releases. The script remains on disk as an explicit
+# operator-only tool (requires `OPS_RECONCILE_FAILED_MIGRATIONS=1`); it
+# is no longer wired into any lifecycle hook.
+#
 # Recovery steps (idempotent — safe on every cold start, no-op when no failed
 # rows exist):
 #   1. DELETE non-applied rows from `_prisma_migrations` for known-bad
 #      migrations. `migrate resolve` only handles the FIRST failed row by
 #      name; this belt-and-suspenders DELETE clears the table before the
-#      resolve call, so resolve always sees a clean slate.
+#      resolve call, so resolve always sees a clean slate. The DELETE
+#      predicate (mirror of DR-031 guard) is: `rolled_back_at IS NULL AND
+#      (finished_at IS NULL OR applied_steps_count = 0)`. A successfully-
+#      applied row (finished_at NOT NULL AND applied_steps_count > 0 AND
+#      rolled_back_at IS NULL) is NEVER touched — preserves ledger
+#      evidence of running migrations.
 #   2. `prisma migrate resolve --rolled-back <name>` for each known-bad
 #      migration. This is the official path Prisma documents; migrate
 #      status reads it.
+#
+# Failure-before-serving: if `prisma migrate deploy` exits non-zero, this
+# script exits non-zero before exec-ing node. Render marks the deploy
+# failed and does NOT route traffic to the broken revision.
 #
 # Known-bad migrations handled here (append as new failures are discovered):
 #   - 20260905020000_n17_projects    — original n17 migration referenced the
