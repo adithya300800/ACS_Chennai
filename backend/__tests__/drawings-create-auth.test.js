@@ -95,6 +95,27 @@ function buildApp() {
         Object.assign(row, args.data);
         return row;
       }),
+      // [DR-009] Conditional ACTIVE claim. Honors compound `where`
+      // (id + projectId + status) and returns count, not the row.
+      updateMany: jest.fn(async (args) => {
+        const row = drawingRows.get(args.where.id);
+        if (!row) return { count: 0 };
+        if (args.where.projectId != null && row.projectId !== args.where.projectId) return { count: 0 };
+        if (args.where.status === 'ACTIVE' && row.status !== 'ACTIVE') return { count: 0 };
+        if (args.where.status && typeof args.where.status === 'object' && args.where.status.not === 'SUPERSEDED' && row.status === 'SUPERSEDED') return { count: 0 };
+        Object.assign(row, args.data);
+        return { count: 1 };
+      }),
+      findFirst: jest.fn(async ({ where }) => {
+        for (const row of drawingRows.values()) {
+          if (where.projectId != null && row.projectId !== where.projectId) continue;
+          if (where.drawingNumber != null && row.drawingNumber !== where.drawingNumber) continue;
+          if (where.status != null && row.status !== where.status) continue;
+          if (where.id && where.id.not && row.id === where.id.not) continue;
+          return row;
+        }
+        return null;
+      }),
     },
     employee: {
       // requireFreshAdmin calls .findUnique with select { id, isAdmin }.

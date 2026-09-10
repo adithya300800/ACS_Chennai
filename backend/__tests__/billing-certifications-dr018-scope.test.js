@@ -92,6 +92,12 @@ function buildApp({
   // DR-018 fix narrows `where.projectId` to `{ in: ids }` for non-admins
   // — the filter must accept BOTH the bare-UUID form and the {in:[..]}
   // form so the new path doesn't silently leak rows.
+  //
+  // [DR-030] Also intersect with any top-level AND clause the route
+  // builds. The fix moved the authorized-scope predicate out of
+  // `where.projectId` and into a top-level AND array so a caller's
+  // projectId AND the scope are both honoured (previously the scope
+  // overwrote the caller's projectId, widening disclosure).
   const matchProject = (r, whereProject) => {
     if (!whereProject) return true;
     if (typeof whereProject === 'string') return r.projectId === whereProject;
@@ -102,6 +108,11 @@ function buildApp({
       return whereProject.in.includes(r.projectId);
     }
     return true;
+  };
+  const matchAndClauses = (r, andClauses) => {
+    if (!Array.isArray(andClauses) || andClauses.length === 0) return true;
+    // AND semantics: every clause must match for the row to survive.
+    return andClauses.every((clause) => matchProject(r, clause.projectId));
   };
 
   const prisma = {
