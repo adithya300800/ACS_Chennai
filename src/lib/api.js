@@ -77,12 +77,35 @@ let refreshEpoch = 0;
 // times → N navigate() calls → the toast in PortalLogin stacks up to
 // "cancerous" levels (user report, Aug 29 2026).
 let logoutDispatched = false;
+// [S6 Item 7] Timestamp of the most recent dispatchLogoutOnce() call.
+// Callers (download(), and any caller that wants to suppress its own
+// "Session expired" toast in the catch block) check this to decide
+// whether the AuthContext listener has ALREADY started the bounce —
+// if so, the toast that fires from PortalLogin's location.state.reason
+// effect is the one we want to keep, not a duplicate from the caller's
+// catch block (Aug 29 2026 user report: two stacked "session expired"
+// toasts on a controlled export failure). 500ms window matches the
+// toast-dedupe budget used in ToastContext.jsx — long enough to swallow
+// the parallel-fire race, short enough that a legitimately distinct
+// session-expiry event (e.g. a second export after sign-in) still
+// surfaces normally.
+let lastLogoutDispatchedAt = 0;
+const LOGOUT_RECENT_WINDOW_MS = 500;
 function dispatchLogoutOnce(reason) {
   if (logoutDispatched) return;
   logoutDispatched = true;
+  lastLogoutDispatchedAt = Date.now();
   window.dispatchEvent(new CustomEvent('auth:logout', { detail: { reason } }));
   // Reset on the next tick so a fresh login session can fire again.
   setTimeout(() => { logoutDispatched = false; }, 0);
+}
+// [S6 Item 7] Recency check. `true` if dispatchLogoutOnce() fired
+// within the last `windowMs` (default 500ms). Use from any catch block
+// that would otherwise surface a "Session expired" toast — the
+// AuthContext listener has already navigated to /portal/login and
+// PortalLogin pushes the canonical toast from there.
+function wasLogoutDispatchedRecently(windowMs = LOGOUT_RECENT_WINDOW_MS) {
+  return lastLogoutDispatchedAt > 0 && (Date.now() - lastLogoutDispatchedAt) < windowMs;
 }
 
 function doRefresh() {
@@ -335,6 +358,24 @@ export const api = {
             );
           }
           dispatchLogoutOnce('refresh_failed');
+          // [S6 Item 7] AuthContext's auth:logout listener navigates to
+          // /portal/login with state.reason='refresh_failed', and
+          // PortalLogin pushes the canonical "Your session has expired"
+          // toast from its location.state useEffect. The ApiError we
+          // throw here is what catch blocks in callers (e.g. Admin.jsx
+          // handleExportMonth) display as `err.message` — pushing the
+          // long "Session expired. Please sign in again." copy would
+          // stack a second toast on top of the listener's. When the
+          // dispatch JUST happened (within the 500ms recency window)
+          // throw with a quieter message and keep the structured code
+          // so callers can still branch on TOKEN_EXPIRED. The console
+          // trace is kept so production debugging still surfaces the
+          // canonical string when devtools is open.
+          if (wasLogoutDispatchedRecently()) {
+            // eslint-disable-next-line no-console
+            console.info('[api.download] session expired — suppressed duplicate toast; AuthContext listener is handling it');
+            throw new ApiError('Signed out.', 401, 'TOKEN_EXPIRED');
+          }
           throw new ApiError('Session expired. Please sign in again.', 401, 'TOKEN_EXPIRED');
         }
         // Retry the download with the freshly-rotated token. A network /
@@ -509,6 +550,17 @@ export const api = {
   // logout/login cycle). Optional chain (`api.getRefreshEpoch?.()`) so
   // an older bundle without this helper doesn't crash.
   getRefreshEpoch: () => refreshEpoch,
+  // [S6 Item 7] Recency check for the most recent dispatchLogoutOnce()
+  // call. Returns true if logout was dispatched within the last
+  // `windowMs` (default 500). Callers in their error catch blocks can
+  // skip pushing "Session expired" — the AuthContext listener has
+  // already navigated to /portal/login where PortalLogin pushes the
+  // canonical toast from location.state.reason. Without this helper,
+  // the same logout produces two stacked toasts (one from the
+  // caller's catch showing err.message, one from PortalLogin's mount
+  // effect).
+  wasLogoutDispatchedRecently: (windowMs = LOGOUT_RECENT_WINDOW_MS) =>
+    wasLogoutDispatchedRecently(windowMs),
 
   // Zoho OAuth — public endpoints (no auth token).
   // Round-7: these previously used raw fetch() in PortalLogin, bypassing

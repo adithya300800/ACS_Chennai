@@ -55,6 +55,33 @@ const serializeManpowerRows = (rows) =>
 // for the migration / clearing contract.
 const DRAFT_BASE = 'dpr_draft_v1';
 
+// [S6 Item 1] Submit-ack localStorage flag. Survives a form re-render /
+// component unmount so the transient-recovery branch (POST submit response
+// lost on the network but the server already committed) can recognize
+// "we already submitted" instead of re-enabling the form and inviting a
+// double-submit click. Keyed by (idempotencyKey, draftId, editingId) —
+// each is non-null on exactly one submit path, so the combined string
+// uniquely identifies a submit intent across the page lifetime. The
+// idempotencyKey on createDpr paths means the same key is replayed if
+// api.js's NETWORK_ERROR auto-retry kicks in (see api.js:request()), so
+// the server's (employeeId, Idempotency-Key, bodyHash) → 201 cache
+// returns the cached row instead of creating a duplicate — the local-
+// Storage flag is the matching client-side contract.
+const SUBMIT_ACK_PREFIX = 'dpr-submit-ack:';
+function buildSubmitAckKey({ idempotencyKey, draftId, editingId }) {
+  const tag = [idempotencyKey, editingId, draftId].filter(Boolean).join('|') || 'unknown';
+  return `${SUBMIT_ACK_PREFIX}${tag}`;
+}
+function setSubmitAck(key) {
+  try { localStorage.setItem(key, JSON.stringify({ ts: Date.now() })); } catch {}
+}
+function clearSubmitAck(key) {
+  try { localStorage.removeItem(key); } catch {}
+}
+function hasSubmitAck(key) {
+  try { return !!localStorage.getItem(key); } catch { return false; }
+}
+
 const getLocalDate = () => {
   const now = new Date();
   const offset = now.getTimezoneOffset();
@@ -1211,6 +1238,16 @@ export default function DprSubmit() {
             lastPutVersionRef.current = acknowledged;
           }
 
+          // [S6 Item 1] Stamp the submit-ack flag BEFORE the publish POST
+          // so a transient response-loss (server committed, response lost)
+          // is recognized as "we already submitted" by the catch block
+          // below instead of re-enabling the form. Keyed by editingId +
+          // draftId — submitDpr has no idempotencyKey on the wire, so we
+          // use the server-side row identity. Cleared on success below;
+          // preserved across the navigate so a follow-up click with the
+          // same identity also short-circuits.
+          const submitAckKey = buildSubmitAckKey({ editingId, draftId });
+          setSubmitAck(submitAckKey);
           const submitted = await api.submitDpr(editingId, versionToSubmit, accessToken);
           // Show success ONLY for the returned terminal state. If the
           // server returned something else (e.g. an idempotent retry
@@ -1222,10 +1259,16 @@ export default function DprSubmit() {
             // additive flag flips and any subsequent edit treats them
             // as already persisted. Same keying as the Save branch.
             markPhotosPersisted(photosToSubmit);
+            clearSubmitAck(submitAckKey);
             toast.push('DPR submitted successfully.', 'success');
             lastPutVersionRef.current = null;
             navigate('/portal/dpr/my');
           } else {
+            // [S6 Item 1] Server returned a non-SUBMITTED payload — the
+            // publish didn't actually land. Drop the ack flag so the
+            // next retry starts fresh, surface the existing error, and
+            // stay on the form.
+            clearSubmitAck(submitAckKey);
             toast.push('Submit did not complete. Please refresh and try again.', 'error');
             setStatus('idle');
             submittingRef.current = false;
@@ -1275,6 +1318,17 @@ export default function DprSubmit() {
           ? crypto.randomUUID()
           : `dpr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+        // [S6 Item 1] Stamp the submit-ack flag BEFORE the create POST
+        // so a transient response-loss is recognized as "we already
+        // submitted" by the catch block below. Keyed by the just-minted
+        // idempotencyKey + draftId — the server replays the cached 201
+        // for this key on retry (api.js auto-retry preserves it), so a
+        // manual user retry would also dedup. Cleared on success below;
+        // the next fresh submit mints a NEW idempotencyKey and gets its
+        // own ack slot, so stale flags can't cross-contaminate.
+        const submitAckKey = buildSubmitAckKey({ idempotencyKey, draftId });
+        setSubmitAck(submitAckKey);
+
         // SOL DR-005: build the create body via the shared helper. The
         // previous inline literal omitted `drawingId` and `drawingRev`,
         // so a fresh final DPR that picked a drawing would land
@@ -1291,10 +1345,53 @@ export default function DprSubmit() {
         });
         await api.createDpr(createPayload, accessToken, idempotencyKey);
         clearDraftForEmployee(currentEmployeeId);
+        clearSubmitAck(submitAckKey);
         toast.push(submitStatus === 'DRAFT' ? 'Draft saved.' : 'DPR submitted successfully.', 'success');
         navigate('/portal/dpr/my');
       }
     } catch (err) {
+      // [S6 Item 1] Reconcile "already submitted" BEFORE re-enabling the
+      // form. The submit-ack flag was stamped right before each
+      // createDpr/submitDpr POST, so if it's still set on the catch
+      // path the server MAY have committed but the response was lost
+      // (NETWORK_ERROR / TIMEOUT). For those transient failures we route
+      // to the success state instead of re-enabling the form — the user
+      // can verify on /portal/dpr/my and a manual retry would either:
+      // (a) hit the server-side idempotency-key cache and return the
+      //     cached row (DR-012/DR-017), or
+      // (b) on submitDpr paths land cleanly on an already-SUBMITTED row.
+      // For non-transient errors (server 4xx/5xx with a structured
+      // message, e.g. PHOTO_BINDING_LOST), the flag is NOT a reliable
+      // "we succeeded" signal — the server explicitly rejected — so we
+      // fall through to the existing error UI.
+      //
+      // Reconstruct the same key the success path built. `idempotencyKey`
+      // is in scope from the createDpr branch; `editingId` + `draftId`
+      // are in scope for the resumed-edit publish branch. At most one
+      // submit attempt is in flight per handleSubmit call, so at most
+      // one of these key shapes will match.
+      const submitAckKey = buildSubmitAckKey({ idempotencyKey, editingId, draftId });
+      const ackFound = hasSubmitAck(submitAckKey);
+      const isTransient = err?.transient === true
+        || err?.code === 'NETWORK_ERROR'
+        || err?.code === 'TIMEOUT';
+      if (ackFound && isTransient) {
+        // Server likely committed; route to success so the user doesn't
+        // re-click and double-submit. We clear the local draft so the
+        // next visit doesn't restore the now-stale form state, and
+        // reset the retry ref so a manual re-entry into the page
+        // doesn't take the lastPutVersionRef branch.
+        toast.push('DPR submitted successfully.', 'success');
+        clearDraftForEmployee(currentEmployeeId);
+        clearSubmitAck(submitAckKey);
+        lastPutVersionRef.current = null;
+        navigate('/portal/dpr/my');
+        return;
+      }
+      // No ack, or non-transient error — fall through to the existing
+      // error UI. Drop the ack flag so the next retry starts fresh.
+      if (ackFound) clearSubmitAck(submitAckKey);
+
       // [DR-006 client] Surface a specific message when the server rolls
       // back because a photo claim was lost mid-submit. Generic
       // "Failed to submit…" would leave the user thinking the form was
@@ -1370,6 +1467,23 @@ export default function DprSubmit() {
         setSearchParams(next, { replace: true });
       }
     }
+    // [S6 Item 1] Wipe every dpr-submit-ack:* entry on Discard. The
+    // createDpr path mints a fresh idempotencyKey per submit attempt,
+    // so each prior submit has its own slot — clearing by prefix is
+    // the safe aggregate move (no stale ack can short-circuit the
+    // next fresh submit, and any in-flight submit-ack from the row
+    // we just discarded becomes moot). The handleSubmit paths mint
+    // new keys on each fresh attempt, so a stale entry can't be
+    // matched against a future submit unless the same primitive
+    // values are reused — which Discard has now invalidated.
+    try {
+      const ackKeys = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(SUBMIT_ACK_PREFIX)) ackKeys.push(k);
+      }
+      ackKeys.forEach((k) => localStorage.removeItem(k));
+    } catch {}
     toast.push('Draft discarded.', 'info');
   };
 
