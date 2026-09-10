@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, lazy } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
@@ -6,35 +6,23 @@ import { api } from '../../lib/api.js';
 import { formatShortDate } from '../../lib/format.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
-// R38 charts: client-side aggregation + chart primitives. The
-// bucketing functions are pure (no API calls); the chart primitives
-// are thin recharts wrappers that consume the ChartConfig convention
-// shadcn/ui's chart.tsx established.
+// R38 charts: pure aggregation helpers stay in the main chunk
+// (used by SparklineTile + memoised by the parent). The recharts-
+// using chart components are extracted into ProjectDashboardCharts.jsx
+// and loaded via React.lazy — recharts only enters the bundle when an
+// admin opens /portal/admin/project-dashboard, keeping every other
+// admin page at its pre-R38 size.
 import {
   bucketByDay,
   byLineItemTopN,
   byEmployeeWeek,
   pendingReviewSparkline,
 } from '../../lib/kpiBuckets.js';
-import { DashboardAreaChart } from '../../components/ui/chart/AreaChart.jsx';
-import { DashboardDonutChart } from '../../components/ui/chart/DonutChart.jsx';
 import { StatSparklineTile } from '../../components/dashboard/StatSparklineTile.jsx';
-// Recharts primitives used directly in the inline BoqTopNBar
-// component. We pull BarChart + Bar + the axis primitives rather
-// than ship a generic BarChart wrapper — only one bar chart ships
-// in this round so a wrapper file would not pay back.
-import {
-  BarChart as RechartsBarChart,
-  Bar as RechartsBar,
-  CartesianGrid,
-  XAxis,
-  YAxis,
-} from 'recharts';
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-} from '../../components/ui/chart/ChartContainer.jsx';
+const ProjectDashboardCharts = lazy(() => import('./ProjectDashboardCharts.jsx'));
+const InspectionDonutCard = lazy(() =>
+  import('./ProjectDashboardCharts.jsx').then((m) => ({ default: m.InspectionDonutCard })),
+);
 
 // Tile-key → endpoint loader + label + "View all" link. Round-34
 // Feature 4 turned each StatTile into an accordion button: clicking
@@ -1255,52 +1243,16 @@ function ProjectKpiView({ kpis, loading, selectedProject, days, expandedTile, se
             kpis.inspections.byType (already server-aggregated) and
             pass the slice colour from the same status palette the
             tile numbers use, so a glance at the donut matches the
-            glance at the chips it replaced. The centre label is the
-            window total — same number as the "Total (window)" tile
-            above, so the donut's middle confirms the count without
-            the user cross-referencing. */}
-        <div
-          className="dpr-card"
-          style={{ padding: '1rem', gridColumn: '1 / -1' }}
-          data-chart-section="inspection-by-type"
-        >
-          <div
-            style={{
-              fontFamily: "'Plus Jakarta Sans', sans-serif",
-              fontWeight: 600,
-              fontSize: '0.85rem',
-              color: 'var(--navy, #0f172a)',
-              marginBottom: '0.5rem',
-            }}
-          >
-            Inspections by type
-          </div>
-          <DashboardDonutChart
-            data={Object.entries(kpis.inspections?.byType || {}).map(([type, count], i) => ({
-              key: type,
-              name: prettyInspectionType(type),
-              value: Number(count) || 0,
-              // Use a fixed sequence of brand-token colours so the
-              // donut reads as one chart even if backend adds a new
-              // sub-work-type. Beyond 8 types the colour wraps —
-              // that's fine, the legend names the type.
-              color: [
-                'var(--blue, #0066FF)',
-                'var(--green, #16a34a)',
-                'var(--amber, #d97706)',
-                'var(--red, #dc2626)',
-                '#0ea5e9',
-                '#7c3aed',
-                '#db2777',
-                '#0d9488',
-              ][i % 8],
-            }))}
-            centerLabel={String(kpis.inspections?.totalCount ?? 0)}
-            centerSubLabel="inspections"
-            emptyMessage="No inspections recorded in this window yet."
-            ariaLabel={`Inspection type breakdown. ${kpis.inspections?.totalCount ?? 0} inspections total.`}
+            glance at the chips it replaced. The donut itself is
+            loaded via React.lazy so recharts only enters the chunk
+            when an admin opens this page (see ProjectDashboardCharts.jsx
+            for the actual render + empty-state handling). */}
+        <React.Suspense fallback={<ChartLoadingPlaceholder variant="donut" />}>
+          <InspectionDonutCard
+            byType={kpis.inspections?.byType || {}}
+            totalCount={kpis.inspections?.totalCount ?? 0}
           />
-        </div>
+        </React.Suspense>
       </TileSection>
 
       {/* Round-29: Cube Tests TileSection REMOVED — the standalone
@@ -1381,71 +1333,25 @@ function ProjectKpiView({ kpis, loading, selectedProject, days, expandedTile, se
         />
       </TileSection>
 
-      {/* R38 chart #1 — DPR trend area chart. bucketByDay folds the
-          already-fetched DPR list into a contiguous window of day
-          buckets (oldest first) so the chart shows activity spikes
-          against the KPI window, not against the dataset's natural
-          date range. We plot one series per status we care about
-          (submitted / approved / rejected) so the chart answers
-          "how is the queue flowing?" at a glance — three stacked
-          bands instead of three overlapping lines. */}
-      <ChartSection title="DPR activity" subtitle="Daily reports by status — last 30 days">
-        <DashboardAreaChart
-          data={dprTrendBuckets}
-          xKey="day"
-          series={[
-            { key: 'submitted', label: 'Submitted', color: 'var(--blue, #0066FF)' },
-            { key: 'underReview', label: 'Under review', color: 'var(--amber, #d97706)' },
-            { key: 'approved', label: 'Approved', color: 'var(--green, #16a34a)' },
-            { key: 'rejected', label: 'Rejected', color: 'var(--red, #dc2626)' },
-          ]}
-          height={220}
-          emptyMessage="No DPRs filed in the selected window yet."
-          ariaLabel="DPR activity trend, by status, last 30 days"
+      {/* R38 charts #1, #3, #4, #5 — lazy-loaded chart chunk. The
+          recharts-using pieces (area chart, BOQ bar, inspection
+          funnel, people heatmap) all live in ProjectDashboardCharts.jsx
+          so they don't add ~50 kB gz to every admin page. While
+          the chunk loads, the four ChartLoadingPlaceholder cards
+          keep the page layout stable so the rest of the dashboard
+          doesn't shift. */}
+      <React.Suspense
+        fallback={
+          <ChartLoadingPlaceholderGroup count={4} />
+        }
+      >
+        <ProjectDashboardCharts
+          kpis={kpis}
+          dprTrendBuckets={dprTrendBuckets}
+          boqTopN={boqTopN}
+          peopleBuckets={peopleBuckets}
         />
-      </ChartSection>
-
-      {/* R38 chart #3 — BOQ top-10 grouped bar. We rank the BOQ list
-          by absolute variance (byLineItemTopN), then render a
-          horizontal grouped bar with two series per item (contract
-          + executed). The bar is rendered with recharts primitives
-          directly rather than a new wrapper file — only one bar
-          chart ships in this round and pulling a new chart file
-          into src/components/ui/chart/ would not pay back. */}
-      <ChartSection
-        title="BOQ top variances"
-        subtitle="Biggest contract vs. executed gaps (absolute variance %)"
-      >
-        <BoqTopNBar rows={boqTopN} />
-      </ChartSection>
-
-      {/* R38 chart #4 — inspection status funnel. Computed client-
-          side from kpis.inspections.totalCount + openCount. We
-          don't fetch a new list for this; the funnel is two bands
-          (OPEN, CLOSED) with widths proportional to the counts. */}
-      <ChartSection
-        title="Inspection status"
-        subtitle="Open vs. closed in the selected window"
-      >
-        <InspectionFunnel
-          total={kpis.inspections?.totalCount ?? 0}
-          open={kpis.inspections?.openCount ?? 0}
-        />
-      </ChartSection>
-
-      {/* R38 chart #5 — people workload heatmap. Hand-rolled CSS
-          grid: rows are employees, columns are week buckets. The
-          colour intensity scales with the cell count vs. the
-          row's max. We pull activity from chartLists.dprs +
-          chartLists.inspections (caller has both lists in memory)
-          and bucket by employee × week via byEmployeeWeek. No
-          external library — a CSS grid of squares is enough. */}
-      <ChartSection
-        title="People workload"
-        subtitle="DPR + inspection activity per employee, by week"
-      >
-        <PeopleHeatmap buckets={peopleBuckets} />
-      </ChartSection>
+      </React.Suspense>
 
       {/* Footer line — meta info for the data the user just looked at.
           Helps when a PM shares a screenshot in a meeting ("these are
@@ -1707,388 +1613,47 @@ function DrillRow({ row, tileKey }) {
   );
 }
 
-// ──── R38 chart primitives ────────────────────────────────────────────────
+// ──── R38 chart loaders ───────────────────────────────────────────────────
 //
-// Three of the four R38 charts are composed inline in the page
-// rather than shipped as separate wrapper files in
-// src/components/ui/chart/. Each is used by exactly one chart on
-// one page, so a generic wrapper would not pay back. The shared
-// bits (ChartContainer + the colour-token conventions) live in the
-// existing chart folder.
+// The recharts-using chart components live in ProjectDashboardCharts.jsx
+// so they only enter the bundle when an admin opens
+// /portal/admin/project-dashboard (lazy import at the top of this
+// file). The placeholders below are intentionally tiny and have NO
+// recharts dependency so they render synchronously during the Suspense
+// window — the user sees stable-sized "Loading chart…" cards rather
+// than layout shift when the chunk lands.
 
-// ChartSection — the .dpr-card shell for the four new chart panels.
-// Mirrors the TileSection heading style (uppercase, 0.78rem, steel,
-// 0.06em tracking) so the eye reads "Daily Reports / Inspections /
-// People / DPR activity / BOQ top variances / ..." as one column.
-function ChartSection({ title, subtitle, children }) {
+// ChartLoadingPlaceholder — one card. The `variant` lets us keep
+// the donut placeholder narrower than the section placeholders so
+// the inspection TileSection doesn't grow a tall blank column.
+function ChartLoadingPlaceholder({ variant = 'section' }) {
+  const isDonut = variant === 'donut';
   return (
-    <section>
-      <h2
-        style={{
-          fontFamily: "'Plus Jakarta Sans', sans-serif",
-          fontSize: '0.78rem',
-          fontWeight: 700,
-          color: 'var(--steel, #64748b)',
-          textTransform: 'uppercase',
-          letterSpacing: '0.06em',
-          margin: '0 0 0.6rem',
-        }}
-      >
-        {title}
-      </h2>
-      <div className="dpr-card" style={{ padding: '1rem 1.25rem' }}>
-        {subtitle ? (
-          <div
-            style={{
-              fontSize: '0.78rem',
-              color: 'var(--steel, #64748b)',
-              marginBottom: 12,
-            }}
-          >
-            {subtitle}
-          </div>
-        ) : null}
-        {children}
-      </div>
-    </section>
-  );
-}
-
-// BoqTopNBar — horizontal grouped bar of contract vs. executed
-// values, sorted by the byLineItemTopN order (highest absolute
-// variance first). Uses recharts primitives directly with the
-// shared ChartContainer so the colour-token convention is the
-// same as the area + donut charts above.
-function BoqTopNBar({ rows }) {
-  if (!Array.isArray(rows) || rows.length === 0) {
-    return (
-      <div
-        role="img"
-        aria-label="Empty BOQ variance chart"
-        style={{
-          height: 220,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontSize: '0.85rem',
-          color: 'var(--steel, #64748b)',
-          background: 'rgba(100,116,139,0.04)',
-          borderRadius: 8,
-          border: '1px dashed var(--steel, #cbd5e1)',
-        }}
-      >
-        No BOQ line items in the selected window.
-      </div>
-    );
-  }
-
-  // ChartConfig — drives the colour tokens via ChartStyle. Two
-  // series so the legend reads "Contract / Executed".
-  const config = {
-    contract: { label: 'Contract', color: 'var(--blue, #0066FF)' },
-    executed: { label: 'Executed', color: 'var(--amber, #d97706)' },
-  };
-
-  return (
-    <div role="img" aria-label="Top 10 BOQ line items by absolute variance">
-      <ChartContainer config={config} style={{ aspectRatio: 'auto', height: Math.max(220, rows.length * 28 + 60), width: '100%' }}>
-        <RechartsBarChart
-          data={rows}
-          layout="vertical"
-          margin={{ top: 8, right: 24, left: 0, bottom: 8 }}
-        >
-          <CartesianGrid stroke="var(--steel, #cbd5e1)" strokeDasharray="3 3" horizontal={false} />
-          <XAxis
-            type="number"
-            tickLine={false}
-            axisLine={false}
-            tick={{ fontSize: 11, fill: 'var(--steel, #64748b)' }}
-            tickFormatter={(v) => {
-              // Indian-locale grouping (lakhs / crores) so a ₹5L
-              // contract doesn't render as "500000".
-              const n = Number(v) || 0;
-              if (n >= 10000000) return `${(n / 10000000).toFixed(1)}Cr`;
-              if (n >= 100000) return `${(n / 100000).toFixed(1)}L`;
-              if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
-              return String(n);
-            }}
-          />
-          <YAxis
-            type="category"
-            dataKey="label"
-            tickLine={false}
-            axisLine={false}
-            width={120}
-            tick={{ fontSize: 11, fill: 'var(--navy, #0f172a)' }}
-          />
-          <ChartTooltip
-            cursor={{ fill: 'rgba(100,116,139,0.06)' }}
-            content={
-              <ChartTooltipContent
-                hideLabel
-                formatter={(value, name) => {
-                  const n = Number(value) || 0;
-                  return (
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        gap: 12,
-                        width: '100%',
-                      }}
-                    >
-                      <span style={{ color: 'var(--steel, #64748b)' }}>{name}</span>
-                      <span
-                        style={{
-                          fontFamily: "'Plus Jakarta Sans', sans-serif",
-                          fontWeight: 700,
-                          color: 'var(--navy, #0f172a)',
-                        }}
-                      >
-                        ₹{n.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-                      </span>
-                    </div>
-                  );
-                }}
-              />
-            }
-          />
-          <RechartsBar dataKey="contractValue" fill="var(--blue, #0066FF)" isAnimationActive={false} name="Contract" />
-          <RechartsBar dataKey="executedValue" fill="var(--amber, #d97706)" isAnimationActive={false} name="Executed" />
-        </RechartsBarChart>
-      </ChartContainer>
+    <div
+      className="dpr-card"
+      style={{
+        padding: '1rem 1.25rem',
+        minHeight: isDonut ? 220 : 180,
+        gridColumn: isDonut ? '1 / -1' : undefined,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: 'var(--steel, #64748b)',
+        fontSize: '0.85rem',
+      }}
+      role="status"
+      aria-live="polite"
+    >
+      Loading chart…
     </div>
   );
 }
 
-// InspectionFunnel — two horizontal bands (OPEN, CLOSED) with
-// widths proportional to their share of total. The data is
-// already on the KPI response (totalCount + openCount) so this
-// is a pure render — no new fetch, no new list.
-function InspectionFunnel({ total, open }) {
-  const totalN = Math.max(0, Number(total) || 0);
-  const openN = Math.max(0, Number(open) || 0);
-  const closedN = Math.max(0, totalN - openN);
-
-  if (totalN === 0) {
-    return (
-      <div
-        role="img"
-        aria-label="Empty inspection status funnel"
-        style={{
-          padding: '1.25rem 0',
-          fontSize: '0.85rem',
-          color: 'var(--steel, #64748b)',
-          textAlign: 'center',
-          background: 'rgba(100,116,139,0.04)',
-          borderRadius: 8,
-          border: '1px dashed var(--steel, #cbd5e1)',
-        }}
-      >
-        No inspections recorded in the selected window.
-      </div>
-    );
-  }
-
-  const openPct = (openN / totalN) * 100;
-  const closedPct = 100 - openPct;
-
-  return (
-    <div role="img" aria-label={`Inspection status funnel: ${openN} open, ${closedN} closed, ${totalN} total`}>
-      <div style={{ display: 'flex', height: 36, borderRadius: 8, overflow: 'hidden', border: '1px solid var(--steel, #cbd5e1)' }}>
-        <div
-          style={{
-            width: `${openPct}%`,
-            background: 'var(--amber, #d97706)',
-            color: 'white',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: '0.78rem',
-            fontWeight: 700,
-            fontFamily: "'Plus Jakarta Sans', sans-serif",
-            transition: 'width 0.3s ease',
-            minWidth: openN > 0 ? 0 : 0,
-          }}
-          title={`Open: ${openN}`}
-        >
-          {openN > 0 ? openN : ''}
-        </div>
-        <div
-          style={{
-            width: `${closedPct}%`,
-            background: 'var(--green, #16a34a)',
-            color: 'white',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: '0.78rem',
-            fontWeight: 700,
-            fontFamily: "'Plus Jakarta Sans', sans-serif",
-            transition: 'width 0.3s ease',
-          }}
-          title={`Closed: ${closedN}`}
-        >
-          {closedN > 0 ? closedN : ''}
-        </div>
-      </div>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          marginTop: 8,
-          fontSize: '0.78rem',
-          color: 'var(--steel, #64748b)',
-        }}
-      >
-        <div>
-          <span
-            aria-hidden="true"
-            style={{
-              display: 'inline-block',
-              width: 8,
-              height: 8,
-              borderRadius: 2,
-              background: 'var(--amber, #d97706)',
-              marginRight: 6,
-              verticalAlign: 'middle',
-            }}
-          />
-          Open · {openN} ({openPct.toFixed(0)}%)
-        </div>
-        <div>
-          <span
-            aria-hidden="true"
-            style={{
-              display: 'inline-block',
-              width: 8,
-              height: 8,
-              borderRadius: 2,
-              background: 'var(--green, #16a34a)',
-              marginRight: 6,
-              verticalAlign: 'middle',
-            }}
-          />
-          Closed · {closedN} ({closedPct.toFixed(0)}%)
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// PeopleHeatmap — hand-rolled CSS grid, no library. Rows are
-// employees (top-8 by total activity), columns are week buckets
-// returned by byEmployeeWeek. The cell colour intensity scales
-// with the cell count vs. the row's max so a sparse employee
-// doesn't render as a fully-saturated block.
-function PeopleHeatmap({ buckets }) {
-  const rows = (buckets && buckets.rows) || [];
-  const weekLabels = (buckets && buckets.weekLabels) || [];
-
-  if (rows.length === 0) {
-    return (
-      <div
-        role="img"
-        aria-label="Empty people workload heatmap"
-        style={{
-          padding: '1.5rem 0',
-          fontSize: '0.85rem',
-          color: 'var(--steel, #64748b)',
-          textAlign: 'center',
-          background: 'rgba(100,116,139,0.04)',
-          borderRadius: 8,
-          border: '1px dashed var(--steel, #cbd5e1)',
-        }}
-      >
-        No people activity in the selected window.
-      </div>
-    );
-  }
-
-  return (
-    <div role="img" aria-label="People workload heatmap, top 8 employees by week">
-      {/* Week-label header — one per week bucket. We render the
-          first day of each week as a short month + day so the
-          columns line up with the cells below. */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: `160px repeat(${weekLabels.length}, 1fr)`,
-          gap: 4,
-          alignItems: 'center',
-          fontSize: '0.72rem',
-          color: 'var(--steel, #64748b)',
-          marginBottom: 6,
-          fontWeight: 600,
-          textTransform: 'uppercase',
-          letterSpacing: '0.04em',
-        }}
-      >
-        <div />
-        {weekLabels.map((label, i) => {
-          const d = new Date(`${label}T00:00:00.000Z`);
-          const text = Number.isNaN(d.getTime())
-            ? label
-            : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-          return <div key={i} style={{ textAlign: 'center' }}>{text}</div>;
-        })}
-      </div>
-      {/* Heatmap body — one row per employee. The cell colour
-          intensity is computed per-row so a high-throughput person
-          doesn't visually drown out a low-throughput one. The base
-          colour is var(--blue) at varying alpha. */}
-      {rows.map((row) => {
-        const max = Math.max(...row.weeks, 1);
-        return (
-          <div
-            key={row.employeeId}
-            style={{
-              display: 'grid',
-              gridTemplateColumns: `160px repeat(${weekLabels.length}, 1fr)`,
-              gap: 4,
-              alignItems: 'center',
-              marginBottom: 4,
-            }}
-          >
-            <div
-              style={{
-                fontSize: '0.82rem',
-                color: 'var(--navy, #0f172a)',
-                fontWeight: 600,
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                paddingRight: 8,
-              }}
-              title={row.employeeName}
-            >
-              {row.employeeName}
-            </div>
-            {row.weeks.map((count, i) => {
-              const alpha = count === 0 ? 0.04 : 0.18 + (count / max) * 0.7;
-              return (
-                <div
-                  key={i}
-                  style={{
-                    background: `rgba(0,102,255,${alpha.toFixed(2)})`,
-                    height: 28,
-                    borderRadius: 4,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: '0.78rem',
-                    fontWeight: 600,
-                    color: count > max * 0.5 ? 'white' : 'var(--navy, #0f172a)',
-                  }}
-                  title={`${row.employeeName} · week of ${weekLabels[i]} · ${count} ${count === 1 ? 'item' : 'items'}`}
-                >
-                  {count > 0 ? count : ''}
-                </div>
-              );
-            })}
-          </div>
-        );
-      })}
-    </div>
-  );
+// ChartLoadingPlaceholderGroup — renders N section placeholders for
+// the lazy ProjectDashboardCharts chunk. The donut placeholder is
+// rendered separately by the TileSection's own Suspense.
+function ChartLoadingPlaceholderGroup({ count = 4 }) {
+  const cards = [];
+  for (let i = 0; i < count; i += 1) cards.push(<ChartLoadingPlaceholder key={i} variant="section" />);
+  return <>{cards}</>;
 }
