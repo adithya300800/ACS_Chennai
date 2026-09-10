@@ -66,6 +66,17 @@ export default function Modal({
   // also clear the captured element on unmount — React will dispose
   // this component when `open` flips to false and the next mount
   // captures a fresh trigger.
+  //
+  // S6/UI-5 (2026-09-09): verified the opener-capture pattern follows
+  // https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/. The ref
+  // `previouslyFocusedRef` is set synchronously when `open` flips to
+  // true (so document.activeElement is still the trigger before the
+  // dialog steals focus on the next paint) and re-read from the cleanup
+  // callback when `open` flips back to false (after React has disposed
+  // the dialog subtree, but before the trigger ref has been swapped).
+  // The optional `returnFocusRef` prop lets callers force a specific
+  // opener (useful when the trigger is unmounted before the dialog
+  // opens — e.g. a row that was deleted).
   useEffect(() => {
     if (!open) return undefined;
     if (returnFocusRef?.current) {

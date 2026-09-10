@@ -238,12 +238,44 @@ export default function Training() {
                   {/* Progress bar — only when progress > 0 OR status is IN_PROGRESS/COMPLETED.
                       We deliberately don't show 0% bars (visual noise for "haven't started").
                       DR-020: suppress the bar for inactive rows (CANCELLED, OVERDUE) — those
-                      assignments have nothing honest to report. */}
+                      assignments have nothing honest to report.
+                      S6/UI-5 (2026-09-09): the percent label is a numeric region that
+                      screen-reader users need to reach. The outer <div> already has an
+                      aria-label ("Progress: 75%"), but a screen-reader user tabbing
+                      through the card may land on the bare number — make it
+                      individually focusable with tabIndex={0} and add an explicit
+                      aria-label so it's announced as "Completion: 75 percent" rather
+                      than as a stray token ("75"). The training-stats strip above
+                      uses the same pattern via .training-stat-num.
+                      S6/UI-4 (2026-09-09): unify the trailing label so the user
+                      sees the same vocabulary everywhere — "% watched" leaked
+                      the tracking mechanics to the employee and read as
+                      half-done even when the row was terminal. Completed rows
+                      now say "Completed" (or "Self-attested" for the
+                      SELF_ATTESTED_COMPLETED evidence class) and IN_PROGRESS
+                      rows say "In progress" so the bar and the pill agree. */}
                   {!isTrainingInactive(e.status) && (e.progressPct > 0 || e.status !== TRAINING_STATUSES.ASSIGNED) && (
                     <div className="training-progress" aria-label={`Progress: ${e.progressPct}%`}>
                       <div className="training-progress-bar" style={{ width: `${Math.min(100, Math.max(0, e.progressPct))}%` }} />
-                      <span className="training-progress-label">
-                        {e.status === TRAINING_STATUSES.SELF_ATTESTED_COMPLETED ? 'Self-attested' : `${e.progressPct}% watched`}
+                      <span
+                        className="training-progress-label"
+                        tabIndex={0}
+                        aria-label={(() => {
+                          // Mirror the visual label for screen readers —
+                          // never announce a bare "75%" to a completed row.
+                          if (e.status === TRAINING_STATUSES.SELF_ATTESTED_COMPLETED) return 'Completion: self-attested';
+                          if (isTrainingTerminal(e.status)) return 'Completion: completed';
+                          if (e.status === TRAINING_STATUSES.IN_PROGRESS) return `Completion: ${e.progressPct} percent — in progress`;
+                          return `Completion: ${e.progressPct} percent watched`;
+                        })()}
+                      >
+                        {e.status === TRAINING_STATUSES.SELF_ATTESTED_COMPLETED
+                          ? 'Self-attested'
+                          : isTrainingTerminal(e.status)
+                            ? 'Completed'
+                            : e.status === TRAINING_STATUSES.IN_PROGRESS
+                              ? 'In progress'
+                              : `${e.progressPct}% watched`}
                       </span>
                     </div>
                   )}

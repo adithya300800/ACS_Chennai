@@ -1834,12 +1834,19 @@ footer {
   word-break: break-all;
   line-height: 1.4;
 }
+/* S6/UI-6 (2026-09-09): stack the workforce row builder to a single
+   column at narrow widths so trade/count/hours inputs aren't squeezed
+   into ~80px each on a 375px viewport. Previous 480px override kept
+   4 columns (1.5fr 0.75fr 0.75fr auto) which clipped the count and
+   hours inputs to two digits at 375px. The remove button moves onto
+   its own row at this width so it doesn't lose its 44px touch target. */
 @media (max-width: 480px) {
   .dpr-manpower-row {
-    grid-template-columns: 1.5fr 0.75fr 0.75fr auto;
+    grid-template-columns: 1fr;
     gap: 0.375rem;
   }
   .dpr-manpower-row input { font-size: 0.8125rem; padding: 0.35rem 0.4rem; }
+  .dpr-manpower-row-remove { justify-self: end; }
 }
 
 /* Round-17 C-14: shared Coming Soon block. */
@@ -2708,6 +2715,24 @@ footer {
     background: transparent;
     padding-top: 0;
   }
+}
+
+/* S6/UI-6 (2026-09-09): mobile density. At 480px and below the DPR /
+   Inspection submit forms become vertically cramped — 1.25rem gutters
+   and a 1.25rem row gap consume ~80px of a 375px viewport in vertical
+   padding alone. Trim both: nested cards drop to 0.75rem padding (was
+   1.25rem), the form gap drops to 0.75rem (was 1.25rem), and the
+   cross-section gap drops to 0.5rem (was 0.75rem). The auto-fit grid
+   in .form-row already collapses at 375px because its minmax(200px, 1fr)
+   can't fit two columns in 327px of available width — pin the
+   collapse explicitly so a future minmax tweak doesn't silently break
+   the stacking. */
+@media (max-width: 480px) {
+  .dpr-card { padding: 0.75rem; }
+  .dpr-form { gap: 0.75rem; }
+  .dpr-form-section { margin-bottom: 0.75rem; }
+  .dpr-form-actions { gap: 0.5rem; padding: 0.5rem 0; flex-wrap: wrap; }
+  .form-row { grid-template-columns: 1fr; gap: 0.5rem; }
 }
 
 .field-error {
