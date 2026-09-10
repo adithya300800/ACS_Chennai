@@ -26,6 +26,13 @@
 process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret-must-be-at-least-32-chars-long-AAAA';
 process.env.ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS || 'http://localhost:3000';
+// [LPR-010 followup] hashIdentifier (used in the handler's structured audit
+// log at dpr.js:2347) calls `salt()` at first use, which throws if
+// PII_LOG_SALT is unset — see src/lib/pii.js. Without this env var the
+// handler 500s with "PII_LOG_SALT environment variable must be set" before
+// fanOutEmail is ever invoked. Pin a deterministic test salt here so the
+// scope-bleed fix can be tested in isolation from PII infra setup.
+process.env.PII_LOG_SALT = process.env.PII_LOG_SALT || 'test-pii-salt-32-chars-min-deadbeef';
 
 const express = require('express');
 const jwt = require('jsonwebtoken');
@@ -52,6 +59,10 @@ const dprRouter = require('../src/routes/dpr');
 const ADMIN_ID = 'admin-1';
 const EMPLOYEE_ID = 'employee-1';
 let dprs = {};
+let notifications = []; // [SOL DR-021] bulk-review's post-create findFirst
+                        // re-reads the row that was just written; we mirror
+                        // what create() stored so the SSE wire + fanOutEmail
+                        // both see the actual message text the handler built.
 
 function seedDpr({ id, status = 'SUBMITTED', submittedById = EMPLOYEE_ID, version = 1 } = {}) {
   dprs[id] = {
@@ -120,7 +131,37 @@ function buildApp() {
       },
     },
     dPRRevision: { create: async ({ data }) => ({ id: 'rev-' + data.dprId, ...data }) },
-    notification: { create: async ({ data }) => ({ id: 'notif-' + Date.now(), ...data }) },
+    notification: {
+      create: async ({ data }) => {
+        const row = {
+          id: 'notif-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+          isRead: false,
+          createdAt: new Date(),
+          ...data,
+        };
+        notifications.push(row);
+        return row;
+      },
+      // [SOL DR-021] bulk-review re-reads the persisted notification row
+      // inside the tx (dpr.js:2670) so the SSE wire carries the real UUID
+      // and EmailLog.notificationId is real. Return the row that create()
+      // just pushed so the post-create fanOutEmail call sees the actual
+      // message text the handler built (e.g. "was rejected: Wrong project code").
+      findFirst: async ({ where, orderBy }) => {
+        let matches = notifications.filter((n) => {
+          for (const [k, v] of Object.entries(where || {})) {
+            if (n[k] !== v) return false;
+          }
+          return true;
+        });
+        // Naive orderBy support — only `createdAt: 'desc'` is used by the
+        // bulk-review handler. Sort by createdAt desc and return the first.
+        if (orderBy && orderBy.createdAt === 'desc') {
+          matches = matches.slice().sort((a, b) => b.createdAt - a.createdAt);
+        }
+        return matches[0] || null;
+      },
+    },
   };
 
   const prisma = {
@@ -152,6 +193,7 @@ function adminAuth() {
 
 beforeEach(() => {
   dprs = {};
+  notifications = [];
   mockFanOutEmail.mockReset();
   mockFanOutEmail.mockResolvedValue(undefined);
 });
@@ -265,5 +307,35 @@ describe('Round-25d — fanOutEmail scope wiring across $transaction boundary', 
     expect(mockFanOutEmail).toHaveBeenCalledTimes(1);
     expect(mockFanOutEmail.mock.calls[0][0].type).toBe('DPR_REJECTED');
     expect(mockFanOutEmail.mock.calls[0][0].message).toMatch(/Photo evidence missing/);
+  });
+
+  // ─── Regression guards ────────────────────────────────────────────────────
+  //
+  // These two guards pin the test scaffolding that the handler now depends
+  // on. Without them the suite silently degrades to a 500 — see the
+  // 2026-09-10 DR-031-SQLFIX CI investigation: removing either line
+  // causes all 7 tests to fail with "Received: 500". Pin both.
+
+  it('test scaffolding sets PII_LOG_SALT (handlers call hashIdentifier via audit logs)', () => {
+    // src/lib/pii.js's `salt()` throws at first use if PII_LOG_SALT is
+    // unset. The handler logs `employeeHash: hashIdentifier(req.employeeId)`
+    // at dpr.js:2347 (and 12 other call sites) on every mutation. If a
+    // future refactor drops the env-var setup at the top of this file,
+    // every handler returns 500 and the suite silently turns red.
+    expect(process.env.PII_LOG_SALT).toBeTruthy();
+    expect(process.env.PII_LOG_SALT.length).toBeGreaterThanOrEqual(32);
+  });
+
+  it('prisma mock surfaces notification.findFirst (DR-021 bulk-review re-read inside tx)', () => {
+    // SOL DR-021: bulk-review's tx now does
+    //   const persistedNotif = await tx.notification.findFirst({ where, orderBy, select });
+    // after the create, so the SSE wire + fanOutEmail see the real UUID.
+    // The mock must mirror create() rows so findFirst can find them — a
+    // missing findFirst causes the tx to reject, the handler to 500, and
+    // the suite to silently turn red. Pin the mock surface here.
+    const app = buildApp();
+    const prisma = app.get('prisma');
+    expect(typeof prisma.notification.findFirst).toBe('function');
+    expect(typeof prisma.notification.create).toBe('function');
   });
 });
