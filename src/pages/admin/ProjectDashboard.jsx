@@ -45,8 +45,12 @@ const InspectionDonutCard = lazy(() =>
 //      backend's DPR list switches from `contains` to `equals` (mode
 //      insensitive). Without this flag, a substring match leaks rows
 //      from similarly named projects.
+// R38.1: when the selection is the "All projects" sentinel
+// (`p.id === '__all__'`), drop the scope so the list endpoint returns
+// its org-wide queue — same pattern the chart-list loader uses.
 function drillScope(p) {
   if (!p) return {};
+  if (p.id === '__all__') return {};
   if (p.id) return { projectId: p.id };
   if (p.name) return { projectName: p.name, exactProjectName: '1' };
   return {};
@@ -85,9 +89,10 @@ const TILE_META = {
     },
     viewAll: (p, kpis) => {
       const w = drillWindow(kpis, 'dpr.submitted');
-      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
-      const qs = new URLSearchParams({ projectId: idParam, status: 'SUBMITTED', ...w }).toString();
-      return `/portal/admin/dpr?${qs}`;
+      // R38.1 — all-projects mode drops the projectId so the queue is unscoped.
+      const params = { status: 'SUBMITTED', ...w };
+      if (p && p.id !== '__all__') params.projectId = encodeURIComponent(p.id || `name:${p.name}`);
+      return `/portal/admin/dpr?${new URLSearchParams(params).toString()}`;
     },
   },
   'dpr.pendingReview': {
@@ -107,9 +112,9 @@ const TILE_META = {
     },
     viewAll: (p, kpis) => {
       const w = drillWindow(kpis, 'dpr.pendingReview');
-      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
-      const qs = new URLSearchParams({ projectId: idParam, ...w }).toString();
-      return `/portal/admin/dpr?${qs}`;
+      const params = { ...w };
+      if (p && p.id !== '__all__') params.projectId = encodeURIComponent(p.id || `name:${p.name}`);
+      return `/portal/admin/dpr?${new URLSearchParams(params).toString()}`;
     },
   },
   'dpr.approved': {
@@ -120,9 +125,9 @@ const TILE_META = {
     },
     viewAll: (p, kpis) => {
       const w = drillWindow(kpis, 'dpr.approved');
-      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
-      const qs = new URLSearchParams({ projectId: idParam, status: 'APPROVED', ...w }).toString();
-      return `/portal/admin/dpr?${qs}`;
+      const params = { status: 'APPROVED', ...w };
+      if (p && p.id !== '__all__') params.projectId = encodeURIComponent(p.id || `name:${p.name}`);
+      return `/portal/admin/dpr?${new URLSearchParams(params).toString()}`;
     },
   },
   'dpr.rejected': {
@@ -133,9 +138,9 @@ const TILE_META = {
     },
     viewAll: (p, kpis) => {
       const w = drillWindow(kpis, 'dpr.rejected');
-      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
-      const qs = new URLSearchParams({ projectId: idParam, status: 'REJECTED', ...w }).toString();
-      return `/portal/admin/dpr?${qs}`;
+      const params = { status: 'REJECTED', ...w };
+      if (p && p.id !== '__all__') params.projectId = encodeURIComponent(p.id || `name:${p.name}`);
+      return `/portal/admin/dpr?${new URLSearchParams(params).toString()}`;
     },
   },
   'inspection.total': {
@@ -146,9 +151,9 @@ const TILE_META = {
     },
     viewAll: (p, kpis) => {
       const w = drillWindow(kpis, 'inspection.total');
-      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
-      const qs = new URLSearchParams({ projectId: idParam, ...w }).toString();
-      return `/portal/admin/inspection?${qs}`;
+      const params = { ...w };
+      if (p && p.id !== '__all__') params.projectId = encodeURIComponent(p.id || `name:${p.name}`);
+      return `/portal/admin/inspection?${new URLSearchParams(params).toString()}`;
     },
   },
   'inspection.open': {
@@ -158,15 +163,16 @@ const TILE_META = {
     label: 'Open Inspections',
     loader: (p, t) => api.getInspections({ ...drillScope(p), status: 'OPEN', limit: 10 }, t).then((d) => d.inspections || d.records || []),
     viewAll: (p) => {
-      const idParam = encodeURIComponent(p.id || `name:${p.name}`);
-      const qs = new URLSearchParams({ projectId: idParam, status: 'OPEN' }).toString();
-      return `/portal/admin/inspection?${qs}`;
+      const params = { status: 'OPEN' };
+      if (p && p.id !== '__all__') params.projectId = encodeURIComponent(p.id || `name:${p.name}`);
+      return `/portal/admin/inspection?${new URLSearchParams(params).toString()}`;
     },
   },
   'boq.items': {
     label: 'BOQ Items',
     loader: (p, t) => api.getBoqItems({ ...drillScope(p), limit: 10 }, t).then((d) => d.items || d.boq || []),
     viewAll: (p) => {
+      if (p && p.id === '__all__') return `/portal/admin/boq`;
       const idParam = encodeURIComponent(p.id || `name:${p.name}`);
       return `/portal/admin/boq?projectId=${idParam}`;
     },
@@ -175,6 +181,7 @@ const TILE_META = {
     label: 'BOQ Variance Items',
     loader: (p, t) => api.getBoqItems({ ...drillScope(p), varianceOnly: true, limit: 10 }, t).then((d) => d.items || d.boq || []),
     viewAll: (p) => {
+      if (p && p.id === '__all__') return `/portal/admin/boq`;
       const idParam = encodeURIComponent(p.id || `name:${p.name}`);
       return `/portal/admin/boq?projectId=${idParam}`;
     },
@@ -431,6 +438,107 @@ const ICONS = {
   ),
 };
 
+// R38.1 — all-projects KPI aggregation helpers. These run client-side
+// over an array of single-project KPI payloads fetched in parallel
+// (loadKpis fan-out path). No backend endpoint change — the per-project
+// /projects/:id/kpis response is the unit; we just sum the buckets.
+
+// Empty KPI payload — same shape as a real response so downstream code
+// (the tile renderers + chart consumers) doesn't need to special-case
+// "no projects yet".
+function emptyKpiPayload() {
+  return {
+    window: { from: null, to: null },
+    dpr: {
+      submittedCount: 0,
+      pendingReviewCount: 0,
+      approvedCount: 0,
+      rejectedCount: 0,
+      draftCount: 0,
+    },
+    inspections: { totalCount: 0, openCount: 0, byType: {} },
+    boq: { itemCount: 0, contractValue: 0, executedValue: 0, variancePct: 0 },
+    people: { onLeaveTodayCount: 0, pendingLeaveCount: 0, overdueTrainingCount: 0 },
+    cubeTests: { dueSoonCount: 0, overdueCount: 0, passedCount: 0 },
+    pendingReviewTrend: [],
+    warnings: [],
+  };
+}
+
+// Sum an array of single-project KPI payloads into one org-wide
+// payload. Counts and money totals add; the byType map is the union of
+// every project (same key in two projects → counts combine); the
+// pendingReviewTrend is appended across projects then re-sorted by
+// date bucket (the project endpoint returns one row per UTC-midnight
+// date; combining across projects is a true merge).
+function sumKpiPayloads(payloads) {
+  const out = emptyKpiPayload();
+  const trend = new Map();
+  payloads.forEach((p) => {
+    if (!p) return;
+    if (p.window && p.window.from) {
+      // Earliest from — earliest wins; latest to — latest wins; the
+      // window is "where the data lives" so the union window is the
+      // widest plausible one.
+      if (!out.window.from || p.window.from < out.window.from) out.window.from = p.window.from;
+      if (!out.window.to || p.window.to > out.window.to) out.window.to = p.window.to;
+    }
+    if (p.dpr) {
+      out.dpr.submittedCount += Number(p.dpr.submittedCount) || 0;
+      out.dpr.pendingReviewCount += Number(p.dpr.pendingReviewCount) || 0;
+      out.dpr.approvedCount += Number(p.dpr.approvedCount) || 0;
+      out.dpr.rejectedCount += Number(p.dpr.rejectedCount) || 0;
+      out.dpr.draftCount += Number(p.dpr.draftCount) || 0;
+    }
+    if (p.inspections) {
+      out.inspections.totalCount += Number(p.inspections.totalCount) || 0;
+      out.inspections.openCount += Number(p.inspections.openCount) || 0;
+      if (p.inspections.byType && typeof p.inspections.byType === 'object') {
+        Object.entries(p.inspections.byType).forEach(([k, v]) => {
+          out.inspections.byType[k] = (out.inspections.byType[k] || 0) + (Number(v) || 0);
+        });
+      }
+    }
+    if (p.boq) {
+      out.boq.itemCount += Number(p.boq.itemCount) || 0;
+      out.boq.contractValue += Number(p.boq.contractValue) || 0;
+      out.boq.executedValue += Number(p.boq.executedValue) || 0;
+      // variancePct is a derived ratio — recompute from the summed
+      // contract / executed so it stays mathematically consistent.
+      // (We can't just average or it'll drift.)
+    }
+    if (p.people) {
+      out.people.onLeaveTodayCount += Number(p.people.onLeaveTodayCount) || 0;
+      out.people.pendingLeaveCount += Number(p.people.pendingLeaveCount) || 0;
+      out.people.overdueTrainingCount += Number(p.people.overdueTrainingCount) || 0;
+    }
+    if (Array.isArray(p.pendingReviewTrend)) {
+      p.pendingReviewTrend.forEach((row) => {
+        const key = row.date || row.day || row.label;
+        if (!key) return;
+        const prev = trend.get(key) || { date: key, submitted: 0, underReview: 0 };
+        prev.submitted += Number(row.submitted) || 0;
+        prev.underReview += Number(row.underReview) || 0;
+        trend.set(key, prev);
+      });
+    }
+    if (Array.isArray(p.warnings)) out.warnings.push(...p.warnings);
+  });
+  // Recompute variancePct from summed contract + executed so the
+  // "All projects" tile reads the same number it would if there were
+  // a single org-wide BOQ row.
+  if (out.boq.contractValue > 0) {
+    out.boq.variancePct = ((out.boq.executedValue - out.boq.contractValue) / out.boq.contractValue) * 100;
+  } else {
+    out.boq.variancePct = 0;
+  }
+  // Sort trend by date key so the chart's X axis stays monotonic.
+  out.pendingReviewTrend = Array.from(trend.values()).sort((a, b) =>
+    String(a.date).localeCompare(String(b.date)),
+  );
+  return out;
+}
+
 // ──── The dashboard component ─────────────────────────────────────────────
 export default function ProjectDashboard() {
   useDocumentTitle('Project Dashboard');
@@ -448,7 +556,16 @@ export default function ProjectDashboard() {
   // selection — the backend's `idOrName` resolver accepts both, and the
   // dashboard needs to show KPIs for "T-Nagar / Phase II" before an
   // admin has registered it as a formal Project row.
-  const [selectedProject, setSelectedProject] = useState(null);
+  //
+  // R38.1: the `id: '__all__'` sentinel selects "All projects" — the
+  // dashboard then fans out per-project KPI calls + fetches unscoped
+  // chart lists so the tiles + charts roll up across every project the
+  // admin can see. The sentinel is intentionally a non-UUID string
+  // so a route like `#/portal/admin/project-dashboard` lands on the
+  // org-wide view by default.
+  const ALL_PROJECTS_ID = '__all__';
+  const isAllProjects = (selectedProject && selectedProject.id === ALL_PROJECTS_ID) || false;
+  const [selectedProject, setSelectedProject] = useState({ id: ALL_PROJECTS_ID, name: 'All projects', isRegistered: false });
 
   // KPI payload from /api/projects/:idOrName/kpis
   const [kpis, setKpis] = useState(null);
@@ -479,6 +596,15 @@ export default function ProjectDashboard() {
   useEffect(() => {
     selectedProjectRef.current = selectedProject;
   }, [selectedProject]);
+
+  // R38.1 — mirror the registered projects list into a ref so the
+  // all-projects KPI fan-out (loadKpis) can read it without re-binding
+  // loadKpis on every project-list refresh. Same DR-012 pattern as
+  // selectedProjectRef above.
+  const projectsRef = useRef([]);
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
 
   // Lookback window in days. 30 = default. "all" is sent as 365 — the
   // backend clamps to 365 and we surface that in the window sub-line.
@@ -603,11 +729,37 @@ export default function ProjectDashboard() {
     setLoadingKpis(true);
     setKpisError('');
     try {
-      // The backend accepts id OR name. We forward whichever we have —
-      // id first if registered, otherwise the name. encodeURIComponent
-      // inside api.getProjectKpis handles spaces + slashes.
-      const ref = selectedProject.id || selectedProject.name;
-      const data = await api.getProjectKpis(ref, days, accessToken);
+      let data;
+      if (isAllProjects) {
+        // R38.1 — fan-out per registered project and sum the buckets on
+        // the client. No new backend endpoint: each call is the same
+        // /projects/:id/kpis the single-project path already hits.
+        // Skips discovered (name-only) projects — they have no id and
+        // the per-project kpis endpoint requires one. If no registered
+        // projects, return an empty payload so the chart shell renders
+        // a clean "0" rather than crashing.
+        const refs = projectsRef.current.map((p) => p.id);
+        if (refs.length === 0) {
+          data = emptyKpiPayload();
+        } else {
+          const results = await Promise.all(
+            refs.map((id) =>
+              api.getProjectKpis(id, days, accessToken).catch((err) => {
+                console.warn('All-projects KPI fan-out failed for', id, err?.message);
+                return null;
+              }),
+            ),
+          );
+          if (!mountedRef.current || myEpoch !== kpiEpochRef.current) return;
+          data = sumKpiPayloads(results.filter(Boolean));
+        }
+      } else {
+        // The backend accepts id OR name. We forward whichever we have —
+        // id first if registered, otherwise the name. encodeURIComponent
+        // inside api.getProjectKpis handles spaces + slashes.
+        const ref = selectedProject.id || selectedProject.name;
+        data = await api.getProjectKpis(ref, days, accessToken);
+      }
       if (!mountedRef.current || myEpoch !== kpiEpochRef.current) return; // stale or unmounted
       setKpis(data);
       // If the backend reported warnings (a sibling roll-up failed),
@@ -628,7 +780,7 @@ export default function ProjectDashboard() {
     } finally {
       if (mountedRef.current && myEpoch === kpiEpochRef.current) setLoadingKpis(false);
     }
-  }, [selectedProject, days, accessToken, toast]);
+  }, [selectedProject, isAllProjects, days, accessToken, toast]);
 
   // DR-012 — separate mount/visibility-listener ownership from
   // selection churn. The previous effect re-bound whenever loadProjects
@@ -680,7 +832,11 @@ export default function ProjectDashboard() {
   const loadChartLists = useCallback(async () => {
     if (!selectedProject) return;
     const myEpoch = ++chartEpochRef.current;
-    const scope = drillScope(selectedProject);
+    // R38.1 — all-projects mode drops the projectId/projectName filter
+    // so the list endpoints return their org-wide view (the admin queue
+    // without a scope). The chart components are unchanged; they consume
+    // the rows the same way they consume per-project rows.
+    const scope = isAllProjects ? {} : drillScope(selectedProject);
     const w = drillWindow({ window: { from: null, to: null } }, 'dpr.submitted');
     // Use the same window as the KPI call so the trend chart matches
     // the tile counts. For the "all-date" inspection.open path we
@@ -707,7 +863,7 @@ export default function ProjectDashboard() {
       // null/empty data with their own "No data yet" message.
       setChartLists({ dprs: [], inspections: [], boq: [] });
     }
-  }, [selectedProject, days, accessToken]);
+  }, [selectedProject, isAllProjects, days, accessToken]);
 
   useEffect(() => {
     if (selectedProject) loadChartLists();
@@ -753,8 +909,12 @@ export default function ProjectDashboard() {
           <p className="dpr-page-sub" style={{ color: 'var(--steel)', margin: 0, fontSize: '0.9rem' }}>
             {/* [DR-025] Drop "Cube Tests" — the Cube Tests TileSection was removed
             in round-29; cube testing is now surfaced through the cube_casting
-            / cube_testing InspectionRecord sub-types. */}
-          KPIs across DPR, Inspections, BOQ, and People — scoped to a single project.
+            / cube_testing InspectionRecord sub-types.
+            [R38.1] Subtitle flips in "All projects" mode to make the
+            org-wide roll-up obvious to anyone scanning the page. */}
+          {isAllProjects
+            ? 'KPIs across DPR, Inspections, BOQ, and People — rolled up across every project.'
+            : 'KPIs across DPR, Inspections, BOQ, and People — scoped to a single project.'}
           </p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -765,6 +925,14 @@ export default function ProjectDashboard() {
             onChange={(e) => {
               const v = e.target.value;
               if (!v) return;
+              // R38.1 — "All projects" sentinel. Selected by default and
+              // pinned at the top of the dropdown so the dashboard lands
+              // on the org-wide view without the admin needing to
+              // re-pick it after every nav.
+              if (v === ALL_PROJECTS_ID) {
+                setSelectedProjectIfChanged({ id: ALL_PROJECTS_ID, name: 'All projects', isRegistered: false });
+                return;
+              }
               // Selector values: UUID for registered, "name:<x>" for discovered.
               if (v.startsWith('name:')) {
                 setSelectedProjectIfChanged({ id: null, name: v.slice(5), isRegistered: false });
@@ -784,7 +952,11 @@ export default function ProjectDashboard() {
               minWidth: 240,
             }}
           >
-            <option value="" disabled>Select a project…</option>
+            {/* R38.1 — all-projects option pinned at the top. Lands the
+                dashboard on the org-wide roll-up by default; admins can
+                narrow down to a single project from the Registered
+                optgroup below. */}
+            <option value={ALL_PROJECTS_ID}>All projects</option>
             <optgroup label="Registered">
               {combinedOptions.registered.map((p) => (
                 <option key={p.id} value={p.id}>{p.name}{p.code ? ` (${p.code})` : ''}</option>
