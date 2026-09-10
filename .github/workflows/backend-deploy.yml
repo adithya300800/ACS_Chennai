@@ -239,10 +239,11 @@ jobs:
               const KNOWN_BAD = [
                 '20260905020000_n17_projects',
                 '20260906000000_n1_project_fk',
-                // [DR-031-SQLFIX 2026-09-10] shipped with `''[]''` instead of `'[]'`
-                // in the bad-definition detector. SQL fixed in place; start.sh now
-                // runs `migrate resolve --rolled-back` before `migrate deploy`.
-                // Listed here until the ledger row is cleared by that bootstrap step.
+                // [DR-031-SQLFIX 2026-09-10] shipped with a SQL syntax bug
+                // (doubled single-quote literal in the bad-definition detector
+                // at migration.sql lines 82/113). SQL fixed in place; start.sh
+                // now runs migrate resolve --rolled-back before migrate deploy.
+                // Listed here until the ledger row is cleared by that bootstrap.
                 '20260908150000_dr031_leave_constraint_correct_bound',
               ];
               try {
