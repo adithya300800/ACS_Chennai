@@ -184,6 +184,12 @@ export default function InspectionSubmit() {
   // while the original draft is still being read.
   const [hydrationState, setHydrationState] = useState('idle');
   const [hydrationError, setHydrationError] = useState(null);
+  // SOL DR-007 (round-23): bumped by Retry to re-run the hydration
+  // effect after a transient server/network failure without losing
+  // in-progress form state. Declared here (above the effect) to avoid
+  // a TDZ ReferenceError when the effect's deps array is evaluated on
+  // first render. The retry handler below mutates the same setter.
+  const [hydrationNonce, setHydrationNonce] = useState(0);
   // SOL DR-006: defense-in-depth guard against the hydration effect
   // re-running when only its context deps change (toast push, token
   // rotation). See DprSubmit.jsx for the full rationale — the same
@@ -1223,7 +1229,6 @@ export default function InspectionSubmit() {
   // `hydrationNonce` changes; Retry bumps it. The nonce is the only
   // safe dep-add — swapping `draftId` would re-mount the form, and
   // `accessToken` rotation is already the bug we're guarding against.
-  const [hydrationNonce, setHydrationNonce] = useState(0);
   const handleRetryHydration = () => {
     lastHydratedDraftIdRef.current = null;
     setHydrationError(null);
