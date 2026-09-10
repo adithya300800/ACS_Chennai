@@ -1,10 +1,10 @@
 /**
- * DR-031 — the postinstall migration-recovery script must guard its DELETE
- * so a successfully-applied migration row is never clobbered.
+ * DR-031 — the destructive migration-recovery script must guard its
+ * DELETE so a successfully-applied migration row is never clobbered.
  *
- * Audit citation:
- *   backend/scripts/clear-failed-migrations.js:78-82 — DELETE matched only
- *   on migration_name with no state predicate. A typo or migration-name
+ * Audit citation (pre-DR-031):
+ *   backend/scripts/clear-failed-migrations.js DELETE matched only on
+ *   migration_name with no state predicate. A typo or migration-name
  *   collision would delete a legitimately-applied ledger row, forcing
  *   `migrate deploy` to re-apply DDL on the next deploy.
  *
@@ -16,14 +16,16 @@
  * The fix narrows the WHERE clause so the DELETE only matches rows that
  * are clearly NOT applied (rolled back, or never finished).
  *
- * [DR-032] Opt-in env var renamed from `POSTINSTALL_CLEAR_MIGRATIONS` to
- * `OPS_RECONCILE_FAILED_MIGRATIONS`. The script is no longer wired into
- * any npm lifecycle hook — `npm install` is DB-free. The Render deploy
- * path is start.sh, which is the sole serialized recovery procedure.
- * This script is operator-only: requires explicit opt-in.
+ * [DR-032] Recovery is operator-only. The script's destructive path
+ * requires `--confirmed-abandoned`; without the flag it runs a
+ * read-only inspection and exits non-zero when non-applied rows exist.
+ * No RENDER auto-fire, no postinstall hook, no lifecycle auto-fire.
  *
- * This test loads the script with a mocked PrismaClient, lets the IIFE
- * run, and asserts the captured DELETE SQL contains the NOT-applied guard.
+ * This test loads the script in two modes — destructive
+ * (--confirmed-abandoned) and inspection (default with RENDER env) —
+ * with a mocked PrismaClient, and asserts the captured SQL contains the
+ * NOT-applied guard (destructive path) and never invokes DELETE
+ * (inspection path).
  */
 
 const capturedQueries = [];
@@ -34,17 +36,22 @@ const disconnectPromise = new Promise((resolve) => {
 });
 
 const mockExecuteRawUnsafe = jest.fn((sql) => {
-  capturedQueries.push(sql);
+  capturedQueries.push({ kind: 'execute', sql });
   return Promise.resolve(0);
 });
+const mockQueryRawUnsafe = jest.fn((sql) => {
+  capturedQueries.push({ kind: 'query', sql });
+  return Promise.resolve([]);
+});
 const mockDisconnect = jest.fn(() => {
-  resolveDisconnect();
+  if (resolveDisconnect) resolveDisconnect();
   return Promise.resolve();
 });
 
 jest.mock('@prisma/client', () => ({
   PrismaClient: jest.fn().mockImplementation(() => ({
     $executeRawUnsafe: mockExecuteRawUnsafe,
+    $queryRawUnsafe: mockQueryRawUnsafe,
     $disconnect: mockDisconnect,
   })),
 }));
@@ -54,15 +61,9 @@ describe('clear-failed-migrations — DR-031 NOT-applied guard', () => {
     RENDER: process.env.RENDER,
     DATABASE_URL: process.env.DATABASE_URL,
     DIRECT_DATABASE_URL: process.env.DIRECT_DATABASE_URL,
+    POSTINSTALL_CLEAR_MIGRATIONS: process.env.POSTINSTALL_CLEAR_MIGRATIONS,
     OPS_RECONCILE_FAILED_MIGRATIONS: process.env.OPS_RECONCILE_FAILED_MIGRATIONS,
   };
-
-  beforeAll(() => {
-    // [DR-032] Set the explicit operator opt-in. The script no longer
-    // auto-fires on RENDER=true — that's intentional, install is DB-free.
-    process.env.OPS_RECONCILE_FAILED_MIGRATIONS = '1';
-    process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
-  });
 
   afterAll(() => {
     for (const [k, v] of Object.entries(originalEnv)) {
@@ -74,97 +75,230 @@ describe('clear-failed-migrations — DR-031 NOT-applied guard', () => {
   beforeEach(() => {
     capturedQueries.length = 0;
     mockExecuteRawUnsafe.mockClear();
+    mockQueryRawUnsafe.mockClear();
     mockDisconnect.mockClear();
-    // Reset the disconnect promise so each test waits for its own IIFE.
     resolveDisconnect = null;
     disconnectPromise.catch(() => {});
   });
 
-  it('emits a DELETE whose WHERE clause excludes successfully-applied rows', async () => {
-    let resolveForThisTest;
-    const localDisconnect = new Promise((resolve) => {
-      resolveForThisTest = resolve;
-    });
-    mockDisconnect.mockImplementationOnce(() => {
-      resolveForThisTest();
-      return Promise.resolve();
-    });
+  describe('destructive path (--confirmed-abandoned)', () => {
+    let originalArgv;
 
-    jest.isolateModules(() => {
-      require('../scripts/clear-failed-migrations.js');
+    beforeEach(() => {
+      originalArgv = process.argv;
+      process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
+      delete process.env.RENDER;
+      delete process.env.POSTINSTALL_CLEAR_MIGRATIONS;
     });
 
-    await localDisconnect;
+    afterEach(() => {
+      process.argv = originalArgv;
+    });
 
-    expect(capturedQueries.length).toBeGreaterThan(0);
+    it('emits a DELETE whose WHERE clause excludes successfully-applied rows', async () => {
+      let resolveForThisTest;
+      const localDisconnect = new Promise((resolve) => {
+        resolveForThisTest = resolve;
+      });
+      mockDisconnect.mockImplementationOnce(() => {
+        resolveForThisTest();
+        return Promise.resolve();
+      });
 
-    // Every emitted DELETE must exclude successfully-applied rows. The
-    // NOT-applied guard: rolled_back_at IS NULL AND (finished_at IS NULL
-    // OR applied_steps_count = 0). A successfully-applied row has
-    // finished_at NOT NULL AND applied_steps_count > 0 AND rolled_back_at
-    // IS NULL, which fails the guard on the right-hand OR clause.
-    capturedQueries.forEach((sql) => {
-      expect(sql).toMatch(/_prisma_migrations/);
-      expect(sql).toMatch(/migration_name/);
-      expect(sql).toMatch(/"rolled_back_at"\s+IS\s+NULL/);
-      expect(sql).toMatch(/"finished_at"\s+IS\s+NULL/);
-      expect(sql).toMatch(/"applied_steps_count"\s+=\s+0/);
+      jest.isolateModules(() => {
+        // Set argv BEFORE requiring so CONFIRMED_ABANDONED flips true.
+        process.argv = ['node', 'clear-failed-migrations.js', '--confirmed-abandoned'];
+        require('../scripts/clear-failed-migrations.js');
+      });
+
+      await localDisconnect;
+
+      const executes = capturedQueries.filter((q) => q.kind === 'execute');
+      expect(executes.length).toBeGreaterThan(0);
+
+      // Every emitted DELETE must exclude successfully-applied rows. The
+      // NOT-applied guard: rolled_back_at IS NULL AND (finished_at IS NULL
+      // OR applied_steps_count = 0). A successfully-applied row has
+      // finished_at NOT NULL AND applied_steps_count > 0 AND rolled_back_at
+      // IS NULL, which fails the guard on the right-hand OR clause.
+      executes.forEach(({ sql }) => {
+        expect(sql).toMatch(/_prisma_migrations/);
+        expect(sql).toMatch(/migration_name/);
+        expect(sql).toMatch(/"rolled_back_at"\s+IS\s+NULL/);
+        expect(sql).toMatch(/"finished_at"\s+IS\s+NULL/);
+        expect(sql).toMatch(/"applied_steps_count"\s+=\s*0/);
+      });
+    });
+
+    it('iterates the KNOWN_BAD list — one DELETE per entry', async () => {
+      let resolveForThisTest;
+      const localDisconnect = new Promise((resolve) => {
+        resolveForThisTest = resolve;
+      });
+      mockDisconnect.mockImplementationOnce(() => {
+        resolveForThisTest();
+        return Promise.resolve();
+      });
+
+      jest.isolateModules(() => {
+        process.argv = ['node', 'clear-failed-migrations.js', '--confirmed-abandoned'];
+        require('../scripts/clear-failed-migrations.js');
+      });
+
+      await localDisconnect;
+
+      const executes = capturedQueries.filter((q) => q.kind === 'execute');
+      // KNOWN_BAD (per scripts/clear-failed-migrations.js) — pin the
+      // order so a future re-ordering shows up as a test diff.
+      expect(executes).toHaveLength(2);
+      expect(executes[0].sql).toMatch(/20260905020000_n17_projects/);
+      expect(executes[1].sql).toMatch(/20260906000000_n1_project_fk/);
     });
   });
 
-  it('iterates the KNOWN_BAD list — one DELETE per entry', async () => {
-    let resolveForThisTest;
-    const localDisconnect = new Promise((resolve) => {
-      resolveForThisTest = resolve;
-    });
-    mockDisconnect.mockImplementationOnce(() => {
-      resolveForThisTest();
-      return Promise.resolve();
-    });
+  describe('inspection path (default; RENDER=true or POSTINSTALL_CLEAR_MIGRATIONS=1)', () => {
+    let originalArgv;
 
-    jest.isolateModules(() => {
-      require('../scripts/clear-failed-migrations.js');
+    beforeEach(() => {
+      originalArgv = process.argv;
+      process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test';
+      process.env.RENDER = 'true';
+      delete process.env.POSTINSTALL_CLEAR_MIGRATIONS;
     });
 
-    await localDisconnect;
+    afterEach(() => {
+      process.argv = originalArgv;
+    });
 
-    // KNOWN_BAD (per scripts/clear-failed-migrations.js) — pin the
-    // order so a future re-ordering shows up as a test diff.
-    expect(capturedQueries).toHaveLength(2);
-    expect(capturedQueries[0]).toMatch(/20260905020000_n17_projects/);
-    expect(capturedQueries[1]).toMatch(/20260906000000_n1_project_fk/);
+    it('uses SELECT (read-only) — never issues DELETE', async () => {
+      let resolveForThisTest;
+      const localDisconnect = new Promise((resolve) => {
+        resolveForThisTest = resolve;
+      });
+      mockDisconnect.mockImplementationOnce(() => {
+        resolveForThisTest();
+        return Promise.resolve();
+      });
+
+      jest.isolateModules(() => {
+        // No --confirmed-abandoned → inspection path.
+        process.argv = ['node', 'clear-failed-migrations.js'];
+        require('../scripts/clear-failed-migrations.js');
+      });
+
+      await localDisconnect;
+
+      const executes = capturedQueries.filter((q) => q.kind === 'execute');
+      expect(executes).toHaveLength(0);
+
+      // Inspection issues exactly one SELECT against _prisma_migrations
+      // with the allowlist filter.
+      const queries = capturedQueries.filter((q) => q.kind === 'query');
+      expect(queries.length).toBeGreaterThan(0);
+      queries.forEach(({ sql }) => {
+        expect(sql).toMatch(/FROM\s+"_prisma_migrations"/);
+        expect(sql).toMatch(/SELECT/);
+        expect(sql).not.toMatch(/DELETE/);
+      });
+    });
+
+    it('exits non-zero when non-applied rows are found', async () => {
+      // Override the query result to simulate the inspection finding
+      // a non-applied row.
+      mockQueryRawUnsafe.mockImplementationOnce(() =>
+        Promise.resolve([
+          {
+            migration_name: '20260905020000_n17_projects',
+            finished_at: null,
+            rolled_back_at: null,
+            applied_steps_count: 0,
+            started_at: new Date(),
+          },
+        ]),
+      );
+
+      let resolveForThisTest;
+      const localDisconnect = new Promise((resolve) => {
+        resolveForThisTest = resolve;
+      });
+      mockDisconnect.mockImplementationOnce(() => {
+        resolveForThisTest();
+        return Promise.resolve();
+      });
+
+      let exitCode;
+      const originalExit = process.exit;
+      process.exit = (code) => {
+        exitCode = code;
+        throw new Error('__exit__'); // unwinds the IIFE
+      };
+
+      try {
+        jest.isolateModules(() => {
+          process.argv = ['node', 'clear-failed-migrations.js'];
+          require('../scripts/clear-failed-migrations.js');
+        });
+        // Allow IIFE to settle (it sets process.exitCode, doesn't call process.exit).
+      } catch (e) {
+        // ignore __exit__
+      } finally {
+        process.exit = originalExit;
+      }
+
+      await localDisconnect;
+
+      // The script uses process.exitCode = 1 (preferred over process.exit
+      // for IIFE-style cleanup). Check either exitCode (if process.exit
+      // was called) or process.exitCode.
+      expect(exitCode === 1 || process.exitCode === 1).toBe(true);
+    });
   });
 
-  it('short-circuits without the operator opt-in (install must be DB-free)', async () => {
-    // [DR-032] Without OPS_RECONCILE_FAILED_MIGRATIONS=1 the script must
-    // skip — even on Render, even with DB env vars. `npm install` is
-    // database-free by contract.
-    delete process.env.OPS_RECONCILE_FAILED_MIGRATIONS;
-    process.env.RENDER = 'true';
+  describe('safety guards', () => {
+    let originalArgv;
 
-    jest.isolateModules(() => {
-      require('../scripts/clear-failed-migrations.js');
+    beforeEach(() => {
+      originalArgv = process.argv;
+      delete process.env.RENDER;
+      delete process.env.POSTINSTALL_CLEAR_MIGRATIONS;
     });
 
-    // The IIFE returns BEFORE constructing PrismaClient or calling
-    // $executeRawUnsafe. Wait a microtask so the IIFE has had a chance
-    // to run. (setImmediate is unreliable inside jest.isolateModules
-    // across versions — a queued microtask is enough.)
-    await Promise.resolve();
-
-    expect(mockExecuteRawUnsafe).not.toHaveBeenCalled();
-  });
-
-  it('short-circuits in non-operator environments (no env vars at all)', async () => {
-    delete process.env.OPS_RECONCILE_FAILED_MIGRATIONS;
-    delete process.env.RENDER;
-
-    jest.isolateModules(() => {
-      require('../scripts/clear-failed-migrations.js');
+    afterEach(() => {
+      process.argv = originalArgv;
     });
 
-    await Promise.resolve();
+    it('short-circuits without --confirmed-abandoned AND without RENDER/POSTINSTALL env vars', async () => {
+      // Operator intent (--confirmed-abandoned) is absent AND no env var
+      // opted into the inspection path. The script must skip entirely
+      // — never touch the DB.
+      jest.isolateModules(() => {
+        process.argv = ['node', 'clear-failed-migrations.js'];
+        require('../scripts/clear-failed-migrations.js');
+      });
 
-    expect(mockExecuteRawUnsafe).not.toHaveBeenCalled();
+      // Microtask flush.
+      await Promise.resolve();
+
+      expect(mockExecuteRawUnsafe).not.toHaveBeenCalled();
+      expect(mockQueryRawUnsafe).not.toHaveBeenCalled();
+    });
+
+    it('short-circuits without DB env vars', async () => {
+      // Even on Render, if there's no DATABASE_URL or DIRECT_DATABASE_URL,
+      // the script must skip — never crash, never partially-connect.
+      delete process.env.DATABASE_URL;
+      delete process.env.DIRECT_DATABASE_URL;
+      process.env.RENDER = 'true';
+
+      jest.isolateModules(() => {
+        process.argv = ['node', 'clear-failed-migrations.js'];
+        require('../scripts/clear-failed-migrations.js');
+      });
+
+      await Promise.resolve();
+
+      expect(mockExecuteRawUnsafe).not.toHaveBeenCalled();
+      expect(mockQueryRawUnsafe).not.toHaveBeenCalled();
+    });
   });
 });

@@ -3,17 +3,10 @@ FROM node:22-alpine
 WORKDIR /app
 
 COPY package*.json ./
-# [DR-032] npm `postinstall` hook has been REMOVED. `npm ci` is now
-# database-free — there is no longer any DB-touching lifecycle hook
-# wired into the install. The previous postinstall
-# (scripts/clear-failed-migrations.js) would clobber unfinished
-# `_prisma_migrations` rows from concurrent releases. The script
-# remains on disk as an operator-only tool (requires
-# `OPS_RECONCILE_FAILED_MIGRATIONS=1`); the production recovery path
-# is backend/start.sh, which is invoked by Render's dashboard
-# startCommand and the only serialized release procedure.
-# scripts/ is still copied because the script is referenced as a
-# documentation/operator reference, but no hook fires it during build.
+# DR-032: install is DB-free. `npm ci` no longer runs a migration-recovery
+# postinstall hook. If the build needs the recovery helper on disk (for
+# manual operator use), it is copied below; otherwise the install step
+# must succeed without DB connectivity.
 COPY scripts/ ./scripts/
 
 RUN npm ci --only=production
@@ -25,25 +18,24 @@ COPY src ./src/
 
 EXPOSE 3000
 
-# LPR-001: `prisma db push` is destructive (accepts data loss, no migration
-# history) and must never run against production. Schema reconciliation is
-# exclusively the job of `prisma migrate deploy`, which applies only
-# pending checked-in SQL migrations and is idempotent.
+# [DR-032] Native/Docker release contract.
 #
-# [DR-032] Release contract: production runs `sh start.sh` (set as the
-# startCommand on the Render dashboard; also declared in render.yaml).
-# `start.sh` is the SOLE serialized release/operator procedure: it
-# deletes non-applied rows for known-bad migrations, runs
-# `prisma migrate resolve --rolled-back`, runs `prisma migrate deploy`
-# (failure-before-serving: exits non-zero on failed migration so the
-# broken revision does NOT receive traffic), then exec's node.
-#
-# Render's dashboard startCommand is authoritative and overrides
-# anything declared here or in render.yaml. This Dockerfile's CMD is a
-# safety net for environments that DON'T override CMD (local docker
-# run, dev containers). It deliberately skips `prisma migrate deploy`
-# — running a container without the migration prerequisite requires
-# the operator to either (a) use `start.sh` or (b) run migrations
-# explicitly before invoking this image. The contract is: production
-# = `sh start.sh`; this CMD is dev/local fallback.
-CMD ["node", "src/index.js"]
+# 1. `prisma db push` is destructive (accepts data loss, no migration
+#    history) and must never run against production. Schema reconciliation
+#    is exclusively the job of `prisma migrate deploy`, which applies only
+#    pending checked-in SQL migrations and is idempotent.
+# 2. Failure-before-serving: `npx prisma migrate deploy` MUST run before
+#    the app starts. If it returns a non-zero exit code (e.g. P3009 for
+#    a failed migration in `_prisma_migrations`), the container stops
+#    rather than serving traffic against a stale schema. The chained
+#    `&&` enforces this; the shell exits on first failure.
+# 3. Recovery is operator-only. The postinstall hook that auto-cleared
+#    allowlisted rows is gone. If `migrate deploy` fails because of a
+#    stuck row, an operator runs
+#      `npm run db:recover -- --confirmed-abandoned`
+#    after inspecting the ledger and verifying backup readiness.
+# 4. Render's dashboard startCommand is authoritative and overrides
+#    anything here. The same chain (`npx prisma migrate deploy &&
+#    node src/index.js`) is set in the dashboard; this Dockerfile is the
+#    authoritative contract for non-Render Docker deployments.
+CMD ["sh", "-c", "npx prisma migrate deploy && node src/index.js"]

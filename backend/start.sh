@@ -1,44 +1,24 @@
 #!/bin/sh
 # start.sh — Render container start command
 #
-# Replaces the inline `npx prisma migrate deploy && node src/index.js` that
-# render.yaml previously held. The inline form couldn't recover from a failed
-# Prisma migration row in `_prisma_migrations` — once Prisma marks a migration
-# as failed it refuses to apply any new ones, blocking every subsequent
-# deploy (P3009). This script runs the recovery before migrate deploy.
+# [DR-032] Recovery is NOT performed at start time. Operators run
+# `npm run db:recover -- --confirmed-abandoned` explicitly after inspecting
+# the ledger and verifying backup readiness — install/upgrade is now
+# DB-free, and recovery is not duplicated between postinstall and start.
 #
-# [DR-032] This is the SOLE serialized release/operator recovery path.
-# Normal `npm install` is now database-free — the previous `postinstall`
-# hook (backend/scripts/clear-failed-migrations.js) was removed because
-# install-time DDL evidence deletion clobbered unfinished rows from
-# concurrent releases. The script remains on disk as an explicit
-# operator-only tool (requires `OPS_RECONCILE_FAILED_MIGRATIONS=1`); it
-# is no longer wired into any lifecycle hook.
+# This script's only job is to apply pending migrations and fail before
+# serving if anything is wrong (failure-before-serving):
+#   1. `npx prisma migrate deploy` runs against $DATABASE_URL /
+#      $DIRECT_DATABASE_URL. P3009 (failed migrations in the target DB)
+#      will exit non-zero here, and the container does NOT start.
+#   2. On success, `node src/index.js` execs and serves.
 #
-# Recovery steps (idempotent — safe on every cold start, no-op when no failed
-# rows exist):
-#   1. DELETE non-applied rows from `_prisma_migrations` for known-bad
-#      migrations. `migrate resolve` only handles the FIRST failed row by
-#      name; this belt-and-suspenders DELETE clears the table before the
-#      resolve call, so resolve always sees a clean slate. The DELETE
-#      predicate (mirror of DR-031 guard) is: `rolled_back_at IS NULL AND
-#      (finished_at IS NULL OR applied_steps_count = 0)`. A successfully-
-#      applied row (finished_at NOT NULL AND applied_steps_count > 0 AND
-#      rolled_back_at IS NULL) is NEVER touched — preserves ledger
-#      evidence of running migrations.
-#   2. `prisma migrate resolve --rolled-back <name>` for each known-bad
-#      migration. This is the official path Prisma documents; migrate
-#      status reads it.
-#
-# Failure-before-serving: if `prisma migrate deploy` exits non-zero, this
-# script exits non-zero before exec-ing node. Render marks the deploy
-# failed and does NOT route traffic to the broken revision.
-#
-# Known-bad migrations handled here (append as new failures are discovered):
-#   - 20260905020000_n17_projects    — original n17 migration referenced the
-#       wrong table for the FK (employee singular vs employees plural); the
-#       corrective migration 20260905030000_fix_n17_employee_fk recreates
-#       the project table correctly.
+# Known-bad migrations that operators may need to clear via db:recover
+# (kept here as documentation; the script no longer touches them):
+#   - 20260905020000_n17_projects    — original n17 migration referenced
+#       the wrong table for the FK (employee singular vs employees
+#       plural); the corrective migration 20260905030000_fix_n17_employee_fk
+#       recreates the project table correctly.
 #   - 20260906000000_n1_project_fk    — original n1 migration referenced
 #       snake_case "project_name" in the backfill, but the DPR /
 #       InspectionRecord columns are camelCase quoted "projectName" (no
@@ -46,64 +26,17 @@
 #       20260906000001_n1_project_fk_fix re-runs the DDL with corrected
 #       backfill column names.
 
-set +e  # don't abort on the first failed DELETE / resolve; we want all of them to attempt
+set -e
 
-echo "[start.sh] Recovery: clearing non-applied rows for known-bad migrations"
-
-node -e "
-  const { PrismaClient } = require('@prisma/client');
-  const p = new PrismaClient();
-  (async () => {
-    try {
-      const KNOWN_BAD = [
-        '20260905020000_n17_projects',
-        '20260906000000_n1_project_fk',
-      ];
-      let totalDeleted = 0;
-      for (const name of KNOWN_BAD) {
-        try {
-          const res = await p.\$executeRawUnsafe(
-            // [DR-031] Prisma 5's `_prisma_migrations` has NO `status`
-            // column — applied state is derived from `finished_at` /
-            // `rolled_back_at` / `applied_steps_count`. The old
-            // `status <> 'applied'` predicate would crash on every cold
-            // start. Mirror the postinstall guard so both recovery paths
-            // use the same predicate: a row is "non-applied" iff it was
-            // rolled back, or never finished its steps. A successfully-
-            // applied row (finished_at NOT NULL AND applied_steps_count
-            // > 0 AND rolled_back_at IS NULL) is NEVER touched — this
-            // guards against a name collision clobbering a legitimate
-            // ledger row.
-            \"DELETE FROM \\\"_prisma_migrations\\\" WHERE \\\"migration_name\\\" = '\" + name + \"' AND \\\"rolled_back_at\\\" IS NULL AND (\\\"finished_at\\\" IS NULL OR \\\"applied_steps_count\\\" = 0)\"
-          );
-          console.log('[start.sh] cleared', res, 'failed/rolled_back rows for', name);
-          totalDeleted += res;
-        } catch (e) {
-          console.log('[start.sh] DELETE failed for', name, '(continuing):', e.message);
-        }
-      }
-      console.log('[start.sh] total cleared:', totalDeleted);
-    } catch (e) {
-      console.log('[start.sh] recovery outer error (continuing):', e.message);
-    } finally {
-      await p.\$disconnect();
-    }
-  })();
-" 2>&1
-
-echo "[start.sh] Recovery: running migrate resolve --rolled-back for known-bad migrations"
-npx prisma migrate resolve --rolled-back 20260905020000_n17_projects 2>&1
-echo "[start.sh] resolve n17_projects rc=$?"
-npx prisma migrate resolve --rolled-back 20260906000000_n1_project_fk 2>&1
-echo "[start.sh] resolve n1_project_fk rc=$?"
-
-echo "[start.sh] Running prisma migrate deploy"
-npx prisma migrate deploy 2>&1
+echo "[start.sh] Running prisma migrate deploy (failure-before-serving; no recovery auto-runs)"
+npx prisma migrate deploy
 RC=$?
 if [ "$RC" -ne 0 ]; then
   echo "[start.sh] prisma migrate deploy FAILED with rc=$RC"
+  echo "[start.sh] Inspect the ledger with: npm run db:recover"
+  echo "[start.sh] After confirming DDL + backup readiness, clear with: npm run db:recover -- --confirmed-abandoned"
   exit $RC
 fi
 
-echo "[start.sh] Starting node src/index.js"
+echo "[start.sh] Migrate deploy OK; starting node src/index.js"
 exec node src/index.js

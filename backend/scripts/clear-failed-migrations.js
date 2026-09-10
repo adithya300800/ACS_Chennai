@@ -1,43 +1,40 @@
 #!/usr/bin/env node
 // scripts/clear-failed-migrations.js
 //
-// [N1] Phase-A migration recovery — operator-only tool.
+// [DR-032] Migration ledger recovery — operator tool. NO LONGER auto-delete.
 //
-// Background.
-// ----------
-// `prisma migrate deploy` refuses to run when ANY row in
-// `_prisma_migrations` has status='failed' (Prisma error P3009). That makes
-// ONE bad migration a permanent blocker for every subsequent deploy.
+// History
+// -------
+// Originally a `postinstall` hook that auto-deleted non-applied rows from
+// `_prisma_migrations` to unblock P3009. That made install/upgrade
+// destructive: any concurrent unfinished migration (which also matches
+// "null finished/rolled-back timestamps") would be silently deleted by the
+// allowlist. Recovery is now an EXPLICIT operator action — install is
+// database-free, the start script fails before serving if migrate-deploy
+// fails, and an operator must inspect the ledger and run this script with
+// `--confirmed-abandoned` to clear rows.
 //
-// During the N1 phase we hit exactly this: `20260906000000_n1_project_fk`
-// referenced the wrong column case in its backfill (snake_case
-// `project_name` on DPR / InspectionRecord whose actual DB columns are
-// camelCase quoted `projectName`). A corrective migration
-// (`20260906000001_n1_project_fk_fix`) was added per the append-only rule
-// from the Phase-4 P0 postmortem, but `migrate deploy` couldn't apply it
-// because Prisma kept seeing the original failed row.
+// Default behavior (no flag): READ-ONLY inspection
+//   - Lists rows matching the allowlist with their state
+//   - PRESERVES all rows — never touches the ledger
+//   - Exits 1 with a recovery message if any non-applied rows exist
+//     (operator decides what to do)
 //
-// [DR-032] Operator-only opt-in.
-// -----------------------------
-// This script is NOT wired into any npm lifecycle hook (postinstall was
-// removed in DR-032 — `npm install` is database-free now). The Render
-// deploy path is `start.sh`, which is the SOLE serialized release/
-// operator recovery procedure. To invoke this script intentionally
-// outside that path, the operator must set
-//   OPS_RECONCILE_FAILED_MIGRATIONS=1
-// before running it. There is no RENDER auto-fire, no CI auto-fire, no
-// lifecycle auto-fire — explicit opt-in only. This guards against a
-// concurrent unfinished migration being clobbered by an unrelated
-// install/build.
+// --confirmed-abandoned: DESTRUCTIVE cleanup
+//   - DELETES allowlisted rows where rolled_back_at IS NULL AND
+//     (finished_at IS NULL OR applied_steps_count = 0)
+//   - Use ONLY after inspecting partial DDL and verifying backup readiness
 //
-// Idempotency.
-// ------------
-// The DELETE only matches rows that are clearly NOT applied. On a healthy
-// DB the WHERE clause matches zero rows and the script exits 0.
+// Operator usage:
+//   # Inspect the ledger (safe, default):
+//   npm run db:recover
 //
-// KNOWN_BAD is the allow-list. Add new entries as you discover migration
-// failures you can't reach via `migrate resolve --rolled-back`. Two
-// entries today; the format is just the migration directory's basename.
+//   # After confirming DDL is safe and backup is fresh:
+//   npm run db:recover -- --confirmed-abandoned
+//
+// KNOWN_BAD allowlist (append as new failures are discovered):
+//   - 20260905020000_n17_projects (DR-031 history)
+//   - 20260906000000_n1_project_fk (DR-031 history)
 
 'use strict';
 
@@ -46,17 +43,61 @@ const { PrismaClient } = require('@prisma/client');
 const KNOWN_BAD = Object.freeze([
   '20260905020000_n17_projects',     // original n17 referenced wrong FK table
   '20260906000000_n1_project_fk',    // original n1 used wrong column case
-                                     //   (file deleted from disk in d8554a3;
-                                     //    failed DB row may still exist from
-                                     //    earlier deploys — delete here too)
 ]);
 
+const CONFIRMED_ABANDONED = process.argv.includes('--confirmed-abandoned');
+
+function nameListForSql() {
+  // KNOWN_BAD is fixed at module load — no user input. Hand-rolled IN clause
+  // because $queryRawUnsafe doesn't take parameter arrays like $queryRaw.
+  return KNOWN_BAD.map((n) => "'" + n.replace(/'/g, "''") + "'").join(',');
+}
+
+async function inspectLedger(prisma) {
+  return prisma.$queryRawUnsafe(
+    'SELECT migration_name, finished_at, rolled_back_at, applied_steps_count, started_at ' +
+    'FROM "_prisma_migrations" ' +
+    'WHERE migration_name IN (' + nameListForSql() + ') ' +
+    'ORDER BY started_at ASC',
+  );
+}
+
+async function deleteAbandonedRows(prisma) {
+  // [DR-031] Prisma 5's `_prisma_migrations` has NO `status` column —
+  // state is derived from `finished_at` / `rolled_back_at` /
+  // `applied_steps_count`. Mirror the DR-031 guard: a successfully-
+  // applied row (finished_at NOT NULL AND applied_steps_count > 0 AND
+  // rolled_back_at IS NULL) is NEVER touched — a name collision or typo
+  // cannot clobber a legitimate ledger row.
+  //
+  // [DR-032] Only invoked with --confirmed-abandoned. The postinstall
+  // path no longer calls this script (postinstall is DB-free).
+  let totalCleared = 0;
+  for (const name of KNOWN_BAD) {
+    const res = await prisma.$executeRawUnsafe(
+      "DELETE FROM \"_prisma_migrations\" WHERE \"migration_name\" = '" +
+      name +
+      "' AND \"rolled_back_at\" IS NULL AND (\"finished_at\" IS NULL OR \"applied_steps_count\" = 0)",
+    );
+    console.log('[clear-failed-migrations] cleared', res, 'rows for', name);
+    totalCleared += res;
+  }
+  return totalCleared;
+}
+
 (async () => {
-  // [DR-032] Explicit operator opt-in only. No RENDER auto-fire, no CI
-  // auto-fire, no lifecycle auto-fire. `npm install` is DB-free; the
-  // Render deploy path is start.sh.
-  if (process.env.OPS_RECONCILE_FAILED_MIGRATIONS !== '1') {
-    console.log('[clear-failed-migrations] OPS_RECONCILE_FAILED_MIGRATIONS!=1, skipping (DB-free install path)');
+  // Local-dev guard. The destructive path is for production deploys only —
+  // running it locally would surprise the developer by mutating their DB.
+  // Render sets `RENDER=true` automatically. Skip everywhere else.
+  // Allow opt-in via explicit env var for environments that don't set
+  // RENDER (e.g. another CI). --confirmed-abandoned is operator intent and
+  // bypasses the guard.
+  if (
+    !CONFIRMED_ABANDONED &&
+    process.env.RENDER !== 'true' &&
+    process.env.POSTINSTALL_CLEAR_MIGRATIONS !== '1'
+  ) {
+    console.log('[clear-failed-migrations] not in Render/CI render, skipping');
     return;
   }
   if (!process.env.DATABASE_URL && !process.env.DIRECT_DATABASE_URL) {
@@ -64,34 +105,42 @@ const KNOWN_BAD = Object.freeze([
     return;
   }
   const prisma = new PrismaClient();
-  let totalCleared = 0;
   try {
-    for (const name of KNOWN_BAD) {
-      // $executeRawUnsafe is intentional: parameterized table / column
-      // names aren't supported by Prisma's $executeRaw templating.
-      //
-      // [N1 fix 2] Prisma 5's `_prisma_migrations` has NO `status` column —
-      // state is derived from `finished_at` / `rolled_back_at` /
-      // `applied_steps_count`. The corrective migration is idempotent
-      // (`ADD COLUMN IF NOT EXISTS`, etc.) so deleting a row that was
-      // somehow applied won't cause data drift — re-applying the
-      // corrective migration recreates any partially-applied DDL harmlessly.
-      //
-      // [DR-031] Guard the DELETE so it ONLY matches rows that are clearly
-      // NOT applied: rolled back, or never finished. A successfully-applied
-      // row has finished_at NOT NULL AND applied_steps_count > 0 AND
-      // rolled_back_at IS NULL. Excluding that combination prevents a
-      // migration-name collision or typo from clobbering a legitimate
-      // ledger row and forcing `migrate deploy` to re-apply DDL.
-      const res = await prisma.$executeRawUnsafe(
-        "DELETE FROM \"_prisma_migrations\" WHERE \"migration_name\" = '" +
-        name +
-        "' AND \"rolled_back_at\" IS NULL AND (\"finished_at\" IS NULL OR \"applied_steps_count\" = 0)",
-      );
-      console.log('[clear-failed-migrations] cleared', res, 'rows for', name);
-      totalCleared += res;
+    if (CONFIRMED_ABANDONED) {
+      const totalCleared = await deleteAbandonedRows(prisma);
+      console.log('[clear-failed-migrations] total cleared:', totalCleared);
+      console.log('[clear-failed-migrations] --confirmed-abandoned acknowledged; ledger evidence DESTROYED');
+    } else {
+      // Read-only inspection — never writes.
+      const rows = await inspectLedger(prisma);
+      if (rows.length === 0) {
+        console.log('[clear-failed-migrations] no allowlisted rows found — ledger clean');
+        return;
+      }
+      console.log('[clear-failed-migrations] inspection — found', rows.length, 'allowlisted rows:');
+      let nonAppliedCount = 0;
+      for (const r of rows) {
+        const finished = r.finished_at === null ? 'NOT FINISHED' : 'finished';
+        const applied = r.applied_steps_count > 0 ? 'applied' : 'NOT APPLIED';
+        const rolled = r.rolled_back_at === null ? 'NOT ROLLED BACK' : 'rolled back';
+        const isNonApplied = r.rolled_back_at === null && (r.finished_at === null || r.applied_steps_count === 0);
+        if (isNonApplied) nonAppliedCount += 1;
+        console.log(
+          '  - ' + r.migration_name +
+          ': ' + finished + ' | ' + applied + ' | ' + rolled +
+          (isNonApplied ? '  <-- NON-APPLIED' : ''),
+        );
+      }
+      if (nonAppliedCount > 0) {
+        console.log('[clear-failed-migrations] PRESERVING ledger evidence (default; install/CI never auto-delete per DR-032).');
+        console.log('[clear-failed-migrations] To clear after inspecting partial DDL and verifying backup readiness, run:');
+        console.log('  npm run db:recover -- --confirmed-abandoned');
+        // Exit non-zero so CI / start.sh can fail-fast on unfinished rows.
+        process.exitCode = 1;
+      } else {
+        console.log('[clear-failed-migrations] all allowlisted rows are applied — ledger is healthy');
+      }
     }
-    console.log('[clear-failed-migrations] total cleared:', totalCleared);
   } catch (err) {
     // Don't fail the install if DB is unreachable (e.g. local dev without
     // a DB). Log loudly so it's visible in the build log.

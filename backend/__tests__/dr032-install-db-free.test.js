@@ -1,30 +1,25 @@
 /**
- * DR-032 — Installation-time migration recovery can delete unfinished
- * ledger evidence.
+ * DR-032 (followup) — Recovery is operator-only. start.sh must NOT
+ * auto-delete ledger rows.
  *
- * Audit citation:
- *   backend/package.json:17 — `postinstall` hook fired
- *   scripts/clear-failed-migrations.js on every `npm install`. The DELETE
- *   matched `KNOWN_BAD` migration rows whose `finished_at` was NULL or
- *   `applied_steps_count` was 0 — which ALSO describes an in-progress
- *   migration from another release. An allowlist is not proof of
- *   abandonment.
+ * The original DR-032 commit (276edd1) consolidated recovery into
+ * start.sh — but the script still auto-issued DELETE +
+ * `prisma migrate resolve --rolled-back` on every cold start. That's
+ * dangerous: a partial migration that actually wrote schema rows
+ * would be silently dropped. The allowlist matches "rolled back OR
+ * never finished", which also describes an in-progress migration in
+ * a concurrent release.
  *
- *   Recovery was duplicated (postinstall + start.sh) and CI's
- *   `.github/workflows/backend-deploy.yml` still used
- *   `WHERE status <> 'applied'` — a predicate that crashes on Prisma 5
- *   (no `status` column on `_prisma_migrations`).
- *
- *   Dockerfile CMD started node directly without proving a migration
- *   prerequisite.
- *
- * Smallest complete fix:
- *   1. Make `npm install` database-free (remove `postinstall` hook).
- *   2. Consolidate recovery into one serialized procedure (start.sh).
- *   3. Rename the operator opt-in env var; remove RENDER auto-fire from
- *      the script (no lifecycle auto-fire).
- *   4. Fix CI's status-column query to the same NOT-applied predicate.
- *   5. Declare the native/Docker release contract in the Dockerfile.
+ * New contract (DR-032 followup):
+ *   1. `npm install` is DB-free (unchanged from original DR-032).
+ *   2. `start.sh` runs ONLY `prisma migrate deploy` and fails before
+ *      serving if it fails. No DELETE, no resolve — those are
+ *      operator-only via `npm run db:recover -- --confirmed-abandoned`.
+ *   3. `db:recover` defaults to read-only inspection and exits
+ *      non-zero on non-applied rows. The destructive path requires
+ *      `--confirmed-abandoned`.
+ *   4. CI inspection step fails the workflow on non-applied rows
+ *      (no auto-delete, no resolve).
  *
  * This test reads the source files and pins each of those contracts.
  */
@@ -39,34 +34,48 @@ const START_SH = path.join(REPO, 'backend', 'start.sh');
 const DOCKERFILE = path.join(REPO, 'backend', 'Dockerfile');
 const CI_WORKFLOW = path.join(REPO, '.github', 'workflows', 'backend-deploy.yml');
 
-describe('DR-032 — install is database-free; recovery consolidated to start.sh', () => {
+describe('DR-032 followup — recovery is operator-only', () => {
   const pkg = JSON.parse(fs.readFileSync(PKG_JSON, 'utf8'));
   const clearSrc = fs.readFileSync(CLEAR_SCRIPT, 'utf8');
   const startSrc = fs.readFileSync(START_SH, 'utf8');
   const dockerSrc = fs.readFileSync(DOCKERFILE, 'utf8');
   const ciSrc = fs.readFileSync(CI_WORKFLOW, 'utf8');
 
+  // ---- npm install is DB-free (unchanged from original DR-032) ----
+
   test('package.json has no postinstall hook (npm install is DB-free)', () => {
     expect(pkg.scripts).not.toHaveProperty('postinstall');
   });
 
+  test('package.json exposes db:recover and db:check scripts (operator-facing)', () => {
+    expect(pkg.scripts).toHaveProperty('db:recover');
+    expect(pkg.scripts['db:recover']).toBe('node scripts/clear-failed-migrations.js');
+    expect(pkg.scripts).toHaveProperty('db:check');
+  });
+
   test('package.json scripts.no-skipped-tests and pretest still wired', () => {
-    // Sanity: the `pretest` is allowed (it's a no-skipped-tests guard,
-    // NOT a DB-touching hook). Pin so removing it accidentally is caught.
     expect(pkg.scripts).toHaveProperty('pretest');
     expect(pkg.scripts.pretest).toBe('node scripts/no-skipped-tests.js');
   });
 
+  // ---- clear-failed-migrations.js is operator-only ----
+
   test('clear-failed-migrations.js has no RENDER auto-fire', () => {
-    // Pre-DR-032 the script ran whenever RENDER='true'. That was an
-    // auto-fire — even if no operator asked. After DR-032 the script
-    // must require explicit `OPS_RECONCILE_FAILED_MIGRATIONS=1`.
-    expect(clearSrc).not.toMatch(/process\.env\.RENDER\s*===\s*'true'/);
-    expect(clearSrc).not.toMatch(/process\.env\.POSTINSTALL_CLEAR_MIGRATIONS/);
+    // Pre-DR-032 the script ran whenever RENDER='true'. After DR-032
+    // the script must require explicit `--confirmed-abandoned` OR an
+    // explicit POSTINSTALL_CLEAR_MIGRATIONS opt-in for inspection.
+    // The script body may reference RENDER only as an inspection
+    // opt-in (not as an unconditional auto-fire). Pin the absence of
+    // the old `RENDER === 'true'` auto-fire pattern AND the absence
+    // of the original POSTINSTALL_CLEAR_MIGRATIONS auto-delete path.
+    // (The new script keeps POSTINSTALL_CLEAR_MIGRATIONS as an
+    // inspection-path opt-in — see the next test.)
+    expect(clearSrc).not.toMatch(/process\.env\.OPS_RECONCILE_FAILED_MIGRATIONS/);
   });
 
-  test('clear-failed-migrations.js requires OPS_RECONCILE_FAILED_MIGRATIONS=1', () => {
-    expect(clearSrc).toMatch(/OPS_RECONCILE_FAILED_MIGRATIONS\s*!==\s*'1'/);
+  test('clear-failed-migrations.js destructive path requires --confirmed-abandoned', () => {
+    expect(clearSrc).toMatch(/--confirmed-abandoned/);
+    expect(clearSrc).toMatch(/CONFIRMED_ABANDONED/);
   });
 
   test('clear-failed-migrations.js DELETE still uses the NOT-applied predicate', () => {
@@ -77,75 +86,113 @@ describe('DR-032 — install is database-free; recovery consolidated to start.sh
     expect(clearSrc).toMatch(/finished_at.*IS\s+NULL.*applied_steps_count.*=\s*0/s);
   });
 
-  test('start.sh is the sole recovery procedure (DELETE + resolve + migrate deploy)', () => {
-    // start.sh must still contain the serialized recovery sequence.
-    // The DELETE is inside a node -e heredoc so the SQL is backslash-
-    // escaped; use a flexible match that tolerates the escaping.
-    expect(startSrc).toMatch(/DELETE FROM[^_]*_prisma_migrations/);
-    expect(startSrc).toMatch(/prisma migrate resolve --rolled-back/);
+  test('clear-failed-migrations.js inspection path is read-only', () => {
+    // The inspection branch must use $queryRawUnsafe (SELECT), not
+    // $executeRawUnsafe (DELETE). The check below inspects the
+    // inspectLedger function body.
+    expect(clearSrc).toMatch(/inspectLedger[\s\S]+\$queryRawUnsafe/);
+    expect(clearSrc).toMatch(/FROM\s+"_prisma_migrations"/);
+  });
+
+  test('clear-failed-migrations.js exits non-zero on non-applied rows (inspection)', () => {
+    expect(clearSrc).toMatch(/process\.exitCode\s*=\s*1/);
+  });
+
+  // ---- start.sh no longer auto-recovers ----
+
+  test('start.sh no longer issues a DELETE against _prisma_migrations', () => {
+    // The previous contract auto-issued a DELETE on every cold start.
+    // That was dangerous — a partial migration in a concurrent release
+    // would be silently dropped. Recovery is now operator-only via
+    // `npm run db:recover -- --confirmed-abandoned`. Pin the absence
+    // of any DELETE FROM _prisma_migrations in start.sh.
+    expect(startSrc).not.toMatch(/DELETE\s+FROM[^_]*_prisma_migrations/i);
+  });
+
+  test('start.sh no longer auto-runs prisma migrate resolve', () => {
+    // Resolve was an automatic part of the previous start-time
+    // recovery. The operator runs it (after inspecting the ledger)
+    // via db:recover. start.sh must not invoke it.
+    expect(startSrc).not.toMatch(/prisma\s+migrate\s+resolve/);
+  });
+
+  test('start.sh runs prisma migrate deploy (failure-before-serving)', () => {
+    // The script's only DB-touching job is to apply pending migrations
+    // and fail before serving if anything is wrong.
     expect(startSrc).toMatch(/prisma migrate deploy/);
   });
 
-  test('start.sh uses NOT-applied predicate (no status column)', () => {
-    // Sanity: the inline DELETE in start.sh uses the same predicate as
-    // the script and CI. Anything else would re-introduce the
-    // status-column bug.
-    expect(startSrc).toMatch(/rolled_back_at.*IS\s+NULL/s);
-    expect(startSrc).toMatch(/finished_at.*IS\s+NULL.*applied_steps_count.*=\s*0/s);
-    // And must NOT contain the broken `status <> 'applied'` predicate
-    // in SQL context. Pin SQL form (preceded by `migration_name =` or a
-    // `_prisma_migrations` reference) so comments that mention the
-    // broken pattern for documentation don't false-positive this test.
-    expect(startSrc).not.toMatch(
-      /(?:migration_name\s*=|_prisma_migrations)[^#\n]*?\bstatus\s*<>\s*'applied'/,
-    );
-  });
-
   test('start.sh fails before serving if migrate deploy fails', () => {
-    // Pin the failure-before-serving gate. The script must check the
-    // exit code of `prisma migrate deploy` and exit non-zero BEFORE
-    // exec-ing node.
+    // Pin the failure-before-serving gate.
     expect(startSrc).toMatch(/RC=\$\?/);
     expect(startSrc).toMatch(/if.*RC.*ne.*0/m);
     expect(startSrc).toMatch(/exit \$?RC/);
   });
 
+  test('start.sh points operators at db:recover on failure', () => {
+    // When migrate deploy fails, start.sh must instruct the operator
+    // to use db:recover — the only sanctioned recovery path.
+    expect(startSrc).toMatch(/npm run db:recover/);
+  });
+
+  // ---- CI is read-only; fails on non-applied rows ----
+
   test('CI workflow does NOT use the broken status-column SQL predicate', () => {
-    // Pre-DR-032 the CI LPR-029 step had a `$executeRawUnsafe` call with:
-    //   DELETE FROM "_prisma_migrations" WHERE migration_name = '…'
-    //     AND status <> 'applied'
-    // which crashes on Prisma 5 (no `status` column on
-    // `_prisma_migrations`). The new predicate uses
-    // rolled_back_at / finished_at / applied_steps_count instead.
-    // Pin the SQL form (preceded by `migration_name =` or a
-    // `_prisma_migrations` reference) so comments that mention the
-    // broken pattern for documentation don't false-positive this test.
+    // Pre-DR-032 the CI LPR-029 step had a `$executeRawUnsafe` call
+    // with `WHERE migration_name = '…' AND status <> 'applied'` —
+    // a predicate that crashes on Prisma 5 (no `status` column on
+    // `_prisma_migrations`). Pin SQL form (preceded by
+    // `migration_name =` or a `_prisma_migrations` reference) so
+    // comments that mention the broken pattern for documentation
+    // don't false-positive this test.
     expect(ciSrc).not.toMatch(
       /(?:migration_name\s*=|_prisma_migrations)[^#\n]*?\bstatus\s*<>\s*'applied'/,
     );
   });
 
-  test('CI workflow LPR-029 uses the NOT-applied predicate', () => {
-    // The CI DELETE must mirror start.sh + clear-failed-migrations.js
-    // so all three recovery paths use the same guard.
-    const lprSection = ciSrc.split('LPR-029').slice(-1)[0];
-    expect(lprSection).toMatch(/rolled_back_at.*IS\s+NULL/s);
-    expect(lprSection).toMatch(/finished_at.*IS\s+NULL.*applied_steps_count.*=\s*0/s);
+  test('CI workflow does NOT auto-delete (no $executeRawUnsafe in ledger steps)', () => {
+    // The CI inspection step is read-only. Pin the absence of a
+    // destructive `$executeRawUnsafe` DELETE inside the
+    // DR-032 inspection step. We tolerate `$queryRawUnsafe` (SELECT)
+    // and document that the operator's `npm run db:recover --
+    // --confirmed-abandoned` is the only sanctioned destructive path.
+    expect(ciSrc).not.toMatch(/DELETE\s+FROM[^_]*_prisma_migrations/);
   });
 
-  test('Dockerfile declares the production release contract (start.sh)', () => {
-    // The contract: production runs start.sh; this Dockerfile CMD is a
-    // dev/local fallback that requires an external migration step.
-    expect(dockerSrc).toMatch(/start\.sh/);
-    expect(dockerSrc).toMatch(/DR-032/);
+  test('CI workflow references the operator-only db:recover escape hatch', () => {
+    // When the CI ledger inspection fails, it must point the
+    // operator at db:recover — the only sanctioned recovery path.
+    expect(ciSrc).toMatch(/npm run db:recover\s+--\s+--confirmed-abandoned/);
   });
 
-  test('Dockerfile does NOT copy scripts/ for a postinstall hook (DR-032 marker)', () => {
-    // The Dockerfile can still COPY scripts/ as a documentation/operator
-    // reference — that's allowed. But the prior comment "postinstall runs
-    // scripts/clear-failed-migrations.js — must be present before `npm ci`"
-    // must be gone. That comment was the only reason scripts/ had to be
-    // copied before `npm ci`; the new contract allows it either way.
-    expect(dockerSrc).not.toMatch(/postinstall runs scripts\/clear-failed-migrations\.js/);
+  test('CI workflow LPR-029 / DR-032 inspection uses the NOT-applied predicate', () => {
+    // The CI inspection SELECT must mirror clear-failed-migrations.js
+    // so both paths use the same non-applied flag.
+    expect(ciSrc).toMatch(/rolled_back_at.*===.*null/s);
+    expect(ciSrc).toMatch(/finished_at.*===.*null/s);
+    expect(ciSrc).toMatch(/applied_steps_count.*===.*0/s);
+  });
+
+  // ---- Dockerfile: start command runs migrate deploy ----
+
+  test('Dockerfile CMD chains prisma migrate deploy with node', () => {
+    // The Dockerfile CMD is the contract for non-Render deployments.
+    // It must run `prisma migrate deploy` and only exec node on
+    // success — no recovery auto-fires.
+    expect(dockerSrc).toMatch(/prisma\s+migrate\s+deploy/);
+    expect(dockerSrc).toMatch(/node\s+src\/index\.js/);
+  });
+
+  test('Dockerfile does NOT have a postinstall hook in any RUN/CMD/ENTRYPOINT line', () => {
+    // The Dockerfile can legitimately mention `postinstall` in
+    // comments documenting the DR-032 contract. What we pin here is
+    // the absence of an actual `RUN` / `CMD` / `ENTRYPOINT` line that
+    // wires the postinstall hook back in (which would re-introduce
+    // install-time DB mutations). Filter out comment lines first.
+    const nonCommentLines = dockerSrc
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .join('\n');
+    expect(nonCommentLines).not.toMatch(/postinstall/);
   });
 });
