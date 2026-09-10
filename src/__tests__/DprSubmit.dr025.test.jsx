@@ -60,9 +60,11 @@ describe('DR-025 — honest loading / empty / error + authoring copy', () => {
     expect(projPanelSrc).not.toMatch(/client,\s*location,\s*contract value/);
   });
 
-  test('4. ProjectDetail Overview drops the contract-value promise', () => {
-    expect(projDetailSrc).toMatch(/client,\s*location,\s*sites/);
-    expect(projDetailSrc).not.toMatch(/client,\s*contract value,\s*sites/);
+  test('4. ProjectDetail Overview drops the contract-value + sites promise', () => {
+    // S6/UI-8: sites is API-only; only (client, location, dates) are admin-editable via ProjectForm.
+    expect(projDetailSrc).toMatch(/client,\s*location,\s*dates/);
+    expect(projDetailSrc).not.toMatch(/client,\s*contract value/);
+    expect(projDetailSrc).not.toMatch(/client,\s*location,\s*sites/);
   });
 
   test('5. EmployeeDashboard attendance aside relabels the false promise', () => {
