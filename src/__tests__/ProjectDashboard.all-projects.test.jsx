@@ -70,6 +70,20 @@ describe('R38.1 — All-projects sentinel + default selection', () => {
     expect(flagIdx).toBeGreaterThan(-1);
     expect(flagIdx).toBeGreaterThan(useStateIdx);
   });
+
+  test('isDiscovered in ProjectKpiView is suppressed for the all-projects sentinel', () => {
+    // The sentinel is stamped `isRegistered: false`, so without the
+    // explicit `isAllProjectsView` guard the project header card
+    // would render an amber "Not yet registered" badge + a
+    // "Register this project →" CTA — wrong and confusing on the
+    // org-wide roll-up. Pin the guard.
+    expect(dashboardSrc).toMatch(
+      /isAllProjectsView\s*=\s*selectedProject\s*&&\s*selectedProject\.id\s*===\s*['"]__all__['"]/,
+    );
+    expect(dashboardSrc).toMatch(
+      /const\s+isDiscovered\s*=\s*!isAllProjectsView\s*&&\s*project\.isRegistered\s*===\s*false/,
+    );
+  });
 });
 
 // ─── Dropdown wiring ───────────────────────────────────────────────────────

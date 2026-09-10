@@ -1184,7 +1184,14 @@ function ProjectKpiView({ kpis, loading, selectedProject, days, expandedTile, se
   if (!kpis) return null;
 
   const project = kpis.project || { name: selectedProject.name, isRegistered: selectedProject.isRegistered };
-  const isDiscovered = project.isRegistered === false;
+  // R38.1: in all-projects mode the sentinel `id: '__all__'` would
+  // otherwise trip `isDiscovered` (because we stamp `isRegistered:
+  // false` on the sentinel object), which then renders an amber "Not
+  // yet registered" badge + a "Register this project →" link — wrong
+  // and confusing for the org-wide roll-up view. Suppress that branch
+  // when the sentinel is active.
+  const isAllProjectsView = selectedProject && selectedProject.id === '__all__';
+  const isDiscovered = !isAllProjectsView && project.isRegistered === false;
   // Each section owns a list of tile keys so the InlineDrillPanel
   // renders in the correct one when expanded. Drafts / people tiles
   // are not actionable (no list endpoint to drill into), so they
