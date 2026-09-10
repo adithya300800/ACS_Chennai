@@ -152,7 +152,7 @@ function BoqTopNBar({ rows }) {
           alignItems: 'center',
           justifyContent: 'center',
           fontSize: '0.85rem',
-          color: 'var(--steel, #64748b)',
+          color: 'var(--navy, #0f172a)',
           background: 'rgba(100,116,139,0.04)',
           borderRadius: 8,
           border: '1px dashed var(--steel, #cbd5e1)',
@@ -262,7 +262,7 @@ function InspectionFunnel({ total, open }) {
         style={{
           padding: '1.25rem 0',
           fontSize: '0.85rem',
-          color: 'var(--steel, #64748b)',
+          color: 'var(--navy, #0f172a)',
           textAlign: 'center',
           background: 'rgba(100,116,139,0.04)',
           borderRadius: 8,

@@ -178,6 +178,14 @@ function DashboardAreaChart({
 // Pinned to the same .dpr-card-free inline chrome (the caller already
 // wraps the chart in a .dpr-card so the message just sits in the
 // chart's slot).
+//
+// Bug fix (R38 audit, 2026-09-10): the original used
+//   background: 'var(--steel, rgba(100,116,139,0.04))'
+// but the CSS-var fallback chain resolved to the literal hex value
+// `#475569` (slate-600) on the live bundle, NOT the low-alpha rgba.
+// Result: a solid 71,85,105 block where the message text blended into
+// the background. Fix: pass the low-alpha rgba directly as the value
+// AND pin `color` to a stronger contrast token (--navy).
 function EmptyChartMessage({ message, ariaLabel }) {
   return (
     <div
@@ -189,8 +197,8 @@ function EmptyChartMessage({ message, ariaLabel }) {
         alignItems: 'center',
         justifyContent: 'center',
         fontSize: '0.85rem',
-        color: 'var(--steel, #64748b)',
-        background: 'var(--steel, rgba(100,116,139,0.04))',
+        color: 'var(--navy, #0f172a)',
+        background: 'rgba(100, 116, 139, 0.04)',
         borderRadius: 8,
         border: '1px dashed var(--steel, #cbd5e1)',
       }}

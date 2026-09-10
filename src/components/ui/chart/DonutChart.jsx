@@ -249,6 +249,15 @@ function DashboardDonutChart({
 // EmptyDonutMessage — used when there are no inspection types in
 // the window. Renders a dashed-border slot the same height as the
 // real donut so the surrounding .dpr-card keeps a consistent shape.
+//
+// Bug fix (R38 audit, 2026-09-10): the original used
+//   background: 'var(--steel, rgba(100,116,139,0.04))'
+// but the CSS-var fallback chain resolved to the literal hex value
+// `#475569` (slate-600) on the live bundle, NOT the low-alpha rgba.
+// Result: a solid 71,85,105 block where the message text blended into
+// the background (color + bg both = var(--steel)). Fix: pass the
+// low-alpha rgba directly as the value AND pin `color` to a stronger
+// contrast token (--navy) so the empty-state message stays readable.
 function EmptyDonutMessage({ message, ariaLabel, height }) {
   return (
     <div
@@ -260,8 +269,8 @@ function EmptyDonutMessage({ message, ariaLabel, height }) {
         alignItems: 'center',
         justifyContent: 'center',
         fontSize: '0.85rem',
-        color: 'var(--steel, #64748b)',
-        background: 'var(--steel, rgba(100,116,139,0.04))',
+        color: 'var(--navy, #0f172a)',
+        background: 'rgba(100, 116, 139, 0.04)',
         borderRadius: 8,
         border: '1px dashed var(--steel, #cbd5e1)',
       }}
