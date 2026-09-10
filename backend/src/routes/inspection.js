@@ -19,7 +19,20 @@ const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/
 // no request idempotency lookup, so a NETWORK_ERROR retry that landed
 // after the original committed produced a duplicate InspectionRecord +
 // duplicate admin notification fan-out. Same contract as dpr.js POST.
-const { tryReplay: tryIdempotentReplay, recordSuccess: recordIdempotentSuccess } = require('../lib/idempotency');
+//
+// [DR-017] Migrated to the durable reserve/complete/release API. The
+// legacy tryReplay/recordSuccess pair had no atomic guard between the
+// row insert and the replay-slot write — a crash between them left a
+// committed InspectionRecord behind a reclaimable PENDING slot, so the
+// NETWORK_ERROR retry created a duplicate. The durable helpers move
+// the slot into the request_dedupe table and the completion lives
+// INSIDE the withRecordTransaction callback so row + slot commit or
+// roll back together.
+const {
+  reserve: reserveIdempotency,
+  complete: completeIdempotency,
+  release: releaseIdempotency,
+} = require('../lib/idempotency');
 const {
   generateReadSASUrl,
   CONTENT_TYPE_EXT,
@@ -232,26 +245,38 @@ mountUploadRoutes(router, {
 router.post('/', async (req, res) => {
   const prisma = getPrisma(req);
 
-  // DR-012: Idempotency-Key replay protection. Mirror of dpr.js POST
-  // (round-10). The frontend's NETWORK_ERROR retry path in src/lib/api.js
-  // re-sends the same payload — without this gate, the retry creates a
-  // duplicate InspectionRecord, a duplicate notification row, and a
-  // duplicate admin email fan-out. Replay returns the cached 201 with
-  // the Idempotent-Replay header so the client can debug "did my second
-  // click create a duplicate?" without a second notification.
-  // Body-hash mismatch returns 409 IDEMPOTENCY_MISMATCH so a leaked key
-  // cannot be used to probe arbitrary payloads against the cached slot
-  // (DR-006 security pin).
-  const idempotencyResult = tryIdempotentReplay(req);
-  if (idempotencyResult && idempotencyResult.mismatch) {
+  // DR-012 + DR-017: Idempotency-Key replay protection. Mirror of dpr.js POST
+  // (round-10) but durable via reserve/complete/release. The frontend's
+  // NETWORK_ERROR retry path in src/lib/api.js re-sends the same payload
+  // — without this gate, the retry creates a duplicate InspectionRecord,
+  // a duplicate notification row, and a duplicate admin email fan-out.
+  // Replay returns the cached 201 with the Idempotent-Replay header so
+  // the client can debug "did my second click create a duplicate?"
+  // without a second notification. Body-hash mismatch returns 409
+  // IDEMPOTENCY_MISMATCH so a leaked key cannot be used to probe
+  // arbitrary payloads against the cached slot (DR-006 security pin).
+  const idempotencyReservation = await reserveIdempotency({
+    prisma,
+    route: 'inspection.create',
+    req,
+  });
+  if (idempotencyReservation.mismatch) {
     return res.status(409).json({
       error: 'Idempotency-Key was used for a different request body',
       code: 'IDEMPOTENCY_MISMATCH',
     });
   }
-  if (idempotencyResult && idempotencyResult.replay) {
+  if (idempotencyReservation.replay && idempotencyReservation.cached) {
     res.setHeader('Idempotent-Replay', 'true');
-    return res.status(idempotencyResult.cached.status).json(idempotencyResult.cached.body);
+    return res.status(idempotencyReservation.cached.status).json(idempotencyReservation.cached.body);
+  }
+  if (idempotencyReservation.conflict) {
+    return res.status(409).json({
+      error: idempotencyReservation.poisoned
+        ? 'A previous request with this Idempotency-Key failed. Use a new key.'
+        : 'A concurrent request with this Idempotency-Key is in flight. Retry shortly.',
+      code: 'IDEMPOTENCY_CONFLICT',
+    });
   }
 
   const {
@@ -685,20 +710,44 @@ router.post('/', async (req, res) => {
         recordId: created.id,
       });
 
+      // [DR-017] Commit the durable idempotency reservation in the SAME
+      // transaction as the record + photo + bind writes so a crash
+      // between any of them rolls everything back together. A retry
+      // that races a still-PENDING slot now gets 409 IDEMPOTENCY_CONFLICT
+      // instead of silently creating a duplicate InspectionRecord. The
+      // legacy in-memory branch (no requestDedupe on the prisma double)
+      // is committed AFTER the response — see below.
+      if (!idempotencyReservation.legacy && db.requestDedupe) {
+        await completeIdempotency({
+          prisma: db,
+          reservation: idempotencyReservation,
+          status: 201,
+          body: created,
+          recordKind: 'inspectionRecord',
+          recordId: created.id,
+        });
+      }
       return created;
     });
 
     res.status(201).json(record);
 
-    // DR-012: persist the success under (employeeId, idempotencyKey)
-    // so a same-key retry within the TTL window returns the cached
-    // body instead of re-running the side effects (record + photos +
-    // bind-claims + admin notification fan-out). MUST run BEFORE the
-    // admin fan-out below — otherwise a retry that lands while the
-    // fan-out is still in flight would re-queue a duplicate
-    // notification email.
-    if (idempotencyResult && idempotencyResult.key) {
-      recordIdempotentSuccess(req, 201, record, req.body);
+    // [DR-017] Legacy in-memory fallback for test Prisma doubles that
+    // do not expose `requestDedupe`. The durable slot was already
+    // committed inside the tx above when the table is wired. The
+    // legacy record happens AFTER res.send so a crash before that
+    // line cannot leak a stale entry — same trade-off as round-10.
+    if (idempotencyReservation.legacy) {
+      try {
+        await completeIdempotency({
+          prisma,
+          reservation: idempotencyReservation,
+          status: 201,
+          body: record,
+          recordKind: 'inspectionRecord',
+          recordId: record.id,
+        });
+      } catch (_) { /* best-effort */ }
     }
 
     // Round-26: fire admin-targeted fan-out for newly-OPENED inspections.
@@ -740,6 +789,10 @@ router.post('/', async (req, res) => {
         expected: err.expected,
         bound: err.bound,
       });
+      // [DR-017] binding-lost is a recoverable 4xx — drop the PENDING
+      // slot so the client can fix the payload (re-upload the photo)
+      // and retry with the same Idempotency-Key.
+      await releaseIdempotency({ prisma, reservation: idempotencyReservation });
       return res.status(bindingLost.status).json(bindingLost.body);
     }
     console.error('Inspection create error', {
@@ -748,7 +801,15 @@ router.post('/', async (req, res) => {
       message: err.message?.split('\n')[0],
     });
     const mapped = mapPrismaError(err);
-    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    if (mapped) {
+      // [DR-017] 4xx → drop the PENDING slot so the client can retry;
+      // 5xx keeps it so a transient backend failure is not double-
+      // charged by the NETWORK_ERROR auto-retry.
+      if (mapped.status >= 400 && mapped.status < 500) {
+        await releaseIdempotency({ prisma, reservation: idempotencyReservation });
+      }
+      return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    }
     res.status(500).json({ error: 'Failed to create inspection record' });
   }
 });

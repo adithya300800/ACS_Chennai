@@ -780,8 +780,8 @@ export const api = {
   // mirror backend/src/routes/boq.js (declared BEFORE /:id so Express
   // doesn't route the literal "executions" through the BOQ detail
   // handler — same pattern as /variance).
-  recordBoqExecution: (boqItemId, data, token) =>
-    api.post(`/boq/${boqItemId}/executions`, data, token),
+  recordBoqExecution: (boqItemId, data, token, idempotencyKey) =>
+    api.post(`/boq/${boqItemId}/executions`, data, token, idempotencyKey),
   listBoqExecutions: (boqItemId, token) =>
     api.get(`/boq/${boqItemId}/executions`, token),
   deleteBoqExecution: (id, token) =>
@@ -1029,8 +1029,8 @@ export const api = {
   },
   getBillingCertification: (id, token) =>
     api.get(`/billing-certifications/${id}`, token),
-  createBillingCertification: (payload, token) =>
-    api.post('/billing-certifications', payload, token),
+  createBillingCertification: (payload, token, idempotencyKey) =>
+    api.post('/billing-certifications', payload, token, idempotencyKey),
   updateBillingCertification: (id, payload, token) =>
     api.patch(`/billing-certifications/${id}`, payload, token),
   // [DR-015] Optional `expectedVersion` on certify/dispute/correct — pass

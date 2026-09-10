@@ -66,6 +66,20 @@ const { mapPrismaError } = require('../lib/errors');
 // passes it as a query param, and many legacy clients don't know
 // about the FK yet.
 const { resolveProject } = require('./projects');
+// [DR-017] Durable idempotency reservation on the execution POST. The
+// legacy in-memory cache (tryReplay / recordSuccess) lost its slot on
+// process restart, so a Render cold-start between a committed insert
+// and a NETWORK_ERROR retry would happily record the executed
+// quantity a second time. reserve/complete/release move the slot into
+// the request_dedupe table so the lock survives the restart. Legacy
+// branch is preserved for hand-rolled test Prisma mocks that don't
+// expose requestDedupe — see idempotency.js.
+const {
+  reserve: reserveIdempotency,
+  complete: completeIdempotency,
+  release: releaseIdempotency,
+} = require('../lib/idempotency');
+const { withRecordTransaction } = require('../lib/uploadIntentBinding');
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -533,6 +547,36 @@ router.post('/:boqItemId/executions', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'notes must be a string up to 1000 chars' });
   }
 
+  // [DR-017] Durable idempotency reservation — claimed AFTER read-only
+  // validation (so a bad payload doesn't lock the key for 5 min) and
+  // BEFORE the side-effecting insert. The legacy in-memory cache lost
+  // the lock on process restart, so a NETWORK_ERROR auto-retry after
+  // a Render cold-start would happily create a duplicate execution row
+  // (the audit's "executed quantity recorded twice" defect).
+  const idempotencyReservation = await reserveIdempotency({
+    prisma,
+    route: 'boqExecution.create',
+    req,
+  });
+  if (idempotencyReservation.mismatch) {
+    return res.status(409).json({
+      error: 'Idempotency-Key was used for a different request body',
+      code: 'IDEMPOTENCY_MISMATCH',
+    });
+  }
+  if (idempotencyReservation.replay && idempotencyReservation.cached) {
+    res.setHeader('Idempotent-Replay', 'true');
+    return res.status(idempotencyReservation.cached.status || 201).json(idempotencyReservation.cached.body);
+  }
+  if (idempotencyReservation.conflict) {
+    return res.status(409).json({
+      error: idempotencyReservation.poisoned
+        ? 'A previous request with this Idempotency-Key failed. Use a new key.'
+        : 'A concurrent request with this Idempotency-Key is in flight. Retry shortly.',
+      code: 'IDEMPOTENCY_CONFLICT',
+    });
+  }
+
   try {
     const data = {
       boqItemId: item.id,
@@ -544,13 +588,47 @@ router.post('/:boqItemId/executions', asyncHandler(async (req, res) => {
     };
     if (normalisedExecutedAt) data.executedAt = normalisedExecutedAt;
 
-    const created = await prisma.boqExecution.create({
-      data,
-      include: {
-        recordedBy: { select: { id: true, name: true, email: true } },
-      },
+    // [DR-017] The row insert AND the durable dedupe commit happen in
+    // the SAME transaction so a crash between them would not leave a
+    // committed execution behind a reclaimable PENDING slot (the
+    // audit's "lost response = double-recorded quantity" defect).
+    // `db` is the transaction client; using the top-level `prisma`
+    // here would split the two writes across transactions and re-open
+    // the race.
+    const created = await withRecordTransaction(prisma, 'boqExecution', async (db) => {
+      const row = await db.boqExecution.create({
+        data,
+        include: {
+          recordedBy: { select: { id: true, name: true, email: true } },
+        },
+      });
+      if (!idempotencyReservation.legacy && db.requestDedupe) {
+        await completeIdempotency({
+          prisma: db,
+          reservation: idempotencyReservation,
+          status: 201,
+          body: row,
+          recordKind: 'boqExecution',
+          recordId: row.id,
+        });
+      }
+      return row;
     });
     res.status(201).json(created);
+    // Legacy in-memory fallback — record AFTER the response so a
+    // handler crash before res.send() doesn't leak a stale slot.
+    if (idempotencyReservation.legacy) {
+      try {
+        await completeIdempotency({
+          prisma,
+          reservation: idempotencyReservation,
+          status: 201,
+          body: created,
+          recordKind: 'boqExecution',
+          recordId: created.id,
+        });
+      } catch (_) { /* best-effort */ }
+    }
   } catch (err) {
     console.error('BOQ execution create error', {
       employeeHash: require('../lib/pii').hashIdentifier(req.employeeId),
@@ -558,7 +636,16 @@ router.post('/:boqItemId/executions', asyncHandler(async (req, res) => {
       message: err.message?.split('\n')[0],
     });
     const mapped = mapPrismaError(err);
-    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    if (mapped) {
+      // [DR-017] Recoverable 4xx → drop the PENDING slot so the client
+      // can fix the payload and retry with the same key. 5xx keeps it
+      // so a transient backend failure isn't double-charged by the
+      // NETWORK_ERROR auto-retry.
+      if (mapped.status >= 400 && mapped.status < 500) {
+        await releaseIdempotency({ prisma, reservation: idempotencyReservation });
+      }
+      return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    }
     res.status(500).json({ error: 'Failed to record BOQ execution' });
   }
 }));

@@ -217,12 +217,12 @@ async function reserve({ prisma, route, req, ttlMs = COMPLETED_TTL_MS }) {
   if (!prisma || !prisma.requestDedupe) {
     const replay = tryReplay(req);
     if (replay && replay.replay) {
-      return { key: rawKey, bodyHash, replay: true, cached: replay.cached };
+      return { key: rawKey, bodyHash, replay: true, cached: replay.cached, legacy: true, employeeId, body: req.body || {} };
     }
     if (replay && replay.mismatch) {
-      return { key: rawKey, bodyHash, mismatch: true, cached: replay.cached };
+      return { key: rawKey, bodyHash, mismatch: true, cached: replay.cached, legacy: true, employeeId, body: req.body || {} };
     }
-    return { key: rawKey, bodyHash, fresh: true, skipped: 'no-prisma-requestdedupe' };
+    return { key: rawKey, bodyHash, fresh: true, legacy: true, employeeId, body: req.body || {}, skipped: 'no-prisma-requestdedupe' };
   }
 
   // Fast path: try to claim the slot. The unique constraint on `key`
@@ -322,7 +322,19 @@ async function reserve({ prisma, route, req, ttlMs = COMPLETED_TTL_MS }) {
 // fan-out, etc.) so a retry that races the handler completion
 // either gets a replay (COMPLETED) or a conflict (still PENDING).
 async function complete({ prisma, reservation, status, body, recordKind, recordId, ttlMs = COMPLETED_TTL_MS }) {
-  if (!reservation || !reservation.namespacedKey) return;
+  // No reservation → nothing to commit. Backward-compat with callers
+  // that never opted in (no Idempotency-Key header).
+  if (!reservation || !reservation.key) return;
+  // [DR-017] Legacy in-memory branch — the slot lives in a process-
+  // local Map. Without this, a deployment without request_dedupe
+  // reserves a key but never records the success, so every retry
+  // re-runs the handler (the bug the audit flagged for the COP +
+  // inspection routes). Map write cannot roll back, so callers MUST
+  // invoke this AFTER committing the row (see boq.js / inspection.js).
+  if (reservation.legacy) {
+    recordSuccess({ headers: { 'idempotency-key': reservation.key }, employeeId: reservation.employeeId || 'anon' }, status, body, reservation.body);
+    return;
+  }
   if (!prisma || !prisma.requestDedupe) return;
   await prisma.requestDedupe.update({
     where: { key: reservation.namespacedKey },

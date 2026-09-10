@@ -700,9 +700,14 @@ export default function BoqAdmin() {
   // row contributes to the variance sum on the next refetch; we
   // refetch the variance map immediately so the row's badge updates
   // without a manual reload.
+  // [DR-017] Mint one Idempotency-Key per submit so the api.js
+  // NETWORK_ERROR retry doesn't double-record the executed quantity.
   const handleRecordExecution = async (payload) => {
     if (!executionTarget) return;
-    await api.recordBoqExecution(executionTarget.id, payload, accessToken);
+    const idempotencyKey = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+      ? crypto.randomUUID()
+      : `boq-exec-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    await api.recordBoqExecution(executionTarget.id, payload, accessToken, idempotencyKey);
     toast.push('Execution recorded.', 'success');
     await fetchVariance();
   };

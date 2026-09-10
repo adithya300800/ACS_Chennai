@@ -1061,6 +1061,22 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
           expectedBlobPath: body.blobPath,
         });
       }
+      // [DR-017] Commit the durable reservation IN THE SAME tx as the
+      // row + bind writes. A crash between the create and the slot
+      // commit would otherwise leave the row visible to the retry
+      // (committed) while the slot was still PENDING, so the retry
+      // would create a duplicate. The legacy in-memory branch
+      // (no requestDedupe) is recorded AFTER the response — see below.
+      if (!idempotencyReservation.legacy && db.requestDedupe) {
+        await completeIdempotency({
+          prisma: db,
+          reservation: idempotencyReservation,
+          status: 201,
+          body: created,
+          recordKind: 'billingCertification',
+          recordId: created.id,
+        });
+      }
       return created;
     });
     const full = await prisma.billingCertification.findUnique({
@@ -1072,17 +1088,23 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
       },
     });
     res.status(201).json(serializeBillingCertification(full));
-    // [DR-020] Mark the reservation COMPLETED so a retry with the same
-    // Idempotency-Key + body returns the cached 201 instead of trying
-    // to create a duplicate row.
-    await completeIdempotency({
-      prisma,
-      reservation: idempotencyReservation,
-      status: 201,
-      body: serializeBillingCertification(full),
-      recordKind: 'billingCertification',
-      recordId: row.id,
-    });
+    // [DR-017] Legacy in-memory fallback for test Prisma doubles that
+    // do not expose `requestDedupe`. The durable slot was already
+    // committed inside the tx above when the table is wired. The
+    // legacy record happens AFTER res.send so a crash before that
+    // line cannot leak a stale entry — same trade-off as round-10.
+    if (idempotencyReservation.legacy) {
+      try {
+        await completeIdempotency({
+          prisma,
+          reservation: idempotencyReservation,
+          status: 201,
+          body: serializeBillingCertification(full),
+          recordKind: 'billingCertification',
+          recordId: row.id,
+        });
+      } catch (_) { /* best-effort */ }
+    }
   } catch (err) {
     // [DR-001] Lost upload claim → 409, never 500. Same envelope as
     // dpr.js — the client knows what to do.

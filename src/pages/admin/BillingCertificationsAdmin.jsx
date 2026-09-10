@@ -1533,9 +1533,16 @@ function CertificationFormModal({
         ...(mode === 'edit' && expectedVersion != null ? { expectedVersion } : {}),
         ...(attachment || {}),
       };
+      // [DR-017] Mint one Idempotency-Key per submit intent. The api.js
+      // NETWORK_ERROR retry path re-sends the same payload — without the
+      // key, the retry would record the COP twice (the audit's primary
+      // DR-017 defect for the COP register).
+      const idempotencyKey = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID()
+        : `billing-cert-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const saved = mode === 'edit'
         ? await api.updateBillingCertification(initialCert.id, payload, accessToken)
-        : await api.createBillingCertification(payload, accessToken);
+        : await api.createBillingCertification(payload, accessToken, idempotencyKey);
       await onSaved(saved);
     } catch (err) {
       setServerError(err?.message || 'Failed to save certification');

@@ -58,6 +58,7 @@ describe('R37 — Billing Certifications Admin: api helpers (src/lib/api.js)', (
   // [DR-015] The certify/dispute wrappers accept an optional
     // expectedVersion pin before the token. Pin the wire shape against
     // the actual file so a future refactor doesn't silently drop it.
+    test('3. exports certifyBillingCertification + disputeBillingCertification with expectedVersion', () => {
     expect(apiSrc).toMatch(/certifyBillingCertification\s*:\s*\(\s*id\s*,\s*expectedVersion\s*,\s*token\s*\)\s*=>/);
     expect(apiSrc).toMatch(/api\.post\(\s*`\/billing-certifications\/\$\{id\}\/certify`/);
     expect(apiSrc).toMatch(/disputeBillingCertification\s*:\s*\(\s*id\s*,\s*reason\s*,\s*expectedVersion\s*,\s*token\s*\)\s*=>/);
@@ -70,7 +71,7 @@ describe('R37 — Billing Certifications Admin: api helpers (src/lib/api.js)', (
     expect(apiSrc).toMatch(/api\.get\(\s*`\/billing-certifications\/\$\{id\}\/read-sas`/);
     expect(apiSrc).toMatch(/getBillingCertification\s*:\s*\(\s*id\s*,\s*token\s*\)\s*=>/);
     expect(apiSrc).toMatch(/api\.get\(\s*`\/billing-certifications\/\$\{id\}`/);
-    expect(apiSrc).toMatch(/createBillingCertification\s*:\s*\(\s*payload\s*,\s*token\s*\)\s*=>/);
+    expect(apiSrc).toMatch(/createBillingCertification\s*:\s*\(\s*payload\s*,\s*token\s*,\s*idempotencyKey\s*\)\s*=>/);
     expect(apiSrc).toMatch(/api\.post\(\s*['"]\/billing-certifications['"]/);
     expect(apiSrc).toMatch(/updateBillingCertification\s*:\s*\(\s*id\s*,\s*payload\s*,\s*token\s*\)\s*=>/);
   });
