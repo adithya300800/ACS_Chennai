@@ -173,6 +173,26 @@ function formatIndianDate(iso) {
   return out || String(iso);
 }
 
+// [DR-025] Inspection-type labels — mirrors the map in
+// ProjectExpandedPanel.jsx so the DPR summary card doesn't show raw enum
+// slugs. Kept inline to avoid a new shared module; if a third consumer
+// appears, hoist to src/lib/constants.js.
+const INSPECTION_TYPE_LABELS = {
+  villa_inspection: 'Villa inspection',
+  day_activity_inspection: 'Day activity inspection',
+  safety_inspection: 'Safety inspection',
+  quality_inspection: 'Quality inspection',
+  compliance_inspection: 'Compliance inspection',
+  material_inspection: 'Material inspection',
+  safety_violation: 'Safety violation',
+  cube_casting: 'Cube casting',
+  cube_testing: 'Cube testing',
+};
+function prettyInspectionType(t) {
+  if (!t) return '';
+  return INSPECTION_TYPE_LABELS[t] || String(t).replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 
 export default function DprSubmit() {
   const { accessToken, employee } = useAuth();
@@ -309,7 +329,11 @@ export default function DprSubmit() {
   }, [quarantinedReason, currentEmployeeId]);
   const [uploadStatuses, setUploadStatuses] = useState({});
   const [todayInspections, setTodayInspections] = useState([]);
-  const [todayInspectionsLoaded, setTodayInspectionsLoaded] = useState(false);
+  // [DR-025] Tri-state inspection summary: 'loading' | 'ok' | 'error'.
+  // The previous `loaded` flag conflated "no records" with "fetch failed",
+  // so a 5xx displayed "None filed yet" — misleading. Now only a
+  // successful exhausted result claims "none".
+  const [todayInspectionsStatus, setTodayInspectionsStatus] = useState('loading');
   const photoObjectUrlsRef = useRef(new Set());
 
   // [DR-006 client] Live count of photos still going through the SAS / PUT
@@ -534,17 +558,29 @@ export default function DprSubmit() {
   // Load today's inspection records so the summary card shows real data
   // while the engineer fills in the DPR. If none exist, the empty state
   // promotes the "Create inspection record →" link.
+  //
+  // [DR-025] Date-keyed stale-response protection: capture the date the
+  // fetch was issued for, and only commit the result if the user hasn't
+  // navigated to a different reportDate in the meantime. Without this a
+  // slow response for the previous date could overwrite the current
+  // date's empty/loading card.
   const loadTodayInspections = useCallback(async () => {
     if (!accessToken) return;
-    setTodayInspectionsLoaded(true);
+    const requestedDate = form.reportDate;
+    setTodayInspectionsStatus('loading');
     try {
       const data = await api.getInspections(
-        { reportDate: form.reportDate, limit: '20' },
+        { reportDate: requestedDate, limit: '20' },
         accessToken
       );
+      // Stale-response guard: another fetch has raced ahead.
+      if (form.reportDate !== requestedDate) return;
       setTodayInspections(data.inspections || []);
+      setTodayInspectionsStatus('ok');
     } catch {
+      if (form.reportDate !== requestedDate) return;
       setTodayInspections([]);
+      setTodayInspectionsStatus('error');
     }
   }, [accessToken, form.reportDate]);
 
@@ -2099,7 +2135,25 @@ export default function DprSubmit() {
             <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", fontSize: '1rem', marginBottom: '0.5rem', color: 'var(--navy)' }}>
               Today's Inspection &amp; Compliance Records
             </h3>
-            {todayInspectionsLoaded && todayInspections.length === 0 ? (
+            {todayInspectionsStatus === 'loading' ? (
+              <p style={{ color: 'var(--steel)', fontSize: '0.9rem', margin: 0 }}>Loading…</p>
+            ) : todayInspectionsStatus === 'error' ? (
+              // [DR-025] Honest failure — only an exhausted empty result
+              // claims "none"; a fetch error exposes Retry instead.
+              <div style={{ margin: 0 }}>
+                <p style={{ color: 'var(--steel)', fontSize: '0.9rem', margin: 0 }}>
+                  Couldn't load today's inspections.
+                </p>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={loadTodayInspections}
+                  style={{ marginTop: 8 }}
+                >
+                  Retry
+                </button>
+              </div>
+            ) : todayInspections.length === 0 ? (
               <p style={{ color: 'var(--steel)', fontSize: '0.9rem', margin: 0 }}>
                 None filed yet for {formatIndianDate(form.reportDate)}.
                 {' '}
@@ -2107,13 +2161,12 @@ export default function DprSubmit() {
                   Create inspection record →
                 </Link>
               </p>
-            ) : !todayInspectionsLoaded ? (
-              <p style={{ color: 'var(--steel)', fontSize: '0.9rem', margin: 0 }}>Loading…</p>
             ) : (
               <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
                 {todayInspections.slice(0, 5).map((insp) => (
                   <li key={insp.id} style={{ fontSize: '0.9rem' }}>
-                    <Link to={`/portal/inspection/${insp.id}`}>{insp.inspectionType}</Link>
+                    {/* [DR-025] Use human label instead of raw enum. */}
+                    <Link to={`/portal/inspection/${insp.id}`}>{prettyInspectionType(insp.inspectionType)}</Link>
                     {' · '}
                     <span style={{ color: 'var(--steel)' }}>{insp.location}</span>
                     {' · '}

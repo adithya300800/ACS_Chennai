@@ -270,11 +270,16 @@ export default function EmployeeDashboard() {
           )}
         </div>
         <aside className="dashboard-attendance-aside">
+          {/* [DR-025] Honest destination copy — the /portal/attendance
+              page is the monthly calendar / marking surface. "Weekly
+              summary + export" was misleading: there is no employee-facing
+              weekly summary, and the timesheet export callers are
+              admin-only. */}
           <Link to="/portal/attendance" className="dashboard-aside-link">
             <ClockIcon size={16} />
             <span>
               <strong>View month</strong>
-              <small>Weekly summary + export</small>
+              <small>Mark attendance · calendar history</small>
             </span>
           </Link>
         </aside>

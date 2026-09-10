@@ -405,9 +405,13 @@ function OverviewPanel({ project, parties, isRegistered }) {
           No metadata yet
         </h2>
         <p style={{ color: 'var(--steel, #64748b)', margin: '0 0 1rem', fontSize: '0.9rem' }}>
+          {/* [DR-025] Drop the "contract value" promise — the admin ProjectForm
+              does NOT expose a contractValue input (only name / code / client /
+              location / dates / assignments). Sites ARE an admin-editable
+              metadata field; keep that in the list. */}
           This project was discovered from an existing daily report or inspection, but
           hasn't been formally registered. Once an admin adds the project details
-          (client, contract value, sites), they'll show up here.
+          (client, location, sites), they'll show up here.
         </p>
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
           <Link to="/portal/dpr/submit" className="btn btn-primary btn-sm">

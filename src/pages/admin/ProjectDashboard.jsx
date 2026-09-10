@@ -169,9 +169,11 @@ const TILE_META = {
 // One page that surfaces five roll-up buckets scoped to a single project:
 //   1. Daily Reports  — submitted / pending / approved / rejected / drafts
 //   2. Inspections    — total (window), open (org-wide), breakdown by type
-//   3. Cube Tests     — due in next 7d / overdue / passed
-//   4. BOQ Variance   — item count, contract INR, executed INR, variance %
-//   5. People         — on leave today, pending leave, overdue training
+//   3. BOQ Variance   — item count, contract INR, executed INR, variance %
+//   4. People         — on leave today, pending leave, overdue training
+// (Round-29: the standalone Cube Tests section was dropped; cube
+// testing is captured under the cube_casting / cube_testing
+// InspectionRecord sub-types.)
 //
 // The KPI endpoint is tolerant — if a sibling roll-up throws (e.g. CubeTest
 // or BoqItem migration not yet shipped in some branch) the dashboard still
@@ -674,7 +676,10 @@ export default function ProjectDashboard() {
         <div>
           <h1 className="dpr-page-title" aria-label="Project Dashboard">Project Dashboard</h1>
           <p className="dpr-page-sub" style={{ color: 'var(--steel)', margin: 0, fontSize: '0.9rem' }}>
-            KPIs across DPR, Inspections, Cube Tests, BOQ, and People — scoped to a single project.
+            {/* [DR-025] Drop "Cube Tests" — the Cube Tests TileSection was removed
+            in round-29; cube testing is now surfaced through the cube_casting
+            / cube_testing InspectionRecord sub-types. */}
+          KPIs across DPR, Inspections, BOQ, and People — scoped to a single project.
           </p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>

@@ -731,8 +731,12 @@ function OverviewSection({ project, parties, isRegistered }) {
   if (!isRegistered) {
     return (
       <div style={{ padding: '0.875rem 0', fontSize: '0.85rem', color: 'var(--steel, #64748b)' }}>
+        {/* [DR-025] Drop the "contract value" promise — the admin ProjectForm
+            does NOT expose a contractValue input (only name / code / client /
+            location / dates / assignments), so telling the user an admin
+            will add it was unimplementable. */}
         Auto-discovered project — no metadata yet. File a DPR or Inspection to start, then ask
-        an admin to formally register it (client, location, contract value).
+        an admin to formally register it (client, location).
       </div>
     );
   }
