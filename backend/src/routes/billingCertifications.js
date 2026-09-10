@@ -345,13 +345,39 @@ async function applyScopeFilter(where, { scope, prisma, employeeId, isAdmin }) {
   // An employee with no filed child records returns an empty list, not
   // the org-wide registry.
   const ids = await getAssignedProjectIds(prisma, employeeId);
+  // [DR-030] Intersect the requested projectId filter with the
+  // authorized scope rather than overwriting it. The previous shape
+  // returned `{ ...where, projectId: { in: ids } }` which silently
+  // replaced any caller-supplied projectId — so a reader allowed A+B
+  // who requests `?projectId=A` got both A and B (misleading totals),
+  // and a reader who requests an unrelated C got the full allowed set
+  // instead of an empty list. Pin both predicates with AND so neither
+  // is lost; an out-of-scope requested project naturally yields zero
+  // rows through the conjunction.
+  const requestedProjectId = where.projectId;
   if (ids.length === 0) {
     // Force-empty result by matching an impossible projectId. Using
     // `id: '__none__'` avoids injecting SQL; the OR-on-empty trick (e.g.
     // `{ projectId: { in: [] } }`) is well-supported by Prisma but we
     // prefer an explicit impossible UUID so the EXPLAIN is the same as
-    // a regular equality lookup.
+    // a regular equality lookup. Holds regardless of what the caller
+    // requested — no assigned project means every requested projectId
+    // is out of scope.
     return { ...where, projectId: '__none__' };
+  }
+  if (requestedProjectId !== undefined) {
+    // Strip the original projectId from `where` and add an AND
+    // conjunct so Prisma evaluates both predicates against the same
+    // column without either one silently overwriting the other.
+    const { projectId: _omit, ...rest } = where;
+    return {
+      ...rest,
+      AND: [
+        ...(Array.isArray(rest.AND) ? rest.AND : []),
+        { projectId: requestedProjectId },
+        { projectId: { in: ids } },
+      ],
+    };
   }
   return { ...where, projectId: { in: ids } };
 }
