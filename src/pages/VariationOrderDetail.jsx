@@ -172,6 +172,30 @@ export default function VariationOrderDetail() {
               ) : (
                 <em className="text-placeholder">No project</em>
               )}
+              {/* S6/UI-3: VOs don't have user-facing revisions like
+                  Drawings, but the backend pins an optimistic-concurrency
+                  `version` on every save. Surfacing it here makes it
+                  clear this row is the CURRENT view (not a stale cache)
+                  and gives admins a tangible handle when discussing
+                  which draft supersedes an earlier one. */}
+              {variation.version != null && (
+                <span
+                  aria-label="Current version"
+                  title="Current version — every save bumps this counter"
+                  style={{
+                    fontSize: '0.7rem',
+                    fontWeight: 600,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.04em',
+                    color: '#fff',
+                    background: 'var(--success, #16a34a)',
+                    padding: '0.15rem 0.45rem',
+                    borderRadius: 4,
+                  }}
+                >
+                  v{variation.version}
+                </span>
+              )}
             </div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.5rem', flexShrink: 0 }}>

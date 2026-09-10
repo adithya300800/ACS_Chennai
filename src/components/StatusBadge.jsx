@@ -22,6 +22,16 @@ const DEFAULT_STATUS_MAP = {
   ACKNOWLEDGED: 'dpr-status-review',
   IN_PROGRESS: 'dpr-status-review',
   PENDING_VERIFICATION: 'dpr-status-review',
+  // S6/UI-4: Inspection CLOSED is the terminal/done state — green.
+  // Distinct from OPEN (draft/grey). Note this is the INSPECTION
+  // status enum token, not the ComplianceRecord "actionStatus"
+  // field (whose values are Title-case user-facing strings like
+  // 'Pending' / 'Under Investigation' / 'Action Taken' / 'Closed'
+  // and are not passed through this map). The two Closed notions
+  // happen to share a tone (both terminal) but live in separate
+  // value spaces — no key collision is possible because the
+  // compliance field never reaches StatusBadge with an uppercase
+  // enum token.
   CLOSED: 'dpr-status-approved',
 
   // Leave

@@ -239,6 +239,29 @@ export default function DrawingDetail() {
             <span style={{ fontSize: '0.85em', color: 'var(--steel)', fontWeight: 500 }}>
               Rev {drawing.revision}
             </span>
+            {/* S6/UI-3: surface that this row is the CURRENT revision (vs.
+                historical entries in the supersedes chain below). The page
+                renders a single revision at a time, but a viewer landing
+                here from a stale link benefits from seeing "Current" up
+                top before they audit the PDF + stamps. */}
+            {drawing.status !== 'SUPERSEDED' && (
+              <span
+                aria-label="Current revision"
+                title="Current revision — supersedes any prior revisions listed below"
+                style={{
+                  fontSize: '0.7rem',
+                  fontWeight: 600,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.04em',
+                  color: '#fff',
+                  background: 'var(--success, #16a34a)',
+                  padding: '0.15rem 0.45rem',
+                  borderRadius: 4,
+                }}
+              >
+                Current
+              </span>
+            )}
             <StatusBadge status={drawing.status} map={DRAWING_STATUS_MAP} />
           </h1>
           {drawing.title && (
@@ -375,6 +398,13 @@ export default function DrawingDetail() {
               <h3 style={{ fontSize: '0.95rem', color: 'var(--navy)', margin: '0 0 0.5rem' }}>
                 Supersedes
               </h3>
+              {/* S6/UI-3: each prior revision is a HISTORICAL stamp of
+                  this drawing number. The label sits in the section
+                  header so a viewer doesn't mistake a chain entry for
+                  the current revision above. */}
+              <div style={{ fontSize: '0.75rem', color: 'var(--steel)', marginBottom: '0.5rem' }}>
+                Historical revisions (no longer in effect)
+              </div>
               <ol style={{ paddingLeft: '1.1rem', margin: 0, display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
                 {chain.map((p) => (
                   <li key={p.id} style={{ fontSize: '0.85rem' }}>
@@ -383,6 +413,23 @@ export default function DrawingDetail() {
                     </Link>
                     <span style={{ color: 'var(--steel)' }}> · Rev {p.revision} · {p.status}</span>
                     <span style={{ color: 'var(--steel)' }}> · {formatDate(p.issuedDate)}</span>
+                    <span
+                      aria-label="Historical revision"
+                      title="Historical revision — superseded by the current row above"
+                      style={{
+                        marginLeft: '0.4rem',
+                        fontSize: '0.65rem',
+                        fontWeight: 600,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.04em',
+                        color: 'var(--steel)',
+                        background: '#f1f5f9',
+                        padding: '0.1rem 0.35rem',
+                        borderRadius: 3,
+                      }}
+                    >
+                      Historical
+                    </span>
                   </li>
                 ))}
               </ol>

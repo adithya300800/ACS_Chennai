@@ -394,6 +394,73 @@ export default function VariationOrdersAdmin() {
                   <StatusBadge status={v.status} map={VARIATION_STATUS_MAP} />
                 </div>
 
+                {/* S6/UI-4: when the VO is APPROVED, surface the
+                    internal-vs-client approval split directly on the
+                    card so a billing engineer scanning the queue can
+                    see at a glance whether this row still needs a
+                    client decision before invoicing. Mirrors the
+                    detail-page timeline ("Internal approval" vs
+                    "Approved") but here it's a coloured strip the
+                    eye can scan across the grid.
+
+                    Colours: amber strip = internal approval recorded
+                    but client decision still outstanding (do NOT
+                    invoice yet); green tick = client approval
+                    captured (or not required). The status badge alone
+                    is insufficient because both states render as
+                    green APPROVED — a previous reader couldn't tell
+                    them apart without opening the detail page. */}
+                {v.status === 'APPROVED' && (
+                  <div
+                    role="status"
+                    aria-label={
+                      v.clientApprovalRequired
+                        ? 'Internal approval only — awaiting client decision'
+                        : 'Client-approved'
+                    }
+                    title={
+                      v.clientApprovalRequired
+                        ? 'Admin approved internally — client has not yet authorised. Do not invoice.'
+                        : 'Client approval captured (or not required). Safe to invoice.'
+                    }
+                    style={{
+                      marginTop: '0.5rem',
+                      padding: '0.35rem 0.55rem',
+                      fontSize: '0.78rem',
+                      fontWeight: 600,
+                      borderRadius: 4,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
+                      ...(v.clientApprovalRequired
+                        ? {
+                            background: '#fffbeb',
+                            color: '#78350f',
+                            border: '1px solid #fde68a',
+                            borderLeft: '3px solid #d97706',
+                          }
+                        : {
+                            background: '#dcfce7',
+                            color: '#166534',
+                            border: '1px solid #86efac',
+                            borderLeft: '3px solid #16a34a',
+                          }),
+                    }}
+                  >
+                    {v.clientApprovalRequired ? (
+                      <>
+                        <span aria-hidden="true">⏳</span>
+                        Internal approval only — awaiting client
+                      </>
+                    ) : (
+                      <>
+                        <span aria-hidden="true">✓</span>
+                        Client-approved
+                      </>
+                    )}
+                  </div>
+                )}
+
                 <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginTop: '0.5rem', gap: '0.5rem' }}>
                   <span style={{
                     fontFamily: "'Plus Jakarta Sans', sans-serif",
