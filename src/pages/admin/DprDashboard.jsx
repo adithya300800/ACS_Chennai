@@ -54,6 +54,178 @@ function PhotoThumb({ photo }) {
   );
 }
 
+// [S6/UI-rev] Inline expansion shown when an admin clicks "Review" on a
+// queue card. Mirrors the read-only detail layout that /portal/dpr/all
+// shows in its detail modal (ProjectExpandedPanel DprBody) so the admin
+// sees the same fields either way. Kept file-local — no cross-file
+// coupling, no shared components. The reviewers' Approve/Reject/Cancel
+// row lives in the parent card so it always sits directly below these
+// details.
+function InlineFieldGrid({ rows }) {
+  if (!rows || rows.length === 0) return null;
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+        gap: '0.45rem 1rem',
+        fontSize: '0.82rem',
+      }}
+    >
+      {rows.map(([label, value]) => (
+        <div key={label}>
+          <div
+            style={{
+              fontSize: '0.62rem',
+              color: 'var(--steel, #64748b)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+              marginBottom: '0.1rem',
+              fontWeight: 600,
+            }}
+          >
+            {label}
+          </div>
+          <div style={{ color: 'var(--navy, #0f172a)' }}>{value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BlockField({ label, value }) {
+  if (value == null || value === '') return null;
+  return (
+    <div>
+      <div
+        style={{
+          fontSize: '0.62rem',
+          color: 'var(--steel, #64748b)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.05em',
+          marginBottom: '0.25rem',
+          fontWeight: 600,
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          whiteSpace: 'pre-wrap',
+          color: 'var(--navy, #0f172a)',
+          fontSize: '0.82rem',
+          lineHeight: 1.45,
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function formatReviewWorkEntry(w) {
+  if (!w) return '';
+  if (typeof w === 'string') return `• ${w}`;
+  const desc = w.description || w.work || w.item || '';
+  const qty = w.quantity != null ? w.quantity : w.qty;
+  const unit = w.unit || '';
+  if (!desc) return JSON.stringify(w);
+  if (qty != null && unit) return `• ${desc} — ${qty} ${unit}`;
+  if (qty != null) return `• ${desc} — ${qty}`;
+  return `• ${desc}`;
+}
+
+function formatReviewCustomSection(s) {
+  if (!s) return '';
+  if (typeof s === 'string') return s;
+  const title = s.title || s.heading || '';
+  const body = s.body || s.content || '';
+  if (title && body) return `${title}\n${body}`;
+  return title || body || JSON.stringify(s);
+}
+
+function formatReviewAudit(by, at) {
+  if (!by) return '';
+  const name = by.name || by.email || by.id || '—';
+  if (!at) return name;
+  const t = typeof at === 'string' ? at : (at instanceof Date ? at.toISOString() : '');
+  if (!t) return name;
+  return `${name} · ${formatShortDate(t)}`;
+}
+
+function FullDprDetails({ dpr }) {
+  const inlineRows = [];
+  if (dpr.location) inlineRows.push(['Location', dpr.location]);
+  if (dpr.contractor || dpr.contractorName) inlineRows.push(['Contractor', dpr.contractor || dpr.contractorName]);
+  if (dpr.weather) {
+    inlineRows.push(['Weather', dpr.temperature ? `${dpr.weather} · ${dpr.temperature}` : dpr.weather]);
+  }
+  if (dpr.boqItem?.description || dpr.boqItemId) {
+    inlineRows.push(['BOQ item', dpr.boqItem?.description || `BOQ #${dpr.boqItemId}`]);
+  }
+  if (dpr.drawing?.drawingNumber || dpr.drawingId) {
+    inlineRows.push([
+      'Drawing',
+      dpr.drawing?.drawingNumber ? `${dpr.drawing.drawingNumber} Rev ${dpr.drawingRev || '—'}` : `Drawing ${dpr.drawingId}`,
+    ]);
+  }
+
+  const blockRows = [];
+  if (dpr.notes) blockRows.push(['Notes', dpr.notes]);
+  if (dpr.workExecutedToday) blockRows.push(['Work executed today', dpr.workExecutedToday]);
+  if (dpr.workLocation) blockRows.push(['Work location', dpr.workLocation]);
+  if (dpr.manpowerSummary) blockRows.push(['Manpower', dpr.manpowerSummary]);
+  if (dpr.risksHindrances) blockRows.push(['Risks / hindrances', dpr.risksHindrances]);
+  if (dpr.materialsReceivedSummary) blockRows.push(['Materials received', dpr.materialsReceivedSummary]);
+  if (dpr.workEntries?.length) {
+    blockRows.push(['Work entries', dpr.workEntries.map(formatReviewWorkEntry).filter(Boolean).join('\n')]);
+  }
+  if (dpr.customSections?.length) {
+    blockRows.push(['Custom sections', dpr.customSections.map(formatReviewCustomSection).filter(Boolean).join('\n\n')]);
+  }
+
+  const auditRows = [];
+  if (dpr.submittedBy?.name) auditRows.push(['Submitted by', formatReviewAudit(dpr.submittedBy, dpr.submittedAt)]);
+  if (dpr.reviewedBy?.name) auditRows.push(['Reviewed by', formatReviewAudit(dpr.reviewedBy, dpr.reviewedAt)]);
+  if (dpr.approvedBy?.name) auditRows.push(['Approved by', formatReviewAudit(dpr.approvedBy, dpr.approvedAt)]);
+  if (dpr.rejectionReason) auditRows.push(['Rejection reason', dpr.rejectionReason]);
+  if (dpr.adminNotes) auditRows.push(['Admin notes', dpr.adminNotes]);
+
+  const hasAny =
+    inlineRows.length > 0 || blockRows.length > 0 || auditRows.length > 0;
+  if (!hasAny) return null;
+
+  return (
+    <div
+      style={{
+        marginBottom: '0.75rem',
+        padding: '0.6rem 0.75rem',
+        background: '#f8fafc',
+        border: '1px solid #e2e8f0',
+        borderRadius: 6,
+        display: 'grid',
+        gap: '0.6rem',
+      }}
+    >
+      {inlineRows.length > 0 && <InlineFieldGrid rows={inlineRows} />}
+      {blockRows.map(([label, value]) => (
+        <BlockField key={label} label={label} value={value} />
+      ))}
+      {auditRows.length > 0 && (
+        <div
+          style={{
+            borderTop: '1px solid #e2e8f0',
+            paddingTop: '0.5rem',
+            marginTop: '0.2rem',
+          }}
+        >
+          <InlineFieldGrid rows={auditRows} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DprDashboard() {
   useDocumentTitle('Daily Reports Review');
   const { accessToken, employee } = useAuth();
@@ -680,6 +852,13 @@ export default function DprDashboard() {
                   )}
                 </div>
               )}
+
+              {/* [S6/UI-rev] Inline expansion: when the admin clicks "Review",
+                  show the full DPR record details above the Approve/Reject
+                  form so they don't have to open the modal separately.
+                  Same field set as the DprAll read-only modal
+                  (ProjectExpandedPanel DprBody). */}
+              {reviewing === dpr.id && <FullDprDetails dpr={dpr} />}
 
               {/* Review actions */}
               {(dpr.status === 'SUBMITTED' || dpr.status === 'UNDER_REVIEW') && (
