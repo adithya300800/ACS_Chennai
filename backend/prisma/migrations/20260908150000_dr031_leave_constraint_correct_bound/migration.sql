@@ -13,8 +13,21 @@
 -- `+ 1` arithmetic AND `'[]'` bound literal. Confirmed locally with
 -- `pgsql-ast-parser`: the broken form is rejected at parse time and
 -- the fixed form parses cleanly. Deploy at commit cf697e7 was marked
--- `update_failed`; recovery is the bootstrap `migrate resolve` step
--- in start.sh (one-shot, idempotent).
+-- `update_failed`.
+--
+-- Recovery path: the bootstrap `migrate resolve --rolled-back` step
+-- runs once before the next `migrate deploy` so Prisma sees no
+-- errored rows and can re-apply the now-fixed SQL. Two places carry
+-- this recovery — pick one depending on which runs first:
+--
+--   1. backend/start.sh — the intended location per render.yaml
+--      (`startCommand: sh start.sh`). Idempotent, narrow, runs on
+--      every cold start. Will activate when the Render dashboard
+--      startCommand is re-synced from render.yaml.
+--   2. .github/workflows/backend-deploy.yml — "DR-031-SQLFIX bootstrap
+--      resolve" step. Runs in CI BEFORE the deploy trigger, so the
+--      triggered deploy has a clear ledger. This is the effective
+--      path while the dashboard is out of sync.
 -- The '[]' bound INCLUDES the upper endpoint, so the constraint range
 -- covers startDate..endDate+1 — one day BEYOND the actual leave. A
 -- valid request for the day AFTER the existing endDate was rejected

@@ -148,6 +148,47 @@ jobs:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
           DIRECT_DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
+      # [DR-031-SQLFIX 2026-09-10] Bootstrap recovery for the broken
+      # `''[]''` literal at lines 82/113 of migration
+      # 20260908150000_dr031_leave_constraint_correct_bound. The SQL
+      # is now fixed in the migration file, but the ledger still
+      # carries an errored row from the failed deploy at commit cf697e7
+      # (Prisma's `migrate deploy` refuses to read any migration file
+      # until the errored row is resolved — `Error: P3009`). This
+      # step runs `prisma migrate resolve --rolled-back` for the
+      # specific migration name to clear the errored state, so the
+      # subsequent deploy (CI-triggered below) can re-apply the
+      # now-fixed SQL.
+      #
+      # Idempotent:
+      #   - If the migration is in errored state: rc=0, row is cleared
+      #   - If the migration is in applied state: rc=non-zero, swallowed
+      #   - If the migration is rolled-back: rc=non-zero, swallowed
+      # After the first successful re-apply, this step is a no-op.
+      #
+      # Must run BEFORE the ledger inspection step below, otherwise the
+      # inspection would fail on this very migration now that it is in
+      # the KNOWN_BAD allowlist.
+      #
+      # Why this lives in CI, not start.sh: the live Render service
+      # config (dashboard) overrides render.yaml and currently runs
+      # `npx prisma migrate deploy && node src/index.js` directly,
+      # bypassing start.sh. render.yaml's `startCommand: sh start.sh`
+      # carries the bootstrap recovery for the next time the service
+      # is re-synced to render.yaml. Until then, CI is the only path
+      # that runs before `migrate deploy` hits the errored row.
+      - name: DR-031-SQLFIX bootstrap resolve (clear errored ledger row)
+        run: |
+          echo "[DR-031-SQLFIX] running one-shot bootstrap resolve…"
+          set +e
+          npx prisma migrate resolve --rolled-back 20260908150000_dr031_leave_constraint_correct_bound
+          RC=$?
+          set -e
+          echo "[DR-031-SQLFIX] migrate resolve rc=$RC (0=cleared errored row; non-zero=steady-state no-op)"
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+          DIRECT_DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+
       # [DR-032] Read-only migration-ledger inspection. Replaces the
       # previous LPR-029 step which auto-deleted allowlisted rows during
       # the workflow and used the non-existent `status` column from
