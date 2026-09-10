@@ -8,6 +8,7 @@ import { SUB_WORK_TYPE_OPTIONS } from './WorkTypes.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import BackButton from '../../components/BackButton.jsx';
 import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
+import SeverityBadge from '../../components/SeverityBadge.jsx';
 // Round-28 #7: full-screen photo lightbox with keyboard + swipe nav.
 import PhotoLightbox from '../../components/PhotoLightbox.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
@@ -132,18 +133,11 @@ export default function InspectionDetail() {
             <span className={`dpr-status-badge dpr-status-${(record.status || 'open').toLowerCase()}`}>
               {(record.status || 'OPEN').replace(/_/g, ' ')}
             </span>
-            {record.severity && (
-              <span style={{
-                padding: '2px 10px',
-                borderRadius: 12,
-                fontSize: '0.75rem',
-                fontWeight: 600,
-                color: record.severity === 'CRITICAL' ? '#dc2626' : record.severity === 'MAJOR' ? '#f59e0b' : '#64748b',
-                background: record.severity === 'CRITICAL' ? '#fee2e2' : record.severity === 'MAJOR' ? '#fef3c7' : '#f1f5f9',
-              }}>
-                {record.severity}
-              </span>
-            )}
+            {/* SOL DR-026: was an inline pill whose MAJOR palette
+                (#f59e0b on #fef3c7) failed WCAG AA at 1.9:1. Reuse the
+                shared badge — canonical severity meaning is preserved
+                (the raw enum stays in aria-label/title). */}
+            {record.severity && <SeverityBadge severity={record.severity} />}
           </div>
         </div>
 
@@ -295,33 +289,45 @@ export default function InspectionDetail() {
             </h3>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '0.5rem' }}>
               {record.photos.map((p, i) => (
-                <button
+                // SOL DR-026: the download anchor used to sit *inside* the
+                // open-lightbox <button> (axe nested-interactive). The
+                // wrapper is now a plain positioned div so the two controls
+                // are siblings, each reachable once by keyboard.
+                <div
                   key={p.id}
-                  type="button"
-                  onClick={() => setLightboxIndex(i)}
                   style={{
                     position: 'relative',
-                    display: 'block',
                     aspectRatio: '1',
                     borderRadius: 6,
                     overflow: 'hidden',
                     background: '#f1f5f9',
-                    padding: 0,
-                    border: 'none',
-                    cursor: 'pointer',
                   }}
-                  aria-label={`Open photo ${i + 1} of ${record.photos.length}`}
-                  title={p.caption || 'Open photo'}
                 >
-                  <img
-                    src={p.readUrl}
-                    alt={p.caption || 'Inspection photo'}
-                    loading="lazy"
-                    style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-                  />
+                  <button
+                    type="button"
+                    onClick={() => setLightboxIndex(i)}
+                    style={{
+                      display: 'block',
+                      width: '100%',
+                      height: '100%',
+                      background: 'none',
+                      padding: 0,
+                      border: 'none',
+                      cursor: 'pointer',
+                    }}
+                    aria-label={`Open photo ${i + 1} of ${record.photos.length}`}
+                    title={p.caption || 'Open photo'}
+                  >
+                    <img
+                      src={p.readUrl}
+                      alt={p.caption || 'Inspection photo'}
+                      loading="lazy"
+                      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                    />
+                  </button>
                   {/* R22.5: per-image download affordance. */}
                   <PhotoDownloadButton photo={p} label="Open inspection photo" />
-                </button>
+                </div>
               ))}
             </div>
           </div>

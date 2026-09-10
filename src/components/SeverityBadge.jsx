@@ -10,16 +10,26 @@ import React from 'react';
 // Renders nothing for null/undefined/empty so callers can drop in
 // `insp.severity` without guarding.
 
+// SOL DR-026: MINOR / MAJOR added. InspectionRecord.severity uses the
+// MINOR|MAJOR|CRITICAL vocabulary while the browse filters use
+// LOW|MEDIUM|HIGH|CRITICAL, so both live here. MAJOR previously rendered
+// as an inline amber-on-amber pill in InspectionDetail (#f59e0b on
+// #fef3c7 ≈ 1.9:1 — a live contrast failure); it now reuses the shared
+// .severity-pill-major palette (#854d0e on #fef3c7 ≈ 7.4:1).
 const SEVERITY_CLASS = {
   LOW: 'severity-pill severity-pill-low',
+  MINOR: 'severity-pill severity-pill-minor',
   MEDIUM: 'severity-pill severity-pill-medium',
+  MAJOR: 'severity-pill severity-pill-major',
   HIGH: 'severity-pill severity-pill-high',
   CRITICAL: 'severity-pill severity-pill-critical',
 };
 
 const SEVERITY_LABEL = {
   LOW: 'Low',
+  MINOR: 'Minor',
   MEDIUM: 'Medium',
+  MAJOR: 'Major',
   HIGH: 'High',
   CRITICAL: 'Critical',
 };

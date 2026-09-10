@@ -185,7 +185,10 @@ export default function InspectionList() {
           </Link>
         </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem' }}>
+        // SOL DR-026: the role="listitem" children below were orphaned —
+        // axe's `listitem` rule requires a role="list" (or <ul>/<ol>)
+        // parent. The grid keeps its layout; only the role is added.
+        <div role="list" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem' }}>
           {inspections.map((insp) => (
             // SOL DR-007: convert the wrapper from <Link> to <div role=listitem>
             // so the DRAFT row can host a Resume button as a sibling rather

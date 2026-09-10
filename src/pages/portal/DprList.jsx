@@ -1003,33 +1003,43 @@ export default function DprList() {
                       <strong style={{ fontSize: '0.9rem' }}>Photos ({expandedDpr.photos.length})</strong>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '0.5rem', marginTop: '0.5rem' }}>
                         {expandedDpr.photos.map((p, i) => (
-                          <button
+                          // SOL DR-026: download anchor un-nested from the
+                          // open-lightbox button (axe nested-interactive).
+                          <div
                             key={p.id}
-                            type="button"
-                            onClick={() => setLightboxIndex(i)}
                             style={{
                               position: 'relative',
-                              display: 'block',
                               aspectRatio: '1',
                               borderRadius: 6,
                               overflow: 'hidden',
                               background: '#f1f5f9',
-                              padding: 0,
-                              border: 'none',
-                              cursor: 'pointer',
                             }}
-                            aria-label={`Open photo ${i + 1} of ${expandedDpr.photos.length}`}
-                            title={p.caption || p.filename}
                           >
-                            <img
-                              src={p.readUrl}
-                              alt={p.caption || p.filename}
-                              loading="lazy"
-                              style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-                            />
+                            <button
+                              type="button"
+                              onClick={() => setLightboxIndex(i)}
+                              style={{
+                                display: 'block',
+                                width: '100%',
+                                height: '100%',
+                                background: 'none',
+                                padding: 0,
+                                border: 'none',
+                                cursor: 'pointer',
+                              }}
+                              aria-label={`Open photo ${i + 1} of ${expandedDpr.photos.length}`}
+                              title={p.caption || p.filename}
+                            >
+                              <img
+                                src={p.readUrl}
+                                alt={p.caption || p.filename}
+                                loading="lazy"
+                                style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                              />
+                            </button>
                             {/* R22.5: per-image download affordance. */}
                             <PhotoDownloadButton photo={p} />
-                          </button>
+                          </div>
                         ))}
                       </div>
                     </div>

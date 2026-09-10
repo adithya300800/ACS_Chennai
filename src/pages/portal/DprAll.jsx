@@ -314,25 +314,29 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '0.5rem' }}>
                   {dpr.photos.map((p, i) => (
-                    <button
-                      key={p.id || p.ulid}
-                      type="button"
-                      onClick={() => setLightboxIndex(i)}
-                      style={{
-                        position: 'relative',
-                        padding: 0,
-                        border: 'none',
-                        background: 'transparent',
-                        cursor: 'pointer',
-                        textAlign: 'left',
-                      }}
-                      aria-label={`Open photo ${i + 1} of ${dpr.photos.length}`}
-                    >
-                      <PhotoThumb photo={p} />
+                    // SOL DR-026: download anchor un-nested from the
+                    // open-lightbox button (axe nested-interactive).
+                    <div key={p.id || p.ulid} style={{ position: 'relative' }}>
+                      <button
+                        type="button"
+                        onClick={() => setLightboxIndex(i)}
+                        style={{
+                          display: 'block',
+                          width: '100%',
+                          padding: 0,
+                          border: 'none',
+                          background: 'transparent',
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                        }}
+                        aria-label={`Open photo ${i + 1} of ${dpr.photos.length}`}
+                      >
+                        <PhotoThumb photo={p} />
+                        {p.caption && <div style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>{p.caption}</div>}
+                      </button>
                       {/* R22.5: per-image download affordance on the modal. */}
                       <PhotoDownloadButton photo={p} />
-                      {p.caption && <div style={{ fontSize: '0.75rem', color: 'var(--steel)', marginTop: '0.25rem' }}>{p.caption}</div>}
-                    </button>
+                    </div>
                   ))}
                 </div>
               </div>

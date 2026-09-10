@@ -640,27 +640,33 @@ export default function DprDashboard() {
               {dpr.photos?.length > 0 && (
                 <div style={{ display: 'flex', gap: '0.375rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
                   {dpr.photos.slice(0, 4).map((photo, i) => (
-                    <button
+                    // SOL DR-026: the download anchor used to sit inside
+                    // this button (axe nested-interactive). Siblings now.
+                    <div
                       key={photo.id}
-                      type="button"
-                      // Round-28 #7: open in-page lightbox instead of new
-                      // tab. stopPropagation so the parent card doesn't
-                      // navigate when the admin taps a thumbnail.
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setLightbox({ photos: dpr.photos, index: i });
-                      }}
-                      style={{ position: 'relative', width: 56, height: 56, borderRadius: 6, background: '#f1f5f9', overflow: 'hidden', flexShrink: 0, display: 'block', padding: 0, border: 'none', cursor: 'pointer' }}
-                      title={photo.caption || 'Open photo'}
-                      aria-label={`Open photo ${i + 1} of ${dpr.photos.length}`}
+                      style={{ position: 'relative', width: 56, height: 56, borderRadius: 6, background: '#f1f5f9', overflow: 'hidden', flexShrink: 0 }}
                     >
-                      <PhotoThumb photo={photo} />
+                      <button
+                        type="button"
+                        // Round-28 #7: open in-page lightbox instead of new
+                        // tab. stopPropagation so the parent card doesn't
+                        // navigate when the admin taps a thumbnail.
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setLightbox({ photos: dpr.photos, index: i });
+                        }}
+                        style={{ width: '100%', height: '100%', display: 'block', padding: 0, border: 'none', background: 'none', cursor: 'pointer' }}
+                        title={photo.caption || 'Open photo'}
+                        aria-label={`Open photo ${i + 1} of ${dpr.photos.length}`}
+                      >
+                        <PhotoThumb photo={photo} />
+                      </button>
                       {/* R22.5: per-image download affordance on the queue
                           card thumbnail. Removing the download button here
                           would lose a feature engineers use frequently for
-                          evidence; keep it on top of the button. */}
+                          evidence; keep it beside the button. */}
                       <PhotoDownloadButton photo={photo} />
-                    </button>
+                    </div>
                   ))}
                   {dpr.photos.length > 4 && (
                     <button
