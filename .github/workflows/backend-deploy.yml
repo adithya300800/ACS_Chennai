@@ -290,8 +290,8 @@ jobs:
                 }
               } catch (e) {
                 console.error('[dr-032] inspection error (continuing):', e && e.message);
-                # Don't fail the workflow on a connection blip — the drift
-                # gate above is the authoritative schema check.
+                // Don't fail the workflow on a connection blip — the drift
+                // gate above is the authoritative schema check.
               } finally {
                 await p.\$disconnect();
               }
