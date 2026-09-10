@@ -31,7 +31,7 @@ const router = express.Router();
 const { requireAuth, requireAdmin, requireFreshAdmin } = require('../middleware/auth');
 const { mapPrismaError, parseStrictISODate, toDateOnly } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
-const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
+const { encodeInstantCursor, decodeInstantCursor, InvalidCursorError } = require('../lib/cursor');
 const { istMidnightUtcFromDateString, formatDateOnly } = require('../lib/dateOnly');
 
 function asyncHandler(fn) {
@@ -104,11 +104,18 @@ router.get('/', asyncHandler(async (req, res) => {
 
   const take = Math.min(parseInt(limit) || 20, 100);
 
+  // [DR-019] VO register same-day pagination — VariationOrder.createdAt is a
+  // timestamp, not a date. The previous date-only cursor silently
+  // truncated every row past the first 21 same-day VOs because the
+  // encoded `date` became UTC midnight and the seek predicate
+  // `(createdAt < midnight)` matched no row from 00:00:01 onward on
+  // that day. Switch to the instant-preserving codec so the seek carries
+  // the exact sub-day timestamp forward.
   let cursorWhere = {};
   if (cursor) {
     let decoded;
     try {
-      decoded = decodeCursor(cursor);
+      decoded = decodeInstantCursor(cursor);
     } catch (e) {
       if (e instanceof InvalidCursorError) {
         return res.status(400).json({ error: 'INVALID_CURSOR', message: e.message || 'Cursor is malformed' });
@@ -192,7 +199,11 @@ router.get('/', asyncHandler(async (req, res) => {
     let nextCursor = null;
     if (hasMore && lastItem && lastItem.id) {
       try {
-        nextCursor = encodeCursor(lastItem.createdAt, lastItem.id);
+        // [DR-019] Encode the exact createdAt instant (not just the
+        // calendar day) so the next page's seek can carry forward a
+        // sub-day timestamp. Using the date-only `encodeCursor` here
+        // would silently re-introduce the same-day skip bug.
+        nextCursor = encodeInstantCursor(lastItem.createdAt, lastItem.id);
       } catch (e) {
         console.error('Variation cursor encode failed', { err: e.message });
         nextCursor = null;

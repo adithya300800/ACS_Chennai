@@ -75,28 +75,59 @@ const SECTION_IDS = ['overview', 'boq', 'dprs', 'inspections', 'drawings', 'repo
 // rows behind the +N more affordance.
 const REPORTS_ACCORDION_CAP = 200;
 
+// [DR-019] Single-page increment for the "Load more" walker. Matches
+// the server's MAX_LIMIT cap so each click walks exactly one page.
+const REPORTS_PAGE_SIZE = 100;
+
 // [DR-022] Walk `/api/projects/:projectId/attachments` until the
 // server's `nextCursor` is null or the local cap is hit. The previous
 // single-shot fetch silently lost everything past row 100. The helper
 // is scoped to this file because the BOQ / DPR / Inspections sub-
 // sections each have their own pagination contract — keeping the
 // walker co-located avoids a leaky abstraction in `lib/api.js`.
-async function fetchAllAttachments(projectKey, accessToken, cap) {
+//
+// [DR-019] The walker now accepts an optional server-side `type`
+// filter and exposes whether the server still had more pages after
+// the local cap. Without the type filter, the SPA collected the first
+// 200 rows across ALL types and then filtered locally — which silently
+// returned "no X reports" for a project where the X-type rows lived
+// past the 200th position. With the filter on the wire, the walker
+// only collects matching rows. `exhausted === false` means the server
+// still has more pages; the UI renders "Load more" in that case.
+async function fetchAllAttachments(projectKey, accessToken, cap, typeFilter = null) {
   const PAGE_SIZE = 100; // matches the server's MAX_LIMIT cap.
   const collected = [];
   let cursor = null;
+  let exhausted = true;
   while (collected.length < cap) {
     const params = { limit: String(PAGE_SIZE) };
     if (cursor) params.cursor = cursor;
+    // [DR-019] Server-side type filter — the backend honours
+    // ?type=… as a single-enum predicate so the walker only collects
+    // matching rows. Sending the chip's type here means a project with
+    // 500 monthly + 1 weekly reports, filtered to WEEKLY, walks the
+    // weekly pages instead of getting stuck on the first 200 monthlies.
+    if (typeFilter) params.type = typeFilter;
     const resp = await api.getProjectAttachments(projectKey, params, accessToken);
     const rows = resp?.attachments || resp?.items || (Array.isArray(resp) ? resp : []);
     if (!Array.isArray(rows) || rows.length === 0) break;
     collected.push(...rows);
     const next = resp?.nextCursor;
-    if (!next) break;
+    if (!next) {
+      exhausted = true;
+      break;
+    }
     cursor = next;
+    // If the server told us there's a next page BUT we already hit
+    // the local cap, mark the walker as not-exhausted so the UI can
+    // offer a "Load more" button. We don't loop here — the parent
+    // effect calls this function with the same cap each time.
+    if (collected.length >= cap) {
+      exhausted = false;
+      break;
+    }
   }
-  return collected.slice(0, cap);
+  return { rows: collected.slice(0, cap), exhausted };
 }
 
 export default function ProjectExpandedPanel({ project, accessToken, onClose, onOpenProjectDetail }) {
@@ -128,7 +159,15 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
   const [boq, setBoq] = useState({ status: 'idle' });
   // R35: Project Reports attachment list. Same 5-state payload slot as the
   // other sections so the Section header can render count/empty-state.
+  // [DR-019] `hasMore` tracks whether the server still has pages past
+  // the local REPORTS_ACCORDION_CAP so the UI can render "Load more".
+  // `filterType` is lifted to the parent so the fetch effect can depend
+  // on it — sending the chip's type server-side is what fixes the
+  // "Walker stops at 200, locally claims exhaustive empty results for a
+  // type" bug.
   const [reports, setReports] = useState({ status: 'idle' });
+  const [reportsHasMore, setReportsHasMore] = useState(false);
+  const [reportsFilterType, setReportsFilterType] = useState(null);
 
   // Tile-expansion state — id of the row currently expanded within a
   // section, or null. Keeps the panel tidy when one DPR is open at a
@@ -141,7 +180,9 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
   const [drawingFormOpen, setDrawingFormOpen] = useState(false);
   const [drawingsRefreshKey, setDrawingsRefreshKey] = useState(0);
   // R35: bump to force a refetch of the reports sub-section after
-  // upload / delete (mirrors drawingsRefreshKey's role).
+  // upload / delete (mirrors drawingsRefreshKey's role). [DR-019] the
+  // refetch now respects the active filterType so an upload while
+  // filtered to WEEKLY doesn't reset the chip.
   const [reportsRefreshKey, setReportsRefreshKey] = useState(0);
 
   const projectKey = project.id || project.name;
@@ -252,12 +293,26 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
     // the accordion render. The cap is the *display* limit, not the
     // server's reachability limit — admins with >200 attachments on a
     // project get the first 200 plus a "+N more" note.
+    //
+    // [DR-019] The walker now also takes the lifted `reportsFilterType`
+    // so a type chip filters server-side. Without this, a project with
+    // 500 monthly + 1 weekly report, filtered to WEEKLY, would walk the
+    // first 200 monthly rows and report "no WEEKLY reports" — the X-type
+    // row lived at position 501 and never made it into the local
+    // collection. The `exhausted` return value drives a Load more
+    // affordance for the case where the server still has pages past the
+    // cap.
     if (projectKey) {
       tasks.push(
         (async () => {
           try {
-            const all = await fetchAllAttachments(projectKey, accessToken, REPORTS_ACCORDION_CAP);
-            if (mountedRef.current) setReports({ status: 'ready', data: all });
+            const { rows, exhausted } = await fetchAllAttachments(
+              projectKey, accessToken, REPORTS_ACCORDION_CAP, reportsFilterType,
+            );
+            if (mountedRef.current) {
+              setReports({ status: 'ready', data: rows });
+              setReportsHasMore(!exhausted);
+            }
           } catch (err) {
             if (mountedRef.current) setReports({ status: 'error', error: err?.message || 'Failed to load' });
           }
@@ -265,10 +320,11 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
       );
     } else {
       setReports({ status: 'ready', data: [] });
+      setReportsHasMore(false);
     }
 
     Promise.allSettled(tasks);
-  }, [projectKey, isRegistered, projectName, accessToken]);
+  }, [projectKey, isRegistered, projectName, accessToken, reportsFilterType]);
 
   // [Round-33+] Re-fetch only the drawings sub-section when the user
   // saves a new drawing via the inline "+ Add drawing" modal. We skip
@@ -295,17 +351,59 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
   // refetch when the user-triggered key bumps. R35.1 dropped the
   // `isRegistered` gate so discovered projects (projectKey = name) also
   // refetch after an upload. [DR-022] walks the cursor instead of
-  // fetching a single 50-row slice.
+  // fetching a single 50-row slice. [DR-019] honours the active
+  // `reportsFilterType` so the upload doesn't reset the chip.
   useEffect(() => {
     if (reportsRefreshKey === 0) return;
     if (!projectKey) return;
-    fetchAllAttachments(projectKey, accessToken, REPORTS_ACCORDION_CAP)
-      .then((rows) => { if (mountedRef.current) setReports({ status: 'ready', data: rows }); })
+    fetchAllAttachments(projectKey, accessToken, REPORTS_ACCORDION_CAP, reportsFilterType)
+      .then(({ rows, exhausted }) => {
+        if (mountedRef.current) {
+          setReports({ status: 'ready', data: rows });
+          setReportsHasMore(!exhausted);
+        }
+      })
       .catch((err) => {
         if (!mountedRef.current) return;
         setReports({ status: 'error', error: err?.message || 'Failed to load' });
       });
-  }, [reportsRefreshKey, projectKey, accessToken]);
+  }, [reportsRefreshKey, projectKey, accessToken, reportsFilterType]);
+
+  // [DR-019] Reset the lifted filterType when the project changes — a
+  // half-set chip from a previous accordion card shouldn't carry over
+  // into the next one. Mirrors the local useEffect that previously lived
+  // inside ReportSection.
+  useEffect(() => {
+    setReportsFilterType(null);
+  }, [projectKey]);
+
+  // [DR-019] Load-more walker — appends the next page onto the existing
+  // rows and updates `hasMore`. The walker keeps the active filterType
+  // so a project with 500 monthly + 1 weekly stays on WEEKLY across
+  // loads. We re-use fetchAllAttachments with a `cap` of `currentRows +
+  // PAGE_SIZE` to walk one more page; the underlying cursor logic is
+  // unchanged.
+  const loadMoreReports = useCallback(async () => {
+    if (!projectKey || !reportsHasMore) return;
+    try {
+      const next = await fetchAllAttachments(
+        projectKey,
+        accessToken,
+        reports.data.length + REPORTS_PAGE_SIZE,
+        reportsFilterType,
+      );
+      if (!mountedRef.current) return;
+      setReports({ status: 'ready', data: next.rows });
+      setReportsHasMore(!next.exhausted);
+    } catch (err) {
+      if (mountedRef.current) {
+        // Surface a toast if available — but ReportSection already has
+        // its own toast; the parent's toast is used as a fallback.
+        // eslint-disable-next-line no-console
+        console.warn('Load more reports failed', err?.message);
+      }
+    }
+  }, [projectKey, accessToken, reportsHasMore, reports.data.length, reportsFilterType]);
 
   const toggleSection = useCallback((id) => {
     setOpenSections((s) => ({ ...s, [id]: !s[id] }));
@@ -478,6 +576,14 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
             currentEmployeeId={currentEmployeeId}
             isAdmin={isAdmin}
             toast={toast}
+            // [DR-019] Lift filterType + hasMore + loadMore so the chip
+            // triggers a server-side re-fetch instead of a silent
+            // local-filter pass, and a project with >200 matching
+            // reports can be walked page-by-page via "Load more".
+            filterType={reportsFilterType}
+            onFilterTypeChange={setReportsFilterType}
+            hasMore={reportsHasMore}
+            onLoadMore={loadMoreReports}
             onUploaded={() => setReportsRefreshKey((k) => k + 1)}
             onDeleted={() => setReportsRefreshKey((k) => k + 1)}
           />
@@ -1132,10 +1238,12 @@ function DrawingSection({ drawings, isRegistered, projectKey, onAddDrawing }) {
 function ReportSection({
   reports, isRegistered, projectKey, accessToken,
   currentEmployeeId, isAdmin, toast, onUploaded, onDeleted,
+  // [DR-019] Controlled filterType + hasMore + loadMore — see parent for
+  // why these are lifted. The local-state version filtered on the
+  // client and silently mis-reported "no X reports" for X-type rows
+  // past the 200-row accordion cap.
+  filterType, onFilterTypeChange, hasMore, onLoadMore,
 }) {
-  // Local filter state — chip selection. `null` = show all.
-  const [filterType, setFilterType] = useState(null);
-
   // Upload form state. The 3-step state machine mirrors DPR/Inspection
   // photo uploads: 'idle' → 'sas' → 'uploading' → 'confirming' → 'idle'.
   // A single `phase` field drives button labels + progress bar render.
@@ -1147,7 +1255,9 @@ function ReportSection({
   const [uploadError, setUploadError] = useState(null);
 
   // Reset upload form when the project changes so a half-typed file
-  // from a previous accordion card doesn't leak across.
+  // from a previous accordion card doesn't leak across. [DR-019] no
+  // longer resets filterType — the parent owns that and resets it via
+  // its own effect on projectKey change.
   useEffect(() => {
     setUploadType(PROJECT_REPORT_TYPES[0]);
     setUploadFile(null);
@@ -1155,7 +1265,6 @@ function ReportSection({
     setUploadPhase('idle');
     setUploadProgress(0);
     setUploadError(null);
-    setFilterType(null);
   }, [projectKey]);
 
   // R35.1: removed the `if (!isRegistered)` early-return that gated the
@@ -1169,7 +1278,11 @@ function ReportSection({
   if (reports.status === 'error') return <ErrorHint>{reports.error}</ErrorHint>;
 
   const rows = reports.data || [];
-  const filtered = filterType ? rows.filter((r) => r.type === filterType) : rows;
+  // [DR-019] `filtered` is a no-op for the rendering now that the
+  // server-side type filter walks only matching rows. Kept as a derived
+  // const so the JSX below doesn't need a wider refactor; with the
+  // server filter on, `filterType` always matches `rows` already.
+  const filtered = rows;
 
   // ─── Upload validation ─────────────────────────────────────────────────
   // Client-side gate that mirrors the backend POST validation. The
@@ -1404,18 +1517,23 @@ function ReportSection({
       </div>
 
       {/* ─── Type filter chips ─────────────────────────────────────────── */}
+      {/* [DR-019] Chips are now controlled by the parent so the chip's
+          onClick triggers a server-side re-fetch with the new filter.
+          `onFilterTypeChange` may be undefined when ReportSection is
+          mounted standalone (rare — guards `?.` so the JSX doesn't
+          crash in tests / Storybook). */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center' }}>
         <FilterChip
           label="All"
           active={filterType === null}
-          onClick={() => setFilterType(null)}
+          onClick={() => onFilterTypeChange?.(null)}
         />
         {PROJECT_REPORT_TYPES.map((t) => (
           <FilterChip
             key={t}
             label={PROJECT_REPORT_TYPE_LABELS[t]?.short || t}
             active={filterType === t}
-            onClick={() => setFilterType(filterType === t ? null : t)}
+            onClick={() => onFilterTypeChange?.(filterType === t ? null : t)}
           />
         ))}
       </div>
@@ -1497,6 +1615,25 @@ function ReportSection({
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* [DR-019] "Load more" affordance — the parent's walker stopped
+          at REPORTS_ACCORDION_CAP; if the server's `nextCursor` was
+          still set after the local cap, render a button that walks
+          one more page. The button calls `onLoadMore` (parent-supplied)
+          which appends the next page onto `reports.data` and clears
+          the chip if the server reported exhaustion. */}
+      {hasMore && (
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '0.5rem 0 0' }}>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={onLoadMore}
+            aria-label="Load more reports"
+          >
+            Load more
+          </button>
         </div>
       )}
     </div>

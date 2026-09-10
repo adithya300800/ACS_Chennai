@@ -181,9 +181,103 @@ function parseDateOnly(value) {
   return dt;
 }
 
+/**
+ * Instant-preserving cursor codec for keyset pagination over a DateTime
+ * column (e.g. VariationOrder.createdAt).
+ *
+ * [DR-019] The shared `encodeCursor` above truncates a DateTime to
+ * `YYYY-MM-DD` (UTC midnight) so it can match a `@db.Date` column. That
+ * truncation silently dropped every same-day row past the cursor — for
+ * VOs raised on the same day, the cursor encoded only the calendar day,
+ * so the seek predicate `(createdAt < cursor.date)` matched nothing on
+ * that day and `(createdAt = cursor.date, id < cursor.id)` matched only
+ * same-instant rows. A project with 21 same-day VOs only returned the
+ * first page because every later row had `createdAt > cursor.date
+ * (midnight)` AND `createdAt != cursor.date (midnight)` — invisible to
+ * the seek. The fix: a separate codec that preserves the instant
+ * (unix-ms) so the seek can carry forward a sub-day timestamp and tie-
+ * break same-instant rows by id.
+ *
+ * Wire format (versioned to keep it future-proof):
+ *   base64url(JSON.stringify({ v: 1, ms: <unix ms>, id: <string> }))
+ *
+ * We do NOT alter the shared DATE codec — Drawing/DPR/Inspection still
+ * keyset on `(@db.Date, id)` and breaking that contract would regress
+ * their already-fixed DR-008 / DR-022 pages. Adding a new entry point
+ * keeps the two contracts independent.
+ *
+ * Threat model mirrors the shared codec: ids are bounded-length
+ * strings, unix-ms is a finite integer, the decoder throws on any
+ * malformed shape so a tampered cursor can't smuggle a payload past
+ * the route handler.
+ */
+function encodeInstantCursor(date, id) {
+  if (!(date instanceof Date)) {
+    throw new InvalidCursorError('date must be a Date instance (instant, not date-only)');
+  }
+  if (Number.isNaN(date.getTime())) {
+    throw new InvalidCursorError('date must be a valid Date');
+  }
+  if (typeof id !== 'string' || id.length === 0 || id.length > 128) {
+    throw new InvalidCursorError('id must be a non-empty string (max 128 chars)');
+  }
+  const json = JSON.stringify({ v: 1, ms: date.getTime(), id });
+  return Buffer.from(json, 'utf8').toString('base64url');
+}
+
+/**
+ * Decode an instant-preserving cursor produced by `encodeInstantCursor`.
+ *
+ * Returns `{ date: Date (with the exact instant), id: string }`. Throws
+ * `InvalidCursorError` on any malformed input — including a legacy
+ * date-only cursor (we reject `v` !== 1 so callers don't silently fall
+ * back to a wrong seek predicate).
+ *
+ * @param {string} cursor
+ * @returns {{ date: Date, id: string }}
+ */
+function decodeInstantCursor(cursor) {
+  if (typeof cursor !== 'string' || cursor.length === 0) {
+    throw new InvalidCursorError('cursor must be a non-empty string');
+  }
+  let raw;
+  try {
+    raw = Buffer.from(cursor, 'base64url').toString('utf8');
+  } catch {
+    throw new InvalidCursorError('cursor is not valid base64');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new InvalidCursorError('cursor is not valid JSON');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new InvalidCursorError('cursor JSON must be an object');
+  }
+  // Reject legacy date-only cursors so a hand-crafted or replayed
+  // old-format cursor fails loudly rather than silently truncating.
+  if (parsed.v !== 1) {
+    throw new InvalidCursorError('cursor.v must be 1 (instant codec)');
+  }
+  if (typeof parsed.ms !== 'number' || !Number.isFinite(parsed.ms) || !Number.isInteger(parsed.ms)) {
+    throw new InvalidCursorError('cursor.ms must be a finite integer (unix milliseconds)');
+  }
+  if (typeof parsed.id !== 'string' || parsed.id.length === 0 || parsed.id.length > 128) {
+    throw new InvalidCursorError('cursor.id must be a non-empty string (max 128 chars)');
+  }
+  const date = new Date(parsed.ms);
+  if (Number.isNaN(date.getTime())) {
+    throw new InvalidCursorError('cursor.ms is not a valid unix timestamp');
+  }
+  return { date, id: parsed.id };
+}
+
 module.exports = {
   encodeCursor,
   decodeCursor,
+  encodeInstantCursor,
+  decodeInstantCursor,
   InvalidCursorError,
   // exported for tests / reuse
   _parseDateOnly: parseDateOnly,

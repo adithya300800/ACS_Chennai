@@ -186,7 +186,16 @@ router.get('/', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const { projectName, projectId, isActive, limit = '50', cursor } = req.query;
 
-  const take = Math.min(parseInt(limit) || 50, LIST_MAX);
+  // [DR-019] Bound the positive limit — the previous `parseInt(limit) ||
+  // 50` accepted 0 / negatives (treated as 50) and non-finite strings
+  // (treated as 50) without warning. A caller sending `?limit=-5` got
+  // a 200 with 0 rows and an unfollowable cursor; `?limit=0` got the
+  // same. Cap at LIST_MAX and clamp non-positive / NaN to 50 so the
+  // walker's `hasMore = rows.length > take` never goes negative.
+  const parsedLimit = parseInt(limit, 10);
+  const take = Number.isFinite(parsedLimit) && parsedLimit > 0
+    ? Math.min(parsedLimit, LIST_MAX)
+    : 50;
 
   const where = {};
   if (projectName) {
@@ -212,10 +221,17 @@ router.get('/', asyncHandler(async (req, res) => {
     where.isActive = isActive === 'true';
   }
 
-  // [DR-022] Cursor codec — base64url(JSON({ projectName, itemCode })).
-  // Tiny inline shape because the shared cursor codec is date+id;
-  // re-using it here would loosen the wire contract for every other
-  // caller for a one-file consumer.
+  // [DR-019] Cursor codec — base64url(JSON({ projectName, itemCode, id })).
+  // The previous (projectName, itemCode) keyset silently dropped legacy
+  // rows whose itemCode was not unique within a project (the original
+  // BOQ bulk import allowed duplicate itemCodes for a short window in
+  // 2024): the `gt` seek matched zero rows with the same projectName +
+  // itemCode as the cursor row, so all duplicates past the cursor were
+  // unreachable from page 2 onward. The fix: add `id` as the third
+  // sort key + cursor field so the seek breaks ties deterministically.
+  // We don't switch to the shared `encodeCursor` codec because the BOQ
+  // sort key isn't a single DateTime — it would loosen the wire
+  // contract for every other caller.
   let cursorPredicate = null;
   if (cursor) {
     if (typeof cursor !== 'string') {
@@ -235,6 +251,12 @@ router.get('/', asyncHandler(async (req, res) => {
       if (typeof parsed.itemCode !== 'string' || parsed.itemCode.length === 0 || parsed.itemCode.length > 60) {
         throw new Error('bad itemCode');
       }
+      // [DR-019] id is required for the tie-break; reject legacy 2-field
+      // cursors so a hand-crafted old-format cursor fails loudly
+      // instead of silently dropping tied rows on the next page.
+      if (typeof parsed.id !== 'string' || parsed.id.length === 0 || parsed.id.length > 128) {
+        throw new Error('bad id');
+      }
       decoded = parsed;
     } catch {
       return res.status(400).json({
@@ -243,11 +265,15 @@ router.get('/', asyncHandler(async (req, res) => {
         message: 'cursor is malformed',
       });
     }
-    // (projectName > decoded.projectName) OR (projectName = decoded AND itemCode > decoded.itemCode).
+    // Keyset seek over (projectName, itemCode, id):
+    //   projectName > cursor.projectName
+    //   OR (projectName = cursor AND itemCode > cursor.itemCode)
+    //   OR (projectName = cursor AND itemCode = cursor AND id > cursor.id)
     cursorPredicate = {
       OR: [
         { projectName: { gt: decoded.projectName } },
         { projectName: decoded.projectName, itemCode: { gt: decoded.itemCode } },
+        { projectName: decoded.projectName, itemCode: decoded.itemCode, id: { gt: decoded.id } },
       ],
     };
   }
@@ -255,7 +281,9 @@ router.get('/', asyncHandler(async (req, res) => {
   try {
     const rows = await prisma.boqItem.findMany({
       where: { ...where, ...(cursorPredicate || {}) },
-      orderBy: [{ projectName: 'asc' }, { itemCode: 'asc' }],
+      // [DR-019] id added as final tie-breaker so the seek above is
+      // deterministic when (projectName, itemCode) has duplicates.
+      orderBy: [{ projectName: 'asc' }, { itemCode: 'asc' }, { id: 'asc' }],
       take: take + 1,
       include: {
         createdBy: { select: { id: true, name: true, email: true } },
@@ -271,6 +299,9 @@ router.get('/', asyncHandler(async (req, res) => {
       ? Buffer.from(JSON.stringify({
           projectName: last.projectName,
           itemCode: last.itemCode,
+          // [DR-019] id is the tie-break so legacy 2-field cursors
+          // would 400 next page; new cursors carry it forward.
+          id: last.id,
         }), 'utf8').toString('base64url')
       : null;
     res.json({ items: page, nextCursor });

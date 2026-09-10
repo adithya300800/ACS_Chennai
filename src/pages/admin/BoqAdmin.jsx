@@ -949,6 +949,25 @@ export default function BoqAdmin() {
         {appliedFilter && ` for project "${appliedFilter}"`}
       </div>
 
+      {/* [DR-019] Render the Load more button — the cursor walker above
+          already fetches the next page; this just exposes the affordance
+          so a BOQ table with >100 rows is reachable from the UI. The
+          button mirrors the DPR / Inspection drill-down patterns so the
+          affordance feels native to the admin surface. */}
+      {hasMore && (
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '0.5rem 0 1rem' }}>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={loadMoreItems}
+            disabled={loadingMore || !nextCursor}
+            aria-label="Load more BOQ items"
+          >
+            {loadingMore ? 'Loading…' : 'Load more'}
+          </button>
+        </div>
+      )}
+
       <BoqFormModal
         open={formOpen}
         initial={formInitial}
