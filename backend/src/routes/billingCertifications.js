@@ -34,6 +34,13 @@
 //                                              reason.
 //   POST   /:id/undispute                      DISPUTED → CERTIFIED. Clears
 //                                              disputeReason.
+//   POST   /:id/cancel-correction              [DR-016 followup] Abandon
+//                                              an in-flight DRAFT correction.
+//                                              Restores the parent's
+//                                              supersededAt = null and
+//                                              hard-deletes the correction
+//                                              row, in one transaction.
+//                                              Admin-only.
 //   DELETE /:id                                soft-delete via deletedAt.
 //                                              Idempotent (already-deleted
 //                                              returns 404 — matches
@@ -1811,6 +1818,96 @@ router.post('/:id/dispute', requireFreshAdmin, asyncHandler(async (req, res) => 
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to dispute billing certification' });
+  }
+}));
+
+// ─── POST /api/billing-certifications/:id/cancel-correction ────────────────
+// [DR-016 followup] Abandon an in-flight DRAFT correction.
+//
+// Operator escape hatch when a correction is abandoned mid-flow:
+//   - Refuses if the target row is not a correction (no
+//     parentCertificationId) — calling /cancel-correction on a non-correction
+//     would be a no-op + confusing audit signal. 400 NOT_A_CORRECTION.
+//   - Inside one $transaction:
+//       (a) restore the parent (supersededAt = null, version + 1) so it
+//           reappears in the active set, then
+//       (b) hard-delete the correction row.
+//   - Idempotent on the second call: the correction row is gone, so the
+//     findUnique above returns null and we 404 CERTIFICATION_NOT_FOUND.
+//   - Admin-only (requireFreshAdmin) — same auth gate as /correct /certify
+//     /dispute /undispute.
+//
+// [DR-019] Optimistic-concurrency pin on the parent restore: the WHERE
+// requires `supersededAt: { not: null }`, so a concurrent writer who
+// already restored the parent (or one who re-corrected and re-stamped
+// it) surfaces as `count !== 1` → 409 VERSION_CONFLICT. The hard-delete
+// on the correction is pinned on `(id, parentCertificationId)` so we
+// can't accidentally delete a row whose parent FK has been re-pointed.
+router.post('/:id/cancel-correction', requireFreshAdmin, asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+  const { id } = req.params;
+  if (!isValidUuid(id)) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'id must be a UUID' });
+  }
+  try {
+    const existing = await prisma.billingCertification.findUnique({ where: { id } });
+    if (!existing || existing.deletedAt) {
+      return res.status(404).json({
+        error: 'CERTIFICATION_NOT_FOUND',
+        code: 'CERTIFICATION_NOT_FOUND',
+        message: 'Billing certification not found',
+      });
+    }
+    if (!existing.parentCertificationId) {
+      return res.status(400).json({
+        error: 'NOT_A_CORRECTION',
+        code: 'NOT_A_CORRECTION',
+        message: 'This certification is not a correction (no parentCertificationId) — nothing to cancel.',
+      });
+    }
+    const parentId = existing.parentCertificationId;
+    const result = await prisma.$transaction(async (tx) => {
+      // 1) Restore the parent — clear supersededAt + bump version.
+      //    Conditional on (id, supersededAt: not null) so a stale caller
+      //    whose parent has already been restored (by a concurrent
+      //    cancel-correction) surfaces as count !== 1 → 409.
+      const restore = await tx.billingCertification.updateMany({
+        where: { id: parentId, supersededAt: { not: null } },
+        data: { supersededAt: null, version: { increment: 1 } },
+      });
+      if (restore.count !== 1) {
+        throw Object.assign(new Error('parent restoration conflict'), { code: 'P2025' });
+      }
+      // 2) Hard-delete the correction row. Pinned on the FK so we cannot
+      //    accidentally delete a row whose parentCertificationId was
+      //    re-pointed under us.
+      await tx.billingCertification.delete({
+        where: { id, parentCertificationId: parentId },
+      });
+      return { cancelled: true, restoredParentId: parentId };
+    });
+
+    res.json(result);
+  } catch (err) {
+    if (err && err.code === 'P2025') {
+      return res.status(409).json({
+        error: 'VERSION_CONFLICT',
+        code: 'VERSION_CONFLICT',
+        message: 'This certification was modified by another action. Please refresh and try again.',
+      });
+    }
+    console.error('[billing-certifications] cancel-correction failed', {
+      employeeHash: hashIdentifier(req.employeeId),
+      certificationId: id,
+      errCode: err?.code,
+      errMessage: err?.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to cancel correction' });
   }
 }));
 
