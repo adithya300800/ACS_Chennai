@@ -212,6 +212,14 @@ describe('R38.1 — sumKpiPayloads math (eval sanity)', () => {
     expect(e).toHaveProperty('inspections.byType');
     expect(e).toHaveProperty('boq.contractValue', 0);
     expect(e).toHaveProperty('boq.variancePct', 0);
+    // R38.1.1 — `boqVariance` is the long-shape field name the
+    // per-project /kpis endpoint emits (itemsCount, totalContractValue,
+    // ...). The BOQ tiles read from this shape; without the empty stub
+    // in this stub, the all-projects roll-up shows 0 across the BOQ row.
+    expect(e).toHaveProperty('boqVariance.itemsCount', 0);
+    expect(e).toHaveProperty('boqVariance.totalContractValue', 0);
+    expect(e).toHaveProperty('boqVariance.totalExecutedValue', 0);
+    expect(e).toHaveProperty('boqVariance.variancePercent', 0);
     expect(e).toHaveProperty('people.onLeaveTodayCount', 0);
     expect(Array.isArray(e.pendingReviewTrend)).toBe(true);
     expect(Array.isArray(e.warnings)).toBe(true);
@@ -293,5 +301,90 @@ describe('R38.1 — sumKpiPayloads math (eval sanity)', () => {
       undefined,
     ]);
     expect(out.dpr.submittedCount).toBe(1);
+  });
+
+  test('R38.1.1 — sumKpiPayloads mirrors summed BOQ into the long-shape boqVariance the tiles read', () => {
+    // The per-project /kpis endpoint returns boqVariance.itemsCount /
+    // totalContractValue / totalExecutedValue / variancePercent; the
+    // BOQ tiles in ProjectKpiView read from that long shape. After the
+    // sum passes, the rolled-up payload must mirror the short `boq`
+    // shapes into `boqVariance` so all-projects BOQ tiles render real
+    // numbers (without this copy every BOQ tile was 0 in the roll-up).
+    const { sumKpiPayloads } = evalSource();
+    const a = {
+      dpr: { submittedCount: 0, pendingReviewCount: 0, approvedCount: 0, rejectedCount: 0, draftCount: 0 },
+      inspections: { totalCount: 0, openCount: 0, byType: {} },
+      boq: { itemCount: 5, contractValue: 100000, executedValue: 130000, variancePct: 30 },
+      people: { onLeaveTodayCount: 0, pendingLeaveCount: 0, overdueTrainingCount: 0 },
+      pendingReviewTrend: [],
+      warnings: [],
+    };
+    const b = {
+      dpr: { submittedCount: 0, pendingReviewCount: 0, approvedCount: 0, rejectedCount: 0, draftCount: 0 },
+      inspections: { totalCount: 0, openCount: 0, byType: {} },
+      boq: { itemCount: 10, contractValue: 200000, executedValue: 100000, variancePct: -50 },
+      people: { onLeaveTodayCount: 0, pendingLeaveCount: 0, overdueTrainingCount: 0 },
+      pendingReviewTrend: [],
+      warnings: [],
+    };
+    const out = sumKpiPayloads([a, b]);
+    expect(out.boqVariance.itemsCount).toBe(15); // 5 + 10
+    expect(out.boqVariance.totalContractValue).toBe(300000); // 100k + 200k
+    expect(out.boqVariance.totalExecutedValue).toBe(230000); // 130k + 100k
+    expect(out.boqVariance.variancePercent).toBeCloseTo(-23.3333, 3); // recomputed from sum
+  });
+});
+
+// R38.1.1 — initial-mount race fix: when the dashboard lands on the
+// "All projects" sentinel, the first loadKpis runs BEFORE the project
+// list resolves, so projectsRef.current is [] and the fan-out produces
+// an empty payload (→ every tile 0). Pin the re-fire useEffect so a
+// future refactor doesn't drop this guard and silently re-break the
+// roll-up.
+describe('R38.1.1 — All-projects initial-mount race', () => {
+  test('Re-fires loadKpis when projects arrive in all-projects mode', () => {
+    // The effect must (a) be conditional on isAllProjects, (b) depend on
+    // projects.length, and (c) call the loadKpisRef helper. Pin all three.
+    // The regex tolerates an optional `.` (optional chaining `.?()`)
+    // between `current?` and `()` so source-formatter whitespace doesn't
+    // confuse the pin.
+    expect(dashboardSrc).toMatch(
+      /if\s*\(\s*isAllProjects\s*&&\s*projects\.length\s*>\s*0\s*\)\s*loadKpisRef\.current\?[\s.]*\(\s*\)/,
+    );
+    // Effect's deps are isAllProjects + projects.length (not the full
+    // projects array — the ref pattern keeps loadKpis stable, so we
+    // only need to know "did the list size change").
+    expect(dashboardSrc).toMatch(
+      /useEffect\(\s*\(\)\s*=>\s*\{[\s\S]*?loadKpisRef\.current\?[\s.]*\(\s*\)[\s\S]*?\},\s*\[isAllProjects,\s*projects\.length\]\s*\)/,
+    );
+  });
+});
+
+// R38.1.1 — ISRO crash fix: React #310 fires when recharts internal
+// hooks re-mount mid-render during a project switch. The minimum
+// defensive pattern is to force the chart Suspense boundaries to
+// remount on selection change, plus stabilise the `byType` reference
+// so recharts never sees a new ref for an unchanged value. Pin both.
+describe('R38.1.1 — Chart Suspense remounts on project change', () => {
+  test('Donut Suspense has key= that changes when selectedProject.name changes', () => {
+    expect(dashboardSrc).toMatch(
+      /<React\.Suspense\s+key=\{`donut-\$\{selectedProject\?\.name\s*\|\|\s*['"`]all['"`]\}`\}/,
+    );
+  });
+
+  test('Lazy charts Suspense has key= that changes when selectedProject.name changes', () => {
+    expect(dashboardSrc).toMatch(
+      /<React\.Suspense\s+key=\{`charts-\$\{selectedProject\?\.name\s*\|\|\s*['"`]all['"`]\}`\}/,
+    );
+  });
+
+  test('EMPTY_OBJ module constant is defined and used for chart byType refs', () => {
+    expect(dashboardSrc).toMatch(
+      /const\s+EMPTY_OBJ\s*=\s*Object\.freeze\(\s*\{\s*\}\s*\)/,
+    );
+    // And it's actually consumed by the donut's `byType` prop:
+    expect(dashboardSrc).toMatch(
+      /byType=\{kpis\.inspections\?\.byType\s*\?\?\s*EMPTY_OBJ\}/,
+    );
   });
 });

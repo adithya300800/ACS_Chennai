@@ -224,6 +224,15 @@ function formatINR(value) {
   return n.toLocaleString('en-IN', { maximumFractionDigits: 0 });
 }
 
+// R38.1.1 — stable empty-object reference for chart props. Recharts
+// infers prop-identity changes by reference; passing `{}` literal in
+// render creates a new ref each render and can trip React #310
+// ("Rendered more hooks than during the previous render") when the
+// selected project changes (recharts ResponsiveContainer's internal
+// hook tree re-mounts). A frozen module-level constant keeps the ref
+// stable so the recharts hook tree stays coherent across renders.
+const EMPTY_OBJ = Object.freeze({});
+
 // Variance % → status colour token. Diverging pair around 0%:
 //   negative  → under contract (good) → green
 //   positive  → overrun (bad)          → red
@@ -458,6 +467,14 @@ function emptyKpiPayload() {
     },
     inspections: { totalCount: 0, openCount: 0, byType: {} },
     boq: { itemCount: 0, contractValue: 0, executedValue: 0, variancePct: 0 },
+    // R38.1.1 — `boqVariance` is the field-name shape the per-project
+    // /projects/:id/kpis endpoint emits (itemsCount, totalContractValue,
+    // totalExecutedValue, variancePercent). The BOQ tiles read from it;
+    // without this stub the all-projects roll-up shows 0 across the
+    // whole BOQ row. We also keep the short `boq` shape so the
+    // aggregator's tests + the chart's internal field lookups both
+    // resolve.
+    boqVariance: { itemsCount: 0, totalContractValue: 0, totalExecutedValue: 0, variancePercent: 0 },
     people: { onLeaveTodayCount: 0, pendingLeaveCount: 0, overdueTrainingCount: 0 },
     cubeTests: { dueSoonCount: 0, overdueCount: 0, passedCount: 0 },
     pendingReviewTrend: [],
@@ -532,6 +549,17 @@ function sumKpiPayloads(payloads) {
   } else {
     out.boq.variancePct = 0;
   }
+  // R38.1.1 — mirror the summed BOQ into the `boqVariance` shape so the
+  // BOQ tiles (which read itemsCount / totalContractValue / etc.) render
+  // real numbers in the all-projects roll-up. The per-project endpoint
+  // emits this long-shape directly; the aggregated payload needs to
+  // match so the same tile renderers work in both modes.
+  out.boqVariance = {
+    itemsCount: out.boq.itemCount,
+    totalContractValue: out.boq.contractValue,
+    totalExecutedValue: out.boq.executedValue,
+    variancePercent: out.boq.variancePct,
+  };
   // Sort trend by date key so the chart's X axis stays monotonic.
   out.pendingReviewTrend = Array.from(trend.values()).sort((a, b) =>
     String(a.date).localeCompare(String(b.date)),
@@ -824,6 +852,16 @@ export default function ProjectDashboard() {
   useEffect(() => {
     if (selectedProject) loadKpis();
   }, [selectedProject, days, loadKpis]);
+
+  // R38.1.1 — re-fire loadKpis when the project list first resolves in
+  // all-projects mode. Initial-mount race: `loadProjects` returns AFTER
+  // `loadKpis`, so `projectsRef.current` is still `[]` when the fan-out
+  // runs (→ empty payload → every tile shows 0). Catching that race
+  // here lets the roll-up show real data without a manual Refresh.
+  useEffect(() => {
+    if (isAllProjects && projects.length > 0) loadKpisRef.current?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAllProjects, projects.length]);
 
   // R38: chart data — the three lists we need to aggregate on the
   // client. Loaded in parallel with the KPI call so a project switch
@@ -1430,10 +1468,14 @@ function ProjectKpiView({ kpis, loading, selectedProject, days, expandedTile, se
             glance at the chips it replaced. The donut itself is
             loaded via React.lazy so recharts only enters the chunk
             when an admin opens this page (see ProjectDashboardCharts.jsx
-            for the actual render + empty-state handling). */}
-        <React.Suspense fallback={<ChartLoadingPlaceholder variant="donut" />}>
+            for the actual render + empty-state handling). The `key`
+            forces a fresh recharts hook tree when the selection
+            changes, avoiding React #310 if props churn during a
+            same-shape transition. EMPTY_OBJ keeps the `byType` ref
+            stable when the inspections map is empty/undefined. */}
+        <React.Suspense key={`donut-${selectedProject?.name || 'all'}`} fallback={<ChartLoadingPlaceholder variant="donut" />}>
           <InspectionDonutCard
-            byType={kpis.inspections?.byType || {}}
+            byType={kpis.inspections?.byType ?? EMPTY_OBJ}
             totalCount={kpis.inspections?.totalCount ?? 0}
           />
         </React.Suspense>
@@ -1523,8 +1565,12 @@ function ProjectKpiView({ kpis, loading, selectedProject, days, expandedTile, se
           so they don't add ~50 kB gz to every admin page. While
           the chunk loads, the four ChartLoadingPlaceholder cards
           keep the page layout stable so the rest of the dashboard
-          doesn't shift. */}
+          doesn't shift. The `key` forces a fresh recharts hook tree
+          when the selection changes (sentinel→project or project→project),
+          avoiding React #310 that occurs when recharts ResponsiveContainer
+          re-mounts internal hooks during the same-shape prop churn. */}
       <React.Suspense
+        key={`charts-${selectedProject?.name || 'all'}`}
         fallback={
           <ChartLoadingPlaceholderGroup count={4} />
         }

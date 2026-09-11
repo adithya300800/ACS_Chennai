@@ -42,6 +42,14 @@ function prettyInspectionType(slug) {
     .join(' ');
 }
 
+// R38.1.1 — stable empty-object reference for chart props. Recharts
+// detects prop-identity changes by reference; passing `{}` literal
+// each render creates a new ref and can trip React #310 ("Rendered
+// more hooks than during the previous render") when the selected
+// project changes. Frozen module-level constant keeps the ref
+// stable so recharts internal hooks stay coherent across renders.
+const EMPTY_OBJ = Object.freeze({});
+
 // ChartSection — the .dpr-card shell for the chart panels. Mirrors
 // the TileSection heading style (uppercase, 0.78rem, steel,
 // 0.06em tracking) so the eye reads "Daily Reports / Inspections /
@@ -497,8 +505,8 @@ function ProjectDashboardCharts({
           can drop it into the section's children without
           re-mounting the section on a Suspense tick. */}
       <InspectionDonutCard
-        byType={kpis?.inspections?.byType || {}}
-        totalCount={kpis?.inspections?.totalCount || 0}
+        byType={kpis?.inspections?.byType ?? EMPTY_OBJ}
+        totalCount={kpis?.inspections?.totalCount ?? 0}
       />
       <ChartSection title="DPR activity" subtitle="Daily reports by status — last 30 days">
         <DashboardAreaChart
