@@ -102,18 +102,21 @@ describe('R38 — Project Dashboard chart integration', () => {
       // Suspense boundary so the page chrome stays interactive
       // while the recharts chunk streams in. The fallback is the
       // eagerly-loaded ChartLoadingPlaceholderGroup so we don't
-      // recurse into another lazy load. The `key={...}` R38.1.1
-      // prop on Suspense can sit between the open tag and the
-      // fallback — widen the regex to {0,250}.
+      // recurse into another lazy load. The R38.1.1 follow-up
+      // REMOVED a `key={...}` prop that was forcing a Suspense
+      // remount on every selection change — that pattern was
+      // causing React #310 inside recharts, not preventing it.
+      // Regex window widened to {0,250} to tolerate prop ordering.
       expect(dashboardSrc).toMatch(/React\.Suspense[\s\S]{0,250}ChartLoadingPlaceholderGroup/);
     });
 
     test('wraps the InspectionDonutCard inside its own Suspense boundary inside the Inspections TileSection', () => {
       // The donut lives inside the Inspections TileSection grid,
       // not after it, so it gets its own Suspense boundary with
-      // the donut-sized fallback (gridColumn: 1 / -1). The `key={...}`
-      // R38.1.1 prop can sit between Suspense and InspectionDonutCard;
-      // widen the regex to {0,250}.
+      // the donut-sized fallback (gridColumn: 1 / -1). The
+      // `key={...}` Suspense prop is intentionally absent (see
+      // above). Regex window widened to {0,250} to tolerate
+      // prop ordering between the open tag and the child.
       expect(dashboardSrc).toMatch(/React\.Suspense[\s\S]{0,250}InspectionDonutCard/);
       expect(dashboardSrc).toMatch(/InspectionDonutCard\s+byType=\{kpis\.inspections\?\.byType/);
       expect(dashboardSrc).toMatch(/totalCount=\{kpis\.inspections\?\.totalCount/);

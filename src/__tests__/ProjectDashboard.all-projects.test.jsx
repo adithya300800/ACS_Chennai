@@ -360,21 +360,27 @@ describe('R38.1.1 — All-projects initial-mount race', () => {
   });
 });
 
-// R38.1.1 — ISRO crash fix: React #310 fires when recharts internal
-// hooks re-mount mid-render during a project switch. The minimum
-// defensive pattern is to force the chart Suspense boundaries to
-// remount on selection change, plus stabilise the `byType` reference
-// so recharts never sees a new ref for an unchanged value. Pin both.
-describe('R38.1.1 — Chart Suspense remounts on project change', () => {
-  test('Donut Suspense has key= that changes when selectedProject.name changes', () => {
-    expect(dashboardSrc).toMatch(
-      /<React\.Suspense\s+key=\{`donut-\$\{selectedProject\?\.name\s*\|\|\s*['"`]all['"`]\}`\}/,
+// R38.1.1 — ISRO crash fix: React #310 ("Rendered more hooks than
+// during the previous render") fired when recharts internal hooks
+// re-mounted mid-render during a project switch. Two earlier attempts
+// (forcing the Suspense boundaries to remount via `key={...}`) actually
+// triggered the #310 instead of fixing it — Suspense + lazy chunks
+// interact badly with key-based remounts under recharts 3.10. The
+// load-bearing fix is to stabilise the `byType` reference: recharts
+// infers prop identity by Object.is, so a fresh `{}` literal each
+// render would churn the internal hook tree. A module-level frozen
+// EMPTY_OBJ keeps the ref stable across renders and across selection
+// changes. The Suspense wrappers are intentionally keyless now.
+describe('R38.1.1 — Stable EMPTY_OBJ for recharts byType prop', () => {
+  test('Donut Suspense does NOT force a key-based remount (would re-trigger #310)', () => {
+    // Pin the absence — a regression that re-adds the key={} would
+    // re-introduce the #310 crash the empty-obj stable ref is meant
+    // to prevent.
+    expect(dashboardSrc).not.toMatch(
+      /<React\.Suspense\s+key=\{`donut-\$\{selectedProject/,
     );
-  });
-
-  test('Lazy charts Suspense has key= that changes when selectedProject.name changes', () => {
-    expect(dashboardSrc).toMatch(
-      /<React\.Suspense\s+key=\{`charts-\$\{selectedProject\?\.name\s*\|\|\s*['"`]all['"`]\}`\}/,
+    expect(dashboardSrc).not.toMatch(
+      /<React\.Suspense\s+key=\{`charts-\$\{selectedProject/,
     );
   });
 

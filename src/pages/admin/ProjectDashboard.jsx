@@ -1468,12 +1468,12 @@ function ProjectKpiView({ kpis, loading, selectedProject, days, expandedTile, se
             glance at the chips it replaced. The donut itself is
             loaded via React.lazy so recharts only enters the chunk
             when an admin opens this page (see ProjectDashboardCharts.jsx
-            for the actual render + empty-state handling). The `key`
-            forces a fresh recharts hook tree when the selection
-            changes, avoiding React #310 if props churn during a
-            same-shape transition. EMPTY_OBJ keeps the `byType` ref
-            stable when the inspections map is empty/undefined. */}
-        <React.Suspense key={`donut-${selectedProject?.name || 'all'}`} fallback={<ChartLoadingPlaceholder variant="donut" />}>
+            for the actual render + empty-state handling). EMPTY_OBJ
+            keeps the `byType` ref stable when the inspections map is
+            empty/undefined — recharts infers prop-identity by reference,
+            so a fresh `{}` each render would otherwise churn the
+            internal hook tree. */}
+        <React.Suspense fallback={<ChartLoadingPlaceholder variant="donut" />}>
           <InspectionDonutCard
             byType={kpis.inspections?.byType ?? EMPTY_OBJ}
             totalCount={kpis.inspections?.totalCount ?? 0}
@@ -1565,12 +1565,11 @@ function ProjectKpiView({ kpis, loading, selectedProject, days, expandedTile, se
           so they don't add ~50 kB gz to every admin page. While
           the chunk loads, the four ChartLoadingPlaceholder cards
           keep the page layout stable so the rest of the dashboard
-          doesn't shift. The `key` forces a fresh recharts hook tree
-          when the selection changes (sentinel→project or project→project),
-          avoiding React #310 that occurs when recharts ResponsiveContainer
-          re-mounts internal hooks during the same-shape prop churn. */}
+          doesn't shift. Recharts internal hooks rely on stable
+          prop identity — EMPTY_OBJ in ProjectDashboardCharts.jsx
+          is the load-bearing piece that keeps `byType` referentially
+          stable when an inspection map is empty/undefined. */}
       <React.Suspense
-        key={`charts-${selectedProject?.name || 'all'}`}
         fallback={
           <ChartLoadingPlaceholderGroup count={4} />
         }
