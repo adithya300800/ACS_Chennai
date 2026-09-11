@@ -58,10 +58,12 @@ function DashboardDonutChart({
   );
   const hasData = totalValue > 0;
 
-  if (!hasData) {
-    return <EmptyDonutMessage message={emptyMessage} ariaLabel={ariaLabel} height={height} />;
-  }
-
+  // R38.1.1 — hooks MUST be called unconditionally. Recharts is
+  // sensitive to hook-count drift between renders ("Rendered more
+  // hooks than during the previous render" / #310). The byType map
+  // transitions from {} (loading) to populated (loaded) on the first
+  // KPI fetch, so config + legendRows must run before any early
+  // return even when we're about to bail out to the empty donut.
   // ChartConfig — one entry per slice. Shadcn's wrapper uses
   // `--color-<key>` so recharts' `Cell fill={...}` needs to point at
   // the same var. We pass the colour through both the config (for the
@@ -87,6 +89,10 @@ function DashboardDonutChart({
         .sort((a, b) => b.value - a.value),
     [safeData, totalValue],
   );
+
+  if (!hasData) {
+    return <EmptyDonutMessage message={emptyMessage} ariaLabel={ariaLabel} height={height} />;
+  }
 
   return (
     <div

@@ -71,12 +71,15 @@ function DashboardAreaChart({
   // every chart through this so a sparse project (no DPRs filed in
   // the last 30 days) gets a clean "No data yet" rather than a
   // broken Recharts render.
+  //
+  // R38.1.1 — hooks MUST be called unconditionally. Recharts is
+  // sensitive to hook-count drift between renders ("Rendered more
+  // hooks than during the previous render" / #310). The chart data
+  // often transitions from empty (loading) to populated (loaded) on
+  // the first KPI fetch, so we must always call useMemo + useId
+  // even when we're about to bail out to the empty-state message.
   const hasData = Array.isArray(data) && data.length > 0
     && data.some((row) => series.some((s) => Number(row[s.key]) > 0));
-
-  if (!hasData) {
-    return <EmptyChartMessage message={emptyMessage} ariaLabel={ariaLabel} />;
-  }
 
   // Config for the shadcn chart wrapper — one entry per series. Each
   // entry's `color` is resolved by ChartStyle into a `--color-<key>`
@@ -96,6 +99,10 @@ function DashboardAreaChart({
   // requires us to know the colour as a string (we use the same hex
   // the tokens define — the fallback in `var(--blue, #0066FF)` etc.).
   const gradId = useId().replace(/:/g, '');
+
+  if (!hasData) {
+    return <EmptyChartMessage message={emptyMessage} ariaLabel={ariaLabel} />;
+  }
 
   const defaultXFormatter = (value) => {
     if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) {

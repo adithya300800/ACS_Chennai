@@ -220,9 +220,47 @@ describe('R38 — Project Dashboard chart integration', () => {
       expect(areaChartSrc).toMatch(/hasData\s*=\s*Array\.isArray\(data\)/);
     });
 
+    test('DashboardAreaChart calls all hooks BEFORE the empty-state early-return (no #310)', () => {
+      // R38.1.1 — the real root cause of the React #310 was a
+      // conditional hook call: `useMemo` + `useId` sat AFTER
+      // `if (!hasData) return <EmptyChartMessage />`. When data
+      // went from empty → non-empty between renders, hooks appeared
+      // and recharts/React threw "Rendered more hooks than during
+      // the previous render". Pin the order so a future refactor
+      // doesn't re-introduce the bug.
+      const hasDataIdx = areaChartSrc.search(/hasData\s*=\s*Array\.isArray/);
+      const configIdx = areaChartSrc.search(/const\s+config\s*=\s*useMemo/);
+      const gradIdIdx = areaChartSrc.search(/const\s+gradId\s*=\s*useId/);
+      const earlyReturnIdx = areaChartSrc.search(/if\s*\(\s*!hasData\s*\)\s*\{/);
+      expect(hasDataIdx).toBeGreaterThan(-1);
+      expect(configIdx).toBeGreaterThan(-1);
+      expect(gradIdIdx).toBeGreaterThan(-1);
+      expect(earlyReturnIdx).toBeGreaterThan(-1);
+      expect(hasDataIdx).toBeLessThan(configIdx);
+      expect(configIdx).toBeLessThan(gradIdIdx);
+      expect(gradIdIdx).toBeLessThan(earlyReturnIdx);
+    });
+
     test('DashboardDonutChart renders the "No data yet" empty state when totalValue is 0', () => {
       expect(donutChartSrc).toMatch(/function\s+EmptyDonutMessage\b/);
       expect(donutChartSrc).toMatch(/const\s+totalValue\s*=\s*useMemo/);
+    });
+
+    test('DashboardDonutChart calls all hooks BEFORE the empty-state early-return (no #310)', () => {
+      // Same anti-pattern as DashboardAreaChart — `useMemo` for
+      // config + legendRows was after the `if (!hasData)` return.
+      // Pin the order here too.
+      const totalValueIdx = donutChartSrc.search(/const\s+totalValue\s*=\s*useMemo/);
+      const configIdx = donutChartSrc.search(/const\s+config\s*=\s*useMemo/);
+      const legendRowsIdx = donutChartSrc.search(/const\s+legendRows\s*=\s*useMemo/);
+      const earlyReturnIdx = donutChartSrc.search(/if\s*\(\s*!hasData\s*\)\s*\{/);
+      expect(totalValueIdx).toBeGreaterThan(-1);
+      expect(configIdx).toBeGreaterThan(-1);
+      expect(legendRowsIdx).toBeGreaterThan(-1);
+      expect(earlyReturnIdx).toBeGreaterThan(-1);
+      expect(totalValueIdx).toBeLessThan(configIdx);
+      expect(configIdx).toBeLessThan(legendRowsIdx);
+      expect(legendRowsIdx).toBeLessThan(earlyReturnIdx);
     });
 
     test('BoqTopNBar renders an inline empty-state when rows is empty', () => {
