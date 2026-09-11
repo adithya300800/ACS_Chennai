@@ -240,6 +240,34 @@ describe('kpiBuckets.byEmployeeWeek', () => {
     expect(byEmployeeWeek(null, 28).rows).toEqual([]);
     expect(byEmployeeWeek(undefined, 28).rows).toEqual([]);
   });
+
+  test('falls back to row.submittedBy.name when submittedByName is missing (live API shape)', () => {
+    // The /dpr list endpoint returns the related user as a nested
+    // object (`submittedBy: { id, name, email }`), NOT a flat
+    // `submittedByName` column. Without this fallback the heatmap
+    // would render CUIDs instead of names (the bug the user
+    // reported on 2026-09-10). Pin that both shapes work.
+    const rows = [
+      { submittedById: 'u1', submittedBy: { id: 'u1', name: 'Alice', email: 'a@x' }, reportDate: '2026-09-09' },
+      { inspectedById: 'u2', inspectedBy: { id: 'u2', name: 'Bob', email: 'b@x' }, reportDate: '2026-09-09' },
+    ];
+    const out = byEmployeeWeek(rows, 28, '2026-09-09');
+    expect(out.rows).toHaveLength(2);
+    const alice = out.rows.find((r) => r.employeeId === 'u1');
+    const bob = out.rows.find((r) => r.employeeId === 'u2');
+    expect(alice.employeeName).toBe('Alice');
+    expect(bob.employeeName).toBe('Bob');
+  });
+
+  test('flat fields still work (legacy / mock fixtures use submittedByName)', () => {
+    // Existing tests + future mocks still expect the flat shape to
+    // work. Verify it doesn't get dropped.
+    const rows = [
+      { submittedById: 'u1', submittedByName: 'Carol', reportDate: '2026-09-09' },
+    ];
+    const out = byEmployeeWeek(rows, 28, '2026-09-09');
+    expect(out.rows[0].employeeName).toBe('Carol');
+  });
 });
 
 describe('kpiBuckets.pendingReviewSparkline', () => {

@@ -202,7 +202,10 @@ export function byEmployeeWeek(rows, days = 28, endDay) {
     if (!row) return;
     const empId = row.submittedById || row.employeeId || row.inspectedById;
     if (!empId) return;
-    const empName = row.submittedByName || row.employeeName || row.inspectedByName || String(empId);
+    const empName = row.submittedByName || row.employeeName || row.inspectedByName
+      || (row.submittedBy && row.submittedBy.name)
+      || (row.inspectedBy && row.inspectedBy.name)
+      || String(empId);
     const dateVal = row.reportDate || row.date;
     if (typeof dateVal !== 'string') return;
     const day = dateVal.slice(0, 10);
