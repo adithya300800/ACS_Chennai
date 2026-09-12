@@ -197,7 +197,24 @@ function makePrisma() {
     // still drive the curated list. The DR-010 suite in
     // projects.dr010.test.js covers the assignment-only path.
     projectAssignment: {
-      findMany: jest.fn(async () => []),
+      // [S7/ISRO-LEAK] Active ProjectAssignment rows for USER. The
+      // historical-evidence narrowing alone is no longer enough to
+      // surface a project in ?scope=assigned — an active
+      // ProjectAssignment is REQUIRED. Alpha + Beta are assigned here
+      // so the curated list returns them (they also have child
+      // records, matching the live data shape). Delta + Gamma have no
+      // assignment row, so they must NOT appear (Delta has no child
+      // records either; Gamma has no child records).
+      findMany: jest.fn(async ({ where } = {}) => {
+        const rows = [
+          { projectId: TOUCHED_A, employeeId: USER_ID },
+          { projectId: TOUCHED_B, employeeId: USER_ID },
+        ];
+        if (where && where.employeeId) {
+          return rows.filter((r) => r.employeeId === where.employeeId);
+        }
+        return rows;
+      }),
     },
   };
 }
@@ -401,5 +418,82 @@ describe('Round-32.1 — ?scope=assigned excludes projects merely created (no ch
     const ids = res.body.projects.map((p) => p.id);
     expect(ids).toContain(TOUCHED_A);
     expect(ids).toContain(TOUCHED_B);
+  });
+});
+
+// ─── 6. S7/ISRO-LEAK — active ProjectAssignment is REQUIRED ─────────────────
+//
+// Live bug (2026-09-12): "The isro project employ has been updated and
+// rajesh kumar is not a part of it but that rajesh kumar my projects
+// still enlist that isro project for him."
+//
+// Root cause: the historical-evidence union (DPR + Inspection + BOQ +
+// VO + Drawing) was the inclusion criterion for ?scope=assigned, with
+// ProjectAssignment as one of SIX union sources. Removing Rajesh's
+// ProjectAssignment row did not remove ISRO from his picker because
+// his old DPR rows still satisfied the historical-evidence branch.
+//
+// Fix (S7/ISRO-LEAK): intersection, not union. The historical sources
+// are no longer inclusion criteria — they exist as a query-time audit
+// trail, but a project only surfaces in ?scope=assigned if there is an
+// ACTIVE ProjectAssignment row linking the employee to the project.
+// An employee assigned but with no child records still sees the
+// project (assignProj alone is sufficient).
+describe('S7/ISRO-LEAK — ?scope=assigned requires active ProjectAssignment', () => {
+  it('9. project with historical child records but NO ProjectAssignment is EXCLUDED', async () => {
+    // Live scenario: Rajesh filed DPRs against ISRO while assigned, then
+    // an admin removed his ProjectAssignment row. ISRO must NOT appear
+    // in his picker anymore — the historical evidence is no longer
+    // enough. Build a mock where TOUCHED_A has a DPR row but no
+    // ProjectAssignment row.
+    const prisma = makePrisma();
+    // Replace the default projectAssignment mock with an empty one for
+    // this test only — simulates "Rajesh was removed from the roster".
+    prisma.projectAssignment.findMany.mockResolvedValueOnce([]);
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .get('/api/projects?scope=assigned')
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    const ids = res.body.projects.map((p) => p.id);
+    expect(ids).not.toContain(TOUCHED_A);
+    expect(ids).not.toContain(TOUCHED_B);
+    expect(res.body.projects).toEqual([]);
+  });
+
+  it('10. project with active ProjectAssignment but NO child records is INCLUDED', async () => {
+    // Live scenario: admin allocates a brand-new project to an employee
+    // (ProjectAssignment row created) before the employee has filed any
+    // child records. The project must still appear — the roster is
+    // authoritative for new projects. Build a mock where CREATED_BY_USER
+    // has an active assignment row but no child records.
+    const prisma = makePrisma();
+    prisma.projectAssignment.findMany.mockResolvedValueOnce([
+      { projectId: CREATED_BY_USER, employeeId: USER_ID },
+    ]);
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .get('/api/projects?scope=assigned')
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    const ids = res.body.projects.map((p) => p.id);
+    expect(ids).toContain(CREATED_BY_USER);
+  });
+
+  it('11. intersection: projectAssignment.findMany is queried with employeeId filter', async () => {
+    // The fix doesn't remove the projectAssignment query — it now is
+    // the SOLE inclusion criterion. Pin the filter shape so a future
+    // refactor that drops the `employeeId` where clause (and returns
+    // the global roster) is caught here.
+    const prisma = makePrisma();
+    const app = buildApp(prisma);
+    await request(app)
+      .get('/api/projects?scope=assigned')
+      .set('Authorization', userJwt());
+    expect(prisma.projectAssignment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ employeeId: USER_ID }),
+      })
+    );
   });
 });

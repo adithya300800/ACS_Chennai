@@ -980,6 +980,12 @@ export const api = {
     api.get(`/projects/${projectId}/attachments/${attachmentId}/read-sas`, token),
   deleteProjectAttachment: (projectId, attachmentId, token) =>
     api.delete(`/projects/${projectId}/attachments/${attachmentId}`, token),
+  // [S7/MyReports] Admin-only review state machine. Body shape mirrors the
+  // backend PATCH handler: `{ status: 'APPROVED' | 'REVISION_REQUESTED' |
+  // 'REJECTED', reviewNotes?: string }`. reviewNotes is required for
+  // REVISION_REQUESTED + REJECTED (server enforces; 400 on omission).
+  reviewProjectAttachment: (projectId, attachmentId, payload, token) =>
+    api.patch(`/projects/${projectId}/attachments/${attachmentId}`, payload, token),
 
   // Project Reports upload — same SAS-mint + confirm pattern as drawings.
   // The `report/` prefix is preserved verbatim in the blob path so an R2

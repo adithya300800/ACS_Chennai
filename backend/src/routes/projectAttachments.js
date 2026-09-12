@@ -19,6 +19,9 @@
 //                                             drawings use).
 //   GET    /:attachmentId/read-sas           mint a 1-hour signed GET URL
 //                                             for the stored blob.
+//   PATCH  /:attachmentId                    admin-only state-machine review.
+//                                             Stamps status + reviewed_by_id +
+//                                             reviewed_at + review_notes.
 //   DELETE /:attachmentId                    soft-delete via deletedAt.
 //                                             Auth-gated to (admin OR
 //                                             uploader) — matches the Boq
@@ -63,7 +66,7 @@ const express = require('express');
 // default Express Router does NOT inherit parent params — without this
 // flag, :projectId would be undefined and every route would 404.
 const router = express.Router({ mergeParams: true });
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireFreshAdmin } = require('../middleware/auth');
 const { mapPrismaError } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
 const { randomUUID } = require('crypto');
@@ -120,6 +123,10 @@ const FIELD_MAX = {
   // [DR-001] Crockford base32 ULIDs are 26 chars; 30 leaves headroom for
   // any future prefix scheme without forcing a schema change.
   uploadIntentUlid: 30,
+  // [S7/MyReports] Review notes cap — admin-supplied reason for
+  // REVISION_REQUESTED + REJECTED. 2000 chars covers a detailed
+  // technical critique without bloating the audit column.
+  reviewNotes: 2000,
 };
 
 function isValidUuid(s) {
@@ -145,6 +152,14 @@ function serializeProjectAttachment(row) {
     uploadedById: row.uploadedById,
     uploadedAt: row.uploadedAt instanceof Date ? row.uploadedAt.toISOString() : row.uploadedAt,
     deletedAt: row.deletedAt instanceof Date ? row.deletedAt.toISOString() : row.deletedAt,
+    // [S7/MyReports] Admin review state — stamped atomically by
+    // PATCH /:attachmentId. Echoed for the admin action bar so the UI
+    // can hide/show Approve / Request Revision / Reject buttons based
+    // on the current state without a second GET.
+    status: row.status,
+    reviewedById: row.reviewedById,
+    reviewedAt: row.reviewedAt instanceof Date ? row.reviewedAt.toISOString() : row.reviewedAt,
+    reviewNotes: row.reviewNotes,
   };
 }
 
@@ -772,6 +787,160 @@ router.delete('/:attachmentId', asyncHandler(async (req, res) => {
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to delete attachment' });
+  }
+}));
+
+// ─── PATCH /api/projects/:projectId/attachments/:attachmentId ───────────────
+// Admin-only review state machine (S7/MyReports, 2026-09-12).
+//
+// User feedback: the Project Reports page exposes upload + list +
+// download + delete, but admins had no way to Approve / Request
+// Revision / Reject a submitted report. Every uploaded report sat in
+// the same implicit "unreviewed" state forever. This endpoint closes
+// the loop — admins get a one-click state change with an optional
+// reason, mirroring InspectionDetail's admin action bar (R36).
+//
+// State machine (validated server-side):
+//
+//   PENDING_REVIEW ──► APPROVED          (closes the review)
+//   PENDING_REVIEW ──► REVISION_REQUESTED (carries reviewNotes)
+//   PENDING_REVIEW ──► REJECTED           (carries reviewNotes)
+//   REVISION_REQUESTED ──► APPROVED      (admin accepts the revised copy)
+//   REVISION_REQUESTED ──► REJECTED      (admin gives up)
+//
+//   APPROVED is terminal — re-approving an already-approved row is a
+//   no-op 200 (idempotent), but transitioning APPROVED → anything else
+//   is a 409 INVALID_TRANSITION (audit semantic: a closed review
+//   cannot be silently re-opened). REJECTED is also terminal.
+//
+// reviewNotes is REQUIRED for REVISION_REQUESTED and REJECTED (so the
+// uploader knows what to change), OPTIONAL for APPROVED (free-text
+// audit note), and IGNORED on no-op re-approvals.
+//
+// `requireFreshAdmin` is intentional — mirrors the DR-001 / R36 admin
+// mutator contract: a stale JWT could carry isAdmin=true after an
+// admin was demoted. Re-reading Employee.isAdmin from the DB on every
+// mutation keeps the action bar's contract honest.
+//
+// 200 → attachment (serialized)
+// 400 → VALIDATION_ERROR (bad UUID, bad status, missing notes, notes too long)
+// 403 → NOT_ADMIN
+// 404 → ATTACHMENT_NOT_FOUND
+// 409 → INVALID_TRANSITION
+// 503 → DB_UNAVAILABLE
+router.patch('/:attachmentId', requireFreshAdmin, asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  const projectId = readProjectId(req);
+  const { attachmentId } = req.params;
+  if (!isValidUuid(attachmentId)) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'attachmentId must be a UUID' });
+  }
+
+  const body = req.body || {};
+  const { status: nextStatus, reviewNotes: rawNotes } = body;
+
+  // Validate the requested target state. Anything outside this set is
+  // a 400 — the client is asking for a state we don't model.
+  const ALLOWED_TARGETS = new Set(['APPROVED', 'REVISION_REQUESTED', 'REJECTED']);
+  if (!nextStatus || !ALLOWED_TARGETS.has(nextStatus)) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      code: 'INVALID_STATUS',
+      message: 'status must be one of APPROVED, REVISION_REQUESTED, REJECTED',
+    });
+  }
+
+  // reviewNotes is optional for APPROVED, required for the other two.
+  // Trim + cap length to keep the audit column bounded.
+  let reviewNotes = null;
+  if (typeof rawNotes === 'string') {
+    reviewNotes = rawNotes.trim().slice(0, FIELD_MAX.reviewNotes);
+  }
+  if ((nextStatus === 'REVISION_REQUESTED' || nextStatus === 'REJECTED') && !reviewNotes) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      code: 'REVIEW_NOTES_REQUIRED',
+      message: 'reviewNotes is required when requesting revision or rejecting',
+    });
+  }
+
+  try {
+    const row = await prisma.projectAttachment.findUnique({
+      where: { id: attachmentId },
+      select: {
+        id: true,
+        projectId: true,
+        status: true,
+        deletedAt: true,
+        reviewedById: true,
+      },
+    });
+    if (!row || row.deletedAt) {
+      return res.status(404).json({
+        error: 'ATTACHMENT_NOT_FOUND',
+        code: 'ATTACHMENT_NOT_FOUND',
+        message: 'Attachment not found',
+      });
+    }
+    if (row.projectId !== projectId) {
+      return res.status(404).json({
+        error: 'ATTACHMENT_NOT_FOUND',
+        code: 'ATTACHMENT_NOT_FOUND',
+        message: 'Attachment not found',
+      });
+    }
+
+    // State machine validation. APPROVED + REJECTED are terminal — once
+    // a review closes it stays closed unless explicitly transitioned via
+    // REVISION_REQUESTED (which is itself only reachable from a still-
+    // open state).
+    const fromStatus = row.status || 'PENDING_REVIEW';
+    const ALLOWED_TRANSITIONS = {
+      PENDING_REVIEW: new Set(['APPROVED', 'REVISION_REQUESTED', 'REJECTED']),
+      REVISION_REQUESTED: new Set(['APPROVED', 'REJECTED']),
+      APPROVED: new Set(),
+      REJECTED: new Set(),
+    };
+    if (!ALLOWED_TRANSITIONS[fromStatus]?.has(nextStatus)) {
+      return res.status(409).json({
+        error: 'INVALID_TRANSITION',
+        code: 'INVALID_TRANSITION',
+        message: `Cannot transition from ${fromStatus} to ${nextStatus}`,
+        fromStatus,
+        toStatus: nextStatus,
+      });
+    }
+
+    // Stamp reviewedById + reviewedAt in lockstep with the status
+    // change so the audit row is consistent — never one without the
+    // other. reviewedAt is intentionally always set on a real
+    // transition; the client uses its presence to render "Reviewed by"
+    // copy.
+    const updated = await prisma.projectAttachment.update({
+      where: { id: attachmentId },
+      data: {
+        status: nextStatus,
+        reviewedById: req.employeeId,
+        reviewedAt: new Date(),
+        reviewNotes,
+      },
+    });
+    res.json(serializeProjectAttachment(updated));
+  } catch (err) {
+    console.error('[project-attachments] patch (review) failed', {
+      employeeHash: hashIdentifier(req.employeeId),
+      projectId,
+      attachmentId,
+      errCode: err?.code,
+      errMessage: err?.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to update review status' });
   }
 }));
 

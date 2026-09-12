@@ -46,6 +46,33 @@ import { uploadBlob, BlobUploadError } from '../../lib/blobUpload.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
+// [S7/MyReports] Admin single-record review transition matrix — mirrors the
+// ALLOWED_TRANSITIONS map in backend/src/routes/projectAttachments.js. The
+// shapes are kept aligned so a wire + UI drift trips one of the test pins.
+//
+//   PENDING_REVIEW     → APPROVED | REVISION_REQUESTED | REJECTED
+//   REVISION_REQUESTED → APPROVED | REJECTED
+//   APPROVED / REJECTED → terminal (no buttons shown)
+const APPROVE_ALLOWED_FROM = new Set(['PENDING_REVIEW', 'REVISION_REQUESTED']);
+const REVISE_ALLOWED_FROM = new Set(['PENDING_REVIEW']);
+const REJECT_ALLOWED_FROM = new Set(['PENDING_REVIEW', 'REVISION_REQUESTED']);
+
+// Visible label per status — mirrors the enum values the backend stamps.
+// Used in the per-row status badge so reviewers can tell at a glance what
+// state a report is in without re-fetching.
+const STATUS_LABEL = {
+  PENDING_REVIEW: 'Pending review',
+  APPROVED: 'Approved',
+  REVISION_REQUESTED: 'Revision requested',
+  REJECTED: 'Rejected',
+};
+const STATUS_COLOR = {
+  PENDING_REVIEW: { bg: '#fef3c7', fg: '#92400e' },
+  APPROVED: { bg: '#dcfce7', fg: '#166534' },
+  REVISION_REQUESTED: { bg: '#ffedd5', fg: '#9a3412' },
+  REJECTED: { bg: '#fee2e2', fg: '#991b1b' },
+};
+
 // Build the file-accept string from ACCEPTED_REPORT_TYPES — mirrors the
 // helper inline in ReportSection (ProjectExpandedPanel.jsx). Same MIME list,
 // same extension mapping. Kept local so the two upload surfaces stay
@@ -70,7 +97,11 @@ const FILE_ACCEPT = buildFileAccept();
 
 export default function MyProjectReports() {
   useDocumentTitle('Project Reports');
-  const { accessToken, employee } = useAuth();
+  // [S7/MyReports] DR-018 family guard — `isAdmin` is destructured
+  // alongside accessToken + employee so the admin action bar gate
+  // below can't silently demote every admin to a no-actions viewer
+  // if a future AuthContext refactor drops isAdmin from its value.
+  const { accessToken, employee, isAdmin } = useAuth();
   const toast = useToast();
 
   // ─── State ─────────────────────────────────────────────────────────────
@@ -93,6 +124,15 @@ export default function MyProjectReports() {
   const [uploadPhase, setUploadPhase] = useState('idle');
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState(null);
+
+  // [S7/MyReports] Admin review action bar state. actionBusy is a single
+  // in-flight flag (not per-row) — admins act on one row at a time and
+  // the flag prevents double-submit across the three buttons. reviewNotes
+  // is keyed by attachment id so multiple rows can have a half-typed
+  // reject reason without clobbering each other; the local map is reset
+  // after a successful review.
+  const [actionBusy, setActionBusy] = useState(false);
+  const [reviewNotesById, setReviewNotesById] = useState({});
 
   // ─── Data loaders ──────────────────────────────────────────────────────
   // Load assigned projects once on mount. The picker auto-selects the
@@ -262,8 +302,53 @@ export default function MyProjectReports() {
     }
   }
 
+  // [S7/MyReports] Admin review action handler — mirrors InspectionDetail's
+  // runAdminAction. `action` is one of 'APPROVED' | 'REVISION_REQUESTED' |
+  // 'REJECTED' (matches backend enum exactly so the wire body is the same
+  // string the backend ALLOWED_TRANSITIONS map keys on). On success the
+  // local row is patched in place — no full re-fetch — so a row's status
+  // pill flips immediately. If the backend 409s on INVALID_TRANSITION the
+  // optimistic patch is reverted via loadReports() fallback.
+  const runReviewAction = useCallback(async (att, action) => {
+    if (actionBusy) return;
+    const notes = (reviewNotesById[att.id] || '').trim();
+    if ((action === 'REVISION_REQUESTED' || action === 'REJECTED') && !notes) return;
+    setActionBusy(true);
+    // Optimistic in-place patch — the status pill + buttons re-render from
+    // the local state without a round trip.
+    setReports((prev) => prev.map((r) => (r.id === att.id
+      ? { ...r, status: action, reviewedAt: new Date().toISOString(), reviewNotes: notes || null }
+      : r
+    )));
+    try {
+      const projectKey = att.projectId || projects.find((p) => p.name === att.projectName)?.id || att.projectName;
+      const updated = await api.reviewProjectAttachment(
+        projectKey, att.id, { status: action, reviewNotes: notes || null }, accessToken,
+      );
+      setReports((prev) => prev.map((r) => (r.id === att.id ? { ...r, ...updated } : r)));
+      setReviewNotesById((prev) => {
+        if (!prev[att.id]) return prev;
+        const next = { ...prev };
+        delete next[att.id];
+        return next;
+      });
+      const verb = action === 'APPROVED' ? 'approved' : action === 'REJECTED' ? 'rejected' : 'sent for revision';
+      toast.push(`Report ${verb}.`, 'success');
+    } catch (err) {
+      // Optimistic patch was wrong — re-fetch to align UI with server state.
+      loadReports();
+      const msg = err?.message || `Failed to ${action.toLowerCase()} report.`;
+      if (err?.status !== 401) toast.push(msg, 'error');
+    } finally {
+      setActionBusy(false);
+    }
+  }, [actionBusy, reviewNotesById, projects, accessToken, toast, loadReports]);
+
   // ─── Render ───────────────────────────────────────────────────────────
-  const isAdmin = !!employee?.isAdmin;
+  // isAdmin comes from the useAuth() destructure at the top of the
+  // component (DR-018 family guard — pin the shape so a future
+  // AuthContext refactor can't silently demote every admin to a
+  // read-only viewer).
   const isUploading = uploadPhase !== 'idle';
 
   return (
@@ -448,6 +533,13 @@ export default function MyProjectReports() {
             {filteredReports.map((r) => {
               const canDelete = isAdmin || (employee && r.uploadedById === employee.id);
               const typeLabel = PROJECT_REPORT_TYPE_LABELS[r.type]?.short || r.type;
+              const rStatus = r.status || 'PENDING_REVIEW';
+              const canApprove = APPROVE_ALLOWED_FROM.has(rStatus);
+              const canRevise = REVISE_ALLOWED_FROM.has(rStatus);
+              const canReject = REJECT_ALLOWED_FROM.has(rStatus);
+              const showReviewBar = isAdmin && (canApprove || canRevise || canReject);
+              const rNotes = reviewNotesById[r.id] || '';
+              const statusPalette = STATUS_COLOR[rStatus] || STATUS_COLOR.PENDING_REVIEW;
               return (
                 <div
                   key={r.id}
@@ -485,6 +577,113 @@ export default function MyProjectReports() {
                       {` · ${formatShortDate(r.uploadedAt || r.createdAt) || '—'}`}
                       {r.sizeBytes ? ` · ${formatBytes(r.sizeBytes)}` : ''}
                     </div>
+                    {/* Status pill — visible to everyone (employee + admin)
+                        so the uploader can see whether their report is still
+                        pending review or has been actioned. The admin-only
+                        action bar sits below it. */}
+                    <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <span
+                        style={{
+                          fontSize: '0.7rem',
+                          fontWeight: 600,
+                          color: statusPalette.fg,
+                          background: statusPalette.bg,
+                          padding: '0.1rem 0.45rem',
+                          borderRadius: 999,
+                        }}
+                      >
+                        {STATUS_LABEL[rStatus] || rStatus}
+                      </span>
+                      {r.reviewedAt && (
+                        <span style={{ fontSize: '0.7rem', color: 'var(--steel)' }}>
+                          Reviewed {formatShortDate(r.reviewedAt)}
+                        </span>
+                      )}
+                      {r.reviewNotes && (
+                        <span
+                          style={{
+                            fontSize: '0.7rem',
+                            color: 'var(--steel)',
+                            fontStyle: 'italic',
+                            overflowWrap: 'anywhere',
+                            maxWidth: 360,
+                          }}
+                          title={r.reviewNotes}
+                        >
+                          “{r.reviewNotes.length > 80 ? `${r.reviewNotes.slice(0, 80)}…` : r.reviewNotes}”
+                        </span>
+                      )}
+                    </div>
+                    {/* [S7/MyReports] Admin-only review action bar. The
+                        combined gate `isAdmin && (canApprove || canRevise
+                        || canReject)` mirrors the DR-008 InspectionDetail
+                        pattern — keep this expression shape stable so the
+                        source-text test pin (test 2) keeps catching drift. */}
+                    {showReviewBar && (
+                      <div
+                        role="toolbar"
+                        aria-label="Admin review actions"
+                        style={{
+                          marginTop: 6,
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '0.4rem',
+                          flexWrap: 'wrap',
+                        }}
+                      >
+                        {canApprove && (
+                          <button
+                            type="button"
+                            className="btn btn-success btn-sm"
+                            disabled={actionBusy}
+                            onClick={() => runReviewAction(r, 'APPROVED')}
+                          >
+                            ✓ Approve
+                          </button>
+                        )}
+                        {(canRevise || canReject) && (
+                          <input
+                            type="text"
+                            value={rNotes}
+                            onChange={(e) => setReviewNotesById((prev) => ({ ...prev, [r.id]: e.target.value }))}
+                            placeholder={canRevise ? 'Reason for revision (required)' : 'Reject reason (required)'}
+                            maxLength={2000}
+                            aria-label="Review notes"
+                            disabled={actionBusy}
+                            style={{
+                              flex: '1 1 200px',
+                              minWidth: 0,
+                              padding: '0.3rem 0.5rem',
+                              fontSize: '0.8rem',
+                              border: '1px solid #cbd5e1',
+                              borderRadius: 4,
+                            }}
+                          />
+                        )}
+                        {canRevise && (
+                          <button
+                            type="button"
+                            className="btn btn-warning btn-sm"
+                            disabled={actionBusy || !rNotes.trim()}
+                            onClick={() => runReviewAction(r, 'REVISION_REQUESTED')}
+                            title={!rNotes.trim() ? 'Enter a reason to enable Request revision' : 'Send back to uploader for revision'}
+                          >
+                            ↺ Request revision
+                          </button>
+                        )}
+                        {canReject && (
+                          <button
+                            type="button"
+                            className="btn btn-danger btn-sm"
+                            disabled={actionBusy || !rNotes.trim()}
+                            onClick={() => runReviewAction(r, 'REJECTED')}
+                            title={!rNotes.trim() ? 'Enter a reason to enable Reject' : 'Reject this report'}
+                          >
+                            ✗ Reject
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <button
                     type="button"

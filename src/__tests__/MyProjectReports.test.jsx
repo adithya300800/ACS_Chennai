@@ -81,11 +81,13 @@ describe('S7/MyReports — Project Reports page source contracts', () => {
     expect(reportsIdx).toBeGreaterThan(inspectionIdx);
   });
 
-  test('5. useAuth() destructure exposes accessToken + employee', () => {
+  test('5. useAuth() destructure exposes accessToken + employee + isAdmin', () => {
     // DR-018 family guard — pin the shape so a future AuthContext refactor
-    // that drops either field can't silently break every call site.
+    // that drops accessToken / employee / isAdmin can't silently break
+    // every call site. isAdmin was added in S7/MyReports for the admin
+    // review action bar gate (test 20).
     expect(pageSrc).toMatch(
-      /const\s*\{\s*accessToken\s*,\s*employee\s*\}\s*=\s*useAuth\(\s*\)/
+      /const\s*\{\s*accessToken\s*,\s*employee\s*,\s*isAdmin\s*\}\s*=\s*useAuth\(\s*\)/
     );
   });
 
@@ -195,5 +197,95 @@ describe('S7/MyReports — Project Reports page source contracts', () => {
     // branch (or the owner branch) is caught here instead of via a live
     // permission escalation.
     expect(pageSrc).toMatch(/isAdmin\s*\|\|\s*\(\s*employee\s*&&\s*(?:r|att)\.uploadedById\s*===\s*employee\.id\s*\)/);
+  });
+
+  // ─── S7/MyReports — admin review action bar (S7 round-2, 2026-09-12) ──
+  // Backend PATCH endpoint added in projectAttachments.js; wrapper added
+  // in src/lib/api.js as api.reviewProjectAttachment. The bar mirrors
+  // InspectionDetail's three-button shape so the wire + UI state machine
+  // stays aligned by source-text contract.
+
+  test('18. three allowed-from Sets mirror the backend state machine', () => {
+    // APPROVE_ALLOWED_FROM = PENDING_REVIEW | REVISION_REQUESTED
+    // REVISE_ALLOWED_FROM  = PENDING_REVIEW
+    // REJECT_ALLOWED_FROM  = PENDING_REVIEW | REVISION_REQUESTED
+    expect(pageSrc).toMatch(
+      /const\s+APPROVE_ALLOWED_FROM\s*=\s*new Set\(\s*\[\s*['"]PENDING_REVIEW['"]\s*,\s*['"]REVISION_REQUESTED['"]\s*\]\s*\)/,
+    );
+    expect(pageSrc).toMatch(
+      /const\s+REVISE_ALLOWED_FROM\s*=\s*new Set\(\s*\[\s*['"]PENDING_REVIEW['"]\s*\]\s*\)/,
+    );
+    expect(pageSrc).toMatch(
+      /const\s+REJECT_ALLOWED_FROM\s*=\s*new Set\(\s*\[\s*['"]PENDING_REVIEW['"]\s*,\s*['"]REVISION_REQUESTED['"]\s*\]\s*\)/,
+    );
+  });
+
+  test('19. useAuth() destructure exposes isAdmin (DR-018 live regression guard)', () => {
+    // DR-018 (2026-09-08) — a missing `isAdmin` in AuthContext's value
+    // bounced every admin from admin-labelled routes. The admin review
+    // bar is gated on `isAdmin` — pin the destructure so a future
+    // AuthContext refactor fails this test instead of silently demoting
+    // every admin to a read-only viewer.
+    expect(pageSrc).toMatch(
+      /const\s*\{\s*accessToken\s*,\s*employee\s*,\s*isAdmin\s*\}\s*=\s*useAuth\(\s*\)/,
+    );
+  });
+
+  test('20. action bar gate: isAdmin AND any allowed-from set has the row status', () => {
+    // Mirrors the DR-008 InspectionDetail pattern. A future refactor
+    // that narrows this (e.g. drops REJECT_ALLOWED_FROM.has(...))
+    // would silently disable the Reject button on REVISION_REQUESTED
+    // rows. The combined gate can be inlined OR hoisted to a local
+    // `showReviewBar` const — both shapes pass this test.
+    expect(pageSrc).toMatch(
+      /(?:showReviewBar\s*=\s*isAdmin\s*&&\s*\(\s*canApprove\s*\|\|\s*canRevise\s*\|\|\s*canReject\s*\)|\{\s*isAdmin\s*&&\s*\(\s*canApprove\s*\|\|\s*canRevise\s*\|\|\s*canReject\s*\))/,
+    );
+  });
+
+  test('21. Approve / Reject / Request-revision buttons call api.reviewProjectAttachment', () => {
+    // The action verbs must match the backend enum exactly so the wire
+    // body is the same string the backend ALLOWED_TRANSITIONS map keys
+    // on. APPROVED / REVISION_REQUESTED / REJECTED — NOT lowercase.
+    expect(pageSrc).toMatch(
+      /onClick\s*=\s*\{\s*\(\s*\)\s*=>\s*runReviewAction\(\s*r\s*,\s*['"]APPROVED['"]\s*\)\s*\}/,
+    );
+    expect(pageSrc).toMatch(
+      /onClick\s*=\s*\{\s*\(\s*\)\s*=>\s*runReviewAction\(\s*r\s*,\s*['"]REVISION_REQUESTED['"]\s*\)\s*\}/,
+    );
+    expect(pageSrc).toMatch(
+      /onClick\s*=\s*\{\s*\(\s*\)\s*=>\s*runReviewAction\(\s*r\s*,\s*['"]REJECTED['"]\s*\)\s*\}/,
+    );
+    // runReviewAction must invoke api.reviewProjectAttachment with the
+    // project key + attachment id + body { status, reviewNotes }.
+    expect(pageSrc).toMatch(
+      /api\.reviewProjectAttachment\(\s*projectKey\s*,\s*att\.id\s*,\s*\{\s*status:\s*action\s*,\s*reviewNotes/,
+    );
+  });
+
+  test('22. Reject + Request-revision buttons are disabled while reviewNotes is empty', () => {
+    // Backend 400s with REVIEW_NOTES_REQUIRED if the notes are missing
+    // for those two actions — the buttons must stay disabled until the
+    // input has trimmed content. Pin the disabled expression shape so
+    // a future refactor that drops the trim() check is caught here.
+    expect(pageSrc).toMatch(
+      /disabled\s*=\s*\{[^}]*actionBusy\s*\|\|\s*!rNotes\.trim\(\s*\)[^}]*\}/,
+    );
+  });
+
+  test('23. an in-flight actionBusy flag guards double-click across all three buttons', () => {
+    // Sibling to the existing `uploadPhase !== idle` flag — same
+    // pattern as InspectionDetail's actionBusy. All three buttons must
+    // bind disabled={actionBusy}.
+    expect(pageSrc).toMatch(/const\s+\[actionBusy\s*,\s*setActionBusy\]\s*=\s*useState\(\s*false\s*\)/);
+    expect(pageSrc).toMatch(/if\s*\(\s*actionBusy\s*\)\s*return/);
+  });
+
+  test('24. reviewNotes input is bound to per-row state + capped at 2000 chars', () => {
+    // Backend slices reviewNotes to FIELD_MAX.reviewNotes (2000) and
+    // mirrors the cap on the input so a paste-bomb gets cut off before
+    // the round trip.
+    expect(pageSrc).toMatch(/value=\{rNotes\}/);
+    expect(pageSrc).toMatch(/onChange=\{[^}]*setReviewNotesById[^}]*\}/);
+    expect(pageSrc).toMatch(/maxLength=\{2000\}/);
   });
 });

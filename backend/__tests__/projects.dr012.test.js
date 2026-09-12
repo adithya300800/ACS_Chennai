@@ -182,7 +182,16 @@ function makePrisma() {
     boqItem: { findMany: jest.fn(async () => []) },
     variationOrder: { findMany: jest.fn(async () => []) },
     drawing: { findMany: jest.fn(async () => []) },
-    projectAssignment: { findMany: jest.fn(async () => []) },
+    // [S7/ISRO-LEAK] Live Tower is the active curated project the user
+    // has child records against — give them an active assignment row
+    // so the new intersection-based scope=assigned filter surfaces it.
+    // Without this, the test fixture (which only had child rows, no
+    // assignment) would fail after the S7 narrowing fix.
+    projectAssignment: {
+      findMany: jest.fn(async () => [
+        { projectId: ACTIVE_ID, employeeId: USER_ID },
+      ]),
+    },
     employee: { findUnique: jest.fn(async () => ({ id: ADMIN_ID, isAdmin: true })) },
   };
 }

@@ -127,10 +127,18 @@ function makePrisma() {
     // [DR-010] ProjectAssignment row for Epsilon Plaza. This is the
     // ONLY reason Epsilon should appear in the assigned list — USER
     // has no child records against it.
+    //
+    // [S7/ISRO-LEAK] The intersection-based narrowing requires an
+    // active ProjectAssignment row even for projects the employee has
+    // filed child records against. Zeta Heights (TOUCHED) has a DPR
+    // row from USER; mirror that with an active ProjectAssignment
+    // row so the regression guard (test 3) still passes after the
+    // S7 fix.
     projectAssignment: {
       findMany: jest.fn(async ({ where } = {}) => {
         let rows = [
           { projectId: ASSIGNED, employeeId: USER_ID, assignedAt: new Date('2026-09-01') },
+          { projectId: TOUCHED, employeeId: USER_ID, assignedAt: new Date('2026-08-01') },
         ];
         if (where && where.employeeId) {
           rows = rows.filter((r) => r.employeeId === where.employeeId);

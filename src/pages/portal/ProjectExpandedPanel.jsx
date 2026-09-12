@@ -1293,6 +1293,35 @@ function ReportSection({
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState(null);
 
+  // [S7/MyReports] Admin review state. actionBusy guards a double-submit
+  // across the three buttons. reviewNotesById is keyed by attachment id
+  // so multiple accordion rows can hold a half-typed reason without
+  // clobbering each other. Both are local to ReportSection so a parent
+  // re-render (e.g. accordion collapse) doesn't lose in-flight state.
+  const [actionBusy, setActionBusy] = useState(false);
+  const [reviewNotesById, setReviewNotesById] = useState({});
+
+  // [S7/MyReports] Admin single-record transition matrix — mirrors the
+  // ALLOWED_TRANSITIONS map in backend/src/routes/projectAttachments.js.
+  // Kept in lockstep with the same Sets in MyProjectReports.jsx so the
+  // two surfaces offer identical affordances for the same status.
+  const APPROVE_ALLOWED_FROM = new Set(['PENDING_REVIEW', 'REVISION_REQUESTED']);
+  const REVISE_ALLOWED_FROM = new Set(['PENDING_REVIEW']);
+  const REJECT_ALLOWED_FROM = new Set(['PENDING_REVIEW', 'REVISION_REQUESTED']);
+
+  const STATUS_LABEL = {
+    PENDING_REVIEW: 'Pending review',
+    APPROVED: 'Approved',
+    REVISION_REQUESTED: 'Revision requested',
+    REJECTED: 'Rejected',
+  };
+  const STATUS_COLOR = {
+    PENDING_REVIEW: { bg: '#fef3c7', fg: '#92400e' },
+    APPROVED: { bg: '#dcfce7', fg: '#166534' },
+    REVISION_REQUESTED: { bg: '#ffedd5', fg: '#9a3412' },
+    REJECTED: { bg: '#fee2e2', fg: '#991b1b' },
+  };
+
   // Reset upload form when the project changes so a half-typed file
   // from a previous accordion card doesn't leak across. [DR-019] no
   // longer resets filterType — the parent owns that and resets it via
@@ -1426,6 +1455,42 @@ function ReportSection({
     } catch (err) {
       const message = err?.message || 'Could not delete report';
       if (toast) toast.push(message, 'error');
+    }
+  }
+
+  // [S7/MyReports] Admin review action handler — mirrors the same shape
+  // as MyProjectReports.runReviewAction. On success we re-fetch the
+  // section (parent's `onReviewed` bumps the refresh key) so the row's
+  // status pill + buttons re-render from the server-canonical state.
+  // The optimistic in-place patch is intentionally avoided here because
+  // the row lives in the parent's `reports.data` array (immutable from
+  // the child's perspective) — easier to let the parent re-fetch.
+  async function runReviewAction(att, action) {
+    if (actionBusy) return;
+    const notes = (reviewNotesById[att.id] || '').trim();
+    if ((action === 'REVISION_REQUESTED' || action === 'REJECTED') && !notes) return;
+    setActionBusy(true);
+    try {
+      await api.reviewProjectAttachment(
+        projectKey, att.id, { status: action, reviewNotes: notes || null }, accessToken,
+      );
+      setReviewNotesById((prev) => {
+        if (!prev[att.id]) return prev;
+        const next = { ...prev };
+        delete next[att.id];
+        return next;
+      });
+      const verb = action === 'APPROVED' ? 'approved' : action === 'REJECTED' ? 'rejected' : 'sent for revision';
+      if (toast) toast.push(`Report ${verb}.`, 'success');
+      // Parent re-fetches via the same `onUploaded` callback — the
+      // shape is "review settled, please re-pull". The parent bumps
+      // reportsRefreshKey which causes its load effect to fire again.
+      onUploaded && onUploaded();
+    } catch (err) {
+      const msg = err?.message || `Failed to ${action.toLowerCase()} report.`;
+      if (toast && err?.status !== 401) toast.push(msg, 'error');
+    } finally {
+      setActionBusy(false);
     }
   }
 
@@ -1595,6 +1660,13 @@ function ReportSection({
         <div style={{ display: 'grid', gap: '0.3rem' }}>
           {filtered.map((att) => {
             const canDelete = isAdmin || (currentEmployeeId && att.uploadedById === currentEmployeeId);
+            const attStatus = att.status || 'PENDING_REVIEW';
+            const canApprove = APPROVE_ALLOWED_FROM.has(attStatus);
+            const canRevise = REVISE_ALLOWED_FROM.has(attStatus);
+            const canReject = REJECT_ALLOWED_FROM.has(attStatus);
+            const showReviewBar = isAdmin && (canApprove || canRevise || canReject);
+            const attNotes = reviewNotesById[att.id] || '';
+            const statusPalette = STATUS_COLOR[attStatus] || STATUS_COLOR.PENDING_REVIEW;
             return (
               <div
                 key={att.id}
@@ -1627,6 +1699,19 @@ function ReportSection({
                 <span style={{ color: 'var(--navy, #0f172a)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {att.title || att.filename}
                 </span>
+                <span
+                  title={STATUS_LABEL[attStatus] || attStatus}
+                  style={{
+                    fontSize: '0.65rem',
+                    fontWeight: 700,
+                    color: statusPalette.fg,
+                    background: statusPalette.bg,
+                    padding: '1px 7px',
+                    borderRadius: 999,
+                  }}
+                >
+                  {STATUS_LABEL[attStatus] || attStatus}
+                </span>
                 <span style={{ fontSize: '0.75rem', color: 'var(--steel, #64748b)' }}>
                   {formatBytes(att.sizeBytes)}
                 </span>
@@ -1650,6 +1735,82 @@ function ReportSection({
                   >
                     Delete
                   </button>
+                )}
+                {/* [S7/MyReports] Admin review action bar — same shape as
+                    the in-MyProjectReports surface. Renders when admin +
+                    the current status is in any allowed-from set.
+                    Approve / Request revision / Reject share a single
+                    actionBusy flag. The Reject/Request-revision buttons
+                    are disabled until the shared review-notes input has
+                    a non-empty trimmed value. */}
+                {showReviewBar && (
+                  <div
+                    role="toolbar"
+                    aria-label="Admin review actions"
+                    style={{
+                      flexBasis: '100%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.4rem',
+                      flexWrap: 'wrap',
+                      paddingTop: 4,
+                    }}
+                  >
+                    {canApprove && (
+                      <button
+                        type="button"
+                        className="btn btn-success btn-sm"
+                        disabled={actionBusy}
+                        onClick={() => runReviewAction(att, 'APPROVED')}
+                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+                      >
+                        ✓ Approve
+                      </button>
+                    )}
+                    {(canRevise || canReject) && (
+                      <input
+                        type="text"
+                        value={attNotes}
+                        onChange={(e) => setReviewNotesById((prev) => ({ ...prev, [att.id]: e.target.value }))}
+                        placeholder={canRevise ? 'Reason for revision (required)' : 'Reject reason (required)'}
+                        maxLength={2000}
+                        aria-label="Review notes"
+                        disabled={actionBusy}
+                        style={{
+                          flex: '1 1 180px',
+                          minWidth: 0,
+                          padding: '0.3rem 0.5rem',
+                          fontSize: '0.78rem',
+                          border: '1px solid #cbd5e1',
+                          borderRadius: 4,
+                        }}
+                      />
+                    )}
+                    {canRevise && (
+                      <button
+                        type="button"
+                        className="btn btn-warning btn-sm"
+                        disabled={actionBusy || !attNotes.trim()}
+                        onClick={() => runReviewAction(att, 'REVISION_REQUESTED')}
+                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+                        title={!attNotes.trim() ? 'Enter a reason to enable Request revision' : 'Send back to uploader for revision'}
+                      >
+                        ↺ Request revision
+                      </button>
+                    )}
+                    {canReject && (
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-sm"
+                        disabled={actionBusy || !attNotes.trim()}
+                        onClick={() => runReviewAction(att, 'REJECTED')}
+                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+                        title={!attNotes.trim() ? 'Enter a reason to enable Reject' : 'Reject this report'}
+                      >
+                        ✗ Reject
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             );

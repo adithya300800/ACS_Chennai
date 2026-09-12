@@ -68,6 +68,10 @@ model Employee {
   // [R35] Back-relation for project reports (file attachments). SetNull
   // on the FK so deleting an admin does not orphan the upload audit.
   projectAttachments         ProjectAttachment[]     @relation("ProjectAttachmentUploader")
+  // [S7] Back-relation for the admin review side of the same table.
+  // SetNull on the FK — deleting an admin must not orphan the
+  // "who approved this" audit, same contract as the uploader side.
+  projectAttachmentsReviewed ProjectAttachment[]     @relation("ProjectAttachmentReviewer")
   // Round-25: email notification preferences + audit log + digest runs.
   // NotificationPreference is 1:1 (PK = employeeId); EmailLog / DigestRun
   // are 1:N and outlive notification rows via onDelete: SetNull.
@@ -1274,6 +1278,28 @@ enum ProjectReportType {
   OTHER
 }
 
+// [S7] Admin review state machine for project attachments. Mirrors the
+// shape used by InspectionRecord (OPEN / ACKNOWLEDGED / CLOSED / REJECTED)
+// and BillingCertification (DRAFT / CERTIFIED / DISPUTED) — one enum per
+// module rather than a shared enum because each module has its own
+// transition graph.
+//
+//   PENDING_REVIEW      → initial state on upload (default for new rows)
+//   APPROVED            → admin accepted; closes the review (terminal-ish:
+//                         admin can re-open by sending back to REVISION_REQUESTED)
+//   REVISION_REQUESTED  → admin wants changes; reviewNotes carries the reason
+//   REJECTED            → admin rejected; reviewNotes carries the reason
+//
+// State transitions are enforced server-side in
+// backend/src/routes/projectAttachments.js#patchAttachment so a future
+// reviewer can't accidentally demote a row that's already approved.
+enum ProjectAttachmentStatus {
+  PENDING_REVIEW
+  APPROVED
+  REVISION_REQUESTED
+  REJECTED
+}
+
 model ProjectAttachment {
   id               String            @id @default(uuid())
   projectId        String            @map("project_id")
@@ -1300,9 +1326,19 @@ model ProjectAttachment {
   // route excludes `deletedAt: not null` so soft-deleted rows stay
   // hidden while preserving the deletion timestamp for audit.
   deletedAt        DateTime?         @map("deleted_at")
+  // [S7] Admin review state. New rows default to PENDING_REVIEW; the PATCH
+  // endpoint stamps `reviewedBy` + `reviewedAt` + `reviewNotes` in lockstep
+  // so every transition is fully auditable.
+  status           ProjectAttachmentStatus @default(PENDING_REVIEW)
+  reviewedById     String?           @map("reviewed_by_id")
+  reviewedAt       DateTime?         @map("reviewed_at")
+  reviewNotes      String?           @map("review_notes")
 
   project    Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   uploadedBy Employee? @relation("ProjectAttachmentUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
+  // [S7] SetNull on the reviewer FK — same contract as uploadedById. A
+  // deleted admin must not orphan the "who approved this" audit.
+  reviewedBy Employee? @relation("ProjectAttachmentReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
 
   // Hot reads: per-project list (with optional ?type filter) and
   // "uploader's recent uploads" for an audit view.
@@ -1314,6 +1350,11 @@ model ProjectAttachment {
   //   `SELECT upload_intent_ulid FROM project_attachment`
   // — an index keeps that read bounded by the indexed rows, not the table.
   @@index([uploadIntentUlid])
+  // [S7] Hot read for the admin review queue: "all PENDING_REVIEW rows
+  // for project X" — composite matches the read shape exactly.
+  @@index([status, projectId])
+  // [S7] Reviewer-side join ("every row admin Y approved today").
+  @@index([reviewedById])
   @@map("project_attachment")
 }
 

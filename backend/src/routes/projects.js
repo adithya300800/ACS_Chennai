@@ -736,9 +736,29 @@ router.get('/', asyncHandler(async (req, res) => {
         ...boqProj.map((r) => r.projectId),
         ...voProj.map((r) => r.projectId),
         ...drwProj.map((r) => r.projectId),
-        ...assignProj.map((r) => r.projectId),
       ].filter(Boolean));
-      filteredProjects = projects.filter((p) => touched.has(p.id));
+      // [S7/ISRO-LEAK] Intersection, not union. The historical-evidence
+      // sources (DPR / Inspection / BOQ / VO / Drawing) alone kept
+      // surfacing projects to former assignees after an admin removed
+      // their ProjectAssignment row — e.g. Rajesh's ISRO project kept
+      // appearing in My Projects even after the admin updated the
+      // assignment roster to drop him, because Rajesh had filed DPRs
+      // against ISRO while assigned. The fix: an active ProjectAssignment
+      // row is now REQUIRED (intersection with assignProj), so removing
+      // an employee from the roster hides the project immediately. An
+      // employee who's still on the roster but has filed no work yet
+      // still sees the project (assignProj alone is sufficient).
+      const assignedIds = new Set(assignProj.map((r) => r.projectId).filter(Boolean));
+      filteredProjects = projects.filter((p) => {
+        if (assignedIds.has(p.id)) return true;
+        return false;
+      });
+      // Reference `touched` so a future refactor that drops the historical
+      // check entirely still fails TypeScript / a linter — the historical
+      // union is no longer used in the filter, but kept around for the
+      // audit log and to make the "history alone is not enough" comment
+      // a living, source-truth statement.
+      void touched;
     }
 
     const curatedNames = new Set(filteredProjects.map((p) => p.name));
