@@ -81,15 +81,19 @@ UPDATE "project_attachment"
    SET "status" = 'PENDING_REVIEW'
  WHERE "status" IS NULL;
 
--- 3. New FK to employee (SetNull matches the existing uploadedById
+-- 3. New FK to employees (SetNull matches the existing uploadedById
 -- contract — deleting an admin does not orphan the review audit).
+-- NB: the live table is `"employees"` (plural snake_case), NOT `"employee"`
+-- or `"Employee"` — see `20260905030000_fix_n17_employee_fk` for the same
+-- shape of fix. The original S7 migration shipped with the singular form
+-- and failed at deploy time with `42P01: relation "employee" does not exist`.
 DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'project_attachment_reviewed_by_id_fkey'
   ) THEN
     ALTER TABLE "project_attachment"
       ADD CONSTRAINT "project_attachment_reviewed_by_id_fkey"
-      FOREIGN KEY ("reviewed_by_id") REFERENCES "employee"("id") ON DELETE SET NULL;
+      FOREIGN KEY ("reviewed_by_id") REFERENCES "employees"("id") ON DELETE SET NULL;
   END IF;
 END $$;
 

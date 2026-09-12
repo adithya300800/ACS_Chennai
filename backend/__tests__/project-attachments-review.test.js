@@ -148,4 +148,18 @@ describe('S7/MyReports — admin review state machine contracts', () => {
     expect(migrationSrc).toMatch(/ADD COLUMN IF NOT EXISTS\s+"review_notes"/);
     expect(migrationSrc).toMatch(/project_attachment_status_project_id_idx/);
   });
+
+  test('10. FK references the plural snake_case "employees" table (NOT "employee" or "Employee")', () => {
+    // [S7-SQLFIX 2026-09-12] The original S7 migration referenced the
+    // singular "employee" table; the live DB has the plural snake_case
+    // "employees" (matches the existing uploadedById FK + the
+    // 20260905030000_fix_n17_employee_fk corrective migration). The
+    // first deploy failed at FK ADD with `42P01: relation "employee"
+    // does not exist`. Pin so a future refactor that drops the "s"
+    // (or uses the Prisma-default PascalCase "Employee") is caught
+    // here at test time instead of at deploy time.
+    expect(migrationSrc).toMatch(/REFERENCES\s+"employees"\("id"\)/);
+    expect(migrationSrc).not.toMatch(/REFERENCES\s+"employee"\(/);
+    expect(migrationSrc).not.toMatch(/REFERENCES\s+"Employee"\(/);
+  });
 });

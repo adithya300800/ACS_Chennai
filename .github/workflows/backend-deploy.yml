@@ -187,6 +187,16 @@ jobs:
       # subsequent deploy (CI-triggered below) can re-apply the
       # now-fixed SQL.
       #
+      # [S7-SQLFIX 2026-09-12] Same pattern: the original
+      # 20260912070000_s7_project_attachment_review migration
+      # referenced the singular "employee" table; the live DB has
+      # the plural snake_case "employees" (see 20260905030000_fix_n17_employee_fk
+      # for the earlier instance of the same mistake). First deploy
+      # at cd71893 failed at FK ADD with `42P01: relation "employee"
+      # does not exist`. SQL corrected to "employees"; this step
+      # clears the errored ledger row so the next deploy re-applies
+      # the corrected DDL.
+      #
       # Idempotent:
       #   - If the migration is in errored state: rc=0, row is cleared
       #   - If the migration is in applied state: rc=non-zero, swallowed
@@ -204,14 +214,18 @@ jobs:
       # carries the bootstrap recovery for the next time the service
       # is re-synced to render.yaml. Until then, CI is the only path
       # that runs before `migrate deploy` hits the errored row.
-      - name: DR-031-SQLFIX bootstrap resolve (clear errored ledger row)
+      - name: Bootstrap resolve (clear errored ledger rows)
         run: |
-          echo "[DR-031-SQLFIX] running one-shot bootstrap resolve…"
+          echo "[bootstrap-resolve] running one-shot resolve for known errored rows…"
           set +e
-          npx prisma migrate resolve --rolled-back 20260908150000_dr031_leave_constraint_correct_bound
-          RC=$?
+          for MIG in \
+            20260908150000_dr031_leave_constraint_correct_bound \
+            20260912070000_s7_project_attachment_review; do
+            echo "[bootstrap-resolve]   $MIG"
+            npx prisma migrate resolve --rolled-back "$MIG"
+            echo "[bootstrap-resolve]   rc=$? (0=cleared, non-zero=steady-state no-op)"
+          done
           set -e
-          echo "[DR-031-SQLFIX] migrate resolve rc=$RC (0=cleared errored row; non-zero=steady-state no-op)"
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
           DIRECT_DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
@@ -253,6 +267,13 @@ jobs:
                 // now runs migrate resolve --rolled-back before migrate deploy.
                 // Listed here until the ledger row is cleared by that bootstrap.
                 '20260908150000_dr031_leave_constraint_correct_bound',
+                // [S7-SQLFIX 2026-09-12] shipped referencing the singular
+                // "employee" table for the reviewed_by_id FK; live DB has
+                // the plural snake_case "employees" (matches the existing
+                // uploadedById FK + the 20260905030000_fix_n17_employee_fk
+                // corrective migration). SQL fixed to "employees"; bootstrap
+                // resolve above clears the errored ledger row.
+                '20260912070000_s7_project_attachment_review',
               ];
               try {
                 const nameList = KNOWN_BAD.map(n => \"'\" + n.replace(/'/g, \"''\") + \"'\").join(',');

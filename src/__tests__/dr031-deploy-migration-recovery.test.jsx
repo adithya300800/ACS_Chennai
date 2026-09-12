@@ -82,15 +82,38 @@ describe('DR-031 — start.sh uses the safe predicate', () => {
     // migration is not in errored state (steady-state after the first
     // successful recovery).
     //
+    // [S7-SQLFIX 2026-09-12] start.sh's bootstrap is now a small loop
+    // over known errored rows (DR-031 + S7) instead of an inline
+    // command — both rows get cleared in one pass. The literal
+    // `|| true` is gone but the steady-state-no-op swallow shape
+    // remains: the loop's last command's exit code is intentionally
+    // discarded (we don't `set -e` around the loop body).
+    //
     // DR-031 audit invariant: the predicate the postinstall hook uses
     // (finished_at IS NULL OR applied_steps_count = 0) is enforced
     // INSIDE prisma's `migrate resolve` — the operator-facing API
     // already refuses to resolve a successfully-applied row, so we
     // don't need to repeat the predicate in shell.
     expect(startShSrc).toMatch(
-      /npx\s+prisma\s+migrate\s+resolve\s+--rolled-back\s+20260908150000_dr031_leave_constraint_correct_bound/,
+      /20260908150000_dr031_leave_constraint_correct_bound/,
     );
-    expect(startShSrc).toMatch(/\|\|\s*true/);
+    // The loop pattern must also list the S7 row (so re-syncing the
+    // dashboard to render.yaml's `sh start.sh` doesn't re-introduce
+    // the P3009 hang on cd71893).
+    expect(startShSrc).toMatch(
+      /20260912070000_s7_project_attachment_review/,
+    );
+    // The bootstrap block must invoke the resolve CLI — the literal
+    // `migrate resolve --rolled-back` form (variable may be quoted).
+    expect(startShSrc).toMatch(
+      /npx\s+prisma\s+migrate\s+resolve\s+--rolled-back\s+["']?\$MIG["']?/,
+    );
+    // The loop body must swallow each iteration's exit code so a
+    // steady-state no-op (rc != 0) doesn't trip `set -e` at the
+    // outer scope. `>/dev/null 2>&1` is the canonical swallow; the
+    // shape `\bfor\b` confirms it's now a loop.
+    expect(startShSrc).toMatch(/\bfor\b[^\n]*\bin\b/);
+    expect(startShSrc).toMatch(/2>&1\s*\|\|\s*true|>\/dev\/null[^\n]*\|\|\s*true/);
   });
 });
 

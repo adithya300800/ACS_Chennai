@@ -53,13 +53,17 @@ set -e
 # which bypasses this script. render.yaml declares
 # `startCommand: sh start.sh` and the dashboard comment notes that
 # the dashboard value is authoritative. The bootstrap recovery ALSO
-# lives in the backend-deploy.yml workflow's "DR-031-SQLFIX bootstrap
-# resolve" step, which runs before the CI triggers Render's deploy,
-# so the deploy recovers even while the dashboard is out of sync.
-# Once the dashboard is re-synced, this script's bootstrap is the
-# canonical path and the CI step is a redundant safety net.
-echo "[start.sh] one-shot DR-031 ledger resolve (no-op once recovered)"
-npx prisma migrate resolve --rolled-back 20260908150000_dr031_leave_constraint_correct_bound >/dev/null 2>&1 || true
+# lives in the backend-deploy.yml workflow's "Bootstrap resolve" step,
+# which runs before the CI triggers Render's deploy, so the deploy
+# recovers even while the dashboard is out of sync. Once the
+# dashboard is re-synced, this script's bootstrap is the canonical
+# path and the CI step is a redundant safety net.
+echo "[start.sh] one-shot ledger resolve for known errored rows (no-op once recovered)"
+for MIG in \
+  20260908150000_dr031_leave_constraint_correct_bound \
+  20260912070000_s7_project_attachment_review; do
+  npx prisma migrate resolve --rolled-back "$MIG" >/dev/null 2>&1 || true
+done
 
 echo "[start.sh] Running prisma migrate deploy (failure-before-serving; no recovery auto-runs)"
 npx prisma migrate deploy
