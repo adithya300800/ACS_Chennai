@@ -105,6 +105,15 @@ const BillingCertificationsAdmin = React.lazy(() => import('./pages/admin/Billin
 // context on (filed DPR/Inspection/BOQ/VO/Drawing). Mounted at
 // /portal/certifications alongside the other "My X" reports.
 const MyCertifications = React.lazy(() => import('./pages/portal/MyCertifications.jsx'));
+// S7/MyReports (2026-09-12): cross-project employee "Project Reports"
+// page — surfaces the per-project ProjectAttachment upload/list flow
+// (weekly / monthly / due-diligence / quality) that previously only
+// lived inside the My Projects accordion. Mounted at /portal/reports
+// next to /portal/certifications so the sidebar entry matches the
+// route hash. No new backend — reuses
+// api.getProjects + api.getProjectAttachments + the 3-step R2 upload
+// pipeline already shipped for the in-accordion section.
+const MyProjectReports = React.lazy(() => import('./pages/portal/MyProjectReports.jsx'));
 // N3-employee: read-only employee browse surface for the same drawing
 // register. The list page is filtered to ACTIVE only; the detail page
 // renders the PDF + chain without the Edit / Supersede / Archive
@@ -241,6 +250,12 @@ function App() {
               (POST/PATCH/DELETE/certify/dispute) stay requireFreshAdmin
               server-side. */}
           <Route path="certifications" element={<MyCertifications />} />
+          {/* S7/MyReports: cross-project My Reports page. No admin gate at
+              the route level — backend's existing endpoints
+              (getProjects scope=assigned + getProjectAttachments +
+              createProjectAttachment requireAuth) are sufficient; admin
+              cross-org browse lives at /portal/admin/reports. */}
+          <Route path="reports" element={<MyProjectReports />} />
           {/* N3-employee: read-only employee browse of the same drawing
               register. ACTIVE-only list + chain + PDF preview, no curation
               actions. Same literal-before-param ordering lesson. */}

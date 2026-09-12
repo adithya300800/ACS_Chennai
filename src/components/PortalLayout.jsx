@@ -272,6 +272,14 @@ const navGroups = [
     items: [
       { to: '/portal/dpr/my', label: 'My Daily Reports', icon: DOC_ICON },
       { to: '/portal/inspection/my', label: 'My Inspection Records', icon: CLIPBOARD_ICON },
+      // S7/MyReports (2026-09-12): cross-project "Project Reports" page
+      // (weekly / monthly / due-diligence / quality) — surface point for
+      // the per-project upload/list flow that previously only lived inside
+      // the My Projects accordion. Visible to everyone; admin features
+      // stay gated server-side. Same REPORT_ICON as the admin "Project
+      // Reports" entry so employees feel it as a sibling of the work
+      // they already see expanded inside a project.
+      { to: '/portal/reports', label: 'Project Reports', icon: REPORT_ICON },
       // Round-29: cube-test sidebar entry REMOVED. Cube testing is
       // captured by the cube_casting / cube_testing InspectionRecord
       // sub-types; no standalone cube-test page.

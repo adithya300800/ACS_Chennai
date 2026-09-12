@@ -411,10 +411,20 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
   const loadMoreReports = useCallback(async () => {
     if (!projectKey || !reportsHasMore) return;
     try {
+      // [S7/MyProjects-CRASH] Guard against reports.data being undefined
+      // — initial state is {status: 'loading'} (no `data` field yet), and
+      // the `useCallback` deps array below evaluates this expression
+      // during EVERY render. Without the guard, the deps array throws
+      // `Cannot read properties of undefined (reading 'length')` the
+      // instant the panel mounts, before any user interaction. The body
+      // line itself is only reached on user click of "Load more", but
+      // using the same guarded expression keeps the body and the deps
+      // aligned by construction.
+      const currentReportsLen = reports.data?.length ?? 0;
       const next = await fetchAllAttachments(
         projectKey,
         accessToken,
-        reports.data.length + REPORTS_PAGE_SIZE,
+        currentReportsLen + REPORTS_PAGE_SIZE,
         reportsFilterType,
       );
       if (!mountedRef.current) return;
@@ -428,7 +438,7 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
         console.warn('Load more reports failed', err?.message);
       }
     }
-  }, [projectKey, accessToken, reportsHasMore, reports.data.length, reportsFilterType]);
+  }, [projectKey, accessToken, reportsHasMore, reports.data?.length ?? 0, reportsFilterType]);
 
   const toggleSection = useCallback((id) => {
     setOpenSections((s) => ({ ...s, [id]: !s[id] }));
