@@ -13,6 +13,15 @@ import SeverityBadge from '../../components/SeverityBadge.jsx';
 import PhotoLightbox from '../../components/PhotoLightbox.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
+// Admin single-record transition matrix — mirrors backend ACK_FROM /
+// CLOSE_FROM / REJECT_FROM in backend/src/routes/inspection.js:1786-1788.
+// Keeping the names aligned with InspectionDashboard.jsx
+// (ACK_ALLOWED_FROM / CLOSE_ALLOWED_FROM / REJECT_ALLOWED_FROM) so the
+// three places read identically in code review.
+const ACK_ALLOWED_FROM = new Set(['OPEN']);
+const CLOSE_ALLOWED_FROM = new Set(['ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
+const REJECT_ALLOWED_FROM = new Set(['OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'PENDING_VERIFICATION']);
+
 function formatIndianDate(iso) {
   if (!iso) return '—';
   return formatShortDate(iso) || String(iso);
@@ -38,7 +47,7 @@ export default function InspectionDetail() {
   useDocumentTitle('Inspection Detail');
   const { id } = useParams();
   const navigate = useNavigate();
-  const { accessToken, employee } = useAuth();
+  const { accessToken, employee, isAdmin } = useAuth();
   const toast = useToast();
   const [record, setRecord] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -49,6 +58,14 @@ export default function InspectionDetail() {
   // doesn't double-submit. Mirrors the `submittingRef` shape from the
   // DPR submit handler.
   const [publishing, setPublishing] = useState(false);
+  // S6/UI-6 (2026-09-11): admin ack/close/reject action bar.
+  // actionBusy guards a double-click across all three actions the same
+  // way `publishing` guards Publish. rejectReason is the required
+  // reason for the Reject call (backend 400s with REASON_REQUIRED
+  // when missing) — keeping it as local state lets the input render
+  // inline with the action bar instead of needing a modal.
+  const [actionBusy, setActionBusy] = useState(false);
+  const [rejectReason, setRejectReason] = useState('');
   // Round-29: linkedCubeTests state REMOVED — the cube-test feature is
   // gone. Cube testing is captured by the cube_casting / cube_testing
   // InspectionRecord sub-types; no separate cube-test rows to link.
@@ -72,6 +89,38 @@ export default function InspectionDetail() {
   }, [id, accessToken, toast]);
 
   useEffect(() => { load(); }, [load]);
+
+  // S6/UI-6 (2026-09-11): single-record admin transition handler.
+  // Mirrors InspectionDashboard's bulk-review path
+  // (api.bulkReviewInspections → api.acknowledgeInspection /
+  // api.closeInspection / api.rejectInspection) but acts on the
+  // current `record.id`. Errors funnel through the same toast surface
+  // as `load` / `publishing` so the user sees one consistent shape.
+  const runAdminAction = useCallback(async (action, body) => {
+    if (actionBusy) return;
+    setActionBusy(true);
+    try {
+      let updated;
+      if (action === 'acknowledge') {
+        updated = await api.acknowledgeInspection(record.id, body?.adminNotes || '', accessToken);
+      } else if (action === 'close') {
+        updated = await api.closeInspection(record.id, body?.adminNotes || '', accessToken);
+      } else if (action === 'reject') {
+        updated = await api.rejectInspection(record.id, body.reason, body?.adminNotes || '', accessToken);
+      } else {
+        throw new Error(`Unknown admin action ${action}`);
+      }
+      setRecord(updated);
+      if (action === 'reject') setRejectReason('');
+      const verb = action === 'acknowledge' ? 'acknowledged' : action === 'close' ? 'closed' : 'rejected';
+      toast.push(`Inspection ${verb}.`, 'success');
+    } catch (err) {
+      const msg = err?.message || `Failed to ${action} inspection.`;
+      if (err?.status !== 401) toast.push(msg, 'error');
+    } finally {
+      setActionBusy(false);
+    }
+  }, [actionBusy, record, accessToken, toast]);
 
   if (loading) {
     return (
@@ -222,6 +271,94 @@ export default function InspectionDetail() {
             >
               {publishing ? 'Publishing…' : 'Publish'}
             </button>
+          </div>
+        )}
+
+        {/* S6/UI-6 (2026-09-11): admin ack/close/reject action bar.
+            Single-record equivalent of InspectionDashboard's bulk
+            buttons — admin reviewers used to have to back out to the
+            list to act on one row. Hidden when no transition applies
+            (DRAFT is owner-only; CLOSED / REJECTED are terminal). The
+            Reject control carries its required-reason input inline so
+            the user doesn't need a modal. */}
+        {isAdmin && (
+          ACK_ALLOWED_FROM.has(record.status) ||
+          CLOSE_ALLOWED_FROM.has(record.status) ||
+          REJECT_ALLOWED_FROM.has(record.status)
+        ) && (
+          <div
+            role="toolbar"
+            aria-label="Admin actions"
+            style={{
+              marginBottom: '1rem',
+              padding: '0.75rem 0.875rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              background: '#f0f9ff',
+              border: '1px solid #bae6fd',
+              borderLeft: '3px solid var(--blue, #2563eb)',
+              borderRadius: 6,
+              fontSize: '0.85rem',
+              flexWrap: 'wrap',
+            }}
+          >
+            <span style={{ fontWeight: 600, color: 'var(--navy, #0f172a)', flexShrink: 0 }}>
+              Review actions:
+            </span>
+            {ACK_ALLOWED_FROM.has(record.status) && (
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={actionBusy}
+                onClick={() => runAdminAction('acknowledge', {})}
+                style={{ flexShrink: 0 }}
+              >
+                ✓ Acknowledge
+              </button>
+            )}
+            {CLOSE_ALLOWED_FROM.has(record.status) && (
+              <button
+                type="button"
+                className="btn btn-success btn-sm"
+                disabled={actionBusy}
+                onClick={() => runAdminAction('close', {})}
+                style={{ flexShrink: 0 }}
+              >
+                ✓ Close
+              </button>
+            )}
+            {REJECT_ALLOWED_FROM.has(record.status) && (
+              <>
+                <input
+                  type="text"
+                  value={rejectReason}
+                  onChange={(e) => setRejectReason(e.target.value)}
+                  placeholder="Reject reason (required)"
+                  maxLength={1000}
+                  aria-label="Reject reason"
+                  disabled={actionBusy}
+                  style={{
+                    flex: '1 1 200px',
+                    minWidth: 0,
+                    padding: '0.4rem 0.6rem',
+                    fontSize: '0.85rem',
+                    border: '1px solid #cbd5e1',
+                    borderRadius: 4,
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn btn-danger btn-sm"
+                  disabled={actionBusy || !rejectReason.trim()}
+                  onClick={() => runAdminAction('reject', { reason: rejectReason.trim() })}
+                  style={{ flexShrink: 0 }}
+                  title={!rejectReason.trim() ? 'Enter a reason to enable Reject' : 'Reject this inspection'}
+                >
+                  ✗ Reject
+                </button>
+              </>
+            )}
           </div>
         )}
 
