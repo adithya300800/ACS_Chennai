@@ -45,6 +45,27 @@ const REPORT_TYPE_BADGE_STYLES = {
   OTHER:                { background: '#f1f5f9', color: '#475569' }, // slate
 };
 
+// [S7 round-2] Mirror the MyProjectReports state-machine constants — the
+// wire enum strings + the allowed-from Sets must match the backend
+// `ALLOWED_TRANSITIONS` map keys by source text (see
+// projectAttachments.js PATCH handler).
+const APPROVE_ALLOWED_FROM = new Set(['PENDING_REVIEW', 'REVISION_REQUESTED']);
+const REVISE_ALLOWED_FROM = new Set(['PENDING_REVIEW']);
+const REJECT_ALLOWED_FROM = new Set(['PENDING_REVIEW', 'REVISION_REQUESTED']);
+
+const STATUS_LABEL = {
+  PENDING_REVIEW: 'Pending review',
+  APPROVED: 'Approved',
+  REVISION_REQUESTED: 'Revision requested',
+  REJECTED: 'Rejected',
+};
+const STATUS_COLOR = {
+  PENDING_REVIEW: { bg: '#fef3c7', fg: '#92400e' },
+  APPROVED: { bg: '#dcfce7', fg: '#166534' },
+  REVISION_REQUESTED: { bg: '#ffedd5', fg: '#9a3412' },
+  REJECTED: { bg: '#fee2e2', fg: '#991b1b' },
+};
+
 const DEFAULT_LIMIT = 50;
 
 function formatDate(value) {
@@ -55,7 +76,7 @@ function formatDate(value) {
 
 export default function ReportsAdmin() {
   useDocumentTitle('Project Reports');
-  const { accessToken } = useAuth();
+  const { accessToken, isAdmin } = useAuth();
   const toast = useToast();
 
   // Filter state.
@@ -78,6 +99,14 @@ export default function ReportsAdmin() {
   const [error, setError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
+
+  // [S7 round-2] Admin review action bar state. actionBusy is a single
+  // in-flight flag (not per-row); reviewNotes is keyed by attachment id so
+  // multiple rows can have a half-typed reject reason without clobbering
+  // each other. Mirrors the MyProjectReports implementation exactly so
+  // the source-text test pins stay in lockstep.
+  const [actionBusy, setActionBusy] = useState(false);
+  const [reviewNotesById, setReviewNotesById] = useState({});
 
   // ─── Loaders: projects + employees (filters' dropdowns) ─────────────
   useEffect(() => {
@@ -206,6 +235,42 @@ export default function ReportsAdmin() {
       setDeleting(false);
     }
   }
+
+  // [S7 round-2] Admin review handler — mirrors MyProjectReports.runReviewAction.
+  // `action` is one of 'APPROVED' | 'REVISION_REQUESTED' | 'REJECTED' (matches
+  // backend enum exactly). On success the local row is patched in place so
+  // the status pill + buttons re-render without a full re-fetch; on a 409
+  // the optimistic patch is reverted via fetchReports().
+  const runReviewAction = useCallback(async (att, action) => {
+    if (actionBusy) return;
+    const notes = (reviewNotesById[att.id] || '').trim();
+    if ((action === 'REVISION_REQUESTED' || action === 'REJECTED') && !notes) return;
+    setActionBusy(true);
+    setReports((prev) => prev.map((r) => (r.id === att.id
+      ? { ...r, status: action, reviewedAt: new Date().toISOString(), reviewNotes: notes || null }
+      : r
+    )));
+    try {
+      const updated = await api.reviewProjectAttachment(
+        att.projectId, att.id, { status: action, reviewNotes: notes || null }, accessToken,
+      );
+      setReports((prev) => prev.map((r) => (r.id === att.id ? { ...r, ...updated } : r)));
+      setReviewNotesById((prev) => {
+        if (!prev[att.id]) return prev;
+        const next = { ...prev };
+        delete next[att.id];
+        return next;
+      });
+      const verb = action === 'APPROVED' ? 'approved' : action === 'REJECTED' ? 'rejected' : 'sent for revision';
+      toast.push(`Report ${verb}.`, 'success');
+    } catch (err) {
+      fetchReports();
+      const msg = err?.message || `Failed to ${action.toLowerCase()} report.`;
+      if (err?.status !== 401) toast.push(msg, 'error');
+    } finally {
+      setActionBusy(false);
+    }
+  }, [actionBusy, reviewNotesById, accessToken, toast]);
 
   return (
     <div className="dpr-page">
@@ -365,6 +430,13 @@ export default function ReportsAdmin() {
           >
             {reports.map((r) => {
               const badgeStyle = REPORT_TYPE_BADGE_STYLES[r.type] || REPORT_TYPE_BADGE_STYLES.OTHER;
+              const rStatus = r.status || 'PENDING_REVIEW';
+              const canApprove = APPROVE_ALLOWED_FROM.has(rStatus);
+              const canRevise = REVISE_ALLOWED_FROM.has(rStatus);
+              const canReject = REJECT_ALLOWED_FROM.has(rStatus);
+              const showReviewBar = isAdmin && (canApprove || canRevise || canReject);
+              const rNotes = reviewNotesById[r.id] || '';
+              const statusPalette = STATUS_COLOR[rStatus] || STATUS_COLOR.PENDING_REVIEW;
               return (
                 <div
                   key={r.id}
@@ -394,6 +466,22 @@ export default function ReportsAdmin() {
                         {r.project?.code ? <span style={{ color: 'var(--steel)', fontWeight: 400 }}> ({r.project.code})</span> : null}
                       </div>
                     </div>
+                    {/* Status pill (visible to admin) */}
+                    <span
+                      style={{
+                        fontSize: '0.65rem',
+                        fontWeight: 700,
+                        background: statusPalette.bg,
+                        color: statusPalette.fg,
+                        padding: '2px 8px',
+                        borderRadius: 999,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.04em',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {STATUS_LABEL[rStatus] || rStatus}
+                    </span>
                   </div>
 
                   {/* Title or filename */}
@@ -418,6 +506,93 @@ export default function ReportsAdmin() {
                     </span>
                     <span>📅 {formatDate(r.uploadedAt)}</span>
                   </div>
+
+                  {/* Review notes (if any) — visible to admin so the
+                      reviewer can see what was already sent back. */}
+                  {(r.reviewNotes || (r.reviewedAt && showReviewBar === false)) && (
+                    <div
+                      style={{
+                        fontSize: '0.75rem',
+                        color: 'var(--steel)',
+                        fontStyle: 'italic',
+                        overflowWrap: 'anywhere',
+                      }}
+                      title={r.reviewNotes || ''}
+                    >
+                      {r.reviewedAt && `Reviewed ${formatDate(r.reviewedAt)}`}
+                      {r.reviewNotes && ` · “${r.reviewNotes.length > 100 ? `${r.reviewNotes.slice(0, 100)}…` : r.reviewNotes}”`}
+                    </div>
+                  )}
+
+                  {/* [S7 round-2] Admin-only review action bar — mirrors
+                      the MyProjectReports pattern. Gate: isAdmin AND any
+                      allowed-from set has the row status. */}
+                  {showReviewBar && (
+                    <div
+                      role="toolbar"
+                      aria-label="Admin review actions"
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.35rem',
+                        flexWrap: 'wrap',
+                        paddingTop: '0.4rem',
+                        borderTop: '1px dashed #e2e8f0',
+                      }}
+                    >
+                      {canApprove && (
+                        <button
+                          type="button"
+                          className="btn btn-success btn-sm"
+                          disabled={actionBusy}
+                          onClick={() => runReviewAction(r, 'APPROVED')}
+                        >
+                          ✓ Approve
+                        </button>
+                      )}
+                      {(canRevise || canReject) && (
+                        <input
+                          type="text"
+                          value={rNotes}
+                          onChange={(e) => setReviewNotesById((prev) => ({ ...prev, [r.id]: e.target.value }))}
+                          placeholder={canRevise ? 'Reason for revision (required)' : 'Reject reason (required)'}
+                          maxLength={2000}
+                          aria-label="Review notes"
+                          disabled={actionBusy}
+                          style={{
+                            flex: '1 1 160px',
+                            minWidth: 0,
+                            padding: '0.3rem 0.5rem',
+                            fontSize: '0.75rem',
+                            border: '1px solid #cbd5e1',
+                            borderRadius: 4,
+                          }}
+                        />
+                      )}
+                      {canRevise && (
+                        <button
+                          type="button"
+                          className="btn btn-warning btn-sm"
+                          disabled={actionBusy || !rNotes.trim()}
+                          onClick={() => runReviewAction(r, 'REVISION_REQUESTED')}
+                          title={!rNotes.trim() ? 'Enter a reason to enable Request revision' : 'Send back to uploader for revision'}
+                        >
+                          ↺ Revision
+                        </button>
+                      )}
+                      {canReject && (
+                        <button
+                          type="button"
+                          className="btn btn-danger btn-sm"
+                          disabled={actionBusy || !rNotes.trim()}
+                          onClick={() => runReviewAction(r, 'REJECTED')}
+                          title={!rNotes.trim() ? 'Enter a reason to enable Reject' : 'Reject this report'}
+                        >
+                          ✗ Reject
+                        </button>
+                      )}
+                    </div>
+                  )}
 
                   {/* Actions */}
                   <div style={{ display: 'flex', gap: '0.4rem', justifyContent: 'flex-end', marginTop: '0.25rem' }}>

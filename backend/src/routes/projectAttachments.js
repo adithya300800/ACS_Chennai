@@ -70,7 +70,7 @@ const { requireAuth, requireFreshAdmin } = require('../middleware/auth');
 const { mapPrismaError } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
 const { randomUUID } = require('crypto');
-const { generateReadSASUrl, READ_URL_TTL_SECONDS } = require('../lib/blobStorage');
+const { generateReadSASUrl, READ_URL_TTL_SECONDS, verifyBlobExists } = require('../lib/blobStorage');
 // [DR-001] Mirror the drawings.js binding — the single `blobPath` field
 // is wrapped as a one-element `photos` array at the call site so the
 // helper's array shape doesn't need a parallel "single" API.
@@ -692,6 +692,31 @@ router.get('/:attachmentId/read-sas', asyncHandler(async (req, res) => {
         error: 'NO_BLOB_ATTACHED',
         code: 'NO_BLOB_ATTACHED',
         message: 'This attachment has no blob path recorded.',
+      });
+    }
+
+    // [S7 round-2] Verify the blob still exists in R2 BEFORE minting a
+    // SAS URL — if the bucket was wiped, restored from a pre-data backup,
+    // or the object was deleted by a lifecycle rule, minting the URL just
+    // hands the browser a presigned URL that 404s on open. A 410 + clear
+    // message lets the SPA surface "file missing, please re-upload"
+    // instead of the cryptic R2 NoSuchKey XML.
+    try {
+      const props = await verifyBlobExists('dpr-documents', row.blobPath);
+      if (!props.exists) {
+        return res.status(410).json({
+          error: 'BLOB_GONE',
+          code: 'BLOB_GONE',
+          message: 'This file is no longer in storage — please re-upload.',
+        });
+      }
+    } catch (err) {
+      // Don't fail the request if R2 HEAD times out — fall through to
+      // minting the SAS URL anyway. The browser will surface the real
+      // error from R2 if the object is genuinely missing.
+      console.warn('[project-attachments] verifyBlobExists failed, minting SAS anyway', {
+        blobPath: row.blobPath,
+        errMessage: err?.message?.split('\n')[0],
       });
     }
 
