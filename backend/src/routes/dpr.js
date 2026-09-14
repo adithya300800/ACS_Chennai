@@ -7,7 +7,7 @@ const router = express.Router();
 // dpr.js verbatim. See lib/idempotency.js for the contract and TTL.
 const { tryReplay: tryIdempotentReplay, recordSuccess: recordIdempotentSuccess } = require('../lib/idempotency');
 const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
-const { generateReadSASUrl, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
+const { generateReadSASUrl, verifyBlobExists, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime, toDateOnly } = require('../lib/errors');
 // Round-27: shared IST date helpers. The `month` query shortcut on the list
 // endpoint uses `getMonthRangeUtc` to expand `?month=YYYY-MM` into a
@@ -1006,6 +1006,14 @@ router.get('/', asyncHandler(async (req, res) => {
     // the photo just renders without a usable src and the placeholder path
     // takes over (PhotoThumb in DprDashboard.jsx falls back gracefully).
     //
+    // [S7 round-3] Verify blob exists in R2 before minting the SAS URL —
+    // same BLOB_GONE guard as projectAttachments.js#read-sas. If the
+    // object is gone (bucket wipe, lifecycle delete, restore from
+    // pre-data backup) the presigned URL would just 404 with R2's
+    // NoSuchKey XML in the browser. Set readUrl: null so PhotoThumb
+    // falls back to its placeholder. HEAD timeouts fall through to
+    // minting anyway so a flaky R2 doesn't break the happy path.
+    //
     // Latency budget: N+1 SAS generations per page, parallel via Promise.all.
     // For a 20-row page with 2 photos each = 40 calls × ~30 ms = ~1.2 s
     // worst-case added. Acceptable for an admin-only queue.
@@ -1017,6 +1025,22 @@ router.get('/', asyncHandler(async (req, res) => {
           const blobName = ext
             ? `${d.submittedById}/${p.ulid}.${ext}`
             : `${d.submittedById}/${p.ulid}`;
+          try {
+            const props = await verifyBlobExists(p.container, blobName);
+            if (!props.exists) {
+              // Object was deleted / never landed — skip the SAS mint so
+              // the browser never opens a URL R2 can't serve.
+              return { ...p, readUrl: null };
+            }
+          } catch (err) {
+            // HEAD timeout / network blip — fall through to minting the
+            // SAS URL anyway; the browser will surface the real error if
+            // the object is genuinely missing.
+            console.warn('[dpr] verifyBlobExists failed, minting SAS anyway', {
+              ulid: p.ulid,
+              errMessage: err?.message?.split('\n')[0],
+            });
+          }
           const { sasUrl } = await generateReadSASUrl(p.container, blobName);
           return { ...p, readUrl: sasUrl };
         } catch (e) {
@@ -1292,6 +1316,12 @@ router.get('/:id', async (req, res) => {
     // (blobStorage.js:66: `${employeeId}/${ulid}.${ext}`). The DPR owner
     // is `dpr.submittedById`; we fall back to it from `p.dpr.submittedById`
     // because the include above pulls it onto each photo row.
+    //
+    // [S7 round-3] BLOB_GONE guard — verify blob exists before minting
+    // the SAS URL (same shape as projectAttachments.js#read-sas +
+    // inspection.js#:id GET). On `exists: false` we return readUrl: null
+    // so PhotoThumb renders its placeholder instead of the browser
+    // opening a presigned URL that R2 will answer with NoSuchKey XML.
     const dprOwnerId = dpr.submittedById;
     const photosWithUrls = await Promise.all(dpr.photos.map(async p => {
       const ext = CONTENT_TYPE_EXT[p.contentType];
@@ -1299,6 +1329,20 @@ router.get('/:id', async (req, res) => {
       const blobName = ext
         ? `${employeeId}/${p.ulid}.${ext}`
         : `${employeeId}/${p.ulid}`;
+      try {
+        const props = await verifyBlobExists(p.container, blobName);
+        if (!props.exists) {
+          const { dpr: _dprJoin, ...photoForClient } = p;
+          return { ...photoForClient, readUrl: null };
+        }
+      } catch (err) {
+        // HEAD timeout / network blip — fall through to minting the SAS
+        // URL anyway.
+        console.warn('[dpr] verifyBlobExists failed, minting SAS anyway', {
+          ulid: p.ulid,
+          errMessage: err?.message?.split('\n')[0],
+        });
+      }
       const { sasUrl } = await generateReadSASUrl(p.container, blobName);
       // Strip the helper join before sending to the client
       const { dpr: _dprJoin, ...photoForClient } = p;

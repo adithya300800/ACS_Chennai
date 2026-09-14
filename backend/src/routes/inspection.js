@@ -35,6 +35,7 @@ const {
 } = require('../lib/idempotency');
 const {
   generateReadSASUrl,
+  verifyBlobExists,
   CONTENT_TYPE_EXT,
 } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
@@ -1215,6 +1216,12 @@ router.get('/:id', async (req, res) => {
     }
 
     // Generate read SAS URLs for photos — mirror dpr.js logic.
+    // [S7 round-3] Verify blob exists in R2 before minting a SAS URL —
+    // if the object is gone (bucket wipe, lifecycle delete, restore from
+    // pre-data backup) the presigned URL would just 404 with R2's
+    // NoSuchKey XML in the browser. Set readUrl: null so the frontend
+    // placeholder kicks in instead. Mirrors projectAttachments.js#read-sas
+    // (BLOB_GONE guard). HEAD timeouts fall through to minting anyway.
     const inspectionOwnerId = record.submittedById;
     const photosWithUrls = await Promise.all(record.photos.map(async p => {
       const ext = CONTENT_TYPE_EXT[p.contentType];
@@ -1222,6 +1229,21 @@ router.get('/:id', async (req, res) => {
       const blobName = ext
         ? `${employeeId}/${p.ulid}.${ext}`
         : `${employeeId}/${p.ulid}`;
+      try {
+        const props = await verifyBlobExists(p.container, blobName);
+        if (!props.exists) {
+          const { inspection: _join, ...photoForClient } = p;
+          return { ...photoForClient, readUrl: null };
+        }
+      } catch (err) {
+        // HEAD timeout / network blip — fall through to minting the SAS
+        // URL anyway; the browser will surface the real error if the
+        // object is genuinely missing.
+        console.warn('[inspection] verifyBlobExists failed, minting SAS anyway', {
+          ulid: p.ulid,
+          errMessage: err?.message?.split('\n')[0],
+        });
+      }
       const { sasUrl } = await generateReadSASUrl(p.container, blobName);
       const { inspection: _join, ...photoForClient } = p;
       return { ...photoForClient, readUrl: sasUrl };
