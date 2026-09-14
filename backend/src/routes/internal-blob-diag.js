@@ -124,26 +124,59 @@ router.get('/blob-diag', requireInternalToken, asyncHandler(async (req, res) => 
     }
   }
 
-  // 3. DPR photo rows — Prisma schema uses `blobPath` (TEXT[]) in some versions
-  //    and `path` (TEXT) in others. Probe both shapes.
+  // 3. DPR photo rows — schema is DPRPhoto { container, ulid, contentType, filename }.
+  //    The blob path is derived as `${container}/${ulid}.${ext}` (ext from contentType).
+  //    Probe each row's derived path against its declared container.
   if (prisma) {
     try {
       const photos = await prisma.dPRPhoto.findMany({
-        select: { id: true, dprId: true, blobPath: true },
-        take: 50,
-      }).catch(() => []);
-      if (photos.length === 0) {
-        // Try the legacy field name.
-        const alt = await prisma.dPRPhoto.findMany({
-          select: { id: true, dprId: true, path: true },
-          take: 50,
-        }).catch(() => []);
-        out.dprPhotos = { triedField: 'path', count: alt.length };
-      } else {
-        out.dprPhotos = { triedField: 'blobPath', count: photos.length };
+        select: { id: true, dprId: true, ulid: true, container: true, contentType: true, filename: true, uploadedAt: true },
+        orderBy: { uploadedAt: 'desc' },
+        take: 100,
+      });
+      const extFor = (ct) => ({
+        'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/heic': 'heic',
+      })[ct] || 'bin';
+      const results = [];
+      let exists = 0, gone = 0, errored = 0;
+      for (const p of photos) {
+        const blobPath = `${p.container}/${p.ulid}.${extFor(p.contentType)}`;
+        const head = await headBlob(p.container, blobPath);
+        if (head.exists) exists++;
+        else if (head.errored) errored++;
+        else gone++;
+        results.push({ id: p.id, container: p.container, blobPath, filename: p.filename, uploadedAt: p.uploadedAt, ...head });
       }
+      out.dprPhotos = { total: photos.length, exists, gone, errored, full: results };
     } catch (err) {
       out.dprPhotos = { errored: true, message: err?.message?.split('\n')[0] };
+    }
+  }
+
+  // 4. InspectionPhoto rows — same shape (container + ulid). Probe too.
+  if (prisma) {
+    try {
+      const photos = await prisma.inspectionPhoto.findMany({
+        select: { id: true, inspectionId: true, ulid: true, container: true, contentType: true, filename: true, uploadedAt: true },
+        orderBy: { uploadedAt: 'desc' },
+        take: 50,
+      });
+      const extFor = (ct) => ({
+        'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/heic': 'heic',
+      })[ct] || 'bin';
+      const results = [];
+      let exists = 0, gone = 0, errored = 0;
+      for (const p of photos) {
+        const blobPath = `${p.container}/${p.ulid}.${extFor(p.contentType)}`;
+        const head = await headBlob(p.container, blobPath);
+        if (head.exists) exists++;
+        else if (head.errored) errored++;
+        else gone++;
+        results.push({ id: p.id, container: p.container, blobPath, filename: p.filename, uploadedAt: p.uploadedAt, ...head });
+      }
+      out.inspectionPhotos = { total: photos.length, exists, gone, errored, full: results };
+    } catch (err) {
+      out.inspectionPhotos = { errored: true, message: err?.message?.split('\n')[0] };
     }
   }
 
