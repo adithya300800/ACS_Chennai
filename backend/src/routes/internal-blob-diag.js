@@ -63,7 +63,7 @@ async function listKeys(Bucket, MaxKeys = 2000) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 20)
     .map(([prefix, count]) => ({ prefix, count }));
-  return { totalListed: keys.length, truncated: resp.IsTruncated || false, topPrefixes, sampleKeys: keys.slice(0, 25) };
+  return { totalListed: keys.length, truncated: resp.IsTruncated || false, topPrefixes, allKeys: keys };
 }
 
 async function headBlob(Bucket, Key) {
