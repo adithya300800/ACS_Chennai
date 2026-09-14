@@ -113,10 +113,23 @@ describe('S7/MyReports — Project Reports page source contracts', () => {
     );
   });
 
-  test('9. page calls api.getProjects with `{ scope: "assigned" }` (server-side narrow)', () => {
+  test('9. page calls api.getProjects with `{ scope: "all" }` for admins, `{ scope: "assigned" }` for employees', () => {
+    // Admins need every project's reports so they can review them
+    // (S7 round-2 admin review action bar). Employees keep `assigned`
+    // which now requires an active ProjectAssignment row (no historical
+    // evidence leak — see projects.dr010/dr012 tests + backend
+    // src/routes/projects.js). Backend rejects scope=all for non-admins,
+    // so the `isAdmin ?` gate MUST be pinned at the call site.
     expect(pageSrc).toMatch(
-      /api\.getProjects\(\s*\{\s*scope:\s*['"]assigned['"]\s*\}\s*,\s*accessToken/
+      /api\.getProjects\(\s*\{\s*scope:\s*isAdmin\s*\?\s*['"]all['"]\s*:\s*['"]assigned['"]\s*\}\s*,\s*accessToken/,
     );
+    // Sanity: both literals must appear in source so neither branch
+    // is accidentally dropped. Match the quoted string literally
+    // (looser than `scope:\\s*['"]assigned['"]` — the latter fails
+    // because the literal sits at the END of the ternary, not
+    // immediately after `scope:`).
+    expect(pageSrc).toMatch(/['"]assigned['"]/);
+    expect(pageSrc).toMatch(/['"]all['"]/);
   });
 
   test('10. cross-project fan-out uses Promise.allSettled (one 404 must not sink the rest)', () => {

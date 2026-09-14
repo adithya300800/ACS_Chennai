@@ -140,7 +140,11 @@ export default function MyProjectReports() {
   const loadProjects = useCallback(async () => {
     setLoadingProjects(true);
     try {
-      const data = await api.getProjects({ scope: 'assigned' }, accessToken);
+      // Admins need to see every project's reports so they can review
+      // uploaded artefacts (S7 round-2). Employees keep scope=assigned
+      // which now requires an active ProjectAssignment row (no historical
+      // evidence leak). Backend rejects scope=all for non-admins.
+      const data = await api.getProjects({ scope: isAdmin ? 'all' : 'assigned' }, accessToken);
       const list = Array.isArray(data) ? data : (data?.projects || data?.items || []);
       setProjects(list);
       if (list.length > 0) setSelectedProjectId((cur) => cur || list[0].id || list[0].name || '');
@@ -151,7 +155,7 @@ export default function MyProjectReports() {
     } finally {
       setLoadingProjects(false);
     }
-  }, [accessToken, toast]);
+  }, [accessToken, isAdmin, toast]);
 
   // Load reports across every assigned project. Per-project calls run in
   // parallel via Promise.allSettled so one project's 404 doesn't sink the
