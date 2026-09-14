@@ -498,6 +498,11 @@ function createApp(deps = {}) {
   // backend/src/routes/internal-upload-sweep.js for the three passes.
   const internalUploadSweepRoutes = require('./routes/internal-upload-sweep');
   app.use('/api/internal/upload', internalUploadSweepRoutes);
+  // [BLOB_GONE root-cause diagnostic, 2026-09-14] TEMPORARY one-shot
+  // diagnostic. DELETE THIS MOUNT + the file in routes/internal-blob-diag.js
+  // after the diagnostic has been run and the root cause is known.
+  const internalBlobDiagRoutes = require('./routes/internal-blob-diag');
+  app.use('/api/internal/blob-diag', internalBlobDiagRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ error: 'Not found' });
