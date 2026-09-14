@@ -337,11 +337,15 @@ const ALLOWED_R2_BUCKETS = [
 ].filter(Boolean);
 
 // DR-017: the buckets the `/ready` probe MUST see. Subset of
-// ALLOWED_R2_BUCKETS — we don't require dpr-documents to be present because
-// nothing in the runtime path writes to it today. Extend this list when a
-// new runtime upload target ships.
+// ALLOWED_R2_BUCKETS — extended in the BLOB_GONE investigation (2026-09-14)
+// to include dpr-documents: it's the runtime write target for R35 project
+// reports, R29 drawings PDFs, AND R37 billing certifications, AND it's the
+// bucket where every observed BLOB_GONE recovery row lives. A missing
+// `dpr-documents` MUST surface as a 503 on /ready, not as silent 410s on
+// every report download a week after deploy.
 const REQUIRED_BUCKETS = [
   process.env.R2_BUCKET_DPR_PHOTOS        || 'dpr-photos',
+  process.env.R2_BUCKET_DPR_DOCUMENTS     || 'dpr-documents',
   process.env.R2_BUCKET_INSPECTION_PHOTOS || 'inspection-photos',
   // training-materials is reserved for future course-attachment uploads; we
   // don't write to it yet, but a missing bucket should fail readiness now so

@@ -65,7 +65,7 @@ const { mapPrismaError, parseStrictISODate, toDateOnly } = require('../lib/error
 const { hashIdentifier } = require('../lib/pii');
 const { randomUUID } = require('crypto');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
-const { generateReadSASUrl, READ_URL_TTL_SECONDS } = require('../lib/blobStorage');
+const { generateReadSASUrl, READ_URL_TTL_SECONDS, verifyBlobExists } = require('../lib/blobStorage');
 // [DR-001] Reuse the S3-7 + DR-006 binding primitives — they are about
 // upload intents, not literally photos, even though the function names
 // carry the photo terminology. The single `pdfBlobPath` field is wrapped
@@ -801,6 +801,28 @@ router.get('/:id/read-sas', asyncHandler(async (req, res) => {
         error: 'NO_PDF_ATTACHED',
         code: 'NO_PDF_ATTACHED',
         message: 'This drawing does not have a PDF attached yet.',
+      });
+    }
+
+    // [BLOB_GONE recovery, 2026-09-14] Mirror the projectAttachments
+    // read-sas guard: HEAD the object first so we don't hand the
+    // browser a presigned URL that R2 answers with NoSuchKey XML.
+    // Falls through on HEAD timeout so a flaky R2 doesn't break the
+    // happy path.
+    try {
+      const props = await verifyBlobExists('dpr-documents', row.pdfBlobPath);
+      if (!props.exists) {
+        return res.status(410).json({
+          error: 'BLOB_GONE',
+          code: 'BLOB_GONE',
+          message: 'This PDF is no longer in storage — please re-upload.',
+          canReplace: true,
+        });
+      }
+    } catch (err) {
+      console.warn('[drawings] verifyBlobExists failed, minting SAS anyway', {
+        blobPath: row.pdfBlobPath,
+        errMessage: err?.message?.split('\n')[0],
       });
     }
 
