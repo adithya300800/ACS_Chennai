@@ -502,7 +502,7 @@ function createApp(deps = {}) {
   // diagnostic. DELETE THIS MOUNT + the file in routes/internal-blob-diag.js
   // after the diagnostic has been run and the root cause is known.
   const internalBlobDiagRoutes = require('./routes/internal-blob-diag');
-  app.use('/api/internal/blob-diag', internalBlobDiagRoutes);
+  app.use('/api/internal', internalBlobDiagRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ error: 'Not found' });
