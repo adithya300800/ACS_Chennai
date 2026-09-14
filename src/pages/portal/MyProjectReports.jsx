@@ -31,7 +31,7 @@
 //     machine so any backend contract change here is also a change
 //     ReportSection needs to pick up (single source of truth on the wire).
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -133,6 +133,15 @@ export default function MyProjectReports() {
   // after a successful review.
   const [actionBusy, setActionBusy] = useState(false);
   const [reviewNotesById, setReviewNotesById] = useState({});
+
+  // [BLOB_GONE recovery] Replace-file flow — the uploader (or admin)
+  // can re-upload a new file in place of one whose R2 bytes are missing.
+  // The hidden file input is keyed by attachment id via a ref so a
+  // single picker services every row in the list.
+  const [replaceBusyId, setReplaceBusyId] = useState(null);
+  const [replaceError, setReplaceError] = useState(null);
+  const fileInputRef = useRef(null);
+  const replaceTargetRef = useRef(null);
 
   // ─── Data loaders ──────────────────────────────────────────────────────
   // Load assigned projects once on mount. The picker auto-selects the
@@ -306,6 +315,71 @@ export default function MyProjectReports() {
     }
   }
 
+  // [BLOB_GONE recovery] Click handler for the "Replace file" button on
+  // each report row. Stash the target row on a ref + programmatically
+  // open the hidden file picker; handleReplaceFileChange does the
+  // SAS → R2 PUT → confirm → PATCH dance on selection.
+  function startReplaceFile(att) {
+    if (replaceBusyId) return;
+    replaceTargetRef.current = att;
+    setReplaceError(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  }
+
+  async function handleReplaceFileChange(e) {
+    const file = e.target.files?.[0];
+    const att = replaceTargetRef.current;
+    if (!file || !att) return;
+    if (file.size > MAX_REPORT_BYTES) {
+      const msg = `File too large. Max ${Math.round(MAX_REPORT_BYTES / (1024 * 1024))} MB.`;
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+      return;
+    }
+    if (!ACCEPTED_REPORT_TYPES.includes(file.type)) {
+      const msg = `File type "${file.type || 'unknown'}" not supported.`;
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+      return;
+    }
+    const projectId = att.projectId || projects.find((p) => p.name === att.projectName)?.id;
+    setReplaceBusyId(att.id);
+    setReplaceError(null);
+    try {
+      const { sasUrl, ulid, blobPath } = await api.getReportSasUrl(
+        file.name, file.type, accessToken,
+      );
+      await uploadBlob(sasUrl, file, { contentType: file.type });
+      await api.confirmReportUpload(
+        ulid, file.name, file.type, file.size, accessToken,
+      );
+      const updated = await api.replaceProjectAttachmentFile(
+        projectId || att.projectName, att.id, {
+          uploadIntentUlid: ulid,
+          blobPath,
+          filename: file.name,
+          contentType: file.type,
+          sizeBytes: file.size,
+        }, accessToken,
+      );
+      setReports((prev) => prev.map((r) => (r.id === att.id ? { ...r, ...updated } : r)));
+      toast.push(`Replaced file — "${updated.filename}".`, 'success');
+    } catch (err) {
+      const msg = err instanceof BlobUploadError
+        ? err.message
+        : (err?.message || 'Replace failed');
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+    } finally {
+      setReplaceBusyId(null);
+      replaceTargetRef.current = null;
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
   // [S7/MyReports] Admin review action handler — mirrors InspectionDetail's
   // runAdminAction. `action` is one of 'APPROVED' | 'REVISION_REQUESTED' |
   // 'REJECTED' (matches backend enum exactly so the wire body is the same
@@ -357,6 +431,22 @@ export default function MyProjectReports() {
 
   return (
     <div className="dpr-page">
+      {/* Hidden file input — programmatically opened by the Replace
+          button on each report row. Same per-row picker pattern as
+          the in-accordion ReportSection in ProjectExpandedPanel. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept={FILE_ACCEPT}
+        onChange={handleReplaceFileChange}
+        style={{ display: 'none' }}
+        aria-hidden="true"
+      />
+      {replaceError && (
+        <div className="portal-auth-error" role="alert" style={{ marginBottom: '0.75rem' }}>
+          {replaceError}
+        </div>
+      )}
       <div className="dpr-card">
         <Breadcrumb
           items={[
@@ -536,6 +626,9 @@ export default function MyProjectReports() {
           <div style={{ display: 'grid', gap: '0.5rem' }}>
             {filteredReports.map((r) => {
               const canDelete = isAdmin || (employee && r.uploadedById === employee.id);
+              // [BLOB_GONE recovery] Replace mirrors the PATCH endpoint's
+              // (admin OR uploader) gate — same ownership rule as Delete.
+              const canReplace = canDelete;
               const typeLabel = PROJECT_REPORT_TYPE_LABELS[r.type]?.short || r.type;
               const rStatus = r.status || 'PENDING_REVIEW';
               const canApprove = APPROVE_ALLOWED_FROM.has(rStatus);
@@ -696,6 +789,17 @@ export default function MyProjectReports() {
                   >
                     Download
                   </button>
+                  {canReplace && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => startReplaceFile(r)}
+                      disabled={replaceBusyId === r.id || (replaceBusyId !== null && replaceBusyId !== r.id)}
+                      title="Re-upload a new file in place — use this if Download returned BLOB_GONE"
+                    >
+                      {replaceBusyId === r.id ? 'Uploading…' : 'Replace'}
+                    </button>
+                  )}
                   {canDelete && (
                     <button
                       type="button"

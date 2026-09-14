@@ -986,6 +986,14 @@ export const api = {
   // REVISION_REQUESTED + REJECTED (server enforces; 400 on omission).
   reviewProjectAttachment: (projectId, attachmentId, payload, token) =>
     api.patch(`/projects/${projectId}/attachments/${attachmentId}`, payload, token),
+  // [S7 round-3] Replace the blob in-place for a BLOB_GONE row.
+  // Reuses the same SAS upload pipeline as `createProjectAttachment`
+  // — caller does: getReportSasUrl → uploadBlob → confirmReportUpload
+  // → replaceProjectAttachmentFile(uploadIntentUlid, blobPath, ...).
+  // Preserves row identity (type / title / uploadedBy / id), resets
+  // review state to PENDING_REVIEW.
+  replaceProjectAttachmentFile: (projectId, attachmentId, payload, token) =>
+    api.patch(`/projects/${projectId}/attachments/${attachmentId}/file`, payload, token),
 
   // Project Reports upload — same SAS-mint + confirm pattern as drawings.
   // The `report/` prefix is preserved verbatim in the blob path so an R2

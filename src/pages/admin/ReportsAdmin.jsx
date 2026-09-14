@@ -23,14 +23,17 @@
 //     uses for chips + badges.
 //   - The filter-chip + card-grid visual vocabulary of DrawingsAdmin.
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { uploadBlob, BlobUploadError } from '../../lib/blobUpload.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { formatShortDate, formatBytes } from '../../lib/format.js';
 import {
+  MAX_REPORT_BYTES,
+  ACCEPTED_REPORT_TYPES,
   PROJECT_REPORT_TYPES,
   PROJECT_REPORT_TYPE_LABELS,
 } from '../../lib/constants.js';
@@ -107,6 +110,16 @@ export default function ReportsAdmin() {
   // the source-text test pins stay in lockstep.
   const [actionBusy, setActionBusy] = useState(false);
   const [reviewNotesById, setReviewNotesById] = useState({});
+
+  // [BLOB_GONE recovery] Replace-file flow — admins can re-upload a new
+  // file in place of one whose R2 bytes are missing (BLOB_GONE 410 from
+  // read-sas). The hidden <input type="file"> is keyed by attachment id
+  // so the change handler knows which row to PATCH. One in-flight flag
+  // mirrors the upload pipeline elsewhere.
+  const [replaceBusyId, setReplaceBusyId] = useState(null);
+  const [replaceError, setReplaceError] = useState(null);
+  const fileInputRef = useRef(null);
+  const replaceTargetRef = useRef(null);
 
   // ─── Loaders: projects + employees (filters' dropdowns) ─────────────
   useEffect(() => {
@@ -236,6 +249,77 @@ export default function ReportsAdmin() {
     }
   }
 
+  // [BLOB_GONE recovery] Click handler for the "Replace file" button.
+  // Stash the row on a ref + programmatically open the hidden file
+  // picker. The change handler (handleReplaceFileChange) does the actual
+  // SAS → R2 PUT → confirm → PATCH dance.
+  function startReplaceFile(att) {
+    if (replaceBusyId) return;
+    replaceTargetRef.current = att;
+    setReplaceError(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  }
+
+  async function handleReplaceFileChange(e) {
+    const file = e.target.files?.[0];
+    const att = replaceTargetRef.current;
+    if (!file || !att) return;
+    if (file.size > MAX_REPORT_BYTES) {
+      const msg = `File too large. Max ${Math.round(MAX_REPORT_BYTES / (1024 * 1024))} MB.`;
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+      return;
+    }
+    if (!ACCEPTED_REPORT_TYPES.includes(file.type)) {
+      const msg = `File type "${file.type || 'unknown'}" not supported.`;
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+      return;
+    }
+    setReplaceBusyId(att.id);
+    setReplaceError(null);
+    try {
+      // 1. Mint a presigned PUT URL for the new bytes.
+      const { sasUrl, ulid, blobPath } = await api.getReportSasUrl(
+        file.name, file.type, accessToken,
+      );
+      // 2. PUT bytes direct-to-R2 (defense-in-depth: confirm-upload
+      //    flips the intent row to CONFIRMED so the orphan sweeper
+      //    can't evict the new bytes while we wait for the PATCH).
+      await uploadBlob(sasUrl, file, { contentType: file.type });
+      await api.confirmReportUpload(
+        ulid, file.name, file.type, file.size, accessToken,
+      );
+      // 3. PATCH the row — DR-001 intent binding + review state reset.
+      const updated = await api.replaceProjectAttachmentFile(
+        att.projectId, att.id, {
+          uploadIntentUlid: ulid,
+          blobPath,
+          filename: file.name,
+          contentType: file.type,
+          sizeBytes: file.size,
+        }, accessToken,
+      );
+      // 4. Patch the row in place so the new filename/size + reset
+      //    status render without a full re-fetch.
+      setReports((prev) => prev.map((r) => (r.id === att.id ? { ...r, ...updated } : r)));
+      toast.push(`Replaced file — "${updated.filename}".`, 'success');
+    } catch (err) {
+      const msg = err instanceof BlobUploadError
+        ? err.message
+        : (err?.message || 'Replace failed');
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+    } finally {
+      setReplaceBusyId(null);
+      replaceTargetRef.current = null;
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
   // [S7 round-2] Admin review handler — mirrors MyProjectReports.runReviewAction.
   // `action` is one of 'APPROVED' | 'REVISION_REQUESTED' | 'REJECTED' (matches
   // backend enum exactly). On success the local row is patched in place so
@@ -274,6 +358,22 @@ export default function ReportsAdmin() {
 
   return (
     <div className="dpr-page">
+      {/* Hidden file input — triggered programmatically by the Replace
+          button on each report card. Mirrors the per-card picker
+          pattern used by ReportSection. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept={ACCEPTED_REPORT_TYPES.join(',')}
+        onChange={handleReplaceFileChange}
+        style={{ display: 'none' }}
+        aria-hidden="true"
+      />
+      {replaceError && (
+        <div className="portal-auth-error" role="alert" style={{ marginBottom: '0.75rem' }}>
+          {replaceError}
+        </div>
+      )}
       <div className="dpr-page-header">
         <div>
           <Breadcrumb
@@ -603,6 +703,16 @@ export default function ReportsAdmin() {
                       aria-label={`Download ${r.filename}`}
                     >
                       Download
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => startReplaceFile(r)}
+                      disabled={replaceBusyId === r.id || (replaceBusyId !== null && replaceBusyId !== r.id)}
+                      aria-label={`Replace file for ${r.filename}`}
+                      title="Re-upload a new file in place — use this if Download returned BLOB_GONE"
+                    >
+                      {replaceBusyId === r.id ? 'Uploading…' : 'Replace'}
                     </button>
                     <button
                       type="button"

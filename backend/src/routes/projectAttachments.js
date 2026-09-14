@@ -708,6 +708,10 @@ router.get('/:attachmentId/read-sas', asyncHandler(async (req, res) => {
           error: 'BLOB_GONE',
           code: 'BLOB_GONE',
           message: 'This file is no longer in storage — please re-upload.',
+          // Hint to the SPA that the PATCH /:attachmentId/file endpoint
+          // can re-upload in-place (preserves row metadata). The SPA
+          // surfaces a "Replace file" CTA on top of the toast.
+          canReplace: true,
         });
       }
     } catch (err) {
@@ -736,6 +740,141 @@ router.get('/:attachmentId/read-sas', asyncHandler(async (req, res) => {
     const mapped = mapPrismaError(err);
     if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
     res.status(500).json({ error: 'Failed to mint read URL' });
+  }
+}));
+
+// ─── PATCH /api/projects/:projectId/attachments/:attachmentId/file ───────────
+// Replace the underlying blob in-place — preserves the row's identity
+// (type / title / uploadedBy / uploadedAt / id) so the admin doesn't
+// have to re-type metadata after a BLOB_GONE recovery. Auth: admin OR
+// uploader (same gate as DELETE). Resets review state to
+// PENDING_REVIEW so the admin's earlier Approve / Reject is no longer
+// sitting over a stale blob.
+//
+// Body shape — same as POST:
+//   uploadIntentUlid  — REQUIRED. The new UploadIntent row that vouches
+//                       for the new bytes (same DR-001 binding check).
+//   blobPath          — REQUIRED. The new R2 key from /api/dpr/sas-url.
+//   filename          — REQUIRED. Re-stamped on the row.
+//   contentType       — REQUIRED. In VALID_REPORT_CONTENT_TYPES.
+//   sizeBytes         — REQUIRED. ≤ 25 MB.
+//
+// 200 → attachment (serialized)
+// 400 → VALIDATION_ERROR
+// 403 → NOT_ATTACHMENT_OWNER
+// 404 → ATTACHMENT_NOT_FOUND
+// 409 → INTENT_MISMATCH (intent doesn't bind to the supplied blobPath)
+// 503 → DB_UNAVAILABLE
+router.patch('/:attachmentId/file', asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  const projectId = readProjectId(req);
+  const { attachmentId } = req.params;
+  if (!isValidUuid(attachmentId)) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'attachmentId must be a UUID' });
+  }
+
+  const body = req.body || {};
+  const { uploadIntentUlid, blobPath, filename, contentType, sizeBytes } = body;
+
+  if (!uploadIntentUlid || typeof uploadIntentUlid !== 'string') {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'uploadIntentUlid is required' });
+  }
+  if (!blobPath || typeof blobPath !== 'string') {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'blobPath is required' });
+  }
+  if (!filename || typeof filename !== 'string') {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'filename is required' });
+  }
+  if (!contentType || !VALID_REPORT_CONTENT_TYPES.has(contentType)) {
+    return res.status(400).json({
+      error: 'INVALID_CONTENT_TYPE',
+      code: 'INVALID_CONTENT_TYPE',
+      message: `contentType must be one of: ${Array.from(VALID_REPORT_CONTENT_TYPES).join(', ')}`,
+    });
+  }
+  if (typeof sizeBytes !== 'number' || !Number.isFinite(sizeBytes) || sizeBytes <= 0 || sizeBytes > 25 * 1024 * 1024) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'sizeBytes must be 1 byte – 26214400 bytes' });
+  }
+
+  try {
+    // Ownership pre-check before binding so a 403 doesn't run a tx.
+    const existing = await prisma.projectAttachment.findUnique({
+      where: { id: attachmentId },
+      select: { projectId: true, deletedAt: true, uploadedById: true },
+    });
+    if (!existing || existing.deletedAt) {
+      return res.status(404).json({ error: 'ATTACHMENT_NOT_FOUND', code: 'ATTACHMENT_NOT_FOUND', message: 'Attachment not found' });
+    }
+    if (existing.projectId !== projectId) {
+      return res.status(404).json({ error: 'ATTACHMENT_NOT_FOUND', code: 'ATTACHMENT_NOT_FOUND', message: 'Attachment not found' });
+    }
+    const isOwner = existing.uploadedById && existing.uploadedById === req.employeeId;
+    if (!req.isAdmin && !isOwner) {
+      return res.status(403).json({
+        error: 'NOT_ATTACHMENT_OWNER',
+        code: 'NOT_ATTACHMENT_OWNER',
+        message: 'Only the uploader or an admin may replace this file',
+      });
+    }
+
+    // [DR-001] Bind the new intent → the new blobPath, atomically.
+    // Same single-element-array adapter as POST so the helper stays
+    // happy. A sweep racing the claim makes the tx roll back; the
+    // client re-uploads.
+    const intentErr = await validatePhotoIntents({
+      prisma,
+      employeeId: req.employeeId,
+      photos: [{ ulid: uploadIntentUlid }],
+      context: 'projectAttachment.replace',
+      expectedContainer: 'dpr-documents',
+      expectedBlobPath: blobPath,
+    });
+    if (intentErr) return res.status(intentErr.status).json(intentErr.body);
+
+    const updated = await withRecordTransaction(prisma, 'projectAttachment', async (db) => {
+      await assertPhotoIntentsBindable({
+        tx: db,
+        employeeId: req.employeeId,
+        photos: [{ ulid: uploadIntentUlid }],
+        expectedContainer: 'dpr-documents',
+        expectedBlobPath: blobPath,
+      });
+      // Re-stamp blob fields + reset review state. The audit trail
+      // (uploadedById / uploadedAt) is preserved; status reverts to
+      // PENDING_REVIEW so the admin's earlier Approve / Reject isn't
+      // sitting over a fresh blob they haven't seen yet.
+      return db.projectAttachment.update({
+        where: { id: attachmentId },
+        data: {
+          blobPath,
+          filename,
+          contentType,
+          sizeBytes,
+          uploadIntentUlid,
+          status: 'PENDING_REVIEW',
+          reviewedById: null,
+          reviewedAt: null,
+          reviewNotes: null,
+        },
+      });
+    });
+
+    res.json(serializeProjectAttachment(updated));
+  } catch (err) {
+    console.error('[project-attachments] replace-file failed', {
+      employeeHash: hashIdentifier(req.employeeId),
+      projectId,
+      attachmentId,
+      errCode: err?.code,
+      errMessage: err?.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to replace file' });
   }
 }));
 
