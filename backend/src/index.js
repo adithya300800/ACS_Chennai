@@ -446,6 +446,12 @@ function createApp(deps = {}) {
   // (Drawings / BOQ / Variations).
   const adminReportsRoutes = require('./routes/adminReports');
   app.use('/api/admin/reports', adminReportsRoutes);
+  // TEMPORARY (BLOB_GONE root-cause investigation, 2026-09-15):
+  // admin-gated HEAD + ulid cross-reference for diagnosis of the
+  // Sept-11/12 photo render failures. DELETE this mount + the route
+  // file once we have a confirmed root cause and recovery path.
+  const adminPhotoDiagRoutes = require('./routes/admin-photo-diag');
+  app.use('/api/admin/diag', adminPhotoDiagRoutes);
   // R37: COP / Billing Certification Register — internal ledger of
   // contractor RA-bill (COP) certifications per project. Sits next to
   // /api/admin/reports because both are cross-org admin registries
@@ -498,11 +504,6 @@ function createApp(deps = {}) {
   // backend/src/routes/internal-upload-sweep.js for the three passes.
   const internalUploadSweepRoutes = require('./routes/internal-upload-sweep');
   app.use('/api/internal/upload', internalUploadSweepRoutes);
-  // [BLOB_GONE root-cause diagnostic, 2026-09-14] TEMPORARY one-shot
-  // diagnostic. DELETE THIS MOUNT + the file in routes/internal-blob-diag.js
-  // after the diagnostic has been run and the root cause is known.
-  const internalBlobDiagRoutes = require('./routes/internal-blob-diag');
-  app.use('/api/internal', internalBlobDiagRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ error: 'Not found' });
