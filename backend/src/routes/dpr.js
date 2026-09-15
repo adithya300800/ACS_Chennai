@@ -7,7 +7,7 @@ const router = express.Router();
 // dpr.js verbatim. See lib/idempotency.js for the contract and TTL.
 const { tryReplay: tryIdempotentReplay, recordSuccess: recordIdempotentSuccess } = require('../lib/idempotency');
 const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
-const { generateReadSASUrl, verifyBlobExists, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
+const { generateReadSASUrl, verifyBlobExists, deleteBlob, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime, toDateOnly } = require('../lib/errors');
 // Round-27: shared IST date helpers. The `month` query shortcut on the list
 // endpoint uses `getMonthRangeUtc` to expand `?month=YYYY-MM` into a
@@ -2952,6 +2952,180 @@ router.post('/:id/pdf', (req, res) => {
              'See backend/src/lib/pdfGenerator.js for the planned integration.',
   });
 });
+
+// ─── PATCH /api/dpr/:id/photos/:photoId ──────────────────────────────────
+// In-place replacement for a DPR photo whose R2 bytes were never landed
+// (BLOB_GONE — usually a PENDING intent swept before the user POSTed
+// the DPR, or an R2 transient during upload). Re-binds the photo row's
+// `ulid` / `filename` / `contentType` / `sizeBytes` to a fresh
+// upload intent + bytes, keeping the row's identity (caption, location,
+// takenAt, takenBy) intact so the user doesn't have to retype metadata.
+//
+// Auth: admin OR the DPR's original submitter (same gate as DELETE).
+//
+// Body (mirrors projectAttachments PATCH /:attachmentId/file):
+//   uploadIntentUlid  REQUIRED. The new UploadIntent row that vouches
+//                     for the new bytes (same DR-001 binding check).
+//   blobPath          REQUIRED. The new R2 key from /api/dpr/sas-url.
+//   filename          REQUIRED. Re-stamped on the row.
+//   contentType       REQUIRED. One of image/jpeg, image/png, image/webp.
+//   sizeBytes         REQUIRED. ≤ 10 MB.
+//
+// 200 → updated photo (with readUrl freshly minted)
+// 400 → VALIDATION_ERROR / INVALID_CONTENT_TYPE
+// 403 → NOT_PHOTO_OWNER (non-admin, non-uploader)
+// 404 → DPR_NOT_FOUND / PHOTO_NOT_FOUND
+// 409 → INTENT_MISMATCH / PHOTO_BINDING_LOST
+// 503 → DB_UNAVAILABLE
+router.patch('/:id/photos/:photoId', asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  if (!prisma) {
+    return res.status(503).json({ error: 'Database unavailable', code: 'DB_UNAVAILABLE' });
+  }
+
+  const { id: dprId, photoId } = req.params;
+
+  const body = req.body || {};
+  const { uploadIntentUlid, blobPath, filename, contentType, sizeBytes } = body;
+
+  if (!uploadIntentUlid || typeof uploadIntentUlid !== 'string') {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'uploadIntentUlid is required' });
+  }
+  if (!blobPath || typeof blobPath !== 'string') {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'blobPath is required' });
+  }
+  if (!filename || typeof filename !== 'string') {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'filename is required' });
+  }
+  const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+  if (!contentType || !ALLOWED_TYPES.has(contentType)) {
+    return res.status(400).json({
+      error: 'INVALID_CONTENT_TYPE',
+      code: 'INVALID_CONTENT_TYPE',
+      message: 'contentType must be one of: image/jpeg, image/png, image/webp',
+    });
+  }
+  const MAX_SIZE = 10 * 1024 * 1024;
+  if (typeof sizeBytes !== 'number' || !Number.isFinite(sizeBytes) || sizeBytes <= 0 || sizeBytes > MAX_SIZE) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      message: `sizeBytes must be 1 byte – ${MAX_SIZE} bytes`,
+    });
+  }
+
+  try {
+    // Ownership pre-check before binding so a 403 doesn't run a tx.
+    const photo = await prisma.dPRPhoto.findUnique({
+      where: { id: photoId },
+      select: { id: true, dprId: true, container: true, ulid: true, filename: true },
+    });
+    if (!photo || photo.dprId !== dprId) {
+      return res.status(404).json({ error: 'PHOTO_NOT_FOUND', code: 'PHOTO_NOT_FOUND', message: 'Photo not found' });
+    }
+    const dpr = await prisma.dPR.findUnique({
+      where: { id: dprId },
+      select: { submittedById: true },
+    });
+    if (!dpr) {
+      return res.status(404).json({ error: 'DPR_NOT_FOUND', code: 'DPR_NOT_FOUND', message: 'DPR not found' });
+    }
+    const isOwner = dpr.submittedById && dpr.submittedById === req.employeeId;
+    if (!req.isAdmin && !isOwner) {
+      return res.status(403).json({
+        error: 'NOT_PHOTO_OWNER',
+        code: 'NOT_PHOTO_OWNER',
+        message: 'Only the DPR submitter or an admin may replace this photo',
+      });
+    }
+
+    // [DR-001] Bind the new intent → the new blobPath, atomically.
+    // The expectedContainer + expectedBlobPath guards are what close
+    // the IDOR hole described in uploadIntentBinding.js — even with a
+    // leaked ulid, the new blobPath must be the SAME path the issuer
+    // minted under the caller's JWT.
+    const intentErr = await validatePhotoIntents({
+      prisma,
+      employeeId: req.employeeId,
+      photos: [{ ulid: uploadIntentUlid }],
+      context: 'dpr.replacePhoto',
+      expectedContainer: photo.container,
+      expectedBlobPath: blobPath,
+    });
+    if (intentErr) return res.status(intentErr.status).json(intentErr.body);
+
+    const updated = await withRecordTransaction(prisma, 'dpr', async (db) => {
+      await assertPhotoIntentsBindable({
+        tx: db,
+        employeeId: req.employeeId,
+        photos: [{ ulid: uploadIntentUlid }],
+        expectedContainer: photo.container,
+        expectedBlobPath: blobPath,
+      });
+      return db.dPRPhoto.update({
+        where: { id: photoId },
+        data: {
+          ulid: uploadIntentUlid,
+          filename,
+          contentType,
+          sizeBytes,
+        },
+      });
+    });
+
+    // Best-effort cleanup of the old blob. The DPR's `submittedById`
+    // (not the photo row's id) is the path prefix used by the read path;
+    // we mirror that to delete the now-orphan bytes. Failures here don't
+    // fail the replace — at worst the orphan sweep (cron OR
+    // `/api/internal/upload-sweep`) will retire it on its next pass.
+    const oldUlid = photo.ulid;
+    const ext = CONTENT_TYPE_EXT[photo.contentType];
+    const oldBlobName = ext
+      ? `${dpr.submittedById}/${oldUlid}.${ext}`
+      : `${dpr.submittedById}/${oldUlid}`;
+    try {
+      await deleteBlob(photo.container, oldBlobName);
+    } catch (err) {
+      console.warn('[dpr] replace photo: best-effort old-blob delete failed', {
+        photoId,
+        container: photo.container,
+        oldBlobName,
+        errMessage: err?.message?.split('\n')[0],
+      });
+    }
+
+    // Mint a fresh read URL using the DPR's submittedById prefix.
+    let readUrl = null;
+    try {
+      const newExt = CONTENT_TYPE_EXT[contentType];
+      const newBlobName = newExt
+        ? `${dpr.submittedById}/${updated.ulid}.${newExt}`
+        : `${dpr.submittedById}/${updated.ulid}`;
+      const props = await verifyBlobExists(photo.container, newBlobName);
+      if (props.exists) {
+        const { sasUrl } = await generateReadSASUrl(photo.container, newBlobName);
+        readUrl = sasUrl;
+      }
+    } catch (err) {
+      console.warn('[dpr] replace photo: verifyBlobExists/ReadSAS failed; returning photo without readUrl', {
+        photoId,
+        errMessage: err?.message?.split('\n')[0],
+      });
+    }
+
+    res.json({ ...updated, readUrl });
+  } catch (err) {
+    console.error('[dpr] replace photo failed', {
+      employeeHash: hashIdentifier(req.employeeId),
+      dprId,
+      photoId,
+      errCode: err?.code,
+      errMessage: err?.message?.split('\n')[0],
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to replace photo' });
+  }
+}));
 
 
 module.exports = router;
