@@ -447,11 +447,13 @@ function createApp(deps = {}) {
   const adminReportsRoutes = require('./routes/adminReports');
   app.use('/api/admin/reports', adminReportsRoutes);
   // TEMPORARY (BLOB_GONE root-cause investigation, 2026-09-15):
-  // admin-gated HEAD + ulid cross-reference for diagnosis of the
-  // Sept-11/12 photo render failures. DELETE this mount + the route
-  // file once we have a confirmed root cause and recovery path.
-  const adminPhotoDiagRoutes = require('./routes/admin-photo-diag');
-  app.use('/api/admin/diag', adminPhotoDiagRoutes);
+  // [REMOVED 2026-09-15] /api/admin/diag/photo-head — temporary diagnostic
+  // for the Sept-11/12 DPR photo BLOB_GONE investigation. Confirmed
+  // root cause (missing bytes in R2) + shipped recovery path
+  // (per-card Replace button on DprAll/DprList backed by
+  // PATCH /api/dpr/:dprId/photos/:photoId). The endpoint widened the
+  // admin attack surface for no remaining benefit — REMOVED, not
+  // extended. See memory blob-gone-root-cause.md.
   // R37: COP / Billing Certification Register — internal ledger of
   // contractor RA-bill (COP) certifications per project. Sits next to
   // /api/admin/reports because both are cross-org admin registries
