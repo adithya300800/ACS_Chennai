@@ -7,7 +7,7 @@ const router = express.Router();
 // dpr.js verbatim. See lib/idempotency.js for the contract and TTL.
 const { tryReplay: tryIdempotentReplay, recordSuccess: recordIdempotentSuccess } = require('../lib/idempotency');
 const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
-const { generateReadSASUrl, verifyBlobExists, deleteBlob, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
+const { generateReadSASUrl, verifyBlobExists, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime, toDateOnly } = require('../lib/errors');
 // Round-27: shared IST date helpers. The `month` query shortcut on the list
 // endpoint uses `getMonthRangeUtc` to expand `?month=YYYY-MM` into a
@@ -3072,27 +3072,18 @@ router.patch('/:id/photos/:photoId', asyncHandler(async (req, res) => {
       });
     });
 
-    // Best-effort cleanup of the old blob. The DPR's `submittedById`
-    // (not the photo row's id) is the path prefix used by the read path;
-    // we mirror that to delete the now-orphan bytes. Failures here don't
-    // fail the replace — at worst the orphan sweep (cron OR
-    // `/api/internal/upload-sweep`) will retire it on its next pass.
-    const oldUlid = photo.ulid;
-    const ext = CONTENT_TYPE_EXT[photo.contentType];
-    const oldBlobName = ext
-      ? `${dpr.submittedById}/${oldUlid}.${ext}`
-      : `${dpr.submittedById}/${oldUlid}`;
-    try {
-      await deleteBlob(photo.container, oldBlobName);
-    } catch (err) {
-      console.warn('[dpr] replace photo: best-effort old-blob delete failed', {
-        photoId,
-        container: photo.container,
-        oldBlobName,
-        errMessage: err?.message?.split('\n')[0],
-      });
-    }
-
+    // We deliberately do NOT delete the old blob here. Reasons:
+    //   1. ProjectAttachments' `/file` replace (the pattern this endpoint
+    //      mirrors) also does not — be consistent.
+    //   2. The old blob's bytes are an unknown — the diagnostic may have
+    //      reported missing because of an upload-time transient, OR the
+    //      bytes may exist under a different path (different employeeId,
+    //      legacy path scheme). Deleting by computed path could nuke
+    //      recoverable evidence.
+    //   3. The orphan sweep (`/api/internal/upload-sweep` + cron) is the
+    //      durable mechanism for cleaning up stale bytes — it knows the
+    //      true DB↔R2 mapping and never deletes a still-bound blob.
+    //
     // Mint a fresh read URL using the DPR's submittedById prefix.
     let readUrl = null;
     try {
