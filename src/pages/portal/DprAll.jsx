@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { uploadBlob, BlobUploadError } from '../../lib/blobUpload.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import PhotoDownloadButton from '../../components/PhotoDownloadButton.jsx';
 import MonthFilter from '../../components/MonthFilter.jsx';
@@ -89,7 +90,8 @@ function PhotoThumb({ photo }) {
 }
 
 function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
-  const { accessToken } = useAuth();
+  const { accessToken, isAdmin } = useAuth();
+  const toast = useToast();
   const [dpr, setDpr] = useState(dprSummary);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -100,6 +102,103 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
   // Round-29: pourSummary state + getCubePourSummary call REMOVED —
   // the cube-test feature is gone. Cube testing is captured by the
   // cube_casting / cube_testing InspectionRecord sub-types.
+
+  // [2026-09-15 BLOB_GONE] Per-photo Replace affordance. The DR detail
+  // response sets `readUrl: null` when the server's HEAD-before-SAS
+  // guard confirms the blob is gone from R2 (upload pipeline gap, not
+  // a per-byte issue). For those rows we surface a Replace button that
+  // re-runs the same SAS-upload pipeline as POST /api/dpr and then
+  // PATCHes the existing photo row to re-bind its (ulid, filename,
+  // contentType, sizeBytes) to the new intent + bytes — preserving the
+  // row's identity (caption / location / takenAt) so the user doesn't
+  // retype metadata. Same gate as the projectAttachments Replace
+  // button (admin OR the DPR's original submitter — enforced server-
+  // side, mirrored client-side as the optimistic gate).
+  const replaceTargetRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const [replaceBusyPhotoId, setReplaceBusyPhotoId] = useState(null);
+  const [replaceError, setReplaceError] = useState(null);
+
+  const canReplacePhoto = (photo) => {
+    if (!photo || !photo.id) return false;
+    // Optimistic gate: admin always, else the DPR's submitter only.
+    if (isAdmin) return true;
+    return dpr && dpr.submittedById && dpr.submittedById === (dpr._selfEmployeeId || null);
+  };
+
+  function startReplacePhoto(photo) {
+    if (replaceBusyPhotoId) return;
+    if (!canReplacePhoto(photo)) {
+      const msg = 'Only the DPR’s submitter or an admin can replace this photo.';
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+      return;
+    }
+    replaceTargetRef.current = photo;
+    setReplaceError(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  }
+
+  async function handleReplacePhotoChange(e) {
+    const file = e.target.files?.[0];
+    const photo = replaceTargetRef.current;
+    if (!file || !photo) return;
+    replaceTargetRef.current = null;
+    setReplaceError(null);
+
+    const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
+    const ALLOWED = ['image/jpeg', 'image/png', 'image/webp'];
+    if (file.size > MAX_PHOTO_BYTES) {
+      const msg = `Photo too large. Max ${Math.round(MAX_PHOTO_BYTES / (1024 * 1024))} MB.`;
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+      return;
+    }
+    if (!ALLOWED.includes(file.type)) {
+      const msg = `Photo type "${file.type || 'unknown'}" not supported (allowed: jpeg, png, webp).`;
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+      return;
+    }
+
+    setReplaceBusyPhotoId(photo.id);
+    try {
+      // 1. Mint a presigned PUT URL for the new bytes.
+      const { sasUrl, ulid, blobPath } = await api.getDprSasUrl(
+        file.name, file.type, photo.container || 'dpr-photos', accessToken,
+      );
+      // 2. PUT the new bytes straight to R2.
+      await uploadBlob(sasUrl, file, { contentType: file.type });
+      // 3. Confirm the upload — flips intent to CONFIRMED.
+      await api.confirmDprUpload(
+        ulid, photo.container || 'dpr-photos', file.name, file.type, file.size, accessToken,
+      );
+      // 4. Re-bind the existing photo row to the new intent + bytes.
+      const updated = await api.replaceDprPhoto(
+        dprSummary.id, photo.id,
+        { uploadIntentUlid: ulid, blobPath, filename: file.name, contentType: file.type, sizeBytes: file.size },
+        accessToken,
+      );
+      // 5. Optimistic patch — server returned the updated row with a
+      // freshly-minted readUrl; drop it into the photos array in-place.
+      setDpr((prev) => {
+        if (!prev || !Array.isArray(prev.photos)) return prev;
+        const nextPhotos = prev.photos.map((p) => (p.id === photo.id ? { ...p, ...updated } : p));
+        return { ...prev, photos: nextPhotos };
+      });
+      toast.push('Photo replaced.', 'success');
+    } catch (err) {
+      console.error('[DprAll] replace photo failed', err);
+      const msg = err?.message || 'Failed to replace photo.';
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+    } finally {
+      setReplaceBusyPhotoId(null);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -336,6 +435,27 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
                       </button>
                       {/* R22.5: per-image download affordance on the modal. */}
                       <PhotoDownloadButton photo={p} />
+                      {/* [2026-09-15 BLOB_GONE] per-photo Replace affordance.
+                          Visible only when the BLOB_GONE guard returned
+                          `readUrl: null` (server confirmed the bytes are
+                          gone from R2). Re-runs the SAS-upload pipeline
+                          then PATCHes the existing photo row to re-bind
+                          its (ulid, filename, contentType, sizeBytes) to
+                          the new bytes — preserves caption / location /
+                          takenAt so the user doesn't retype metadata. */}
+                      {!p.readUrl && canReplacePhoto(p) && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          style={{ marginTop: '0.25rem', width: '100%' }}
+                          onClick={() => startReplacePhoto(p)}
+                          disabled={replaceBusyPhotoId === p.id || (replaceBusyPhotoId !== null && replaceBusyPhotoId !== p.id)}
+                          aria-label={`Replace photo ${i + 1} of ${dpr.photos.length}`}
+                          title="Re-upload a new photo in place — use this when the existing one is broken (BLOB_GONE)"
+                        >
+                          {replaceBusyPhotoId === p.id ? 'Uploading…' : 'Replace'}
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -349,6 +469,36 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
         open={lightboxIndex !== null}
         onClose={() => setLightboxIndex(null)}
       />
+      {/* [2026-09-15 BLOB_GONE] Hidden file picker shared by every
+          Replace button in the photo grid. Stash the target photo on
+          a ref in startReplacePhoto; this input fires once the user
+          picks a file. accept mirrors the same allowlist as POST
+          /api/dpr. key={Date.now()} in startReplacePhoto forces this
+          same <input> to re-emit a change event when the same photo
+          is replaced twice in a row (browsers don't fire `change` if
+          the user picks the exact same filename twice). */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        onChange={handleReplacePhotoChange}
+        style={{ display: 'none' }}
+      />
+      {replaceError && (
+        <div
+          role="alert"
+          style={{
+            marginTop: '0.5rem',
+            padding: '0.5rem 0.75rem',
+            borderRadius: 6,
+            background: 'var(--danger-bg, #fef2f2)',
+            color: 'var(--danger, #b91c1c)',
+            fontSize: '0.875rem',
+          }}
+        >
+          {replaceError}
+        </div>
+      )}
     </Modal>
   );
 }

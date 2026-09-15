@@ -469,6 +469,18 @@ export const api = {
   generateDprPdf: (id, token) => api.post(`/dpr/${id}/pdf`, {}, token),
   // SOL-P0#4: delete own DRAFT DPR. Backend enforces DRAFT-only + owner-only.
   deleteDpr: (id, token) => api.delete(`/dpr/${id}`, token),
+  // [2026-09-15 BLOB_GONE] PATCH /api/dpr/:id/photos/:photoId — recover a
+  // photo whose R2 bytes were never landed (BLOB_GONE). Re-binds the
+  // (ulid, filename, contentType, sizeBytes) of the existing photo row to
+  // a fresh upload intent + bytes, keeping the row's identity (caption /
+  // location / takenAt / uploadedAt) intact. Same gate as projectAttachments
+  // /file: admin OR DPR's submitter. Caller does the standard
+  // /dpr/sas-url → uploadBlob → /dpr/confirm-upload pipeline first, then
+  // passes the new (uploadIntentUlid, blobPath, filename, contentType,
+  // sizeBytes) to this helper. Server returns the updated photo with a
+  // freshly-minted readUrl.
+  replaceDprPhoto: (dprId, photoId, payload, token) =>
+    api.patch(`/dpr/${dprId}/photos/${photoId}`, payload, token),
   // P0 round-9: GET /api/dpr/notifications is mounted only as an SSE stream,
   // so JSON-parsing the response silently throws and the bell shows "0 unread".
   // The dedicated JSON-list endpoint returns { notifications: [...] } so

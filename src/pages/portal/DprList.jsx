@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
+import { uploadBlob, BlobUploadError } from '../../lib/blobUpload.js';
 import { formatDateOnly, formatMonthLabel, getCurrentIstMonth, shiftMonth } from '../../lib/format.js';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
@@ -230,6 +231,98 @@ export default function DprList() {
   // Round-29: pourSummary state REMOVED — the cube-test feature is gone.
   // Round-28 #7: lightbox state for the in-place detail modal.
   const [lightboxIndex, setLightboxIndex] = useState(null);
+
+  // [2026-09-15 BLOB_GONE] Per-photo Replace affordance for the
+  // employee's own DPR history modal. Same pattern as DprAll.jsx:
+  // the BLOB_GONE guard returns readUrl:null, we surface a Replace
+  // button when the bytes are gone from R2. The handler re-runs the
+  // standard SAS-upload pipeline then PATCHes the existing photo row
+  // to re-bind its (ulid, filename, contentType, sizeBytes) to the new
+  // bytes — preserves caption / location / takenAt so the user doesn't
+  // retype metadata. Admin always allowed; employee only on their own
+  // DPRs (mirror of backend gate, enforced optimistically here).
+  // Uses the `isAdmin` const derived from `useAuth()` at line ~123 so we
+  // don't double-call the hook.
+  const replaceTargetRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const [replaceBusyPhotoId, setReplaceBusyPhotoId] = useState(null);
+  const [replaceError, setReplaceError] = useState(null);
+
+  function canReplacePhoto(photo) {
+    if (!photo || !photo.id) return false;
+    if (isAdmin) return true;
+    return expandedDpr && expandedDpr.submittedById && expandedDpr.submittedById === expandedDpr._selfEmployeeId;
+  }
+
+  function startReplacePhoto(photo) {
+    if (replaceBusyPhotoId) return;
+    if (!canReplacePhoto(photo)) {
+      const msg = 'Only the DPR’s submitter or an admin can replace this photo.';
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+      return;
+    }
+    replaceTargetRef.current = photo;
+    setReplaceError(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  }
+
+  async function handleReplacePhotoChange(e) {
+    const file = e.target.files?.[0];
+    const photo = replaceTargetRef.current;
+    if (!file || !photo) return;
+    replaceTargetRef.current = null;
+    setReplaceError(null);
+
+    const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
+    const ALLOWED = ['image/jpeg', 'image/png', 'image/webp'];
+    if (file.size > MAX_PHOTO_BYTES) {
+      const msg = `Photo too large. Max ${Math.round(MAX_PHOTO_BYTES / (1024 * 1024))} MB.`;
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+      return;
+    }
+    if (!ALLOWED.includes(file.type)) {
+      const msg = `Photo type "${file.type || 'unknown'}" not supported (allowed: jpeg, png, webp).`;
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+      return;
+    }
+
+    setReplaceBusyPhotoId(photo.id);
+    try {
+      const { sasUrl, ulid, blobPath } = await api.getDprSasUrl(
+        file.name, file.type, photo.container || 'dpr-photos', accessToken,
+      );
+      await uploadBlob(sasUrl, file, { contentType: file.type });
+      await api.confirmDprUpload(
+        ulid, photo.container || 'dpr-photos', file.name, file.type, file.size, accessToken,
+      );
+      const updated = await api.replaceDprPhoto(
+        expandedDpr.id, photo.id,
+        { uploadIntentUlid: ulid, blobPath, filename: file.name, contentType: file.type, sizeBytes: file.size },
+        accessToken,
+      );
+      // Optimistic patch — drop the updated photo (with fresh readUrl)
+      // into the photos array in place.
+      setExpandedDpr((prev) => {
+        if (!prev || !Array.isArray(prev.photos)) return prev;
+        const nextPhotos = prev.photos.map((p) => (p.id === photo.id ? { ...p, ...updated } : p));
+        return { ...prev, photos: nextPhotos };
+      });
+      toast.push('Photo replaced.', 'success');
+    } catch (err) {
+      console.error('[DprList] replace photo failed', err);
+      const msg = err?.message || 'Failed to replace photo.';
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+    } finally {
+      setReplaceBusyPhotoId(null);
+    }
+  }
 
   const fetchDprs = useCallback(async (cursor = null) => {
     try {
@@ -1038,15 +1131,54 @@ export default function DprList() {
                               aria-label={`Open photo ${i + 1} of ${expandedDpr.photos.length}`}
                               title={p.caption || p.filename}
                             >
-                              <img
-                                src={p.readUrl}
-                                alt={p.caption || p.filename}
-                                loading="lazy"
-                                style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-                              />
+                              {p.readUrl ? (
+                                <img
+                                  src={p.readUrl}
+                                  alt={p.caption || p.filename}
+                                  loading="lazy"
+                                  style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                                />
+                              ) : (
+                                // [2026-09-15 BLOB_GONE] placeholder when
+                                // the server's HEAD-before-SAS guard
+                                // returned exists:false. Same icon shape
+                                // as DprAll's PhotoThumb fallback.
+                                <div
+                                  style={{
+                                    width: '100%',
+                                    height: '100%',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    color: 'var(--steel)',
+                                    background: '#f1f5f9',
+                                    fontSize: '0.75rem',
+                                  }}
+                                  aria-label="Photo unavailable — bytes missing from R2"
+                                >
+                                  Photo unavailable
+                                </div>
+                              )}
                             </button>
                             {/* R22.5: per-image download affordance. */}
                             <PhotoDownloadButton photo={p} />
+                            {/* [2026-09-15 BLOB_GONE] per-photo Replace
+                                affordance, identical pattern to DprAll.
+                                Visible only when the server confirmed
+                                bytes are gone from R2. */}
+                            {!p.readUrl && canReplacePhoto(p) && (
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                style={{ marginTop: '0.25rem', width: '100%' }}
+                                onClick={() => startReplacePhoto(p)}
+                                disabled={replaceBusyPhotoId === p.id || (replaceBusyPhotoId !== null && replaceBusyPhotoId !== p.id)}
+                                aria-label={`Replace photo ${i + 1} of ${expandedDpr.photos.length}`}
+                                title="Re-upload a new photo in place — use this when the existing one is broken (BLOB_GONE)"
+                              >
+                                {replaceBusyPhotoId === p.id ? 'Uploading…' : 'Replace'}
+                              </button>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -1113,6 +1245,38 @@ export default function DprList() {
         open={lightboxIndex !== null}
         onClose={() => setLightboxIndex(null)}
       />
+      {/* [2026-09-15 BLOB_GONE] Hidden file picker shared by every
+          Replace button in the photo grid. Mirrors the same pattern
+          in DprAll.jsx — stash the target photo on a ref in
+          startReplacePhoto; this input fires once the user picks
+          a file. accept mirrors POST /api/dpr's allowlist. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        onChange={handleReplacePhotoChange}
+        style={{ display: 'none' }}
+      />
+      {replaceError && (
+        <div
+          role="alert"
+          style={{
+            position: 'fixed',
+            bottom: '1rem',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            padding: '0.5rem 1rem',
+            borderRadius: 6,
+            background: 'var(--danger-bg, #fef2f2)',
+            color: 'var(--danger, #b91c1c)',
+            fontSize: '0.875rem',
+            zIndex: 1100,
+            boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+          }}
+        >
+          {replaceError}
+        </div>
+      )}
     </div>
   );
 }
