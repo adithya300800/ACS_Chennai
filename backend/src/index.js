@@ -447,13 +447,27 @@ function createApp(deps = {}) {
   const adminReportsRoutes = require('./routes/adminReports');
   app.use('/api/admin/reports', adminReportsRoutes);
   // TEMPORARY (BLOB_GONE root-cause investigation, 2026-09-15):
-  // [REMOVED 2026-09-15] /api/admin/diag/photo-head — temporary diagnostic
-  // for the Sept-11/12 DPR photo BLOB_GONE investigation. Confirmed
-  // root cause (missing bytes in R2) + shipped recovery path
-  // (per-card Replace button on DprAll/DprList backed by
-  // PATCH /api/dpr/:dprId/photos/:photoId). The endpoint widened the
-  // admin attack surface for no remaining benefit — REMOVED, not
-  // extended. See memory blob-gone-root-cause.md.
+  // [REMOVED 2026-09-15] /api/admin/diag/photo-head — first-cut diagnostic
+  // for the Sept-13/15 DPR photo BLOB_GONE investigation. Closed: 13
+  // missing bytes across 6 DPRs (3 uploaders) confirmed in R2, recovery
+  // path shipped (PATCH per-card Replace button on DprAll + DprList,
+  // commit 39ff989). Removed because the route had a 1000-key pagination
+  // cap + scanned only one bucket — too narrow for a real root-cause
+  // probe.
+  //
+  // [2026-09-15, RE-ADDED] /api/admin/diag/photo-reconcile — second-cut
+  // diagnostic that closes both gaps (full ContinuationToken pagination,
+  // scans all R2 buckets). User flagged "if we have the photos in R2 why
+  // do we need to re-upload" — fair point; the previous diag couldn't
+  // PROVE the bytes were missing. This version returns every key whose
+  // path contains the broken ULID across all buckets, so we can
+  // distinguish "bytes truly missing" from "bytes at a different path
+  // we can rebind to". Read-only (no mutations). DELETE this mount +
+  // the route file after the reconcile decision is made (either ship
+  // a reconcile endpoint that fixes the row pointer, or fall back to
+  // the per-card Replace flow already shipped).
+  const adminPhotoReconcileRoutes = require('./routes/admin-photo-reconcile');
+  app.use('/api/admin/diag', adminPhotoReconcileRoutes);
   // R37: COP / Billing Certification Register — internal ledger of
   // contractor RA-bill (COP) certifications per project. Sits next to
   // /api/admin/reports because both are cross-org admin registries
