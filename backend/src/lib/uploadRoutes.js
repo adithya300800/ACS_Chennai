@@ -5,13 +5,12 @@
  * had ~80 lines each of nearly-identical upload code:
  *   - The /sas-url handler (content-type allowlist, container allowlist,
  *     MAX_PHOTO_SIZE gate at issue time, pendingUploads registration,
- *     20-min TTL with orphan-blob cleanup).
+ *     20-min cache-bounding TTL).
  *   - The /confirm-upload handler (size verification, content-type
  *     check, blob existence check, 1 KB size tolerance, PII-hashed
  *     error logging).
  *   - The pendingUploads Map (separate instance in each file).
  *   - The MAX_PHOTO_SIZE constant.
- *   - The sweepPendingUpload helper.
  *
  * DR-003's auth + byte-ceiling + orphan-cleanup fixes doubled that
  * duplication. Any future change (e.g. a stricter content-type
@@ -27,8 +26,7 @@
  *         server validates against an allowlist.
  *   - Single process-wide pendingUploads Map (keyed by employeeId +
  *     ulid, never collides between routes).
- *   - Single MAX_PHOTO_SIZE + sweepPendingUpload + verifyBlobExists
- *     error-shape policy.
+ *   - Single MAX_PHOTO_SIZE + verifyBlobExists error-shape policy.
  *
  * Both dpr.js and inspection.js now call this with their own config.
  */
@@ -37,7 +35,6 @@ const {
   generateULID,
   generateUploadSASUrl,
   verifyBlobExists,
-  deleteBlob,
   CONTENT_TYPE_EXT,
 } = require('./blobStorage');
 const { hashIdentifier } = require('./pii');
@@ -54,23 +51,15 @@ const SIZE_TOLERANCE_BYTES = 1024;        // 1 KB tolerance for chunked-upload f
 // One Map, one TTL sweeper, one source of truth.
 const pendingUploads = new Map();
 
-// DR-003: best-effort orphan-blob cleanup. When the 20-min TTL fires,
-// if the user uploaded bytes to R2 but never called /confirm-upload,
-// those bytes become orphaned (unreferenced, paying for storage forever).
-// 404 from R2 means the blob never landed — that's fine.
-async function sweepPendingUpload({ employeeId, ulid, container, blobName }) {
-  try {
-    await deleteBlob(container, blobName);
-  } catch (err) {
-    if (err?.$metadata?.httpStatusCode === 404) return;
-    console.warn('Upload orphan-blob cleanup failed', {
-      employeeHash: hashIdentifier(employeeId),
-      ulid,
-      container,
-      errMessage: err.message?.split('\n')[0],
-    });
-  }
-}
+// [DR-001 fix 2026-09-19] RETIRED `sweepPendingUpload` — the prior
+// 20-min timer called this helper after /confirm-upload refreshed
+// the in-process Map entry, which deleted CONFIRMED R2 bytes. Object
+// lifecycle now belongs exclusively to the reference-aware orphan
+// sweep (/api/internal/upload-sweep + cron → deleteBlob in
+// backend/src/routes/internal-upload-sweep.js:168 and
+// DeleteObjectCommand in backend/scripts/_sweepOrphanUploadsCore.js:173).
+// The Map is a hot-path cache only; cache eviction happens at
+// /confirm-upload + at the 20-min timer, with no delete side-effect.
 
 // Validate a client-declared sizeBytes. Returns null if OK, or an
 // Express response object to send. Used by /sas-url (the gate that
@@ -273,6 +262,17 @@ function mountUploadRoutes(router, config = {}) {
       { pathPrefix }
     );
 
+    // [DR-001 fix 2026-09-19] The 20-min timer below MUST NOT own object
+    // lifecycle. Once a SAS URL is issued, the durable UploadIntent
+    // (DB) is the source of truth for "is this blob confirmed?". The
+    // in-process Map is just a hot-path cache, and the timer only
+    // exists to bound that cache. We deliberately do NOT call
+    // `sweepPendingUpload` here — that helper deletes R2 bytes and
+    // the prior implementation deleted confirmed media when the
+    // /confirm-upload handler refreshed the Map entry after CAS. The
+    // orphan-blob cleanup path is now exclusively the durable sweep
+    // (/api/internal/upload-sweep + cron), which is reference-aware
+    // and gated on the same durable UploadIntent row.
     pendingUploads.set(`${req.employeeId}:${ulid}`, {
       employeeId: req.employeeId,
       container,
@@ -315,20 +315,15 @@ function mountUploadRoutes(router, config = {}) {
       }
     }
 
-    // 20-min TTL: bound the in-memory map AND clean up any orphaned
-    // R2 blob if the user never confirmed.
+    // [DR-001 fix 2026-09-19] 20-min TTL: bound the in-memory cache ONLY.
+    // The timer no longer owns object lifecycle. If the user never
+    // confirmed, the durable UploadIntent will EXPIRE and the
+    // reference-aware sweep (/api/internal/upload-sweep + cron) is
+    // the only path that can delete R2 bytes. Confirmed entries are
+    // evicted from the cache by /confirm-upload (which deletes the
+    // entry, not refreshes it) so this timer never sees them.
     setTimeout(() => {
-      const key = `${req.employeeId}:${ulid}`;
-      const entry = pendingUploads.get(key);
-      pendingUploads.delete(key);
-      if (entry) {
-        sweepPendingUpload({
-          employeeId: entry.employeeId,
-          ulid,
-          container: entry.container,
-          blobName: entry.blobName,
-        }).catch(() => {});
-      }
+      pendingUploads.delete(`${req.employeeId}:${ulid}`);
     }, PENDING_TTL_MS).unref();
 
     res.json({ sasUrl, ulid, blobPath, expiresAt });
@@ -459,17 +454,14 @@ function mountUploadRoutes(router, config = {}) {
         return res.status(502).json({ error: 'BLOB_VERIFICATION_FAILED', message: 'Could not verify upload' });
       }
 
-      // Refresh the in-process Map cache AFTER successful confirmation
-      // so subsequent same-process calls can short-circuit. The Map
-      // is NEVER consulted above to invalidate an intent.
-      pendingUploads.set(pendingKey, {
-        employeeId: req.employeeId,
-        container: intent.container,
-        filename,
-        contentType: intent.contentType,
-        blobName: intent.blobPath,
-        pathPrefix: null,
-      });
+      // [DR-001 fix 2026-09-19] Evict the in-process Map cache after
+      // successful confirmation. The prior implementation refreshed
+      // the entry, which the /sas-url 20-min timer then picked up
+      // and used to call sweepPendingUpload → deleteBlob against
+      // CONFIRMED R2 bytes. The durable UploadIntent row is now the
+      // sole source of truth for "is this blob confirmed?" — the Map
+      // is hot-path only, and a confirmed blob is removed from it.
+      pendingUploads.delete(pendingKey);
 
       return res.json({ verified: true });
     }
@@ -520,6 +512,5 @@ module.exports = {
   SIZE_TOLERANCE_BYTES,
   // Exported for tests + advanced use cases:
   pendingUploads,
-  sweepPendingUpload,
   validateSizeBytes,
 };
