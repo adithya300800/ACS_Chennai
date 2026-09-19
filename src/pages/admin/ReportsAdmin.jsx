@@ -336,7 +336,13 @@ export default function ReportsAdmin() {
     )));
     try {
       const updated = await api.reviewProjectAttachment(
-        att.projectId, att.id, { status: action, reviewNotes: notes || null }, accessToken,
+        att.projectId, att.id,
+        // [DR-037] Echo the row's contentVersion at click-time so the
+        // server can 409 if a parallel replace already moved it. This
+        // is captured from `att.contentVersion` (the optimistic-updated
+        // local row above sets it from the prior server response).
+        { status: action, reviewNotes: notes || null, expectedVersion: att.contentVersion ?? 0 },
+        accessToken,
       );
       setReports((prev) => prev.map((r) => (r.id === att.id ? { ...r, ...updated } : r)));
       setReviewNotesById((prev) => {
@@ -349,7 +355,15 @@ export default function ReportsAdmin() {
       toast.push(`Report ${verb}.`, 'success');
     } catch (err) {
       fetchReports();
-      const msg = err?.message || `Failed to ${action.toLowerCase()} report.`;
+      // [DR-037] Stale-version 409 — server says the row moved since
+      // we opened the tab. Render a "refresh and try again" toast
+      // instead of the generic failure copy so the admin knows the
+      // action didn't fail for a transient reason.
+      const isStale = err?.code === 'STALE_REVIEW_VERSION'
+        || (typeof err?.message === 'string' && err.message.includes('STALE_REVIEW_VERSION'));
+      const msg = isStale
+        ? 'This report changed since you opened it. The page refreshed; please try again.'
+        : (err?.message || `Failed to ${action.toLowerCase()} report.`);
       if (err?.status !== 401) toast.push(msg, 'error');
     } finally {
       setActionBusy(false);

@@ -994,8 +994,12 @@ export const api = {
     api.delete(`/projects/${projectId}/attachments/${attachmentId}`, token),
   // [S7/MyReports] Admin-only review state machine. Body shape mirrors the
   // backend PATCH handler: `{ status: 'APPROVED' | 'REVISION_REQUESTED' |
-  // 'REJECTED', reviewNotes?: string }`. reviewNotes is required for
-  // REVISION_REQUESTED + REJECTED (server enforces; 400 on omission).
+  // 'REJECTED', reviewNotes?: string, expectedVersion?: number }`.
+  // reviewNotes is required for REVISION_REQUESTED + REJECTED (server
+  // enforces; 400 on omission).
+  // [DR-037] expectedVersion is the row's contentVersion at click-time;
+  // the server 409s STALE_REVIEW_VERSION on mismatch so an admin can't
+  // Approve a blob replaced from another tab since they opened this one.
   reviewProjectAttachment: (projectId, attachmentId, payload, token) =>
     api.patch(`/projects/${projectId}/attachments/${attachmentId}`, payload, token),
   // [S7 round-3] Replace the blob in-place for a BLOB_GONE row.
@@ -1004,6 +1008,8 @@ export const api = {
   // → replaceProjectAttachmentFile(uploadIntentUlid, blobPath, ...).
   // Preserves row identity (type / title / uploadedBy / id), resets
   // review state to PENDING_REVIEW.
+  // [DR-037] Same expectedVersion contract as reviewProjectAttachment —
+  // the server bumps contentVersion on success and 409s on mismatch.
   replaceProjectAttachmentFile: (projectId, attachmentId, payload, token) =>
     api.patch(`/projects/${projectId}/attachments/${attachmentId}/file`, payload, token),
 

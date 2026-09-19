@@ -927,16 +927,16 @@ model AdminDigestRun {
 // the 20-min TTL sweep — the DB row is the source of truth.
 // ─────────────────────────────────────────────────────────────────────────────
 model UploadIntent {
-  id          String    @id @default(uuid())
-  employeeId  String    @map("employee_id")
-  ulid        String    @map("ulid")
-  container   String    @map("container")
-  blobPath    String    @map("blob_path")
-  contentType String    @map("content_type")
-  status      String    @default("PENDING") @map("status") // PENDING | CONFIRMED | EXPIRED
-  expiresAt   DateTime  @map("expires_at")
-  confirmedAt DateTime? @map("confirmed_at")
-  createdAt   DateTime  @default(now()) @map("created_at")
+  id                  String    @id @default(uuid())
+  employeeId          String    @map("employee_id")
+  ulid                String    @map("ulid")
+  container           String    @map("container")
+  blobPath            String    @map("blob_path")
+  contentType         String    @map("content_type")
+  status              String    @default("PENDING") @map("status") // PENDING | CONFIRMED | EXPIRED
+  expiresAt           DateTime  @map("expires_at")
+  confirmedAt         DateTime? @map("confirmed_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
   // [DR-004] Verified-metadata stamp from /confirm-upload.
   //
   // Before DR-004 the durable-intent /confirm-upload handler wrote
@@ -956,9 +956,9 @@ model UploadIntent {
   // with verified_at=NULL and are treated as unverified on retry — the
   // solver re-runs the HEAD and stamps the columns if the blob is
   // still there.
-  verifiedSizeBytes    Int?      @map("verified_size_bytes")
-  verifiedContentType  String?   @map("verified_content_type")
-  verifiedAt           DateTime? @map("verified_at")
+  verifiedSizeBytes   Int?      @map("verified_size_bytes")
+  verifiedContentType String?   @map("verified_content_type")
+  verifiedAt          DateTime? @map("verified_at")
 
   // [S3-7] Binding columns — the missing half of LPR-012.
   //
@@ -1323,38 +1323,44 @@ enum ProjectAttachmentStatus {
 }
 
 model ProjectAttachment {
-  id               String            @id @default(uuid())
-  projectId        String            @map("project_id")
+  id               String                  @id @default(uuid())
+  projectId        String                  @map("project_id")
   type             ProjectReportType
   title            String?
-  filename         String            @map("filename")
-  contentType      String            @map("content_type")
-  sizeBytes        Int               @map("size_bytes")
+  filename         String                  @map("filename")
+  contentType      String                  @map("content_type")
+  sizeBytes        Int                     @map("size_bytes")
   // R2 blob path: scoped under `${employeeId}/${ulid}.${ext}` by the
   // upload route (mountUploadRoutes), so the actual stored path matches
   // the shape used by DPR / Inspection / Drawing uploads. We store the
   // full blob name verbatim so /read-sas can re-mint a GET URL without
   // recomputing it.
-  blobPath         String            @map("blob_path")
-  uploadedById     String?           @map("uploaded_by_id")
-  uploadedAt       DateTime          @default(now()) @map("uploaded_at")
+  blobPath         String                  @map("blob_path")
+  uploadedById     String?                 @map("uploaded_by_id")
+  uploadedAt       DateTime                @default(now()) @map("uploaded_at")
   // [DR-001] ulid of the UploadIntent row that vouched for `blobPath`.
   // Stamped at create-time inside the same transaction as the binding
   // claim (see lib/uploadIntentBinding.js + routes/projectAttachments.js).
   // Legacy rows (pre-deploy) leave this NULL and rely on the
   // referenced-blobPath sweep defence for protection.
-  uploadIntentUlid String?           @map("upload_intent_ulid")
+  uploadIntentUlid String?                 @map("upload_intent_ulid")
   // First `deletedAt` in the schema (Round-35). Set on DELETE; the list
   // route excludes `deletedAt: not null` so soft-deleted rows stay
   // hidden while preserving the deletion timestamp for audit.
-  deletedAt        DateTime?         @map("deleted_at")
+  deletedAt        DateTime?               @map("deleted_at")
   // [S7] Admin review state. New rows default to PENDING_REVIEW; the PATCH
   // endpoint stamps `reviewedBy` + `reviewedAt` + `reviewNotes` in lockstep
   // so every transition is fully auditable.
   status           ProjectAttachmentStatus @default(PENDING_REVIEW)
-  reviewedById     String?           @map("reviewed_by_id")
-  reviewedAt       DateTime?         @map("reviewed_at")
-  reviewNotes      String?           @map("review_notes")
+  reviewedById     String?                 @map("reviewed_by_id")
+  reviewedAt       DateTime?               @map("reviewed_at")
+  reviewNotes      String?                 @map("review_notes")
+  // [DR-037] Monotonic counter stamped on every successful mutation
+  // (review / replace / delete). Review + replace PATCH endpoints must
+  // echo this back as `expectedVersion`; a mismatch returns 409
+  // STALE_REVIEW_VERSION so an admin can never silently Approve a
+  // blob the reviewer never saw (replace-A-then-approve-B race).
+  contentVersion   Int                     @default(1) @map("content_version")
 
   project    Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   uploadedBy Employee? @relation("ProjectAttachmentUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
@@ -1377,6 +1383,10 @@ model ProjectAttachment {
   @@index([status, projectId])
   // [S7] Reviewer-side join ("every row admin Y approved today").
   @@index([reviewedById])
+  // [DR-037] Symmetric with (status, projectId); keeps version-bounded
+  // lookups covered if/when one is added. No read currently filters by
+  // version — present for symmetry.
+  @@index([status, contentVersion])
   @@map("project_attachment")
 }
 

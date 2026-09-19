@@ -160,6 +160,11 @@ function serializeProjectAttachment(row) {
     reviewedById: row.reviewedById,
     reviewedAt: row.reviewedAt instanceof Date ? row.reviewedAt.toISOString() : row.reviewedAt,
     reviewNotes: row.reviewNotes,
+    // [DR-037] Monotonic content counter — the SPA echoes this back as
+    // `expectedVersion` on review / replace / delete PATCH calls. A
+    // mismatch returns 409 STALE_REVIEW_VERSION. Default 0 keeps
+    // pre-migration rows readable until the migration runs.
+    contentVersion: row.contentVersion ?? 0,
   };
 }
 
@@ -787,7 +792,7 @@ router.patch('/:attachmentId/file', asyncHandler(async (req, res) => {
   }
 
   const body = req.body || {};
-  const { uploadIntentUlid, blobPath, filename, contentType, sizeBytes } = body;
+  const { uploadIntentUlid, blobPath, filename, contentType, sizeBytes, expectedVersion } = body;
 
   if (!uploadIntentUlid || typeof uploadIntentUlid !== 'string') {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'uploadIntentUlid is required' });
@@ -809,11 +814,32 @@ router.patch('/:attachmentId/file', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'sizeBytes must be 1 byte – 26214400 bytes' });
   }
 
+  // [DR-037] Same stale-version guard as the review PATCH. The replace
+  // path increments contentVersion on success — if the SPA's view is
+  // behind, we refuse the replace so the user is forced to refresh
+  // rather than overwrite a row that already changed in another tab.
+  if (expectedVersion !== undefined && expectedVersion !== null) {
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_EXPECTED_VERSION',
+        message: 'expectedVersion must be a non-negative integer',
+      });
+    }
+  }
+
   try {
     // Ownership pre-check before binding so a 403 doesn't run a tx.
     const existing = await prisma.projectAttachment.findUnique({
       where: { id: attachmentId },
-      select: { projectId: true, deletedAt: true, uploadedById: true },
+      select: {
+        projectId: true,
+        deletedAt: true,
+        uploadedById: true,
+        // [DR-037] Read the current version for the optimistic-concurrency
+        // check below.
+        contentVersion: true,
+      },
     });
     if (!existing || existing.deletedAt) {
       return res.status(404).json({ error: 'ATTACHMENT_NOT_FOUND', code: 'ATTACHMENT_NOT_FOUND', message: 'Attachment not found' });
@@ -827,6 +853,21 @@ router.patch('/:attachmentId/file', asyncHandler(async (req, res) => {
         error: 'NOT_ATTACHMENT_OWNER',
         code: 'NOT_ATTACHMENT_OWNER',
         message: 'Only the uploader or an admin may replace this file',
+      });
+    }
+
+    // [DR-037] Stale-version conflict for replace. Same shape as the
+    // review PATCH 409 — distinguishable from INVALID_TRANSITION by
+    // error code, so the SPA can render a different message ("content
+    // changed since you opened this tab; refresh and try again").
+    if (expectedVersion !== undefined && expectedVersion !== null
+        && existing.contentVersion !== expectedVersion) {
+      return res.status(409).json({
+        error: 'STALE_REVIEW_VERSION',
+        code: 'STALE_REVIEW_VERSION',
+        message: `Row contentVersion is ${existing.contentVersion}; expected ${expectedVersion}. Refresh and retry.`,
+        currentVersion: existing.contentVersion,
+        submittedVersion: expectedVersion,
       });
     }
 
@@ -856,6 +897,11 @@ router.patch('/:attachmentId/file', asyncHandler(async (req, res) => {
       // (uploadedById / uploadedAt) is preserved; status reverts to
       // PENDING_REVIEW so the admin's earlier Approve / Reject isn't
       // sitting over a fresh blob they haven't seen yet.
+      //
+      // [DR-037] Increment contentVersion on every replace so a
+      // reviewer holding the OLD version's stale tab gets a 409 on
+      // their next PATCH (the review endpoint compares expectedVersion
+      // against this row's now-bumped value).
       return db.projectAttachment.update({
         where: { id: attachmentId },
         data: {
@@ -868,6 +914,7 @@ router.patch('/:attachmentId/file', asyncHandler(async (req, res) => {
           reviewedById: null,
           reviewedAt: null,
           reviewNotes: null,
+          contentVersion: { increment: 1 },
         },
       });
     });
@@ -1014,7 +1061,23 @@ router.patch('/:attachmentId', requireFreshAdmin, asyncHandler(async (req, res) 
   }
 
   const body = req.body || {};
-  const { status: nextStatus, reviewNotes: rawNotes } = body;
+  const { status: nextStatus, reviewNotes: rawNotes, expectedVersion } = body;
+
+  // [DR-037] Stale-review guard. SPA captures the row's contentVersion
+  // at click-time and echoes it back as expectedVersion. If the row
+  // has been replaced or reviewed since (contentVersion bumped), we
+  // refuse the write so an admin can't Approve a blob they never saw.
+  // Validated here (before the row lookup) so a malformed payload gets
+  // a clean 400 rather than a 404-then-409 dance.
+  if (expectedVersion !== undefined && expectedVersion !== null) {
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_EXPECTED_VERSION',
+        message: 'expectedVersion must be a non-negative integer',
+      });
+    }
+  }
 
   // Validate the requested target state. Anything outside this set is
   // a 400 — the client is asking for a state we don't model.
@@ -1050,6 +1113,9 @@ router.patch('/:attachmentId', requireFreshAdmin, asyncHandler(async (req, res) 
         status: true,
         deletedAt: true,
         reviewedById: true,
+        // [DR-037] Read the current version so we can compare against
+        // expectedVersion before stamping status / reviewedById / etc.
+        contentVersion: true,
       },
     });
     if (!row || row.deletedAt) {
@@ -1088,11 +1154,32 @@ router.patch('/:attachmentId', requireFreshAdmin, asyncHandler(async (req, res) 
       });
     }
 
+    // [DR-037] Stale-review conflict — the row's contentVersion has
+    // moved since the SPA captured it. Most likely a parallel Replace
+    // happened (new blob, contentVersion+1); the reviewer's decision
+    // would land on bytes they haven't seen. Return 409 with both
+    // versions so the SPA can render "refresh and try again" copy
+    // instead of silently mutating the unseen blob.
+    if (expectedVersion !== undefined && expectedVersion !== null
+        && row.contentVersion !== expectedVersion) {
+      return res.status(409).json({
+        error: 'STALE_REVIEW_VERSION',
+        code: 'STALE_REVIEW_VERSION',
+        message: `Row contentVersion is ${row.contentVersion}; expected ${expectedVersion}. Refresh and retry.`,
+        currentVersion: row.contentVersion,
+        submittedVersion: expectedVersion,
+      });
+    }
+
     // Stamp reviewedById + reviewedAt in lockstep with the status
     // change so the audit row is consistent — never one without the
     // other. reviewedAt is intentionally always set on a real
     // transition; the client uses its presence to render "Reviewed by"
     // copy.
+    //
+    // [DR-037] contentVersion bumped on every successful review write
+    // so a second reviewer hitting the same row's stale tab also
+    // 409s. Monotonic — never decremented.
     const updated = await prisma.projectAttachment.update({
       where: { id: attachmentId },
       data: {
@@ -1100,6 +1187,7 @@ router.patch('/:attachmentId', requireFreshAdmin, asyncHandler(async (req, res) 
         reviewedById: req.employeeId,
         reviewedAt: new Date(),
         reviewNotes,
+        contentVersion: { increment: 1 },
       },
     });
     res.json(serializeProjectAttachment(updated));
