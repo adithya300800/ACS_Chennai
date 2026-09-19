@@ -125,8 +125,23 @@ async function validatePhotoIntents({ prisma, employeeId, photos, context, expec
       // Scoped by employeeId: an intent belonging to another employee is
       // simply not found, so IDOR and "no intent at all" collapse into
       // one rejection path. Never widen this to a bare `ulid: { in }`.
+      //
+      // [DR-008] Pull the canonical tuple (container, contentType,
+      // verifiedContentType, verifiedSizeBytes) so this pass can reject
+      // claims that disagree with the server-issued metadata. Without
+      // this select, a client could POST ulid `X` with contentType
+      // `image/jpeg` even when intent `X` was minted with `image/png`;
+      // the helper used to accept both, and the photo row was written
+      // with the lie.
       where,
-      select: { ulid: true },
+      select: {
+        ulid: true,
+        container: true,
+        blobPath: true,
+        contentType: true,
+        verifiedContentType: true,
+        verifiedSizeBytes: true,
+      },
     });
   } catch (err) {
     // A failed lookup must not silently admit unverified photos — that
@@ -146,10 +161,93 @@ async function validatePhotoIntents({ prisma, employeeId, photos, context, expec
   }
 
   const confirmedSet = new Set(confirmed.map((r) => r.ulid));
+  const canonicalByUlid = new Map();
+  for (const row of confirmed) canonicalByUlid.set(row.ulid, row);
+
   const missingIndexes = [];
   for (let i = 0; i < photos.length; i++) {
     const p = photos[i];
     if (!p || !confirmedSet.has(p.ulid)) missingIndexes.push(i);
+  }
+
+  // [DR-008] Claim discrepancy check — every photo's claimed contentType
+  // (and container, when caller did not pin expectedContainer) must match
+  // the server-issued metadata on the intent row. Mismatches are
+  // surfaced BEFORE the missing-check short-circuit below because they
+  // are a separate failure mode (claim lie vs. wrong ulid) and produce
+  // a different error code — clients need to distinguish "re-upload"
+  // (UPLOAD_NOT_CONFIRMED) from "your client and the server disagree
+  // on what you uploaded" (ULID_CLAIM_MISMATCH).
+  //
+  // Source of truth for `contentType`:
+  //   1. `verifiedContentType` when present — the type from the HEAD
+  //      call that DR-004 wrote to the row at confirm-upload time;
+  //   2. otherwise the registered `contentType` from /sas-url mint.
+  // The verified value always wins because /confirm-upload may have
+  // stamped a corrected type on a legacy mint whose declared type was
+  // wrong but whose HEAD re-verified the right one.
+  //
+  // Source of truth for `container` is `intent.container` directly —
+  // the field is never re-issued. Skip the check when the caller passed
+  // `expectedContainer` so the existing /sas-url + /confirm-upload
+  // callers (DPR / Inspection) don't surface "but my container matches
+  // expectedContainer" double-failures.
+  const mismatchIndexes = [];
+  const mismatchDetails = [];
+  for (let i = 0; i < photos.length; i++) {
+    const p = photos[i];
+    if (!p || !confirmedSet.has(p.ulid)) continue; // missing is reported below
+    const canonical = canonicalByUlid.get(p.ulid);
+    if (!canonical) continue;
+
+    const serverType = canonical.verifiedContentType || canonical.contentType;
+    if (p.contentType && serverType && p.contentType !== serverType) {
+      mismatchIndexes.push(i);
+      mismatchDetails.push({
+        ulid: p.ulid,
+        field: 'contentType',
+        claimed: p.contentType,
+        intent: canonical.contentType,
+        verified: canonical.verifiedContentType || null,
+      });
+    }
+
+    if (
+      !expectedContainer && // skip when the caller pinned the container
+      p.container && canonical.container && p.container !== canonical.container
+    ) {
+      mismatchIndexes.push(i);
+      mismatchDetails.push({
+        ulid: p.ulid,
+        field: 'container',
+        claimed: p.container,
+        intent: canonical.container,
+      });
+    }
+  }
+
+  if (mismatchIndexes.length > 0) {
+    console.warn('[upload/intent] rejected photos whose claims disagree with intent', {
+      employeeHash: hashIdentifier(employeeId),
+      context,
+      photoCount: photos.length,
+      mismatchCount: mismatchIndexes.length,
+      mismatchIndexes: mismatchIndexes.slice(0, 10),
+      mismatchDetails: mismatchDetails.slice(0, 5),
+    });
+    return {
+      status: 400,
+      body: {
+        error: 'ULID_CLAIM_MISMATCH',
+        code: 'ULID_CLAIM_MISMATCH',
+        message:
+          `photos[${mismatchIndexes.slice(0, 5).join(', ')}] ` +
+          'claim a content-type or container that does not match the confirmed upload; ' +
+          're-upload the photo(s) and try again',
+        photoIndexes: mismatchIndexes,
+        details: mismatchDetails.slice(0, 10),
+      },
+    };
   }
 
   if (missingIndexes.length === 0) return null;

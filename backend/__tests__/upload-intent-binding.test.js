@@ -201,7 +201,14 @@ const postInspection = (app, photos, employeeId = EMPLOYEE_A) =>
 
 describe('S3-7 — DPR POST consumes upload intents', () => {
   it('stamps boundType=dpr and boundAt on every confirmed intent', async () => {
-    const prisma = buildPrisma([intent({ ulid: ULID_1 }), intent({ ulid: ULID_2 })]);
+    // [DR-008] Intent ULID_2's container must match the photo's claim
+    // ('dpr-documents') — validatePhotoIntents now cross-checks the
+    // photo's claimed container against the intent row and rejects the
+    // mismatch as 400 ULID_CLAIM_MISMATCH.
+    const prisma = buildPrisma([
+      intent({ ulid: ULID_1, container: 'dpr-photos' }),
+      intent({ ulid: ULID_2, container: 'dpr-documents' }),
+    ]);
     const app = buildApp(prisma);
 
     const res = await postDpr(app, [photo(ULID_1, 'dpr-photos'), photo(ULID_2, 'dpr-documents')]);
