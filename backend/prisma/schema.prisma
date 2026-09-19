@@ -937,6 +937,28 @@ model UploadIntent {
   expiresAt   DateTime  @map("expires_at")
   confirmedAt DateTime? @map("confirmed_at")
   createdAt   DateTime  @default(now()) @map("created_at")
+  // [DR-004] Verified-metadata stamp from /confirm-upload.
+  //
+  // Before DR-004 the durable-intent /confirm-upload handler wrote
+  // `status='CONFIRMED'` BEFORE doing the HEAD check, so a malformed
+  // upload (missing blob, wrong content-type, zero/wrong size) still
+  // left the row CONFIRMED — a retry then returned verified:true from
+  // the status alone, and binding accepted the unverified blob.
+  //
+  // The fix: HEAD the blob, content-type-check, size-check FIRST, and
+  // only stamp CONFIRMED if the verify succeeded; persist the verified
+  // metadata here so (a) retried /confirm-upload calls can prove a
+  // prior valid verification without re-HEADing, and (b) association
+  // writers can read the canonical contentType/size the intent vouched
+  // for, instead of trusting the client-supplied POST body fields.
+  //
+  // Existing CONFIRMED rows from before this column shipped are left
+  // with verified_at=NULL and are treated as unverified on retry — the
+  // solver re-runs the HEAD and stamps the columns if the blob is
+  // still there.
+  verifiedSizeBytes    Int?      @map("verified_size_bytes")
+  verifiedContentType  String?   @map("verified_content_type")
+  verifiedAt           DateTime? @map("verified_at")
 
   // [S3-7] Binding columns — the missing half of LPR-012.
   //

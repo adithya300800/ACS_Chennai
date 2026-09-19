@@ -1,0 +1,55 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DR-004 — verified-metadata stamp on upload_intent
+-- ─────────────────────────────────────────────────────────────────────────────
+--
+-- Pre-DR-004, the durable-intent /confirm-upload handler flipped
+-- status from PENDING to CONFIRMED BEFORE doing the HEAD/type/size
+-- checks, so a malformed upload (missing blob, wrong content-type,
+-- zero/wrong size) still left the row CONFIRMED. A subsequent retry
+-- then returned verified:true from the status alone — and
+-- validatePhotoIntents / bindPhotoIntentsTx accepted the unverified
+-- blob into the business record.
+--
+-- Trigger:
+--   The SOL review document (Code review by SOL/
+--   ACS-Portal-Media-Workflow-Review-2026-09-19-f53c22b.md) DR-004
+--   calls out that an owned confirmed PNG ULID could be "verified"
+--   with a JPEG on retry, and that binding helpers accept client-
+--   claimed contentType without cross-checking the intent's stored
+--   contentType. Fixed in lockstep with DR-008's canonical-tuple pass.
+--
+-- Effect (3 nullable columns, additive — no destructive change):
+--
+--   1. verified_size_bytes  INT       — contentLength from the HEAD call
+--                                       that accompanied a successful CAS
+--                                       PENDING -> CONFIRMED. Persisted so
+--                                       association writers (DPRPhoto,
+--                                       InspectionPhoto, ProjectAttachment)
+--                                       can stamp their `sizeBytes` from
+--                                       the server-issued value rather than
+--                                       the client's POST body.
+--
+--   2. verified_content_type VARCHAR  — contentType from the same HEAD
+--                                       call. Used by DR-008's canonical-
+--                                       tuple pass to detect client claims
+--                                       that disagree with the verified
+--                                       intent.
+--
+--   3. verified_at          TIMESTAMP — when the HEAD call completed
+--                                       successfully. A retry of
+--                                       confirm-upload reads this column;
+--                                       if NULL, the previous CAS path
+--                                       wrote CONFIRMED without the
+--                                       verify-first guard, so the
+--                                       intent is treated as unverified
+--                                       and the HEAD is re-run.
+--
+-- Existing rows: all 3 columns default NULL. The route treats a
+-- CONFIRMED+verified_at=NULL row as unverified on retry and either
+-- re-verifies (if the blob is still there) or expires the intent.
+-- No backfill — we cannot reconstruct past HEAD results.
+
+ALTER TABLE upload_intent
+  ADD COLUMN IF NOT EXISTS verified_size_bytes INT,
+  ADD COLUMN IF NOT EXISTS verified_content_type VARCHAR(255),
+  ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;

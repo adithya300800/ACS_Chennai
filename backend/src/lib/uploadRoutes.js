@@ -45,7 +45,13 @@ const { hashIdentifier } = require('./pii');
 // them in one place is the whole point of the DR-021 refactor.
 const MAX_PHOTO_SIZE = 10 * 1024 * 1024;   // 10 MB
 const PENDING_TTL_MS = 20 * 60 * 1000;     // 20 min (long enough for a slow mobile upload, short enough to bound memory)
-const SIZE_TOLERANCE_BYTES = 1024;        // 1 KB tolerance for chunked-upload finalization
+// [DR-004] Tightened to exact-match. The previous 1 KB tolerance
+// permitted silently small objects through the size check (the audit's
+// "empty small objects" symptom); the verified contentLength must now
+// equal the declared size exactly before the intent can move to
+// CONFIRMED. Chunked-upload finalizers compute exact lengths, so a
+// zero-byte slack is the correct contract.
+const SIZE_TOLERANCE_BYTES = 0;
 
 // Process-wide pending upload registry. Entries are keyed by
 // `${employeeId}:${ulid}` and the ulid is server-generated per
@@ -380,21 +386,34 @@ function mountUploadRoutes(router, config = {}) {
     }
 
     if (intent) {
-      // Idempotent re-confirm — bytes are already attached to a
-      // business record; respond 200 rather than 5xx. Matters because
-      // a flaky network can retry /confirm-upload after the server
-      // already accepted it.
+      // [DR-004] CONFIRMED-without-verified legacy rows may exist (any
+      // intent committed before the verified_* columns shipped). They
+      // are not auto-trusted as verified — the SOL review's exact
+      // concern was that "verified:true" could come from a stale
+      // status flip without any HEAD/type/size check. Treat any
+      // CONFIRMED row whose verified_at IS NULL as needing evidence;
+      // re-run the HEAD, and either stamp the verified_* stamp (if the
+      // blob is still there) or expire the intent (if the HEAD finds
+      // the blob gone). A CONFIRMED row WITH verified_at set is the
+      // idempotent retry path — return 200 immediately.
       if (intent.status === 'CONFIRMED') {
-        return res.json({ verified: true, alreadyConfirmed: true });
-      }
-      // EXPIRED status or expired-by-time → 410.
-      if (intent.status === 'EXPIRED' || intent.expiresAt.getTime() < Date.now()) {
+        if (intent.verifiedAt) {
+          return res.json({ verified: true, alreadyConfirmed: true });
+        }
+        // Fall through to the verify-first path below; that path
+        // handles a CONFIRMED row by stamping verified_* (when HEAD
+        // succeeds) or expiring it (when HEAD finds it absent). The
+        // status flip itself stays CONFIRMED — we only stamp the
+        // verified_* metadata.
+      } else if (intent.status === 'EXPIRED' || intent.expiresAt.getTime() < Date.now()) {
+        // EXPIRED status or expired-by-time → 410.
         return res.status(410).json({ error: 'INTENT_EXPIRED', message: 'Upload intent has expired; please restart the upload' });
       }
-      // PENDING — validate the untrusted request fields against the
-      // durable record. The intent owns the canonical container, blob
-      // path, and content type; the request is never allowed to
-      // override them.
+
+      // PENDING (or legacy CONFIRMED-without-verified) — validate the
+      // untrusted request fields against the durable record. The
+      // intent owns the canonical container, blob path, and content
+      // type; the request is never allowed to override them.
       if (intent.container !== container) {
         return res.status(400).json({ error: 'CONTAINER_MISMATCH', message: 'Container does not match upload intent' });
       }
@@ -402,47 +421,30 @@ function mountUploadRoutes(router, config = {}) {
         return res.status(400).json({ error: 'CONTENT_TYPE_MISMATCH', message: 'Content-type does not match upload intent' });
       }
 
-      // CAS: atomic PENDING → CONFIRMED with an expiry guard. If the
-      // count is not exactly 1, another confirm already won the race
-      // OR expiresAt crossed NOW() between the check above and the
-      // CAS. Either way, refuse with 410 — the lost-expiry race must
-      // never return a successful confirmation.
-      let casCount;
-      try {
-        const cas = await prisma.uploadIntent.updateMany({
-          where: {
-            id: intent.id,
-            status: 'PENDING',
-            expiresAt: { gt: new Date() },
-          },
-          data: { status: 'CONFIRMED', confirmedAt: new Date() },
-        });
-        casCount = cas.count || 0;
-      } catch (err) {
-        console.error('[upload/intent] CAS failed', {
-          employeeHash: hashIdentifier(req.employeeId),
-          ulid,
-          errCode: err?.code,
-          errMessage: err?.message?.split('\n')[0],
-        });
-        return res.status(503).json({ error: 'UPLOAD_INTENT_CONFIRM_FAILED', message: 'Could not confirm upload intent' });
-      }
-
-      if (casCount !== 1) {
-        return res.status(410).json({ error: 'INTENT_EXPIRED', message: 'Upload intent has expired; please restart the upload' });
-      }
-
-      // Server-side blob verification. The blobName is derived from
-      // the durable intent record — the canonical owner of the key
-      // shape (including any `allowedPathPrefixesPerContainer`
-      // prefix). NEVER reconstructed from untrusted request fields.
+      // [DR-004] VERIFY FIRST. The HEAD call (network) is the
+      // authoritative "is this blob real?" check; doing it BEFORE the
+      // CAS PENDING→CONFIRMED flip means a failed/suspicious upload
+      // never leaves the intent at CONFIRMED, which used to silently
+      // accept an unverified blob into the business record on retry.
       //
-      // [DR-007] Three-state discrimination:
-      //   absent  (404) → 404 BLOB_NOT_UPLOADED  (definitively missing)
-      //   unknown (403/timeout/5xx) → 502 BLOB_VERIFICATION_FAILED (retry hint)
-      //   present → also checks contentType + size against request
+      // [DR-007] Three-state discrimination via the new verify return
+      // shape — only `present` lets the CAS proceed; `absent` and
+      // `unknown` leave the intent at PENDING (or the legacy
+      // CONFIRMED-without-verified state) so a future retry can
+      // re-upload or re-verify.
       const props = await verifyBlobExists(intent.container, intent.blobPath);
       if (isAbsent(props)) {
+        // If the row was already CONFIRMED but never verified (legacy
+        // from before this fix), flip it to EXPIRED so a subsequent
+        // binding doesn't accept a missing blob.
+        if (intent.status === 'CONFIRMED') {
+          try {
+            await prisma.uploadIntent.update({
+              where: { id: intent.id },
+              data: { status: 'EXPIRED' },
+            });
+          } catch (_) { /* best-effort */ }
+        }
         return res.status(404).json({ error: 'BLOB_NOT_UPLOADED', message: 'Photo bytes not found in storage' });
       }
       if (isUnknown(props)) {
@@ -457,12 +459,96 @@ function mountUploadRoutes(router, config = {}) {
           reason: props.reason,
         });
       }
-      // outcome === 'present'
+      // outcome === 'present' — contentType + size must exactly match
+      // the intent, and the client's declared size must be exact
+      // (tighter than the legacy 1KB tolerance, which DR-004
+      // identified as accepting empty/small objects).
       if (props.contentType && props.contentType !== contentType) {
         return res.status(400).json({ error: 'CONTENT_TYPE_MISMATCH', message: 'Uploaded content-type does not match request' });
       }
-      if (Math.abs((props.contentLength || 0) - sizeBytes) > SIZE_TOLERANCE_BYTES) {
-        return res.status(400).json({ error: 'SIZE_MISMATCH', message: 'Uploaded size does not match declared size' });
+      // [DR-004] Reject zero/undefined verified size as well as
+      // declared zero — exact equality on the verified contentLength.
+      // The previous 1KB tolerance permitted silently small objects to
+      // pass; tightened to require the verified size to match the
+      // declared size exactly.
+      if (typeof props.contentLength !== 'number' || props.contentLength <= 0) {
+        return res.status(400).json({ error: 'SIZE_MISMATCH', message: 'Verified size is empty or unknown' });
+      }
+      if (Math.abs(props.contentLength - sizeBytes) > SIZE_TOLERANCE_BYTES) {
+        return res.status(400).json({
+          error: 'SIZE_MISMATCH',
+          message: `Verified size (${props.contentLength}) does not match declared size (${sizeBytes})`,
+          verifiedSize: props.contentLength,
+          declaredSize: sizeBytes,
+        });
+      }
+
+      // CAS: now that verify is past, flip PENDING→CONFIRMED (or
+      // stamp verified_* on a legacy CONFIRMED-without-verified row)
+      // atomically with an `expiresAt > NOW()` guard and a
+      // verified_at IS NULL guard for the legacy path.
+      let casCount;
+      try {
+        if (intent.status === 'PENDING') {
+          const cas = await prisma.uploadIntent.updateMany({
+            where: {
+              id: intent.id,
+              status: 'PENDING',
+              expiresAt: { gt: new Date() },
+            },
+            data: {
+              status: 'CONFIRMED',
+              confirmedAt: new Date(),
+              verifiedSizeBytes: props.contentLength,
+              verifiedContentType: props.contentType || contentType,
+              verifiedAt: new Date(),
+            },
+          });
+          casCount = cas.count || 0;
+          // [DR-004] On a lost CAS, distinguish "another confirm won
+          // the race" from "the intent crossed expiresAt between our
+          // read and our write". The previous code always returned
+          // INTENT_EXPIRED for casCount != 1, which was a lie when the
+          // other side had already CAS'd successfully.
+          if (casCount !== 1) {
+            const fresher = await prisma.uploadIntent.findUnique({
+              where: { employeeId_ulid: { employeeId: req.employeeId, ulid } },
+              select: { status: true, expiresAt: true },
+            });
+            const crossed = !fresher || fresher.expiresAt.getTime() < Date.now();
+            if (crossed) {
+              return res.status(410).json({ error: 'INTENT_EXPIRED', message: 'Upload intent has expired; please restart the upload' });
+            }
+            // Another confirm landed first — must be marked
+            // CONFIRMED-with-verified by now; fall through to the
+            // 200 response (idempotent retry).
+          }
+        } else {
+          // intent.status === 'CONFIRMED' with verified_at=NULL — the
+          // legacy pre-DR-004 path. Stamp verified_* without
+          // touching the status.
+          const stamp = await prisma.uploadIntent.updateMany({
+            where: {
+              id: intent.id,
+              status: 'CONFIRMED',
+              verifiedAt: null,
+            },
+            data: {
+              verifiedSizeBytes: props.contentLength,
+              verifiedContentType: props.contentType || contentType,
+              verifiedAt: new Date(),
+            },
+          });
+          casCount = stamp.count || 0;
+        }
+      } catch (err) {
+        console.error('[upload/intent] CAS failed', {
+          employeeHash: hashIdentifier(req.employeeId),
+          ulid,
+          errCode: err?.code,
+          errMessage: err?.message?.split('\n')[0],
+        });
+        return res.status(503).json({ error: 'UPLOAD_INTENT_CONFIRM_FAILED', message: 'Could not confirm upload intent' });
       }
 
       // [DR-001 fix 2026-09-19] Evict the in-process Map cache after
@@ -515,8 +601,19 @@ function mountUploadRoutes(router, config = {}) {
     if (props.contentType && props.contentType !== contentType) {
       return res.status(400).json({ error: 'CONTENT_TYPE_MISMATCH', message: 'Uploaded content-type does not match request' });
     }
-    if (Math.abs((props.contentLength || 0) - sizeBytes) > SIZE_TOLERANCE_BYTES) {
-      return res.status(400).json({ error: 'SIZE_MISMATCH', message: 'Uploaded size does not match declared size' });
+    // [DR-004] Mirror the durable branch's tighter size contract:
+    // reject zero/undefined verified sizes, require exact equality
+    // against the declared size (SIZE_TOLERANCE_BYTES=0).
+    if (typeof props.contentLength !== 'number' || props.contentLength <= 0) {
+      return res.status(400).json({ error: 'SIZE_MISMATCH', message: 'Verified size is empty or unknown' });
+    }
+    if (Math.abs(props.contentLength - sizeBytes) > SIZE_TOLERANCE_BYTES) {
+      return res.status(400).json({
+        error: 'SIZE_MISMATCH',
+        message: `Verified size (${props.contentLength}) does not match declared size (${sizeBytes})`,
+        verifiedSize: props.contentLength,
+        declaredSize: sizeBytes,
+      });
     }
 
     pendingUploads.delete(pendingKey);
