@@ -171,6 +171,16 @@ function buildApp({ adminIsAdmin = true, userIsAdmin = false, employeeExists = t
               name: r.uploadedByName || `Employee ${r.uploadedById.slice(0, 4)}`,
               designation: r.uploadedByDesignation || null,
             } : undefined,
+            // [DR-010] Reviewer join — the route now requests
+            // `include.reviewedBy` so the admin UI can render
+            // "Approved <date> by <name>" without a second trip.
+            // The mock honours the include exactly like the others so
+            // DR-010 stays in lockstep with the query shape.
+            reviewedBy: include.reviewedBy ? (r.reviewedById ? {
+              id: r.reviewedById,
+              name: r.reviewedByName || `Reviewer ${r.reviewedById.slice(0, 4)}`,
+              designation: r.reviewedByDesignation || null,
+            } : null) : undefined,
           }));
         }
         return rows;
@@ -221,7 +231,7 @@ function buildApp({ adminIsAdmin = true, userIsAdmin = false, employeeExists = t
 }
 
 // Helper to seed an attachment row with sensible defaults.
-function seed({ id, projectId, type = 'WEEKLY_REPORT', uploadedById = USER_ID, uploadedAt = new Date('2026-09-01T10:00:00Z'), deletedAt = null, filename, title, uploadedByName, uploadedByDesignation }) {
+function seed({ id, projectId, type = 'WEEKLY_REPORT', uploadedById = USER_ID, uploadedAt = new Date('2026-09-01T10:00:00Z'), deletedAt = null, filename, title, uploadedByName, uploadedByDesignation, status, reviewedById, reviewedAt, reviewNotes, reviewedByName, reviewedByDesignation, uploadIntentUlid }) {
   return {
     id, projectId, type,
     title: title ?? `${type} title`,
@@ -232,6 +242,18 @@ function seed({ id, projectId, type = 'WEEKLY_REPORT', uploadedById = USER_ID, u
     uploadedById, uploadedAt, deletedAt,
     uploadedByName: uploadedByName ?? 'Test User',
     uploadedByDesignation: uploadedByDesignation ?? null,
+    // [DR-010] Review-state fields — always present on the DTO so a
+    // freshly-approved reload doesn't fall back to a silent pending
+    // state in the SPA.
+    status: status ?? 'PENDING_REVIEW',
+    reviewedById: reviewedById ?? null,
+    reviewedAt: reviewedAt ?? null,
+    reviewNotes: reviewNotes ?? null,
+    uploadIntentUlid: uploadIntentUlid ?? null,
+    // Reviewer join fields — the mock `include.reviewedBy` block uses
+    // these when the route requests the join.
+    reviewedByName: reviewedByName ?? null,
+    reviewedByDesignation: reviewedByDesignation ?? null,
   };
 }
 
@@ -422,6 +444,99 @@ describe('R36 — Admin Project Reports: response shape', () => {
       .get('/api/admin/reports')
       .set('Authorization', adminJwt());
     expect(res.body.reports.map((r) => r.id)).toEqual([ATT_A2, ATT_A3, ATT_A1]);
+  });
+});
+
+describe('DR-010 — Admin report DTO exposes review-state fields + reviewedBy join on every response', () => {
+  it('15. Approved row surfaces status / reviewedById / reviewedAt / reviewNotes / reviewedBy on the wire', async () => {
+    const { app, attachmentRows } = buildApp();
+    const approvedAt = new Date('2026-09-13T14:30:00Z');
+    attachmentRows.set(ATT_A1, seed({
+      id: ATT_A1,
+      projectId: PROJECT_A,
+      status: 'APPROVED',
+      reviewedById: ADMIN_ID,
+      reviewedAt: approvedAt,
+      reviewNotes: 'Looks good — proceed with next milestone.',
+      reviewedByName: 'Adithya Mohanavel',
+      reviewedByDesignation: 'Project Director',
+      uploadIntentUlid: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+    }));
+    const res = await request(app)
+      .get('/api/admin/reports')
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    const row = res.body.reports[0];
+    expect(row.status).toBe('APPROVED');
+    expect(row.reviewedById).toBe(ADMIN_ID);
+    expect(row.reviewedAt).toBe(approvedAt.toISOString());
+    expect(row.reviewNotes).toBe('Looks good — proceed with next milestone.');
+    expect(row.uploadIntentUlid).toBe('01ARZ3NDEKTSV4RRFFQ69G5FAV');
+    expect(row.reviewedBy).toEqual({
+      id: ADMIN_ID,
+      name: 'Adithya Mohanavel',
+      designation: 'Project Director',
+    });
+  });
+
+  it('16. Pending row still surfaces status — never omitted, never faked', async () => {
+    const { app, attachmentRows } = buildApp();
+    attachmentRows.set(ATT_A1, seed({
+      id: ATT_A1,
+      projectId: PROJECT_A,
+      // No review yet — status should be the row's PENDING_REVIEW
+      // default, NOT omitted (which would make the SPA fall back to
+      // a fake "Pending Review").
+    }));
+    const res = await request(app)
+      .get('/api/admin/reports')
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    const row = res.body.reports[0];
+    expect(row.status).toBe('PENDING_REVIEW');
+    expect(row.reviewedById).toBeNull();
+    expect(row.reviewedAt).toBeNull();
+    expect(row.reviewNotes).toBeNull();
+    // The reviewedBy join resolves to null when reviewedById is null —
+    // the SPA can safely render "Reviewed <date>" only when reviewedAt
+    // is truthy.
+    expect(row.reviewedBy).toBeNull();
+  });
+
+  it('17. Source-text pin — findMany include requests reviewedBy', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(
+      path.resolve(__dirname, '../src/routes/adminReports.js'), 'utf8'
+    );
+    // The audit's missing-join class of bug — when the include is
+    // dropped the serializer still emits `reviewedBy: null` and the
+    // SPA never sees a reviewer name. Pin the include so a future
+    // refactor can't silently regress it.
+    //
+    // Anchor on the findMany include block (not the doc-comment
+    // mention of `include: { reviewedBy }` near the serializer),
+    // which is the only literal `include: { ... reviewedBy: { select`
+    // triple in the file.
+    expect(src).toMatch(/include:\s*\{[\s\S]{0,800}reviewedBy:\s*\{\s*select:\s*\{[\s\S]{0,200}id:\s*true,[\s\S]{0,200}name:\s*true,[\s\S]{0,200}designation:\s*true/);
+  });
+
+  it('18. DTO ordering — review-state fields land BEFORE the joined context blocks (so a frontend shard can read top-of-body)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(
+      path.resolve(__dirname, '../src/routes/adminReports.js'), 'utf8'
+    );
+    // Locate the serializeAdminReport body and assert the review
+    // fields precede project/uploadedBy/reviewedBy object blocks.
+    const ix = src.indexOf('function serializeAdminReport');
+    expect(ix).toBeGreaterThan(0);
+    const body = src.slice(ix, ix + 4000);
+    const statusIx = body.indexOf('status:');
+    const projectIx = body.indexOf('project:');
+    expect(statusIx).toBeGreaterThan(0);
+    expect(projectIx).toBeGreaterThan(0);
+    expect(statusIx).toBeLessThan(projectIx);
   });
 });
 

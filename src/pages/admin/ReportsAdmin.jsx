@@ -530,7 +530,14 @@ export default function ReportsAdmin() {
           >
             {reports.map((r) => {
               const badgeStyle = REPORT_TYPE_BADGE_STYLES[r.type] || REPORT_TYPE_BADGE_STYLES.OTHER;
-              const rStatus = r.status || 'PENDING_REVIEW';
+              // [DR-010] r.status is required on every row now — the
+              // backend serializer always emits it (NOT NULL enum column
+              // with a default of PENDING_REVIEW). Drop the silent
+              // fallback so a missing status surfaces as an obvious
+              // missing-data case ("Status unavailable") instead of a
+              // fake "Pending Review" that hides the bug.
+              const rStatus = r.status;
+              const rStatusMissing = !rStatus;
               const canApprove = APPROVE_ALLOWED_FROM.has(rStatus);
               const canRevise = REVISE_ALLOWED_FROM.has(rStatus);
               const canReject = REJECT_ALLOWED_FROM.has(rStatus);
@@ -580,7 +587,13 @@ export default function ReportsAdmin() {
                         whiteSpace: 'nowrap',
                       }}
                     >
-                      {STATUS_LABEL[rStatus] || rStatus}
+                      {/* [DR-010] explicit missing-data label rather than
+                          a silent fallback to "Pending Review" — if the
+                          server ever drops `status` from the DTO, we
+                          want to see the bug, not invent a state. */}
+                      {rStatusMissing
+                        ? 'Status unavailable'
+                        : (STATUS_LABEL[rStatus] || rStatus)}
                     </span>
                   </div>
 
@@ -608,8 +621,12 @@ export default function ReportsAdmin() {
                   </div>
 
                   {/* Review notes (if any) — visible to admin so the
-                      reviewer can see what was already sent back. */}
-                  {(r.reviewNotes || (r.reviewedAt && showReviewBar === false)) && (
+                      reviewer can see what was already sent back.
+                      [DR-010] also renders "by <reviewer name>" so a
+                      freshly-approved reload doesn't read as anonymous
+                      — the backend now joins `reviewedBy` and the SPA
+                      uses it. */}
+                  {(r.reviewNotes || r.reviewedAt) && (
                     <div
                       style={{
                         fontSize: '0.75rem',
@@ -620,6 +637,7 @@ export default function ReportsAdmin() {
                       title={r.reviewNotes || ''}
                     >
                       {r.reviewedAt && `Reviewed ${formatDate(r.reviewedAt)}`}
+                      {r.reviewedBy?.name && ` by ${r.reviewedBy.name}`}
                       {r.reviewNotes && ` · “${r.reviewNotes.length > 100 ? `${r.reviewNotes.slice(0, 100)}…` : r.reviewNotes}”`}
                     </div>
                   )}

@@ -143,6 +143,14 @@ function decodeCursor(cursor) {
 // projectAttachments.serializeProjectAttachment for the bare fields,
 // adds two small join objects. Date → ISO so the SPA can format with its
 // own timezone-aware helpers (formatShortDate / formatDateTime).
+//
+// [DR-010] Every review-state field is surfaced on EVERY response so the
+// admin reload never invents "Pending Review" by reading its own
+// absence. Status, reviewedById, reviewedAt and reviewNotes are NOT
+// NULL columns with a default (PENDING_REVIEW), so the serializer can
+// safely read them directly without a `|| null` fallback — the only
+// nullable is `reviewedBy` (the joined object) because the join may
+// have been omitted by a query that did not include the relation.
 function serializeAdminReport(row) {
   if (!row) return null;
   return {
@@ -157,6 +165,17 @@ function serializeAdminReport(row) {
     uploadedById: row.uploadedById,
     uploadedAt: row.uploadedAt instanceof Date ? row.uploadedAt.toISOString() : row.uploadedAt,
     deletedAt: row.deletedAt instanceof Date ? row.deletedAt.toISOString() : row.deletedAt,
+    // [DR-010] Review-state fields — present on every row. The SPA
+    // stops falling back to "Pending Review" when these are absent.
+    status: row.status,
+    reviewedById: row.reviewedById || null,
+    reviewedAt: row.reviewedAt instanceof Date ? row.reviewedAt.toISOString() : (row.reviewedAt || null),
+    reviewNotes: row.reviewNotes || null,
+    // [DR-001] The UploadIntent ulid that vouched for `blobPath`. The
+    // serializer was already including uploadedById/At; pairing it
+    // with uploadIntentUlid means the admin diagnostic view can
+    // follow the wiring without a separate reconciliation call.
+    uploadIntentUlid: row.uploadIntentUlid || null,
     project: row.project ? {
       id: row.project.id,
       name: row.project.name,
@@ -166,6 +185,16 @@ function serializeAdminReport(row) {
       id: row.uploadedBy.id,
       name: row.uploadedBy.name,
       designation: row.uploadedBy.designation || null,
+    } : null,
+    // [DR-010] Reviewer nested object — only present when the
+    // (admin-list + admin-detail) Prisma query included
+    // `include: { reviewedBy }`. Read-side always includes it; the
+    // serializer keeps the absence meaningful ("reviewer FK not
+    // joined") instead of faking a name.
+    reviewedBy: row.reviewedBy ? {
+      id: row.reviewedBy.id,
+      name: row.reviewedBy.name,
+      designation: row.reviewedBy.designation || null,
     } : null,
   };
 }
@@ -385,6 +414,13 @@ router.get('/', async (req, res) => {
         include: {
           project:    { select: { id: true, name: true, code: true } },
           uploadedBy: { select: { id: true, name: true, designation: true } },
+          // [DR-010] review-state join — the serializer exposes
+          // `reviewedBy: { id, name, designation }` so the admin UI
+          // can render "Approved 2026-09-15 by Adithya M." without
+          // a second round-trip. Cost is one indexed lookup per row
+          // (composite index on (status, projectId) already covers
+          // the queue filter; reviewedBy is a single FK resolve).
+          reviewedBy: { select: { id: true, name: true, designation: true } },
         },
       }),
       prisma.projectAttachment.count({ where }),
