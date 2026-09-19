@@ -1167,6 +1167,109 @@ router.get('/stats', inspectionStatsAdminGuard, asyncHandler(async (req, res) =>
   });
 }));
 
+// ─── [DR-009] Shared inspection-record wire DTO ──────────────────────────────
+//
+// GET /api/inspection/:id historically returned a decorated response
+// (minted readUrls per photo + structured rejection fields) while every
+// transition handler (acknowledge / close / reject / submit / PUT)
+// returned the raw ORM record. After Acknowledge and Close the SPA was
+// handed a record whose photos had no `readUrl`, leaving the gallery
+// with empty `<img src>` and naturalWidth=0 — even though the canonical
+// GET was still 200 with valid readUrls. A page reload restored the
+// display.
+//
+// Fix: hoist the GET DTO shape into a single async helper and call it
+// from BOTH the GET handler and every transition handler, so the wire
+// contract is invariant across read-after-action navigation. The
+// helper is the same `serializeInspectionRecordForWire(...)` everywhere;
+// there is no longer a "GET shape" vs. a "transition shape" distinction.
+//
+// The helper:
+//   1. Walks `record.photos` and mints a read SAS URL for each,
+//      honouring the DR-007 three-state verify outcome (absent =>
+//      readUrl:null placeholder, unknown => warn-only, present =>
+//      mint a fresh SAS).
+//   2. If `record.status === 'REJECTED'`, walks the `_adminNotes`
+//      history in reverse to extract the latest REJECT decision
+//      (reason, notes, by, at) and resolves the reviewer `by` cuid
+//      into an Employee stub for the SPA name render.
+//   3. Returns a single object spread from the original record with
+//      the decorated photos + rejection fields overlaid.
+//
+// Tolerates both photo shapes: full include with `photos.inspection`
+// join (GET handler) and the bare `photos: true` shape
+// (transition result). In the bare shape it falls back to
+// `record.submittedById` as the tenant prefix.
+async function serializeInspectionRecordForWire(prisma, record) {
+  const inspectionOwnerId = record.submittedById;
+  const photosWithUrls = await Promise.all((record.photos || []).map(async (p) => {
+    const ext = CONTENT_TYPE_EXT[p.contentType];
+    const employeeId = (p.inspection && p.inspection.submittedById) || inspectionOwnerId;
+    const blobName = ext
+      ? `${employeeId}/${p.ulid}.${ext}`
+      : `${employeeId}/${p.ulid}`;
+    try {
+      const props = await verifyBlobExists(p.container, blobName);
+      if (isAbsent(props)) {
+        const { inspection: _join, ...photoForClient } = p;
+        return { ...photoForClient, readUrl: null };
+      }
+      if (props.outcome === 'unknown') {
+        console.warn('[inspection] verifyBlobExists unknown, minting SAS anyway', {
+          ulid: p.ulid,
+          reason: props.reason,
+        });
+      }
+    } catch (err) {
+      console.warn('[inspection] verifyBlobExists threw, minting SAS anyway', {
+        ulid: p.ulid,
+        errMessage: err?.message?.split('\n')[0],
+      });
+    }
+    const { sasUrl } = await generateReadSASUrl(p.container, blobName);
+    const { inspection: _join, ...photoForClient } = p;
+    return { ...photoForClient, readUrl: sasUrl };
+  }));
+
+  // DR-022: structured rejection decision — same logic as the original
+  // GET handler, hoisted verbatim so behaviour is identical. The
+  // transition that just ran already appended a REJECT entry to
+  // `_adminNotes` (see transitionInspectionRecord), so this lookup
+  // will always find a fresh entry on the same response.
+  let rejectionReason = null;
+  let rejectionNotes = null;
+  let rejectedBy = null;
+  let rejectedAt = null;
+  if (record.status === 'REJECTED') {
+    const notes = (((record.data || {})._adminNotes) || []);
+    for (let i = notes.length - 1; i >= 0; i -= 1) {
+      const entry = notes[i];
+      if (entry && entry.action === 'REJECT') {
+        rejectionReason = entry.reason || null;
+        rejectionNotes = entry.notes || null;
+        rejectedAt = entry.at || null;
+        if (entry.by) {
+          const reviewer = await prisma.employee.findUnique({
+            where: { id: entry.by },
+            select: { id: true, name: true, email: true },
+          });
+          rejectedBy = reviewer || { id: entry.by, name: null, email: null };
+        }
+        break;
+      }
+    }
+  }
+
+  return {
+    ...record,
+    photos: photosWithUrls,
+    rejectionReason,
+    rejectionNotes,
+    rejectedBy,
+    rejectedAt,
+  };
+}
+
 // ─── GET /api/inspection/:id ────────────────────────────────────────────────
 router.get('/:id', async (req, res) => {
   const prisma = getPrisma(req);
@@ -1216,97 +1319,13 @@ router.get('/:id', async (req, res) => {
       return res.status(403).json({ error: 'FORBIDDEN', message: 'Not authorized' });
     }
 
-    // Generate read SAS URLs for photos — mirror dpr.js logic.
-    // [S7 round-3] Verify blob exists in R2 before minting a SAS URL —
-    // if the object is gone (bucket wipe, lifecycle delete, restore from
-    // pre-data backup) the presigned URL would just 404 with R2's
-    // NoSuchKey XML in the browser. Set readUrl: null so the frontend
-    // placeholder kicks in instead. Mirrors projectAttachments.js#read-sas
-    // (BLOB_GONE guard). HEAD timeouts fall through to minting anyway.
-    const inspectionOwnerId = record.submittedById;
-    const photosWithUrls = await Promise.all(record.photos.map(async p => {
-      const ext = CONTENT_TYPE_EXT[p.contentType];
-      const employeeId = (p.inspection && p.inspection.submittedById) || inspectionOwnerId;
-      const blobName = ext
-        ? `${employeeId}/${p.ulid}.${ext}`
-        : `${employeeId}/${p.ulid}`;
-      try {
-        const props = await verifyBlobExists(p.container, blobName);
-        // [DR-007] Only treat `outcome: 'absent'` (or the legacy
-        // `{exists: false}` mock shape) as a definitive "blob gone" —
-        // the new 'unknown' outcome is left to fall through so the
-        // browser gets a fresh SAS URL and surfaces the real error if
-        // the object is genuinely missing.
-        if (isAbsent(props)) {
-          const { inspection: _join, ...photoForClient } = p;
-          return { ...photoForClient, readUrl: null };
-        }
-        if (props.outcome === 'unknown') {
-          console.warn('[inspection] verifyBlobExists unknown, minting SAS anyway', {
-            ulid: p.ulid,
-            reason: props.reason,
-          });
-        }
-      } catch (err) {
-        // Defensive: the production helper should NEVER throw under
-        // DR-007 (it returns `outcome: 'unknown'` for transport errors).
-        // Kept for any future SDK-shape regression so we don't break
-        // the listing.
-        console.warn('[inspection] verifyBlobExists threw, minting SAS anyway', {
-          ulid: p.ulid,
-          errMessage: err?.message?.split('\n')[0],
-        });
-      }
-      const { sasUrl } = await generateReadSASUrl(p.container, blobName);
-      const { inspection: _join, ...photoForClient } = p;
-      return { ...photoForClient, readUrl: sasUrl };
-    }));
-
-    // DR-022: surface the structured rejection decision in the GET DTO.
-    // The InspectionRecord schema has no top-level rejection columns
-    // (only `status`), so we read the latest REJECT entry from the
-    // existing `_adminNotes` JSON history (populated by the transition
-    // handler in this same file). The handler now stores `reason` on
-    // the REJECT entry, so the GET DTO has a single source of truth
-    // for `rejectionReason` / `rejectionNotes` / `rejectedBy` /
-    // `rejectedAt` without re-parsing the unrelated notification
-    // message. We resolve the reviewer `by` (cuid) into a minimal
-    // Employee row so the UI can render a name without a second fetch.
-    let rejectionReason = null;
-    let rejectionNotes = null;
-    let rejectedBy = null;
-    let rejectedAt = null;
-    if (record.status === 'REJECTED') {
-      const notes = (((record.data || {})._adminNotes) || []);
-      // Walk the history in reverse to find the most recent REJECT
-      // entry. Bulk and single paths both write to this array, so
-      // the latest REJECT always reflects the most recent decision.
-      for (let i = notes.length - 1; i >= 0; i -= 1) {
-        const entry = notes[i];
-        if (entry && entry.action === 'REJECT') {
-          rejectionReason = entry.reason || null;
-          rejectionNotes = entry.notes || null;
-          rejectedAt = entry.at || null;
-          if (entry.by) {
-            const reviewer = await prisma.employee.findUnique({
-              where: { id: entry.by },
-              select: { id: true, name: true, email: true },
-            });
-            rejectedBy = reviewer || { id: entry.by, name: null, email: null };
-          }
-          break;
-        }
-      }
-    }
-
-    res.json({
-      ...record,
-      photos: photosWithUrls,
-      rejectionReason,
-      rejectionNotes,
-      rejectedBy,
-      rejectedAt,
-    });
+    // [DR-009] Photo-URL decoration + structured rejection fields are
+    // hoisted to `serializeInspectionRecordForWire` (defined above the
+    // GET handler). The helper is shared with every transition
+    // handler so the wire shape is invariant across reads and
+    // mutations — see the helper docstring for the audit rationale.
+    const decorated = await serializeInspectionRecordForWire(prisma, record);
+    res.json(decorated);
   } catch (err) {
     console.error('Inspection get error', {
       employeeHash: hashIdentifier(req.employeeId),
@@ -1756,7 +1775,11 @@ router.put('/:id', async (req, res) => {
       return u;
     });
 
-    res.json(updated);
+    // [DR-009] PUT is a photo-affecting mutation; decorate the
+    // response with the shared wire DTO so the SPA can keep the
+    // freshly-replaced photos visible without a reload.
+    const decorated = await serializeInspectionRecordForWire(prisma, updated);
+    res.json(decorated);
   } catch (err) {
     // SOL DR-004: a lost photo claim is not a server fault — the tx
     // rolled back, the row is unchanged, and the client can recover
@@ -2129,10 +2152,13 @@ router.post('/:id/acknowledge', requireFreshAdmin, async (req, res) => {
       req.employeeId,
       { allowAdminOverride: true } // DR-027: route is req.isAdmin-gated above
     );
-    // SOL DR-021: `result` is now `{ record, transitioned, notification }`.
-    // Caller returns the record (wire contract unchanged) — provider work
-    // (fanOutEmail, SSE) already ran inside the helper.
-    res.json(result.record);
+    // [DR-009] Decorate with the same wire DTO as the GET handler so
+    // the SPA's optimistic-update path keeps a usable readUrl on
+    // every photo (previously the bare ORM record left the gallery
+    // blank). Provider work (fanOutEmail, SSE) already ran inside the
+    // transition helper.
+    const decorated = await serializeInspectionRecordForWire(prisma, result.record);
+    res.json(decorated);
   } catch (err) {
     return inspectionHandleTransitionError(req, res, err, 'acknowledge');
   }
@@ -2161,8 +2187,11 @@ router.post('/:id/close', requireFreshAdmin, async (req, res) => {
       req.employeeId,
       { allowAdminOverride: true } // DR-027: route is req.isAdmin-gated above
     );
-    // SOL DR-021: see ACKNOWLEDGE above.
-    res.json(result.record);
+    // [DR-009] Decorate with the shared wire DTO (readUrl minting +
+    // structured rejection fields). See ACKNOWLEDGE handler above for
+    // the audit rationale.
+    const decorated = await serializeInspectionRecordForWire(prisma, result.record);
+    res.json(decorated);
   } catch (err) {
     return inspectionHandleTransitionError(req, res, err, 'close');
   }
@@ -2198,8 +2227,13 @@ router.post('/:id/reject', requireFreshAdmin, async (req, res) => {
       req.employeeId,
       { allowAdminOverride: true } // DR-027: route is req.isAdmin-gated above
     );
-    // SOL DR-021: see ACKNOWLEDGE above.
-    res.json(result.record);
+    // [DR-009] Decorate with the shared wire DTO. The transition
+    // appended a fresh REJECT entry to `_adminNotes` before this
+    // helper runs, so `rejectionReason / rejectionNotes / rejectedBy /
+    // rejectedAt` resolve off the just-written entry in the same
+    // response — no second GET required for the rejection banner.
+    const decorated = await serializeInspectionRecordForWire(prisma, result.record);
+    res.json(decorated);
   } catch (err) {
     return inspectionHandleTransitionError(req, res, err, 'reject');
   }
@@ -2260,7 +2294,10 @@ router.post('/:id/submit', async (req, res) => {
       }
     }
 
-    res.json(updated.record);
+    // [DR-009] Same shared DTO so the SPA's owner-submit path keeps the
+    // freshly-opened record's photo readUrls without a reload.
+    const decorated = await serializeInspectionRecordForWire(prisma, updated.record);
+    res.json(decorated);
   } catch (err) {
     return inspectionHandleTransitionError(req, res, err, 'submit');
   }
