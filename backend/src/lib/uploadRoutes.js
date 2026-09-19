@@ -35,6 +35,8 @@ const {
   generateULID,
   generateUploadSASUrl,
   verifyBlobExists,
+  isAbsent, // [DR-007] three-state verify discriminator
+  isUnknown,
   CONTENT_TYPE_EXT,
 } = require('./blobStorage');
 const { hashIdentifier } = require('./pii');
@@ -434,24 +436,33 @@ function mountUploadRoutes(router, config = {}) {
       // the durable intent record — the canonical owner of the key
       // shape (including any `allowedPathPrefixesPerContainer`
       // prefix). NEVER reconstructed from untrusted request fields.
-      try {
-        const props = await verifyBlobExists(intent.container, intent.blobPath);
-        if (!props.exists) {
-          return res.status(404).json({ error: 'BLOB_NOT_UPLOADED', message: 'Photo bytes not found in storage' });
-        }
-        if (props.contentType && props.contentType !== contentType) {
-          return res.status(400).json({ error: 'CONTENT_TYPE_MISMATCH', message: 'Uploaded content-type does not match request' });
-        }
-        if (Math.abs((props.contentLength || 0) - sizeBytes) > SIZE_TOLERANCE_BYTES) {
-          return res.status(400).json({ error: 'SIZE_MISMATCH', message: 'Uploaded size does not match declared size' });
-        }
-      } catch (err) {
-        console.error('Upload blob verification failed', {
+      //
+      // [DR-007] Three-state discrimination:
+      //   absent  (404) → 404 BLOB_NOT_UPLOADED  (definitively missing)
+      //   unknown (403/timeout/5xx) → 502 BLOB_VERIFICATION_FAILED (retry hint)
+      //   present → also checks contentType + size against request
+      const props = await verifyBlobExists(intent.container, intent.blobPath);
+      if (isAbsent(props)) {
+        return res.status(404).json({ error: 'BLOB_NOT_UPLOADED', message: 'Photo bytes not found in storage' });
+      }
+      if (isUnknown(props)) {
+        console.error('Upload blob verification could not determine presence', {
           employeeHash: hashIdentifier(req.employeeId),
           container: intent.container, ulid,
-          errMessage: err.message?.split('\n')[0],
+          reason: props.reason,
         });
-        return res.status(502).json({ error: 'BLOB_VERIFICATION_FAILED', message: 'Could not verify upload' });
+        return res.status(502).json({
+          error: 'BLOB_VERIFICATION_FAILED',
+          message: 'Could not verify upload — retry shortly',
+          reason: props.reason,
+        });
+      }
+      // outcome === 'present'
+      if (props.contentType && props.contentType !== contentType) {
+        return res.status(400).json({ error: 'CONTENT_TYPE_MISMATCH', message: 'Uploaded content-type does not match request' });
+      }
+      if (Math.abs((props.contentLength || 0) - sizeBytes) > SIZE_TOLERANCE_BYTES) {
+        return res.status(400).json({ error: 'SIZE_MISMATCH', message: 'Uploaded size does not match declared size' });
       }
 
       // [DR-001 fix 2026-09-19] Evict the in-process Map cache after
@@ -479,25 +490,33 @@ function mountUploadRoutes(router, config = {}) {
     // (the server-issued key), falling back to the legacy shape only
     // when no entry exists — kept for pre-LPR-012 / no-prisma-stub
     // test paths.
-    try {
-      const blobName = pending.blobName || `${req.employeeId}/${ulid}.${CONTENT_TYPE_EXT[contentType] || 'bin'}`;
-      const props = await verifyBlobExists(container, blobName);
-      if (!props.exists) {
-        return res.status(404).json({ error: 'BLOB_NOT_UPLOADED', message: 'Photo bytes not found in storage' });
-      }
-      if (props.contentType && props.contentType !== contentType) {
-        return res.status(400).json({ error: 'CONTENT_TYPE_MISMATCH', message: 'Uploaded content-type does not match request' });
-      }
-      if (Math.abs((props.contentLength || 0) - sizeBytes) > SIZE_TOLERANCE_BYTES) {
-        return res.status(400).json({ error: 'SIZE_MISMATCH', message: 'Uploaded size does not match declared size' });
-      }
-    } catch (err) {
-      console.error('Upload blob verification failed', {
+    //
+    // [DR-007] Same three-state discrimination as the durable-intent
+    // branch above (absent → 404, unknown → 502 + retry hint,
+    // present → contentType + size check).
+    const blobName = pending.blobName || `${req.employeeId}/${ulid}.${CONTENT_TYPE_EXT[contentType] || 'bin'}`;
+    const props = await verifyBlobExists(container, blobName);
+    if (isAbsent(props)) {
+      return res.status(404).json({ error: 'BLOB_NOT_UPLOADED', message: 'Photo bytes not found in storage' });
+    }
+    if (isUnknown(props)) {
+      console.error('Upload blob verification (back-compat) could not determine presence', {
         employeeHash: hashIdentifier(req.employeeId),
         container, ulid,
-        errMessage: err.message?.split('\n')[0],
+        reason: props.reason,
       });
-      return res.status(502).json({ error: 'BLOB_VERIFICATION_FAILED', message: 'Could not verify upload' });
+      return res.status(502).json({
+        error: 'BLOB_VERIFICATION_FAILED',
+        message: 'Could not verify upload — retry shortly',
+        reason: props.reason,
+      });
+    }
+    // outcome === 'present'
+    if (props.contentType && props.contentType !== contentType) {
+      return res.status(400).json({ error: 'CONTENT_TYPE_MISMATCH', message: 'Uploaded content-type does not match request' });
+    }
+    if (Math.abs((props.contentLength || 0) - sizeBytes) > SIZE_TOLERANCE_BYTES) {
+      return res.status(400).json({ error: 'SIZE_MISMATCH', message: 'Uploaded size does not match declared size' });
     }
 
     pendingUploads.delete(pendingKey);

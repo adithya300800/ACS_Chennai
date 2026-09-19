@@ -36,6 +36,7 @@ const {
 const {
   generateReadSASUrl,
   verifyBlobExists,
+  isAbsent, // [DR-007] normalized "definitively missing" check
   CONTENT_TYPE_EXT,
 } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime } = require('../lib/errors');
@@ -1231,15 +1232,27 @@ router.get('/:id', async (req, res) => {
         : `${employeeId}/${p.ulid}`;
       try {
         const props = await verifyBlobExists(p.container, blobName);
-        if (!props.exists) {
+        // [DR-007] Only treat `outcome: 'absent'` (or the legacy
+        // `{exists: false}` mock shape) as a definitive "blob gone" —
+        // the new 'unknown' outcome is left to fall through so the
+        // browser gets a fresh SAS URL and surfaces the real error if
+        // the object is genuinely missing.
+        if (isAbsent(props)) {
           const { inspection: _join, ...photoForClient } = p;
           return { ...photoForClient, readUrl: null };
         }
+        if (props.outcome === 'unknown') {
+          console.warn('[inspection] verifyBlobExists unknown, minting SAS anyway', {
+            ulid: p.ulid,
+            reason: props.reason,
+          });
+        }
       } catch (err) {
-        // HEAD timeout / network blip — fall through to minting the SAS
-        // URL anyway; the browser will surface the real error if the
-        // object is genuinely missing.
-        console.warn('[inspection] verifyBlobExists failed, minting SAS anyway', {
+        // Defensive: the production helper should NEVER throw under
+        // DR-007 (it returns `outcome: 'unknown'` for transport errors).
+        // Kept for any future SDK-shape regression so we don't break
+        // the listing.
+        console.warn('[inspection] verifyBlobExists threw, minting SAS anyway', {
           ulid: p.ulid,
           errMessage: err?.message?.split('\n')[0],
         });

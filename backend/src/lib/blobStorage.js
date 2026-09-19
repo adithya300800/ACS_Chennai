@@ -194,9 +194,14 @@ async function generateReadSASUrl(containerName, blobName) {
   };
 }
 
-/**
- * Verify a blob exists by fetching its HEAD metadata (8s timeout).
- */
+// [DR-007] Three-state verify outcome. The previous shape only exposed
+// `exists: boolean` and collapsed every failure (403, timeout, 404, 5xx)
+// into `{exists: false}` — so callers couldn't tell "blob gone" from
+// "couldn't determine". DR-007 separates those into `outcome: 'present'
+// | 'absent' | 'unknown'` with a `reason` field for diagnostics. Only
+// `absent` is a safe "definitively missing" signal; `unknown` should
+// trigger a Retry/Service-unavailable surface, not an immediate
+// "show null readUrl / replace" affordance.
 const VERIFY_BLOB_TIMEOUT_MS = 8_000;
 
 async function verifyBlobExists(containerName, blobName) {
@@ -211,23 +216,79 @@ async function verifyBlobExists(containerName, blobName) {
       { abortSignal: abortController.signal }
     );
     return {
+      // outcome=present: HEAD returned 200 — blob is there.
+      outcome: 'present',
+      // exists=true retained as a back-compat derived field for callers
+      // that read it directly; new code should branch on `outcome`.
       exists: true,
       contentType: props.ContentType,
       contentLength: props.ContentLength,
       lastModified: props.LastModified,
     };
   } catch (err) {
-    if (err.name === 'AbortError' || err.$metadata?.httpStatusCode === 403) {
-      // R2 returns 403 for missing blobs on presigned-path buckets
-      return { exists: false };
+    const status = err.$metadata?.httpStatusCode;
+    if (status === 404) {
+      // outcome=absent: 404 is positive proof the blob is gone. Safe to
+      // 410 / null / "re-upload" surfaces.
+      return { outcome: 'absent', exists: false, reason: 'NOT_FOUND_404' };
     }
-    if (err.$metadata?.httpStatusCode === 404) {
-      return { exists: false };
+    if (status === 403) {
+      // R2 frequently returns 403 on presigned-path buckets for objects
+      // the caller lacks permission to HEAD — that is permission, not
+      // absence. Kept as `unknown` so callers surface "Retry / contact
+      // admin" rather than encouraging a destructive re-upload.
+      return { outcome: 'unknown', exists: false, reason: 'PERMISSION_DENIED_403' };
     }
-    throw err;
+    if (err.name === 'AbortError') {
+      // outcome=unknown: timeout is not absence — the blob may well be
+      // there; the HEAD just didn't complete in VERIFY_BLOB_TIMEOUT_MS.
+      return { outcome: 'unknown', exists: false, reason: 'TIMEOUT' };
+    }
+    // 5xx / network errors / DNS failures — preserve as `unknown` with
+    // the SDK's name / status code in `reason` so the route can render
+    // it on the toast. Previously this path `throw`d, and every caller
+    // caught it in a try/catch that fell through to minting SAS anyway —
+    // the new contract makes the fall-through explicit.
+    return {
+      outcome: 'unknown',
+      exists: false,
+      reason: err.name || err.Code || `NETWORK_ERROR_${status || 'UNKNOWN'}`,
+    };
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+/**
+ * [DR-007] Normalize "is this blob definitively absent?" across the
+ * new `outcome` shape and the legacy `{exists: boolean}` mock shape.
+ * Test mocks continue to pass `{exists: true|false}` without `outcome`,
+ * and the production helper returns `{outcome, exists, reason}`. Both
+ * are accepted here so the 6+ production callers (and ~25 test mocks)
+ * can switch from `if (!props.exists)` to `if (isAbsent(props))`
+ * without a synchronized test-mock migration.
+ */
+function isAbsent(props) {
+  if (!props) return false;
+  if (props.outcome === 'absent') return true;
+  // Legacy mock fallback: `{exists: false}` without outcome is treated
+  // as definitive absence (test mocks intentionally exercise the
+  // "blob gone" path).
+  if (props.outcome === undefined && props.exists === false) return true;
+  return false;
+}
+
+/**
+ * [DR-007] Companion to `isAbsent` for the confirm-upload handler,
+ * which needs to distinguish "blob gone" (return 404) from "could not
+ * determine" (return 502 + Retry) instead of a single "blob failure"
+ * 500. Returns true only for the production-reported `unknown` state;
+ * legacy mocks without `outcome` are NOT considered unknown (they're
+ * either present or absent via `isAbsent`).
+ */
+function isUnknown(props) {
+  if (!props) return false;
+  return props.outcome === 'unknown';
 }
 
 /**
@@ -440,6 +501,8 @@ module.exports = {
   generateUploadSASUrl,
   generateReadSASUrl,
   verifyBlobExists,
+  isAbsent,
+  isUnknown,
   uploadBufferToBlob,
   deleteBlob,
   applyR2Cors,

@@ -65,7 +65,7 @@ const { mapPrismaError, parseStrictISODate, toDateOnly } = require('../lib/error
 const { hashIdentifier } = require('../lib/pii');
 const { randomUUID } = require('crypto');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
-const { generateReadSASUrl, READ_URL_TTL_SECONDS, verifyBlobExists } = require('../lib/blobStorage');
+const { generateReadSASUrl, READ_URL_TTL_SECONDS, verifyBlobExists, isAbsent } = require('../lib/blobStorage');
 // [DR-001] Reuse the S3-7 + DR-006 binding primitives — they are about
 // upload intents, not literally photos, even though the function names
 // carry the photo terminology. The single `pdfBlobPath` field is wrapped
@@ -807,11 +807,14 @@ router.get('/:id/read-sas', asyncHandler(async (req, res) => {
     // [BLOB_GONE recovery, 2026-09-14] Mirror the projectAttachments
     // read-sas guard: HEAD the object first so we don't hand the
     // browser a presigned URL that R2 answers with NoSuchKey XML.
-    // Falls through on HEAD timeout so a flaky R2 doesn't break the
-    // happy path.
+    // [DR-007] Only `outcome: 'absent'` (404) triggers a 410 BLOB_GONE.
+    // Permission/timeout/5xx land in `outcome: 'unknown'` and fall
+    // through to minting a fresh SAS URL so a flaky R2 doesn't break the
+    // happy path; the browser surfaces the real error if the object is
+    // genuinely missing.
     try {
       const props = await verifyBlobExists('dpr-documents', row.pdfBlobPath);
-      if (!props.exists) {
+      if (isAbsent(props)) {
         return res.status(410).json({
           error: 'BLOB_GONE',
           code: 'BLOB_GONE',
@@ -819,8 +822,16 @@ router.get('/:id/read-sas', asyncHandler(async (req, res) => {
           canReplace: true,
         });
       }
+      if (props.outcome === 'unknown') {
+        console.warn('[drawings] verifyBlobExists unknown, minting SAS anyway', {
+          blobPath: row.pdfBlobPath,
+          reason: props.reason,
+        });
+      }
     } catch (err) {
-      console.warn('[drawings] verifyBlobExists failed, minting SAS anyway', {
+      // Defensive — should not happen under DR-007. Kept so a future
+      // SDK regression doesn't break the listing.
+      console.warn('[drawings] verifyBlobExists threw, minting SAS anyway', {
         blobPath: row.pdfBlobPath,
         errMessage: err?.message?.split('\n')[0],
       });

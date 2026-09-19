@@ -70,7 +70,7 @@ const { requireAuth, requireFreshAdmin } = require('../middleware/auth');
 const { mapPrismaError } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
 const { randomUUID } = require('crypto');
-const { generateReadSASUrl, READ_URL_TTL_SECONDS, verifyBlobExists } = require('../lib/blobStorage');
+const { generateReadSASUrl, READ_URL_TTL_SECONDS, verifyBlobExists, isAbsent } = require('../lib/blobStorage');
 // [DR-001] Mirror the drawings.js binding — the single `blobPath` field
 // is wrapped as a one-element `photos` array at the call site so the
 // helper's array shape doesn't need a parallel "single" API.
@@ -701,9 +701,13 @@ router.get('/:attachmentId/read-sas', asyncHandler(async (req, res) => {
     // hands the browser a presigned URL that 404s on open. A 410 + clear
     // message lets the SPA surface "file missing, please re-upload"
     // instead of the cryptic R2 NoSuchKey XML.
+    // [DR-007] Only `outcome: 'absent'` (404) triggers a 410 BLOB_GONE.
+    // Permission/timeout/5xx land in `outcome: 'unknown'` and fall
+    // through to minting a fresh SAS URL; the browser surfaces the real
+    // error if the object is genuinely missing.
     try {
       const props = await verifyBlobExists('dpr-documents', row.blobPath);
-      if (!props.exists) {
+      if (isAbsent(props)) {
         return res.status(410).json({
           error: 'BLOB_GONE',
           code: 'BLOB_GONE',
@@ -714,11 +718,16 @@ router.get('/:attachmentId/read-sas', asyncHandler(async (req, res) => {
           canReplace: true,
         });
       }
+      if (props.outcome === 'unknown') {
+        console.warn('[project-attachments] verifyBlobExists unknown, minting SAS anyway', {
+          blobPath: row.blobPath,
+          reason: props.reason,
+        });
+      }
     } catch (err) {
-      // Don't fail the request if R2 HEAD times out — fall through to
-      // minting the SAS URL anyway. The browser will surface the real
-      // error from R2 if the object is genuinely missing.
-      console.warn('[project-attachments] verifyBlobExists failed, minting SAS anyway', {
+      // Defensive — should not happen under DR-007. Kept so a future
+      // SDK regression doesn't break the listing.
+      console.warn('[project-attachments] verifyBlobExists threw, minting SAS anyway', {
         blobPath: row.blobPath,
         errMessage: err?.message?.split('\n')[0],
       });

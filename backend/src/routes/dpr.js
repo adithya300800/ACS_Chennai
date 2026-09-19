@@ -7,7 +7,7 @@ const router = express.Router();
 // dpr.js verbatim. See lib/idempotency.js for the contract and TTL.
 const { tryReplay: tryIdempotentReplay, recordSuccess: recordIdempotentSuccess } = require('../lib/idempotency');
 const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
-const { generateReadSASUrl, verifyBlobExists, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
+const { generateReadSASUrl, verifyBlobExists, isAbsent, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime, toDateOnly } = require('../lib/errors');
 // Round-27: shared IST date helpers. The `month` query shortcut on the list
 // endpoint uses `getMonthRangeUtc` to expand `?month=YYYY-MM` into a
@@ -1027,16 +1027,24 @@ router.get('/', asyncHandler(async (req, res) => {
             : `${d.submittedById}/${p.ulid}`;
           try {
             const props = await verifyBlobExists(p.container, blobName);
-            if (!props.exists) {
+            // [DR-007] Only `outcome: 'absent'` (404) → null readUrl.
+            // Permission/timeout/5xx land in `outcome: 'unknown'` and
+            // fall through to minting a fresh SAS URL.
+            if (isAbsent(props)) {
               // Object was deleted / never landed — skip the SAS mint so
               // the browser never opens a URL R2 can't serve.
               return { ...p, readUrl: null };
             }
+            if (props.outcome === 'unknown') {
+              console.warn('[dpr] verifyBlobExists unknown, minting SAS anyway', {
+                ulid: p.ulid,
+                reason: props.reason,
+              });
+            }
           } catch (err) {
-            // HEAD timeout / network blip — fall through to minting the
-            // SAS URL anyway; the browser will surface the real error if
-            // the object is genuinely missing.
-            console.warn('[dpr] verifyBlobExists failed, minting SAS anyway', {
+            // Defensive — should not happen under DR-007. Kept so a
+            // future SDK regression doesn't break the listing.
+            console.warn('[dpr] verifyBlobExists threw, minting SAS anyway', {
               ulid: p.ulid,
               errMessage: err?.message?.split('\n')[0],
             });
@@ -1331,14 +1339,23 @@ router.get('/:id', async (req, res) => {
         : `${employeeId}/${p.ulid}`;
       try {
         const props = await verifyBlobExists(p.container, blobName);
-        if (!props.exists) {
+        // [DR-007] Only `outcome: 'absent'` (404) → null readUrl.
+        // Permission/timeout/5xx land in `outcome: 'unknown'` and
+        // fall through to minting a fresh SAS URL.
+        if (isAbsent(props)) {
           const { dpr: _dprJoin, ...photoForClient } = p;
           return { ...photoForClient, readUrl: null };
         }
+        if (props.outcome === 'unknown') {
+          console.warn('[dpr] verifyBlobExists unknown, minting SAS anyway', {
+            ulid: p.ulid,
+            reason: props.reason,
+          });
+        }
       } catch (err) {
-        // HEAD timeout / network blip — fall through to minting the SAS
-        // URL anyway.
-        console.warn('[dpr] verifyBlobExists failed, minting SAS anyway', {
+        // Defensive — should not happen under DR-007. Kept so a
+        // future SDK regression doesn't break the listing.
+        console.warn('[dpr] verifyBlobExists threw, minting SAS anyway', {
           ulid: p.ulid,
           errMessage: err?.message?.split('\n')[0],
         });
@@ -3092,12 +3109,22 @@ router.patch('/:id/photos/:photoId', asyncHandler(async (req, res) => {
         ? `${dpr.submittedById}/${updated.ulid}.${newExt}`
         : `${dpr.submittedById}/${updated.ulid}`;
       const props = await verifyBlobExists(photo.container, newBlobName);
-      if (props.exists) {
+      // [DR-007] Only mint a SAS URL for an outcome of `present`. For
+      // `absent` (404) we surface null readUrl so the SPA knows the
+      // replacement didn't land; for `unknown` (timeout / 403 / 5xx)
+      // we also leave readUrl null rather than hand out a URL that may
+      // never resolve — the client triggers a retry on next mount.
+      if (props.outcome === 'present') {
         const { sasUrl } = await generateReadSASUrl(photo.container, newBlobName);
         readUrl = sasUrl;
+      } else if (props.outcome === 'unknown') {
+        console.warn('[dpr] replace photo: verifyBlobExists unknown; returning photo without readUrl', {
+          photoId,
+          reason: props.reason,
+        });
       }
     } catch (err) {
-      console.warn('[dpr] replace photo: verifyBlobExists/ReadSAS failed; returning photo without readUrl', {
+      console.warn('[dpr] replace photo: verifyBlobExists/ReadSAS threw; returning photo without readUrl', {
         photoId,
         errMessage: err?.message?.split('\n')[0],
       });
