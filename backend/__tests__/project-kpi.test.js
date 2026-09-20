@@ -408,6 +408,22 @@ describe('N17 — GET /api/projects', () => {
 
 // ─── 5. KPI: DPR counts grouped by projectName ──────────────────────────────
 describe('N17 — GET /api/projects/:idOrName/kpis', () => {
+  // Pin the clock so the 30-day window covers the fixture reportDates
+  // (2026-08-15..2026-08-20) and excludes the out-of-window dpr-old +
+  // the Anna-Nagar row stays inside. Without this pin the test is a
+  // time-bomb: `computeKpiWindow` uses `new Date()` (today in IST) and
+  // the window slides forward each calendar day. Same pattern as
+  // projects.dr013.test.js. The instant chosen (2026-09-01 12:00 UTC
+  // = 17:30 IST) keeps IST's "today" on 2026-09-01 so the 30-day
+  // window lands on [2026-08-02, 2026-09-02).
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-09-01T12:00:00.000Z'));
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
   it('5. KPI endpoint returns DPR counts grouped by projectName (and a derived pendingReview)', async () => {
     const prisma = makePrisma();
     const app = buildApp(prisma);
