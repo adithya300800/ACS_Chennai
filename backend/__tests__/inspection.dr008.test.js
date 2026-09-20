@@ -119,12 +119,22 @@ function buildApp({ isAdmin = false } = {}) {
         if (!rec) return null;
         // DR-008-C: simulate a concurrent draft PUT landing between our
         // SUBMIT tx read and the conditional update. The "concurrent"
-        // PUT bumps updatedAt AND clears the checklistItems array —
-        // exactly the audit race: a draft edit that invalidates content
-        // while the SUBMIT tx is mid-flight.
+        // PUT bumps updatedAt — isolating the CAS check from the
+        // DR-008-A content gate (which has its own dedicated test
+        // above). If we ALSO cleared checklistItems here, the route's
+        // content-validation gate (inspection.js:1971) would fire
+        // BEFORE the CAS ever runs and the test would 400 instead of
+        // 409 — that's a different bug class with its own regression
+        // test (test 1 above).
+        //
+        // Return a snapshot clone with the STALE updatedAt so the
+        // route's conditional UPDATE WHERE-clause carries that stale
+        // pin; bump the underlying row's updatedAt so the mock's
+        // update handler trips its P2025 CAS check on the mismatch.
         if (simulateConcurrentUpdatedAtJump && rec.status === 'DRAFT') {
+          const snapshot = { ...rec };
           rec.updatedAt = new Date('2026-09-04T09:35:00.000Z');
-          rec.data = { ...(rec.data || {}), checklistItems: [] };
+          return snapshot;
         }
         return rec;
       },
