@@ -99,7 +99,14 @@ describe('SOL DR-013 — drilldown scope, window, and OPEN preservation', () => 
     test('2d. viewAll links include from/to + status', () => {
       // View-all links must carry the same window so the queue page
       // opens pre-filtered to the same bucket the tile showed.
-      expect(PROJECT_DASHBOARD_JSX).toMatch(/new URLSearchParams\(\{\s*projectId:\s*idParam,\s*status:\s*['"]APPROVED['"],\s*\.\.\.w\s*\}\)/);
+      // R38.1 changed the build pattern: the viewAll now constructs
+      // `params = { status: 'APPROVED', ...w }` first, then conditionally
+      // appends `params.projectId = encodeURIComponent(...)` only when
+      // not in all-projects mode. The contract — status + window spread
+      // — is preserved.
+      expect(PROJECT_DASHBOARD_JSX).toMatch(/const\s+params\s*=\s*\{\s*status:\s*['"]APPROVED['"],\s*\.\.\.w\s*\}/);
+      // All-projects sentinel must NOT leak projectId for '__all__'.
+      expect(PROJECT_DASHBOARD_JSX).toMatch(/['"]__all__['"]/);
     });
   });
 

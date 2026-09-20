@@ -125,7 +125,12 @@ describe('DR-032 followup — recovery is operator-only', () => {
     expect(resolveCalls.length).toBeLessThanOrEqual(1);
     if (resolveCalls.length === 1) {
       expect(resolveCalls[0]).toMatch(/--rolled-back/);
-      expect(resolveCalls[0]).toMatch(/20260908150000_dr031_leave_constraint_correct_bound/);
+      // The DR-031 migration name now lives in the `for MIG in ...`
+      // bootstrap loop, NOT on the resolve line itself (line 65
+      // uses `"$MIG"`). The intent is the same — only this one
+      // sanctioned migration is auto-resolved — so we check the
+      // for-loop iterable in the surrounding source.
+      expect(startSrc).toMatch(/for\s+MIG\s+in[\s\S]*20260908150000_dr031_leave_constraint_correct_bound[\s\S]*do/);
       expect(resolveCalls[0] + '\n' + startSrc).toMatch(/\|\|\s*true/);
     }
   });
