@@ -1,0 +1,84 @@
+name: AppLog retention sweep
+
+# Round-40 #4 — Daily retention sweep for the AppLog table.
+#
+# Background:
+#   The AppLog table (see backend/prisma/schema.prisma) is the single
+#   durable store for HTTP requests, error-handler errors, and safeAsync
+#   fanout failures. Without a retention policy the table grows
+#   unbounded. The endpoint `POST /api/internal/cron/prune-logs`
+#   deletes rows older than LOG_RETENTION_DAYS (default 30) and emits
+#   one level=info source=cron log row per fire as proof of life.
+#
+# ── Why daily at 21:30 UTC (= 03:00 IST) ───────────────────────────────────
+#
+# 03:00 IST is the lowest-traffic window for this portal (HR works
+# 09:00-19:00 IST; the workforce is asleep). A missed fire just
+# delays the prune by one day — the endpoint is idempotent, so the
+# next fire catches up. This matches the S3-7 upload sweep's daily
+# cadence model except by cron-expression instead of per-15-minutes.
+#
+# GitHub Actions instead of a Render Cron Job for the same reason as
+# cron-upload-sweep.yml: Render cron requires a paid plan, and public
+# repo Actions minutes are free. Worst-case lag is roughly the same
+# as a Render cron (5-15 min), and the only consequence of a delayed
+# run is that some log rows live ~24h longer than the retention
+# window — harmless for this workload.
+#
+# ── Bounded by design ─────────────────────────────────────────────────────
+#
+# The endpoint returns 200 with `deleted: N`. A non-200 response
+# fails the job so GH Actions surfaces the outage. Healthy day =
+# deleted is roughly the volume of yesterday's worth (proportional
+# to traffic); a deleted << volume-24h-ago means either the cron is
+# running too frequently or the table is shrinking naturally — verify
+# via the SELECT count(*) check in the run.
+#
+# Authentication: header `X-Internal-Token` matching backend env var
+# `INTERNAL_API_TOKEN` (a repository secret already used by
+# cron-upload-sweep.yml, cron-warmup.yml, etc).
+
+on:
+  schedule:
+    - cron: '30 21 * * *'  # 21:30 UTC = 03:00 IST
+  workflow_dispatch:
+
+concurrency:
+  # A delayed scheduled fire plus a manual fire must not prune
+  # concurrently — the DELETE is idempotent so it would still be safe,
+  # but the volume of GH Actions invocations should not double-up
+  # unnecessarily on the operators who read these logs.
+  group: 'app-log-prune'
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fire AppLog retention sweep
+        run: |
+          url="https://acs-chennai.onrender.com/api/internal/cron/prune-logs"
+          echo "[prune-logs] POST $url"
+          response=$(curl -X POST "$url" \
+            -H "X-Internal-Token: ${{ secrets.INTERNAL_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -fsS -m 60 -w "\nHTTP_STATUS:%{http_code}")
+
+          echo "$response"
+          status=$(echo "$response" | tail -n 1 | sed 's/HTTP_STATUS://')
+          if [ "$status" != "200" ]; then
+            echo "[prune-logs] non-200 response (status=$status) — failing so GH Actions surfaces it"
+            exit 1
+          fi
+
+          # Surface the deletion count + retention window in the job log
+          # so a run that drifts from the baseline (volume range) is
+          # visible without opening Render's logs.
+          body=$(echo "$response" | sed '$d')
+          deleted=$(echo "$body" | grep -o '"deleted":[0-9]*' | head -1 || true)
+          retention=$(echo "$body" | grep -o '"retentionDays":[0-9]*' | head -1 || true)
+          echo "[prune-logs] ${deleted:-deleted:unknown} ${retention:-retentionDays:unknown}"

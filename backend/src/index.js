@@ -517,6 +517,12 @@ function createApp(deps = {}) {
   // the cost math + design rationale.
   const internalWarmupRoutes = require('./routes/internal-warmup');
   app.use('/api/internal/warmup', internalWarmupRoutes);
+  // Round-40 #4: app_log retention sweep. Render Cron Job hits this
+  // daily at 03:00 IST (= 21:30 UTC) so the table stays under the
+  // projected 30-day sliding window. See backend/src/routes/internal-
+  // cron.js for the retention rationale + LOG_RETENTION_DAYS knob.
+  const internalCronRoutes = require('./routes/internal-cron');
+  app.use('/api/internal/cron', internalCronRoutes);
   // [S3-7] Durable upload-intent sweep. Same INTERNAL_API_TOKEN gate.
   // GH Actions cron (cron-upload-sweep.yml) hits this every 15 minutes.
   // This is the cron LPR-012's migration promised but never shipped —
