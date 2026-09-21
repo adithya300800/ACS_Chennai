@@ -1723,3 +1723,73 @@ model RequestDedupe {
   @@index([state, createdAt])
   @@map("request_dedupe")
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Structured application log (round-40 logging pipeline).
+//
+// Single durable store for everything the backend wants to remember about a
+// request or background operation. Supabase `app_log` replaces the implicit
+// "read Render stdout before the 7-day TTL eats it" workflow that every
+// previous round has relied on. Retained 30 days sliding (round-40 section G);
+// daily cron prunes rows older than that. PII-redacted on write by
+// src/lib/log.js (the only real consumer of lib/pii#redact today).
+//
+// Columns:
+//   id           uuid PK
+//   level        "info" | "warn" | "error" — kept as String (not enum) so a
+//                new value is a code change, not a migration.
+//   source       canonical call-site tag — see "Canonical source values" below.
+//   message      short human label (e.g. "http.request", "http.error",
+//                "fanout.failed", "cron.prune_logs").
+//   context      Json — pre-redacted call-site context (employee hash,
+//                route, status, latency, error shape). NOT a place to put
+//                raw bodies / emails / tokens — redaction is mandatory.
+//   requestId    upstream X-Request-Id (or server-minted uuid). Indexed so
+//                "what did user X do on request Y" is a single btree lookup.
+//   employeeHash HMAC(employeeId). NEVER a raw employeeId — the table is
+//                hash-only end to end for DPDP minimization. An operator
+//                debugging "what did user X do" computes hashIdentifier(X)
+//                locally and matches.
+//   route        req.path or route template (template preferred).
+//   method       GET | POST | PUT | PATCH | DELETE — denormalized so the
+//                HTTP tile aggregates are filter-only, no need to substring
+//                the route.
+//   status       HTTP status code (null for non-HTTP sources).
+//   latencyMs    wall-clock duration of the request handler in ms.
+//   errorCode    err.code (e.g. VERSION_CONFLICT) on the error path.
+//   errorStack   err.stack truncated to ~2KB; null in production unless
+//                LOG_STACK_TRACE=1 is set for an active incident.
+//   createdAt    timestamptz(6) — sub-second ordering matters under firehose.
+//
+// Canonical source values (documented so call-site writes stay consistent):
+//   "http"         — requestLogger middleware (round-40 section C2)
+//   "errorHandler" — error-handler upgrade (round-40 section C3)
+//   "safeAsync"    — safeAsync wrapper (round-40 section E)
+//   "cron"         — internal-cron prune endpoint (round-40 section G)
+//
+// Indexes — two only. Per-request hot read is (requestId); retention sweep
+// is (createdAt). Every other filter (level / errorCode / route) is
+// single-column scan at projected 30-day row counts (~30k rows); adding a
+// 3rd index today only costs a write on every insert. Add the next index
+// when a real query pattern proves it.
+// ─────────────────────────────────────────────────────────────────────────────
+model AppLog {
+  id           String   @id @default(uuid())
+  level        String
+  source       String
+  message      String
+  context      Json
+  requestId    String?  @map("request_id")
+  employeeHash String?  @map("employee_hash")
+  route        String?
+  method       String?
+  status       Int?
+  latencyMs    Int?     @map("latency_ms")
+  errorCode    String?  @map("error_code")
+  errorStack   String?  @map("error_stack")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([createdAt])
+  @@index([requestId])
+  @@map("app_log")
+}
