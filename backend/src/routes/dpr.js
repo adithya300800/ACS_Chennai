@@ -838,12 +838,16 @@ router.post('/', async (req, res) => {
     // traces. The error is fully logged server-side with the hashed employee
     // identifier for correlation; the client gets a stable error code and
     // request id it can quote when reporting.
-    const requestId = req.headers['x-request-id'] || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    res.setHeader('X-Request-Id', requestId);
+    //
+    // Round-40 #2: request id is minted exactly once, by the request-id
+    // middleware. The X-Request-Id response header is already set; just
+    // echo req.id into the body so the client-side error reporter can
+    // quote it.
+    const requestId = req.id || null;
     res.status(500).json({
       error: 'Failed to create DPR',
       code: 'DPR_SAVE_FAILED',
-      requestId,
+      ...(requestId ? { requestId } : {}),
     });
   }
 });

@@ -59,13 +59,16 @@ function safeHandler(fn) {
     } catch (err) {
       const mapped = mapPrismaError(err);
       if (mapped) {
-        // Include the request id so the caller can correlate with server logs
-        const requestId = res.getHeader('X-Request-Id') || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        res.setHeader('X-Request-Id', requestId);
+        // Round-40 #2: the request id is minted exactly once, by the
+        // request-id middleware at the top of createApp(). The response
+        // header is already set there — re-using it here keeps the
+        // X-Request-Id on the wire consistent with what the request-
+        // logger middleware and the error handler log.
+        const requestId = req.id || res.getHeader('X-Request-Id') || null;
         return res.status(mapped.status).json({
           error: mapped.message,
           code: mapped.code,
-          requestId,
+          ...(requestId ? { requestId } : {}),
         });
       }
       next(err);

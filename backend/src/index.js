@@ -216,6 +216,15 @@ function createApp(deps = {}) {
     next();
   });
 
+  // Round-40 #2: per-request log middleware. Mounts IMMEDIATELY after the
+  // request-id mint so every request — including 401 from requireAuth and
+  // body-parser 4xx — produces an http.request row. The listener fires from
+  // res.on('finish'), so it runs AFTER requireAuth has populated
+  // req.employeeId regardless of mount order; see
+  // backend/src/middleware/requestLogger.js for the full rationale.
+  const requestLogger = require('./middleware/requestLogger');
+  app.use(requestLogger);
+
   // CORS — manual headers, exact origin allowlist.
   // Round-7: trimmed methods to what this API actually uses.
   //
@@ -561,6 +570,48 @@ function createApp(deps = {}) {
       name: err?.name,
       message: err?.message?.split('\n')[0],
     });
+
+    // Round-40 #2: durable log row for every thrown error. Body, query,
+    // and headers are explicitly redacted (lib/log's redact() runs
+    // server-side on every write) so an auth/login body carrying
+    // email+password, or a ?token=… query string, never lands in the
+    // table as plaintext. headers is an explicit allowlist
+    // (user-agent + referer) — `authorization` is never stored.
+    //
+    // errorStack is null in production unless LOG_STACK_TRACE=1 is set
+    // for an active incident (round-40 plan K.13). Otherwise first ~2KB
+    // of the stack is persisted so an operator debugging a future crash
+    // has the frame, not just the message.
+    //
+    // IP is intentionally NOT captured — see plan K.13 (DPDP
+    // minimization: every other identifier on the table is hashed or
+    // redacted; raw IP would be the one field breaking that rule).
+    const log = require('./lib/log');
+    log.error(
+      {
+        source: 'errorHandler',
+        requestId,
+        employeeHash: req.employeeId ? require('./lib/pii').hashIdentifier(req.employeeId) : null,
+        isAdmin: !!req.isAdmin,
+        route: req.path,
+        method: req.method,
+        status,
+        code: err?.code,
+        name: err?.name,
+        message: err?.message?.split('\n')[0],
+        body: req.body,    // redact() runs server-side inside log.error
+        query: req.query,
+        headers: {
+          'user-agent': req.headers['user-agent'],
+          referer: req.headers['referer'],
+        },
+        errorStack: (process.env.NODE_ENV !== 'production' ||
+                     process.env.LOG_STACK_TRACE === '1')
+          ? (err?.stack || '').slice(0, 2000)
+          : null,
+      },
+      'http.error',
+    );
     if (process.env.NODE_ENV !== 'production') {
       console.error(err.stack);
     }
