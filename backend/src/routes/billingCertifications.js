@@ -84,6 +84,10 @@ const router = express.Router();
 const { requireAuth, requireFreshAdmin } = require('../middleware/auth');
 const { mapPrismaError, parseStrictISODate, toDateOnly } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
+// Round-40 #3: fire-and-forget wrapper for the 5 silent `.catch(() => [])`
+// sites below. The previous shape swallowed DB outages as empty arrays,
+// so the user's project picker silently went empty with no audit trail.
+const safeAsync = require('../lib/safeAsync');
 const { randomUUID } = require('crypto');
 const { generateReadSASUrl, READ_URL_TTL_SECONDS } = require('../lib/blobStorage');
 // [DR-001] Mirror the drawings.js + projectAttachments.js binding — the
@@ -300,33 +304,48 @@ router.use(requireAuth);
 // Same five-audit-column union as R30 projects.js?scope=assigned — no new
 // ProjectMembership table is needed; the join is derived from existing
 // child rows.
-async function getAssignedProjectIds(prisma, employeeId) {
+async function getAssignedProjectIds(prisma, employeeId, logCtx = {}) {
+  // Round-40 #3: each findMany previously used `.catch(() => [])` to
+  // silently swallow a transient DB outage — leaving the employee with
+  // an empty project picker and no audit trail. safeAsync keeps the
+  // empty-array fallback contract intact while surfacing the outage
+  // as source=safeAsync code=fanout.failed rows for the operator.
+  const safeFind = (label, q) => safeAsync(label, () => q, {
+    requestId: logCtx.requestId,
+    employeeHash: logCtx.employeeHash,
+    fallback: [],
+  });
   const [dprProj, inspProj, boqProj, voProj, drwProj] = await Promise.all([
-    prisma.dPR.findMany({
-      distinct: ['projectId'],
-      where: { submittedById: employeeId, projectId: { not: null } },
-      select: { projectId: true },
-    }).catch(() => []),
-    prisma.inspectionRecord.findMany({
-      distinct: ['projectId'],
-      where: { submittedById: employeeId, projectId: { not: null } },
-      select: { projectId: true },
-    }).catch(() => []),
-    prisma.boqItem.findMany({
-      distinct: ['projectId'],
-      where: { createdById: employeeId, projectId: { not: null } },
-      select: { projectId: true },
-    }).catch(() => []),
-    prisma.variationOrder.findMany({
-      distinct: ['projectId'],
-      where: { raisedById: employeeId, projectId: { not: null } },
-      select: { projectId: true },
-    }).catch(() => []),
-    prisma.drawing.findMany({
-      distinct: ['projectId'],
-      where: { issuedById: employeeId, projectId: { not: null } },
-      select: { projectId: true },
-    }).catch(() => []),
+    safeFind('assigned.dpr',
+      prisma.dPR.findMany({
+        distinct: ['projectId'],
+        where: { submittedById: employeeId, projectId: { not: null } },
+        select: { projectId: true },
+      })),
+    safeFind('assigned.inspection',
+      prisma.inspectionRecord.findMany({
+        distinct: ['projectId'],
+        where: { submittedById: employeeId, projectId: { not: null } },
+        select: { projectId: true },
+      })),
+    safeFind('assigned.boq',
+      prisma.boqItem.findMany({
+        distinct: ['projectId'],
+        where: { createdById: employeeId, projectId: { not: null } },
+        select: { projectId: true },
+      })),
+    safeFind('assigned.variation',
+      prisma.variationOrder.findMany({
+        distinct: ['projectId'],
+        where: { raisedById: employeeId, projectId: { not: null } },
+        select: { projectId: true },
+      })),
+    safeFind('assigned.drawing',
+      prisma.drawing.findMany({
+        distinct: ['projectId'],
+        where: { issuedById: employeeId, projectId: { not: null } },
+        select: { projectId: true },
+      })),
   ]);
   return Array.from(new Set([
     ...dprProj.map((r) => r.projectId),
@@ -337,7 +356,7 @@ async function getAssignedProjectIds(prisma, employeeId) {
   ].filter(Boolean)));
 }
 
-async function applyScopeFilter(where, { scope, prisma, employeeId, isAdmin }) {
+async function applyScopeFilter(where, { scope, prisma, employeeId, isAdmin, logCtx }) {
   if (isAdmin) return where;
   // Non-admin: [DR-018] `?scope=assigned` is mandatory by contract.
   // If the param is absent or empty, default to 'assigned' so a non-
@@ -351,7 +370,7 @@ async function applyScopeFilter(where, { scope, prisma, employeeId, isAdmin }) {
   // Employee + scope=assigned → narrow to their assigned projects.
   // An employee with no filed child records returns an empty list, not
   // the org-wide registry.
-  const ids = await getAssignedProjectIds(prisma, employeeId);
+  const ids = await getAssignedProjectIds(prisma, employeeId, logCtx);
   // [DR-030] Intersect the requested projectId filter with the
   // authorized scope rather than overwriting it. The previous shape
   // returned `{ ...where, projectId: { in: ids } }` which silently
@@ -545,11 +564,11 @@ router.get('/', asyncHandler(async (req, res) => {
     prisma,
     employeeId: req.employeeId,
     isAdmin: !!req.isAdmin,
+    logCtx: { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) },
   });
   const scopedRowsWhere = cursorPredicate
     ? { ...scopedWhere, ...cursorPredicate }
     : scopedWhere;
-
   try {
     const [rows, total, totalsByStatus] = await Promise.all([
       prisma.billingCertification.findMany({
@@ -714,6 +733,7 @@ router.get('/aggregates', asyncHandler(async (req, res) => {
     prisma,
     employeeId: req.employeeId,
     isAdmin: !!req.isAdmin,
+    logCtx: { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) },
   });
 
   try {
@@ -818,7 +838,10 @@ router.get('/:id', asyncHandler(async (req, res) => {
     // the list does — 404, not 403, so we don't leak the row's existence
     // to an employee who's not on that project's site.
     if (!req.isAdmin) {
-      const assigned = await getAssignedProjectIds(prisma, req.employeeId);
+      const assigned = await getAssignedProjectIds(prisma, req.employeeId, {
+    requestId: req.id,
+    employeeHash: hashIdentifier(req.employeeId),
+  });
       if (!assigned.includes(row.projectId)) {
         return res.status(404).json({ error: 'CERTIFICATION_NOT_FOUND', code: 'CERTIFICATION_NOT_FOUND', message: 'Billing certification not found' });
       }
@@ -1981,7 +2004,10 @@ router.get('/:id/read-sas', asyncHandler(async (req, res) => {
     // detail endpoint — don't leak the row's existence to an employee
     // who's not on that project's site.
     if (!req.isAdmin) {
-      const assigned = await getAssignedProjectIds(prisma, req.employeeId);
+      const assigned = await getAssignedProjectIds(prisma, req.employeeId, {
+    requestId: req.id,
+    employeeHash: hashIdentifier(req.employeeId),
+  });
       if (!assigned.includes(row.projectId)) {
         return res.status(404).json({
           error: 'CERTIFICATION_NOT_FOUND',

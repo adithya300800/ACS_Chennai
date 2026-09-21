@@ -15,6 +15,11 @@ const { mapPrismaError, parseStrictISODate, parseISODateTime, toDateOnly } = req
 // Asia/Kolkata calendar (see backend/src/lib/dateOnly.js).
 const { getMonthRangeUtc, InvalidMonthRangeError } = require('../lib/dateOnly');
 const { hashIdentifier } = require('../lib/pii');
+// Round-40 #3: fire-and-forget wrapper. The previous inline
+// `fanOutEmail(...)` calls had no .catch() — transport failures vanished
+// without a trace. safeAsync logs them as source=safeAsync
+// code=fanout.failed rows instead.
+const safeAsync = require('../lib/safeAsync');
 const { encodeCursor, decodeCursor, InvalidCursorError } = require('../lib/cursor');
 // Round-25: post-write email fan-out for the in-app notification system.
 // The 13 notification.create call sites add a single `fanOutEmail(...)` line
@@ -2263,13 +2268,17 @@ router.post('/:id/review', requireFreshAdmin, async (req, res) => {
         isRead: !!updated.notification.isRead,
       });
     }
-    fanOutEmail(updated.notification || {
-      id: null,
-      employeeId: dpr.submittedById,
-      type: 'DPR_REVIEWED',
-      dprId: id,
-      message: notifMessage,
-    }, prisma, { projectName: dpr.projectName, reportDate: formatReportDate(dpr.reportDate) });
+    // Round-40 #3: wrap in safeAsync so a transport failure produces a
+    // log row (source=safeAsync, code=fanout.failed) instead of vanishing.
+    safeAsync('notify.dpr.reviewed',
+      () => fanOutEmail(updated.notification || {
+        id: null,
+        employeeId: dpr.submittedById,
+        type: 'DPR_REVIEWED',
+        dprId: id,
+        message: notifMessage,
+      }, prisma, { projectName: dpr.projectName, reportDate: formatReportDate(dpr.reportDate) }),
+      { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) });
 
     res.json(updated.dpr);
   } catch (err) {
@@ -2397,13 +2406,18 @@ router.post('/:id/approve', requireFreshAdmin, async (req, res) => {
     // DR-021: pass the actual persisted notification row id to
     // fanOutEmail so EmailLog.notificationId is real (not the legacy
     // `null` placeholder).
-    fanOutEmail(updated.notification || {
-      id: null,
-      employeeId: dpr.submittedById,
-      type: 'DPR_APPROVED',
-      dprId: id,
-      message: notifMessage,
-    }, prisma, { projectName: dpr.projectName, reportDate: formatReportDate(dpr.reportDate) });
+    //
+    // Round-40 #3: wrap in safeAsync so a transport failure produces a
+    // log row (source=safeAsync, code=fanout.failed) instead of vanishing.
+    safeAsync('notify.dpr.approved',
+      () => fanOutEmail(updated.notification || {
+        id: null,
+        employeeId: dpr.submittedById,
+        type: 'DPR_APPROVED',
+        dprId: id,
+        message: notifMessage,
+    }, prisma, { projectName: dpr.projectName, reportDate: formatReportDate(dpr.reportDate) }),
+      { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) });
 
     const updatedDpr = updated.dpr;
     res.json(updatedDpr);
@@ -2548,13 +2562,18 @@ router.post('/:id/reject', requireFreshAdmin, async (req, res) => {
     // fanOutEmail so EmailLog.notificationId is real (not the legacy
     // `null` placeholder). The audit trail can now trace an email back
     // to the exact notification row that triggered it.
-    fanOutEmail(_notification || {
-      id: null,
-      employeeId: dpr.submittedById,
-      type: 'DPR_REJECTED',
+    //
+    // Round-40 #3: wrap in safeAsync so a transport failure produces a
+    // log row (source=safeAsync, code=fanout.failed) instead of vanishing.
+    safeAsync('notify.dpr.rejected',
+      () => fanOutEmail(_notification || {
+        id: null,
+        employeeId: dpr.submittedById,
+        type: 'DPR_REJECTED',
       dprId: id,
       message: notifMessage,
-    }, prisma, { projectName: dpr.projectName, reportDate: formatReportDate(dpr.reportDate), reason: _combinedNotes });
+    }, prisma, { projectName: dpr.projectName, reportDate: formatReportDate(dpr.reportDate), reason: _combinedNotes }),
+      { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) });
 
     res.json(dprForClient);
   } catch (err) {
@@ -2776,13 +2795,18 @@ router.post('/bulk-review', requireFreshAdmin, async (req, res) => {
       // fanOutEmail so EmailLog.notificationId is real. EmailLog FK
       // is nullable (SetNull) so audit trails stay valid even when the
       // underlying notification is pruned.
-      fanOutEmail(result.notification || {
-        id: null,
-        employeeId: result.submittedById,
-        type: `DPR_${result.newStatus === 'UNDER_REVIEW' ? 'DPR_REVIEWED' : result.newStatus}`,
-        dprId: result.id,
-        message: notifMessage,
-      }, prisma, { projectName: result.projectName });
+      //
+      // Round-40 #3: wrap in safeAsync so a transport failure produces a
+      // log row (source=safeAsync, code=fanout.failed) instead of vanishing.
+      safeAsync('notify.dpr.transition',
+        () => fanOutEmail(result.notification || {
+          id: null,
+          employeeId: result.submittedById,
+          type: `DPR_${result.newStatus === 'UNDER_REVIEW' ? 'DPR_REVIEWED' : result.newStatus}`,
+          dprId: result.id,
+          message: notifMessage,
+      }, prisma, { projectName: result.projectName }),
+        { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) });
 
       succeeded.push({ id: result.id, newStatus: result.newStatus });
     } catch (err) {

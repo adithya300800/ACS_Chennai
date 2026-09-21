@@ -36,6 +36,14 @@ const router = express.Router();
 const { requireAuth, requireFreshAdmin } = require('../middleware/auth');
 const { mapPrismaError, parseStrictISODate } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
+// Round-40 #3: fire-and-forget wrapper for the 10 silent `.catch(...)` sites
+// in this route's list/aggregate pipeline. The previous shape swallowed DB
+// outages as empty arrays (or only echoed them via console.warn), so the
+// user's project picker silently went empty with no audit trail that
+// operators can grep. safeAsync emits source=safeAsync code=fanout.failed
+// rows; `fallback: []` preserves the existing empty-array return contract
+// so the downstream `Promise.all` union logic stays unchanged.
+const safeAsync = require('../lib/safeAsync');
 const { getTodayBusinessDate } = require('../lib/dateOnly');
 
 function asyncHandler(fn) {
@@ -616,30 +624,26 @@ router.get('/', asyncHandler(async (req, res) => {
       // is unchanged in spirit (still scoped to the requester's
       // submittedById) — only the orphan lock is added.
       scope === 'all'
-        ? prisma.dPR.findMany({
-            where: { projectId: null },
-            distinct: ['projectName'],
-            select: { projectName: true },
-            orderBy: { projectName: 'asc' },
-          }).catch((err) => {
-            console.warn('Projects list — DPR auto-discovery failed', {
-              prismaCode: err.code,
-              message: err.message?.split('\n')[0],
-            });
-            return [];
-          })
-        : prisma.dPR.findMany({
-            where: { projectId: null, submittedById: req.employeeId },
-            distinct: ['projectName'],
-            select: { projectName: true },
-            orderBy: { projectName: 'asc' },
-          }).catch((err) => {
-            console.warn('Projects list — DPR auto-discovery (mine/assigned) failed', {
-              prismaCode: err.code,
-              message: err.message?.split('\n')[0],
-            });
-            return [];
-          }),
+        ? safeAsync(
+            'projects.discovered.dpr.all',
+            () => prisma.dPR.findMany({
+              where: { projectId: null },
+              distinct: ['projectName'],
+              select: { projectName: true },
+              orderBy: { projectName: 'asc' },
+            }),
+            { requestId: req.id, employeeHash: hashIdentifier(req.employeeId), fallback: [] },
+          )
+        : safeAsync(
+            'projects.discovered.dpr.scoped',
+            () => prisma.dPR.findMany({
+              where: { projectId: null, submittedById: req.employeeId },
+              distinct: ['projectName'],
+              select: { projectName: true },
+              orderBy: { projectName: 'asc' },
+            }),
+            { requestId: req.id, employeeHash: hashIdentifier(req.employeeId), fallback: [] },
+          ),
       // Same scoping for InspectionRecord.projectName — an employee who
       // only ever filed inspections against "RESOLVE-TEST-PROJECT-NEW"
       // should see that name in their dropdown, even if they never filed
@@ -650,18 +654,26 @@ router.get('/', asyncHandler(async (req, res) => {
       // non-orphan rows with a stale projectName don't keep the source
       // alive in Discovered after a merge.
       scope === 'all'
-        ? prisma.inspectionRecord.findMany({
-            where: { projectId: null },
-            distinct: ['projectName'],
-            select: { projectName: true },
-            orderBy: { projectName: 'asc' },
-          }).catch(() => [])
-        : prisma.inspectionRecord.findMany({
-            where: { projectId: null, submittedById: req.employeeId },
-            distinct: ['projectName'],
-            select: { projectName: true },
-            orderBy: { projectName: 'asc' },
-          }).catch(() => []),
+        ? safeAsync(
+            'projects.discovered.inspections.all',
+            () => prisma.inspectionRecord.findMany({
+              where: { projectId: null },
+              distinct: ['projectName'],
+              select: { projectName: true },
+              orderBy: { projectName: 'asc' },
+            }),
+            { requestId: req.id, employeeHash: hashIdentifier(req.employeeId), fallback: [] },
+          )
+        : safeAsync(
+            'projects.discovered.inspections.scoped',
+            () => prisma.inspectionRecord.findMany({
+              where: { projectId: null, submittedById: req.employeeId },
+              distinct: ['projectName'],
+              select: { projectName: true },
+              orderBy: { projectName: 'asc' },
+            }),
+            { requestId: req.id, employeeHash: hashIdentifier(req.employeeId), fallback: [] },
+          ),
     ]);
 
     // For ?scope=assigned, narrow the curated list to ONLY the projects
@@ -695,40 +707,64 @@ router.get('/', asyncHandler(async (req, res) => {
     let filteredProjects = projects;
     if (scope === 'assigned') {
       const [dprProj, inspProj, boqProj, voProj, drwProj, assignProj] = await Promise.all([
-        prisma.dPR.findMany({
-          distinct: ['projectId'],
-          where: { submittedById: req.employeeId, projectId: { not: null } },
-          select: { projectId: true },
-        }).catch(() => []),
-        prisma.inspectionRecord.findMany({
-          distinct: ['projectId'],
-          where: { submittedById: req.employeeId, projectId: { not: null } },
-          select: { projectId: true },
-        }).catch(() => []),
-        prisma.boqItem.findMany({
-          distinct: ['projectId'],
-          where: { createdById: req.employeeId, projectId: { not: null } },
-          select: { projectId: true },
-        }).catch(() => []),
-        prisma.variationOrder.findMany({
-          distinct: ['projectId'],
-          where: { raisedById: req.employeeId },
-          select: { projectId: true },
-        }).catch(() => []),
-        prisma.drawing.findMany({
-          distinct: ['projectId'],
-          where: { issuedById: req.employeeId, projectId: { not: null } },
-          select: { projectId: true },
-        }).catch(() => []),
+        safeAsync(
+          'projects.assigned.dpr',
+          () => prisma.dPR.findMany({
+            distinct: ['projectId'],
+            where: { submittedById: req.employeeId, projectId: { not: null } },
+            select: { projectId: true },
+          }),
+          { requestId: req.id, employeeHash: hashIdentifier(req.employeeId), fallback: [] },
+        ),
+        safeAsync(
+          'projects.assigned.inspection',
+          () => prisma.inspectionRecord.findMany({
+            distinct: ['projectId'],
+            where: { submittedById: req.employeeId, projectId: { not: null } },
+            select: { projectId: true },
+          }),
+          { requestId: req.id, employeeHash: hashIdentifier(req.employeeId), fallback: [] },
+        ),
+        safeAsync(
+          'projects.assigned.boq',
+          () => prisma.boqItem.findMany({
+            distinct: ['projectId'],
+            where: { createdById: req.employeeId, projectId: { not: null } },
+            select: { projectId: true },
+          }),
+          { requestId: req.id, employeeHash: hashIdentifier(req.employeeId), fallback: [] },
+        ),
+        safeAsync(
+          'projects.assigned.variation',
+          () => prisma.variationOrder.findMany({
+            distinct: ['projectId'],
+            where: { raisedById: req.employeeId },
+            select: { projectId: true },
+          }),
+          { requestId: req.id, employeeHash: hashIdentifier(req.employeeId), fallback: [] },
+        ),
+        safeAsync(
+          'projects.assigned.drawing',
+          () => prisma.drawing.findMany({
+            distinct: ['projectId'],
+            where: { issuedById: req.employeeId, projectId: { not: null } },
+            select: { projectId: true },
+          }),
+          { requestId: req.id, employeeHash: hashIdentifier(req.employeeId), fallback: [] },
+        ),
         // [DR-010] Explicit roster membership. Admins create a
         // ProjectAssignment row when allocating a project to an
         // employee — the assigned employee should see that project
         // in their picker before they've filed any child record.
-        prisma.projectAssignment.findMany({
-          distinct: ['projectId'],
-          where: { employeeId: req.employeeId },
-          select: { projectId: true },
-        }).catch(() => []),
+        safeAsync(
+          'projects.assigned.assignment',
+          () => prisma.projectAssignment.findMany({
+            distinct: ['projectId'],
+            where: { employeeId: req.employeeId },
+            select: { projectId: true },
+          }),
+          { requestId: req.id, employeeHash: hashIdentifier(req.employeeId), fallback: [] },
+        ),
       ]);
       const touched = new Set([
         ...dprProj.map((r) => r.projectId),

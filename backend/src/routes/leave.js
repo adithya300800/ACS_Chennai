@@ -35,6 +35,10 @@ const {
 } = require('../lib/leaveRules');
 const { mapPrismaError } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
+// Round-40 #3: fire-and-forget wrapper. Same semantics as the previous
+// inline .catch(() => {}) but surfaces failures as durable app_log rows
+// (source=safeAsync, code=fanout.failed) instead of swallowing them.
+const safeAsync = require('../lib/safeAsync');
 // Round-25: email fan-out hook for the existing in-app notification. The
 // 13 sites across dpr/leave/inspection/training add one fire-and-forget
 // `fanOutEmail(...)` call after their notification.create. The helper
@@ -404,7 +408,12 @@ router.post('/:id/approve', requireFreshAdmin, asyncHandler(async (req, res) => 
     // id for the EmailLog FK, so fan-out runs only if the insert succeeded
     // (otherwise pass null — EmailLog.notificationId is nullable).
     if (notifRow) {
-      fanOutEmail(notifRow, prisma);
+      // Round-40 #3: wrap in safeAsync so a transport failure produces a
+      // log row (source=safeAsync, code=fanout.failed) instead of being
+      // silently swallowed. The previous inline call had no .catch().
+      safeAsync('notify.leave.submit',
+        () => fanOutEmail(notifRow, prisma),
+        { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) });
     }
 
     console.log('[leave/approve]', {
@@ -482,7 +491,11 @@ router.post('/:id/reject', requireFreshAdmin, asyncHandler(async (req, res) => {
       });
       // Round-25: email fan-out (fire-and-forget). Pass the inserted row so
       // EmailLog can FK back to the notification id.
-      fanOutEmail(notifRow, prisma);
+      // Round-40 #3: safeAsync surfaces transport failures as log rows
+      // instead of swallowing them.
+      safeAsync('notify.leave.reject',
+        () => fanOutEmail(notifRow, prisma),
+        { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) });
     } catch (notifyErr) {
       console.error('[leave/reject] notification insert failed', {
         leaveId: updated.id,

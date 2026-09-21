@@ -68,6 +68,12 @@ const {
 } = require('../templates/email');
 const { findActiveAdmins } = require('../lib/adminRecipients');
 const { hashIdentifier } = require('../lib/pii');
+// Round-40 #3: fire-and-forget wrapper. The previous inline
+// `.catch(() => null)` / `.catch(() => [])` swallows a transient DB
+// failure as an empty result. safeAsync logs them as source=safeAsync
+// code=fanout.failed rows so the operator can see the outage instead
+// of wondering why the admin got nothing.
+const safeAsync = require('../lib/safeAsync');
 const { getIstDateString, getIstDateLabel, istMidnightUtcFromDateString, parseDateOnlyToUtc } = require('../lib/dateOnly');
 
 function getPrisma(req) { return req.app.get('prisma'); }
@@ -297,9 +303,16 @@ router.post('/run', requireInternalToken, asyncHandler(async (req, res) => {
 
       // Per-admin prefs gate. Admins who flipped their master switch or
       // explicitly muted this type stay silent; we still audit-log.
-      const prefs = await prisma.notificationPreference.findUnique({
-        where: { employeeId: admin.id },
-      }).catch(() => null);
+      //
+      // Round-40 #3: wrap in safeAsync so a transient DB outage produces
+      // a log row instead of being silently swallowed. fallback: null
+      // preserves the existing behaviour — `prefs` is null and the
+      // downstream "master switch off" branch is skipped.
+      const prefs = await safeAsync(
+        'attendance.adminPrefs',
+        () => prisma.notificationPreference.findUnique({ where: { employeeId: admin.id } }),
+        { fallback: null },
+      );
 
       let terminalStatus;
       let emailLogId = null;

@@ -52,6 +52,11 @@ const {
 } = require('../lib/trainingRules');
 const { mapPrismaError } = require('../lib/errors');
 const { hashIdentifier } = require('../lib/pii');
+// Round-40 #3: fire-and-forget wrapper. The previous inline
+// `fanOutEmail(...)` calls had no .catch() — transport failures vanished
+// without a trace. safeAsync logs them as source=safeAsync
+// code=fanout.failed rows instead.
+const safeAsync = require('../lib/safeAsync');
 // Round-25: email fan-out hook for the existing in-app notification. The
 // 6 training notification.create sites add one fire-and-forget
 // `fanOutEmail(...)` call after their insert succeeds.
@@ -392,12 +397,17 @@ router.post('/enrollments', trainingWriteLimiter, requireFreshAdmin, asyncHandle
         // template render "New training assigned: <course>" without a
         // follow-up lookup. dueDate is included so the email body can
         // surface the deadline.
-        fanOutEmail(notifRow, prisma, {
-          courseTitle: enrollment.course.title,
-          dueDate: enrollment.dueDate
-            ? new Date(enrollment.dueDate).toISOString().slice(0, 10)
-            : null,
-        });
+        //
+        // Round-40 #3: wrap in safeAsync so a transport failure produces
+        // a log row instead of being silently swallowed.
+        safeAsync('notify.training.assigned',
+          () => fanOutEmail(notifRow, prisma, {
+            courseTitle: enrollment.course.title,
+            dueDate: enrollment.dueDate
+              ? new Date(enrollment.dueDate).toISOString().slice(0, 10)
+              : null,
+          }),
+          { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) });
       } catch (notifyErr) {
         console.error('[training/assign] notification insert failed', {
           enrollmentId: enrollment.id,
@@ -677,7 +687,10 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
             message: `You started: ${updated.course.title}`,
           },
         });
-        fanOutEmail(notifRow, prisma, { courseTitle: updated.course.title });
+        // Round-40 #3: safeAsync surfaces transport failures as log rows.
+        safeAsync('notify.training.inProgress',
+          () => fanOutEmail(notifRow, prisma, { courseTitle: updated.course.title }),
+          { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) });
       } catch (notifyErr) {
         console.error('[training/progress] in-progress notification failed', {
           enrollmentId: updated.id,
@@ -694,7 +707,10 @@ router.put('/enrollments/:id/progress', trainingWriteLimiter, asyncHandler(async
             message: `Training completed: ${updated.course.title}`,
           },
         });
-        fanOutEmail(notifRow, prisma, { courseTitle: updated.course.title });
+        // Round-40 #3: safeAsync surfaces transport failures as log rows.
+        safeAsync('notify.training.completed',
+          () => fanOutEmail(notifRow, prisma, { courseTitle: updated.course.title }),
+          { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) });
       } catch (notifyErr) {
         console.error('[training/progress] completed notification failed', {
           enrollmentId: updated.id,
@@ -886,7 +902,10 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
           message: `Training completed: ${updated.course.title}`,
         },
       });
-      fanOutEmail(notifRow, prisma, { courseTitle: updated.course.title });
+      // Round-40 #3: safeAsync surfaces transport failures as log rows.
+      safeAsync('notify.training.complete',
+        () => fanOutEmail(notifRow, prisma, { courseTitle: updated.course.title }),
+        { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) });
     } catch (notifyErr) {
       console.error('[training/complete] notification failed', {
         enrollmentId: updated.id,
@@ -1024,7 +1043,10 @@ router.post('/enrollments/:id/admin-override', trainingWriteLimiter, requireFres
           message: `Training completed: ${updated.course.title}`,
         },
       });
-      fanOutEmail(notifRow, prisma, { courseTitle: updated.course.title });
+      // Round-40 #3: safeAsync surfaces transport failures as log rows.
+      safeAsync('notify.training.adminOverride',
+        () => fanOutEmail(notifRow, prisma, { courseTitle: updated.course.title }),
+        { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) });
     } catch (notifyErr) {
       console.error('[training/admin-override] notification failed', {
         enrollmentId: updated.id,
@@ -1154,10 +1176,13 @@ router.post('/enrollments/:id/cancel', trainingWriteLimiter, requireFreshAdmin, 
           message: `Training unassigned: ${updated.course.title}${result.value.note ? ` — ${result.value.note}` : ''}`,
         },
       });
-      fanOutEmail(notifRow, prisma, {
-        courseTitle: updated.course.title,
-        note: result.value.note,
-      });
+      // Round-40 #3: safeAsync surfaces transport failures as log rows.
+      safeAsync('notify.training.cancelled',
+        () => fanOutEmail(notifRow, prisma, {
+          courseTitle: updated.course.title,
+          note: result.value.note,
+        }),
+        { requestId: req.id, employeeHash: hashIdentifier(req.employeeId) });
     } catch (notifyErr) {
       console.error('[training/cancel] notification failed', {
         enrollmentId: updated.id,
