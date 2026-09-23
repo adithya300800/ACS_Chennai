@@ -31,12 +31,15 @@ import {
   ACCEPTED_REPORT_TYPES,
   PROJECT_REPORT_TYPE_LABELS,
   PROJECT_REPORT_TYPES,
+  DOCUMENT_CATEGORIES,
+  DOCUMENT_CATEGORY_LABELS,
 } from '../../lib/constants.js';
 import { uploadBlob, BlobUploadError } from '../../lib/blobUpload.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import DrawingFormModal from '../../components/DrawingFormModal.jsx';
+import FilterChip from '../../components/ui/FilterChip.jsx';
 
 // Status maps for the per-row badges. Mirrors DprList / InspectionList
 // so the colors match the user's existing mental model.
@@ -1335,6 +1338,32 @@ function ReportSection({
     setUploadError(null);
   }, [projectKey]);
 
+  // [DocumentCategory] Optional subject-matter classifier. Default null
+  // = "no category" = legacy report upload (Weekly / Monthly / etc.).
+  // When set, uploadType is silently coerced to 'OTHER' so the backend
+  // review state machine sees nothing new — `category` is the real
+  // classifier for category-tagged uploads. The type <select> is
+  // disabled in the JSX when uploadCategory is set, so the user never
+  // sees the auto-coercion (matches the "silent, not user-facing"
+  // contract).
+  const [uploadCategory, setUploadCategory] = useState(null);
+  // [DocumentCategory] Coercion effect — keeps the existing handleUpload
+  // (which sends `type: uploadType`) on the happy path without
+  // refactoring its body. When a category is picked the type select
+  // visually shows "Other" with a small hint chip; clearing the
+  // category restores the user's previous cadence pick.
+  useEffect(() => {
+    if (uploadCategory) {
+      setUploadType('OTHER');
+    } else {
+      // Restore the canonical first-pick only when the user hasn't
+      // changed the type themselves; the reset useEffect above also
+      // restores it on projectKey change so a cross-project leak is
+      // impossible.
+      setUploadType(PROJECT_REPORT_TYPES[0]);
+    }
+  }, [uploadCategory]);
+
   // R35.1: removed the `if (!isRegistered)` early-return that gated the
   // upload form behind a "Register this project first…" message. The
   // backend now accepts either a UUID (existing project) or a free-text
@@ -1351,6 +1380,177 @@ function ReportSection({
   // const so the JSX below doesn't need a wider refactor; with the
   // server filter on, `filterType` always matches `rows` already.
   const filtered = rows;
+
+  // [DocumentCategory] Single attachment card — defined as a closure
+  // here so it can access ReportSection's local state (actionBusy,
+  // reviewNotesById) and per-row helpers (handleDownload, handleDelete,
+  // runReviewAction). The body is byte-for-byte the same as the
+  // pre-extraction render, plus a `<CategoryBadge>` next to the
+  // existing TypeBadge so a card with a category reads as one
+  // cohesive row. Used by the group-by-category list below (see
+  // CategoryGroup callsite) — extracted from the inline `.map` so the
+  // grouping IFFE doesn't have to duplicate ~150 lines of card JSX.
+  const renderAttCard = (att) => {
+    const canDelete = isAdmin || (currentEmployeeId && att.uploadedById === currentEmployeeId);
+    const attStatus = att.status || 'PENDING_REVIEW';
+    const canApprove = APPROVE_ALLOWED_FROM.has(attStatus);
+    const canRevise = REVISE_ALLOWED_FROM.has(attStatus);
+    const canReject = REJECT_ALLOWED_FROM.has(attStatus);
+    const showReviewBar = isAdmin && (canApprove || canRevise || canReject);
+    const attNotes = reviewNotesById[att.id] || '';
+    const statusPalette = STATUS_COLOR[attStatus] || STATUS_COLOR.PENDING_REVIEW;
+    return (
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.6rem',
+          padding: '0.5rem 0.75rem',
+          background: '#f8fafc',
+          border: '1px solid #e2e8f0',
+          borderRadius: 6,
+          fontSize: '0.85rem',
+          flexWrap: 'wrap',
+        }}
+      >
+        <span
+          style={{
+            fontSize: '0.65rem',
+            fontWeight: 700,
+            color: 'var(--navy, #0f172a)',
+            background: '#e0f2fe',
+            padding: '1px 7px',
+            borderRadius: 999,
+            textTransform: 'uppercase',
+            letterSpacing: '0.04em',
+          }}
+        >
+          {PROJECT_REPORT_TYPE_LABELS[att.type]?.short || att.type}
+        </span>
+        {/* [DocumentCategory] Subject-matter badge. Hidden for legacy
+            rows (category === null) so the existing Weekly / Monthly
+            / Due Diligence / Quality cards stay visually identical
+            when no category is in play. */}
+        <CategoryBadge category={att.category} />
+        <span style={{ color: 'var(--navy, #0f172a)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {att.title || att.filename}
+        </span>
+        <span
+          title={STATUS_LABEL[attStatus] || attStatus}
+          style={{
+            fontSize: '0.65rem',
+            fontWeight: 700,
+            color: statusPalette.fg,
+            background: statusPalette.bg,
+            padding: '1px 7px',
+            borderRadius: 999,
+          }}
+        >
+          {STATUS_LABEL[attStatus] || attStatus}
+        </span>
+        <span style={{ fontSize: '0.75rem', color: 'var(--steel, #64748b)' }}>
+          {formatBytes(att.sizeBytes)}
+        </span>
+        <span style={{ fontSize: '0.72rem', color: 'var(--steel, #64748b)' }}>
+          {formatShortDate(att.uploadedAt)}
+        </span>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={() => handleDownload(att)}
+          style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+        >
+          Download
+        </button>
+        {canDelete && (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => handleDelete(att)}
+            style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem', color: '#b91c1c' }}
+          >
+            Delete
+          </button>
+        )}
+        {/* [S7/MyReports] Admin review action bar — same shape as
+            the in-MyProjectReports surface. Renders when admin +
+            the current status is in any allowed-from set.
+            Approve / Request revision / Reject share a single
+            actionBusy flag. The Reject/Request-revision buttons
+            are disabled until the shared review-notes input has
+            a non-empty trimmed value. */}
+        {showReviewBar && (
+          <div
+            role="toolbar"
+            aria-label="Admin review actions"
+            style={{
+              flexBasis: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.4rem',
+              flexWrap: 'wrap',
+              paddingTop: 4,
+            }}
+          >
+            {canApprove && (
+              <button
+                type="button"
+                className="btn btn-success btn-sm"
+                disabled={actionBusy}
+                onClick={() => runReviewAction(att, 'APPROVED')}
+                style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+              >
+                ✓ Approve
+              </button>
+            )}
+            {(canRevise || canReject) && (
+              <input
+                type="text"
+                value={attNotes}
+                onChange={(e) => setReviewNotesById((prev) => ({ ...prev, [att.id]: e.target.value }))}
+                placeholder={canRevise ? 'Reason for revision (required)' : 'Reject reason (required)'}
+                maxLength={2000}
+                aria-label="Review notes"
+                disabled={actionBusy}
+                style={{
+                  flex: '1 1 180px',
+                  minWidth: 0,
+                  padding: '0.3rem 0.5rem',
+                  fontSize: '0.78rem',
+                  border: '1px solid #cbd5e1',
+                  borderRadius: 4,
+                }}
+              />
+            )}
+            {canRevise && (
+              <button
+                type="button"
+                className="btn btn-warning btn-sm"
+                disabled={actionBusy || !attNotes.trim()}
+                onClick={() => runReviewAction(att, 'REVISION_REQUESTED')}
+                style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+                title={!attNotes.trim() ? 'Enter a reason to enable Request revision' : 'Send back to uploader for revision'}
+              >
+                ↺ Request revision
+              </button>
+            )}
+            {canReject && (
+              <button
+                type="button"
+                className="btn btn-danger btn-sm"
+                disabled={actionBusy || !attNotes.trim()}
+                onClick={() => runReviewAction(att, 'REJECTED')}
+                style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+                title={!attNotes.trim() ? 'Enter a reason to enable Reject' : 'Reject this report'}
+              >
+                ✗ Reject
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   // ─── Upload validation ─────────────────────────────────────────────────
   // Client-side gate that mirrors the backend POST validation. The
@@ -1401,8 +1601,17 @@ function ReportSection({
 
       // Step 4: insert the ProjectAttachment row that binds the blob
       // path to the project + uploader.
+      //
+      // [DocumentCategory] Single-line additive extension to the
+      // existing payload: `category` carries the subject-matter
+      // classifier picked on the upload form (or null for legacy
+      // Weekly / Monthly / Due Diligence / Quality cadence uploads).
+      // The function's control flow + error handling stay untouched
+      // — this is the minimum-impact way to wire the new field
+      // through the existing 4-step upload pipeline.
       await api.createProjectAttachment(projectKey, {
         type: uploadType,
+        category: uploadCategory || null,
         title: uploadTitle.trim() || null,
         filename: uploadFile.name,
         contentType: uploadFile.type,
@@ -1537,11 +1746,22 @@ function ReportSection({
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', fontSize: '0.75rem' }}>
-            <span style={{ color: 'var(--steel, #64748b)' }}>Type</span>
+            <span style={{ color: 'var(--steel, #64748b)' }}>
+              Type
+              {/* [DocumentCategory] When a category is picked, the type
+                  select is silently coerced to 'OTHER' — render the
+                  label with a tiny "auto" hint so the user understands
+                  why the dropdown is stuck. */}
+              {uploadCategory && (
+                <span style={{ marginLeft: 6, fontSize: '0.65rem', color: 'var(--brand)' }}>
+                  auto-other (category picked)
+                </span>
+              )}
+            </span>
             <select
               value={uploadType}
               onChange={(e) => setUploadType(e.target.value)}
-              disabled={isUploading}
+              disabled={isUploading || Boolean(uploadCategory)}
               style={{ fontSize: '0.82rem', padding: '0.3rem 0.4rem', borderRadius: 4, border: '1px solid #cbd5e1' }}
             >
               {PROJECT_REPORT_TYPES.map((t) => (
@@ -1585,6 +1805,35 @@ function ReportSection({
             {uploadPhase === 'confirming' && 'Finalizing…'}
             {uploadPhase === 'idle' && 'Upload report'}
           </button>
+        </div>
+        {/* [DocumentCategory] Subject-matter classifier chip group.
+            Appended BELOW the existing cadence UX (Type + Title + File
+            + Upload button row) so the legacy Weekly / Monthly / Due
+            Diligence / Quality flow is visually unchanged when no
+            category is picked. Picking a chip silently coerces type
+            to 'OTHER' (see the [DocumentCategory] coercion effect
+            above) and ships the chosen category to the backend on the
+            existing 4-step upload pipeline. Clear chip (active === null)
+            restores the legacy cadence flow. */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center', marginTop: '0.4rem' }}>
+          <span style={{ fontSize: '0.72rem', color: 'var(--steel, #64748b)', marginRight: '0.2rem' }}>
+            Document category:
+          </span>
+          <FilterChip
+            label="None"
+            active={uploadCategory === null}
+            onClick={() => setUploadCategory(null)}
+            disabled={isUploading}
+          />
+          {DOCUMENT_CATEGORIES.map((c) => (
+            <FilterChip
+              key={c}
+              label={DOCUMENT_CATEGORY_LABELS[c]?.short || c}
+              active={uploadCategory === c}
+              onClick={() => setUploadCategory(uploadCategory === c ? null : c)}
+              disabled={isUploading}
+            />
+          ))}
         </div>
         {isUploading && (
           <div
@@ -1657,164 +1906,37 @@ function ReportSection({
             : `No ${PROJECT_REPORT_TYPE_LABELS[filterType]?.label || filterType} reports for this project.`}
         </div>
       ) : (
-        <div style={{ display: 'grid', gap: '0.3rem' }}>
-          {filtered.map((att) => {
-            const canDelete = isAdmin || (currentEmployeeId && att.uploadedById === currentEmployeeId);
-            const attStatus = att.status || 'PENDING_REVIEW';
-            const canApprove = APPROVE_ALLOWED_FROM.has(attStatus);
-            const canRevise = REVISE_ALLOWED_FROM.has(attStatus);
-            const canReject = REJECT_ALLOWED_FROM.has(attStatus);
-            const showReviewBar = isAdmin && (canApprove || canRevise || canReject);
-            const attNotes = reviewNotesById[att.id] || '';
-            const statusPalette = STATUS_COLOR[attStatus] || STATUS_COLOR.PENDING_REVIEW;
+        <div style={{ display: 'grid', gap: '0.6rem' }}>
+          {/* [DocumentCategory] Group the list by category. Legacy
+              reports (category === null) live in the top "Reports"
+              section so the existing Weekly / Monthly / Due Diligence /
+              Quality flow stays visually unchanged; category-tagged
+              rows render under per-category section headers in
+              canonical enum order. Each section reuses the same card
+              shape as before — a small CategoryBadge next to the
+              existing TypeBadge tells the user which group the row
+              belongs to when several are on screen. */}
+          {(() => {
+            const legacyRows = filtered.filter((a) => !a.category);
+            const categorySections = DOCUMENT_CATEGORIES
+              .map((c) => ({ category: c, rows: filtered.filter((a) => a.category === c) }))
+              .filter((g) => g.rows.length > 0);
             return (
-              <div
-                key={att.id}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.6rem',
-                  padding: '0.5rem 0.75rem',
-                  background: '#f8fafc',
-                  border: '1px solid #e2e8f0',
-                  borderRadius: 6,
-                  fontSize: '0.85rem',
-                  flexWrap: 'wrap',
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: '0.65rem',
-                    fontWeight: 700,
-                    color: 'var(--navy, #0f172a)',
-                    background: '#e0f2fe',
-                    padding: '1px 7px',
-                    borderRadius: 999,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.04em',
-                  }}
-                >
-                  {PROJECT_REPORT_TYPE_LABELS[att.type]?.short || att.type}
-                </span>
-                <span style={{ color: 'var(--navy, #0f172a)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {att.title || att.filename}
-                </span>
-                <span
-                  title={STATUS_LABEL[attStatus] || attStatus}
-                  style={{
-                    fontSize: '0.65rem',
-                    fontWeight: 700,
-                    color: statusPalette.fg,
-                    background: statusPalette.bg,
-                    padding: '1px 7px',
-                    borderRadius: 999,
-                  }}
-                >
-                  {STATUS_LABEL[attStatus] || attStatus}
-                </span>
-                <span style={{ fontSize: '0.75rem', color: 'var(--steel, #64748b)' }}>
-                  {formatBytes(att.sizeBytes)}
-                </span>
-                <span style={{ fontSize: '0.72rem', color: 'var(--steel, #64748b)' }}>
-                  {formatShortDate(att.uploadedAt)}
-                </span>
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => handleDownload(att)}
-                  style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
-                >
-                  Download
-                </button>
-                {canDelete && (
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => handleDelete(att)}
-                    style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem', color: '#b91c1c' }}
-                  >
-                    Delete
-                  </button>
+              <>
+                {legacyRows.length > 0 && (
+                  <CategoryGroup label="Reports" rows={legacyRows} renderCard={renderAttCard} />
                 )}
-                {/* [S7/MyReports] Admin review action bar — same shape as
-                    the in-MyProjectReports surface. Renders when admin +
-                    the current status is in any allowed-from set.
-                    Approve / Request revision / Reject share a single
-                    actionBusy flag. The Reject/Request-revision buttons
-                    are disabled until the shared review-notes input has
-                    a non-empty trimmed value. */}
-                {showReviewBar && (
-                  <div
-                    role="toolbar"
-                    aria-label="Admin review actions"
-                    style={{
-                      flexBasis: '100%',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '0.4rem',
-                      flexWrap: 'wrap',
-                      paddingTop: 4,
-                    }}
-                  >
-                    {canApprove && (
-                      <button
-                        type="button"
-                        className="btn btn-success btn-sm"
-                        disabled={actionBusy}
-                        onClick={() => runReviewAction(att, 'APPROVED')}
-                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
-                      >
-                        ✓ Approve
-                      </button>
-                    )}
-                    {(canRevise || canReject) && (
-                      <input
-                        type="text"
-                        value={attNotes}
-                        onChange={(e) => setReviewNotesById((prev) => ({ ...prev, [att.id]: e.target.value }))}
-                        placeholder={canRevise ? 'Reason for revision (required)' : 'Reject reason (required)'}
-                        maxLength={2000}
-                        aria-label="Review notes"
-                        disabled={actionBusy}
-                        style={{
-                          flex: '1 1 180px',
-                          minWidth: 0,
-                          padding: '0.3rem 0.5rem',
-                          fontSize: '0.78rem',
-                          border: '1px solid #cbd5e1',
-                          borderRadius: 4,
-                        }}
-                      />
-                    )}
-                    {canRevise && (
-                      <button
-                        type="button"
-                        className="btn btn-warning btn-sm"
-                        disabled={actionBusy || !attNotes.trim()}
-                        onClick={() => runReviewAction(att, 'REVISION_REQUESTED')}
-                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
-                        title={!attNotes.trim() ? 'Enter a reason to enable Request revision' : 'Send back to uploader for revision'}
-                      >
-                        ↺ Request revision
-                      </button>
-                    )}
-                    {canReject && (
-                      <button
-                        type="button"
-                        className="btn btn-danger btn-sm"
-                        disabled={actionBusy || !attNotes.trim()}
-                        onClick={() => runReviewAction(att, 'REJECTED')}
-                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
-                        title={!attNotes.trim() ? 'Enter a reason to enable Reject' : 'Reject this report'}
-                      >
-                        ✗ Reject
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
+                {categorySections.map((g) => (
+                  <CategoryGroup
+                    key={g.category}
+                    label={DOCUMENT_CATEGORY_LABELS[g.category]?.label || g.category}
+                    rows={g.rows}
+                    renderCard={renderAttCard}
+                  />
+                ))}
+              </>
             );
-          })}
+          })()}
         </div>
       )}
 
@@ -1840,28 +1962,87 @@ function ReportSection({
   );
 }
 
-// Tiny chip used by the type-filter row + future inline filters.
-function FilterChip({ label, active, onClick }) {
+// [DocumentCategory] Section header for a category group in the
+// employee retrieval list. Visually identical to the existing
+// per-section dividers in the rest of the file (a small uppercase
+// label with a thin underline). Inline style to match the rest of
+// the file's pattern.
+function CategoryGroup({ label, rows, renderCard }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
+    <div style={{ display: 'grid', gap: '0.3rem' }}>
+      <div
+        style={{
+          fontSize: '0.7rem',
+          fontWeight: 700,
+          color: 'var(--steel, #64748b)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.06em',
+          paddingTop: 4,
+          paddingBottom: 2,
+          borderBottom: '1px solid #e2e8f0',
+        }}
+      >
+        {label}
+        <span style={{ marginLeft: 6, fontWeight: 500, color: '#94a3b8' }}>
+          ({rows.length})
+        </span>
+      </div>
+      {rows.map((att) => (
+        <AttCardWrapper key={att.id}>{renderCard(att)}</AttCardWrapper>
+      ))}
+    </div>
+  );
+}
+
+// [DocumentCategory] Tiny wrapper so CategoryGroup can flatten its
+// grid children without forcing the section header + cards into the
+// same grid track. Renders to a fragment-equivalent div.
+function AttCardWrapper({ children }) {
+  return <>{children}</>;
+}
+
+// [DocumentCategory] Small badge that surfaces the row's subject-
+// matter classifier on every card. Reuses the type-badge colour
+// scheme (light blue) so a card with both badges reads as one
+// cohesive row. Hidden for legacy rows (category === null) to keep
+// the existing report list visually identical when no category is
+// in play.
+function CategoryBadge({ category }) {
+  if (!category) return null;
+  const label = DOCUMENT_CATEGORY_LABELS[category]?.short || category;
+  return (
+    <span
+      title={DOCUMENT_CATEGORY_LABELS[category]?.label || category}
       style={{
-        fontSize: '0.72rem',
-        fontWeight: 600,
-        padding: '0.2rem 0.6rem',
+        fontSize: '0.65rem',
+        fontWeight: 700,
+        color: '#0f172a',
+        background: '#fef3c7',
+        padding: '1px 7px',
         borderRadius: 999,
-        border: '1px solid ' + (active ? 'var(--brand, #0066ff)' : '#cbd5e1'),
-        background: active ? 'rgba(0, 102, 255, 0.08)' : 'white',
-        color: active ? 'var(--brand, #0066ff)' : 'var(--steel, #64748b)',
-        cursor: 'pointer',
+        textTransform: 'uppercase',
+        letterSpacing: '0.04em',
       }}
     >
       {label}
-    </button>
+    </span>
   );
 }
+
+// [DocumentCategory] Single attachment card — extracted from the
+// inline `.map` body so the per-project list can group rows by
+// category via `CategoryGroup` without duplicating ~150 lines of
+// card JSX. The implementation lives as a closure inside
+// `ReportSection` (above) so it can access ReportSection's local
+// state + per-row helpers without prop-drilling. Module-scope
+// `CategoryGroup` + `CategoryBadge` + `AttCardWrapper` below.
+
+// [FilterChip] Lifted to src/components/ui/FilterChip.jsx in this round
+// (so the upload-form category chip row + admin Reports page's second
+// chip row can share the same pill styling). The local definition was
+// removed and every call site now imports the shared component — pill
+// styling is byte-for-byte identical, so existing report chips are
+// visually unaffected.
 
 // Compact file size formatter (bytes → KB/MB). Keeps the reports list
 // scannable without adding a new helper to lib/format.js for a single

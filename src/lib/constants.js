@@ -44,6 +44,52 @@ export const PROJECT_REPORT_TYPE_LABELS = {
 };
 export const PROJECT_REPORT_TYPES = Object.keys(PROJECT_REPORT_TYPE_LABELS);
 
+// [DocumentCategory] Subject-matter classifier for ProjectAttachment
+// uploads. Mirrors the Prisma `DocumentCategory` enum in
+// backend/prisma/schema.prisma — keep the value strings exactly in
+// sync (the backend validates against this set on POST + on the GET
+// ?category= filter). Independent of PROJECT_REPORT_TYPES (which
+// describes report cadence, not subject matter).
+//
+// Order matters — it defines the canonical chip-row order on the
+// employee form + admin filter row. 8 values keeps a single chip row
+// wrapping cleanly on the 9.5" tablet breakpoint.
+export const DOCUMENT_CATEGORY_LABELS = {
+  CLIENT_APPROVALS_DELIVERABLES: {
+    label: 'Client approvals / deliverables',
+    short: 'Approvals',
+  },
+  DESIGN_DRAWINGS: {
+    label: 'Design drawings',
+    short: 'Drawings',
+  },
+  COST_BOQ: {
+    label: 'Cost / BOQ',
+    short: 'Cost / BOQ',
+  },
+  PROCUREMENT_VENDOR: {
+    label: 'Procurement / vendor',
+    short: 'Procurement',
+  },
+  SITE_PROGRESS_INSPECTIONS: {
+    label: 'Site progress / inspections',
+    short: 'Site progress',
+  },
+  QUALITY_SAFETY: {
+    label: 'Quality / safety',
+    short: 'Quality / safety',
+  },
+  CONTRACTS_CHANGE_ORDERS: {
+    label: 'Contracts / change orders',
+    short: 'Contracts',
+  },
+  HANDOVER_CLOSEOUT: {
+    label: 'Handover / closeout',
+    short: 'Handover',
+  },
+};
+export const DOCUMENT_CATEGORIES = Object.keys(DOCUMENT_CATEGORY_LABELS);
+
 // Round-14: Employee Training. Mirrors backend/src/lib/trainingRules.js
 // values — keep in sync if the backend caps change.
 //
