@@ -1322,6 +1322,27 @@ enum ProjectAttachmentStatus {
   REJECTED
 }
 
+// [DocumentCategory] Subject-matter classifier for ProjectAttachment uploads.
+// Independent of `type` (ProjectReportType, which describes report cadence)
+// and `status` (ProjectAttachmentStatus, which describes the admin review
+// state machine). New uploads pick a category; the existing Weekly /
+// Monthly / Due Diligence / Quality / Other report types keep their own
+// pipeline and remain NULL on `category`.
+//
+// 8 values cover the documented engineering/construction document
+// taxonomy — keeps the chip row short enough for a single mobile row
+// without horizontal scroll.
+enum DocumentCategory {
+  CLIENT_APPROVALS_DELIVERABLES
+  DESIGN_DRAWINGS
+  COST_BOQ
+  PROCUREMENT_VENDOR
+  SITE_PROGRESS_INSPECTIONS
+  QUALITY_SAFETY
+  CONTRACTS_CHANGE_ORDERS
+  HANDOVER_CLOSEOUT
+}
+
 model ProjectAttachment {
   id               String                  @id @default(uuid())
   projectId        String                  @map("project_id")
@@ -1361,6 +1382,12 @@ model ProjectAttachment {
   // STALE_REVIEW_VERSION so an admin can never silently Approve a
   // blob the reviewer never saw (replace-A-then-approve-B race).
   contentVersion   Int                     @default(1) @map("content_version")
+  // [DocumentCategory] Subject-matter classifier (independent of `type`
+  // and `status`). NULL on rows uploaded under the legacy report pipeline
+  // (Weekly / Monthly / Due Diligence / Quality) — those flows keep
+  // working untouched because the column is nullable and the only
+  // writer is the new category chip path.
+  category         DocumentCategory?       @map("category")
 
   project    Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   uploadedBy Employee? @relation("ProjectAttachmentUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
@@ -1387,6 +1414,14 @@ model ProjectAttachment {
   // lookups covered if/when one is added. No read currently filters by
   // version — present for symmetry.
   @@index([status, contentVersion])
+  // [DocumentCategory] Hot read for the category chip filter on the
+  // per-project GET + admin GET (filtered by category, scoped to one
+  // project, soft-deleted hidden). Composite matches the WHERE shape:
+  // (projectId, category, deletedAt) covers both the filtered and
+  // unfiltered list (Postgres can use the prefix). NULL values are
+  // indexed too (default btree behaviour) so a "show me category=NULL
+  // legacy reports" path also stays covered if the UI adds one.
+  @@index([projectId, category, deletedAt])
   @@map("project_attachment")
 }
 
