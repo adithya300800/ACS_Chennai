@@ -41,9 +41,12 @@ import {
   ACCEPTED_REPORT_TYPES,
   PROJECT_REPORT_TYPES,
   PROJECT_REPORT_TYPE_LABELS,
+  DOCUMENT_CATEGORIES,
+  DOCUMENT_CATEGORY_LABELS,
 } from '../../lib/constants.js';
 import { uploadBlob, BlobUploadError } from '../../lib/blobUpload.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
+import FilterChip from '../../components/ui/FilterChip.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // [S7/MyReports] Admin single-record review transition matrix — mirrors the
@@ -111,6 +114,11 @@ export default function MyProjectReports() {
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [filterType, setFilterType] = useState(''); // '' = all
+  // [DocumentCategory] Optional category chip filter — mirrors the type
+  // filter above. '' = show every category; a specific value narrows the
+  // list to rows with that subject-matter classifier (and includes
+  // legacy rows with category=null when 'Uncategorised' is picked).
+  const [filterCategory, setFilterCategory] = useState('');
   const [reports, setReports] = useState([]);
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingReports, setLoadingReports] = useState(true);
@@ -124,6 +132,21 @@ export default function MyProjectReports() {
   const [uploadPhase, setUploadPhase] = useState('idle');
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState(null);
+
+  // [DocumentCategory] Optional subject-matter classifier. Mirrors the
+  // ProjectExpandedPanel#ReportSection behaviour: when set, uploadType
+  // is silently coerced to 'OTHER' (the backend override), the type
+  // <select> is disabled, and the chosen category ships on the POST.
+  // NULL = legacy report upload (Weekly / Monthly / Due Diligence /
+  // Quality / Other cadence flow).
+  const [uploadCategory, setUploadCategory] = useState(null);
+  useEffect(() => {
+    if (uploadCategory) {
+      setUploadType('OTHER');
+    } else {
+      setUploadType(PROJECT_REPORT_TYPES[0]);
+    }
+  }, [uploadCategory]);
 
   // [S7/MyReports] Admin review action bar state. actionBusy is a single
   // in-flight flag (not per-row) — admins act on one row at a time and
@@ -180,7 +203,12 @@ export default function MyProjectReports() {
       const results = await Promise.allSettled(
         projects.map((p) => api.getProjectAttachments(
           p.id || p.name,
-          {},
+          // [DocumentCategory] Pass the chip-filter through to the
+          // backend GET handler (which forwards it as ?category=...).
+          // Done at the server so we don't drag down rows we'd
+          // immediately filter out client-side — important for large
+          // projects with hundreds of attachments.
+          filterCategory ? { category: filterCategory } : {},
           accessToken,
         )),
       );
@@ -208,7 +236,7 @@ export default function MyProjectReports() {
     } finally {
       setLoadingReports(false);
     }
-  }, [projects, accessToken, toast]);
+  }, [projects, accessToken, toast, filterCategory]);
 
   useEffect(() => { loadProjects(); }, [loadProjects]);
   useEffect(() => { if (!loadingProjects) loadReports(); }, [loadProjects, loadReports, loadingProjects]);
@@ -257,8 +285,16 @@ export default function MyProjectReports() {
         ulid, uploadFile.name, uploadFile.type, uploadFile.size, accessToken,
       );
       // Step 4: insert the ProjectAttachment row.
+      //
+      // [DocumentCategory] Single-line additive extension: `category`
+      // carries the subject-matter classifier picked on the upload
+      // form (or null for legacy Weekly / Monthly / Due Diligence /
+      // Quality cadence uploads). The function's control flow + error
+      // handling stay untouched — minimum-impact way to wire the new
+      // field through the existing 4-step upload pipeline.
       await api.createProjectAttachment(selectedProjectId, {
         type: uploadType,
+        category: uploadCategory || null,
         title: uploadTitle.trim() || null,
         filename: uploadFile.name,
         contentType: uploadFile.type,
@@ -506,13 +542,22 @@ export default function MyProjectReports() {
             <div>
               <label htmlFor="mpr-type" style={{ display: 'block', fontSize: '0.8rem', color: 'var(--steel)', marginBottom: 4 }}>
                 Type
+                {/* [DocumentCategory] When a category is picked, the
+                    type select is silently coerced to 'OTHER' — render
+                    the label with a tiny "auto" hint so the user
+                    understands why the dropdown is stuck. */}
+                {uploadCategory && (
+                  <span style={{ marginLeft: 6, fontSize: '0.7rem', color: 'var(--brand)' }}>
+                    auto-other (category picked)
+                  </span>
+                )}
               </label>
               <select
                 id="mpr-type"
                 className="form-select"
                 value={uploadType}
                 onChange={(e) => setUploadType(e.target.value)}
-                disabled={isUploading}
+                disabled={isUploading || Boolean(uploadCategory)}
                 style={{ width: '100%', padding: '0.4rem 0.5rem', borderRadius: 4, border: '1px solid #cbd5e1' }}
               >
                 {PROJECT_REPORT_TYPES.map((t) => (
@@ -563,6 +608,37 @@ export default function MyProjectReports() {
               </button>
             </div>
           </div>
+          {/* [DocumentCategory] Subject-matter classifier chip group.
+              Appended BELOW the existing Type + Title + File + Upload
+              row so the legacy Weekly / Monthly / Due Diligence /
+              Quality flow stays visually unchanged when no category
+              is picked. Picking a chip silently coerces type to
+              'OTHER' (see the [DocumentCategory] coercion effect in
+              the upload-form state) and ships the chosen category on
+              the POST. The chip row sits INSIDE the upload form so
+              the "Choose a category to skip the type" affordance is
+              co-located with the file picker — matches the in-
+              accordion ReportSection UX. */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center', marginTop: '0.5rem' }}>
+            <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginRight: '0.2rem' }}>
+              Document category:
+            </span>
+            <FilterChip
+              label="None"
+              active={uploadCategory === null}
+              onClick={() => setUploadCategory(null)}
+              disabled={isUploading}
+            />
+            {DOCUMENT_CATEGORIES.map((c) => (
+              <FilterChip
+                key={c}
+                label={DOCUMENT_CATEGORY_LABELS[c]?.short || c}
+                active={uploadCategory === c}
+                onClick={() => setUploadCategory(uploadCategory === c ? null : c)}
+                disabled={isUploading}
+              />
+            ))}
+          </div>
           {uploadError && (
             <div
               role="alert"
@@ -582,7 +658,7 @@ export default function MyProjectReports() {
         </div>
 
         {/* Type chip filter */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '1rem' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.5rem' }}>
           <button
             type="button"
             className={`btn btn-sm ${filterType === '' ? 'btn-primary' : 'btn-secondary'}`}
@@ -599,6 +675,31 @@ export default function MyProjectReports() {
             >
               {PROJECT_REPORT_TYPE_LABELS[t]?.short || t}
             </button>
+          ))}
+        </div>
+        {/* [DocumentCategory] Subject-matter chip filter row.
+            Sits BELOW the type filter so the cadence chips stay visually
+            primary (matching the upload form's order: type first, then
+            category). The "All" sentinel maps to the empty string so the
+            backend GET forwards no ?category= and returns every row.
+            The same chip row ships on ReportsAdmin.jsx for the admin
+            registry — keeps the employee + admin surfaces in sync. */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center', marginBottom: '1rem' }}>
+          <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginRight: '0.25rem' }}>
+            Category:
+          </span>
+          <FilterChip
+            label="All"
+            active={filterCategory === ''}
+            onClick={() => setFilterCategory('')}
+          />
+          {DOCUMENT_CATEGORIES.map((c) => (
+            <FilterChip
+              key={c}
+              label={DOCUMENT_CATEGORY_LABELS[c]?.short || c}
+              active={filterCategory === c}
+              onClick={() => setFilterCategory(filterCategory === c ? '' : c)}
+            />
           ))}
         </div>
 
@@ -674,6 +775,33 @@ export default function MyProjectReports() {
                       {` · ${formatShortDate(r.uploadedAt || r.createdAt) || '—'}`}
                       {r.sizeBytes ? ` · ${formatBytes(r.sizeBytes)}` : ''}
                     </div>
+                    {/* [DocumentCategory] Per-row category badge. Renders
+                        only when the row carries a subject-matter
+                        classifier (legacy rows have category=null and
+                        get no badge — keeps the visual surface unchanged
+                        for the existing Weekly / Monthly / Due Diligence
+                        / Quality rows). Tinted differently from the
+                        type pill so the two classifiers stay
+                        distinguishable at a glance. */}
+                    {r.category && (
+                      <span
+                        title={DOCUMENT_CATEGORY_LABELS[r.category]?.label || r.category}
+                        style={{
+                          display: 'inline-block',
+                          marginTop: 4,
+                          marginRight: 6,
+                          fontSize: '0.7rem',
+                          fontWeight: 600,
+                          color: '#5b21b6',
+                          background: '#ede9fe',
+                          padding: '0.1rem 0.5rem',
+                          borderRadius: 999,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {DOCUMENT_CATEGORY_LABELS[r.category]?.short || r.category}
+                      </span>
+                    )}
                     {/* Status pill — visible to everyone (employee + admin)
                         so the uploader can see whether their report is still
                         pending review or has been actioned. The admin-only
