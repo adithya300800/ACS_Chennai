@@ -36,7 +36,10 @@ import {
   ACCEPTED_REPORT_TYPES,
   PROJECT_REPORT_TYPES,
   PROJECT_REPORT_TYPE_LABELS,
+  DOCUMENT_CATEGORIES,
+  DOCUMENT_CATEGORY_LABELS,
 } from '../../lib/constants.js';
+import FilterChip from '../../components/ui/FilterChip.jsx';
 
 // Color-coded type badges — 5 enum values, each gets a distinct bg/text
 // pair so the admin can scan the card grid by hue.
@@ -87,6 +90,13 @@ export default function ReportsAdmin() {
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [projectId, setProjectId] = useState('');          // '' = all
   const [activeTypes, setActiveTypes] = useState([]);        // [] = all
+  // [DocumentCategory] Single-value category chip filter (mutually
+  // exclusive — '' = show every category including uncategorised
+  // legacy rows). Mirrors the MyProjectReports chip row + the
+  // backend's ?category= query param. The admin can pick at most
+  // one category at a time to keep the chip row readable on a 5-row
+  // toolbar that already has 4 dropdown filters.
+  const [filterCategory, setFilterCategory] = useState('');
   const [uploadedById, setUploadedById] = useState('');     // '' = all
   const [employees, setEmployees] = useState([]);
   const [employeesLoading, setEmployeesLoading] = useState(true);
@@ -178,6 +188,12 @@ export default function ReportsAdmin() {
       const params = { limit: String(DEFAULT_LIMIT) };
       if (projectId) params.projectId = projectId;
       if (activeTypes.length > 0) params.types = activeTypes.join(',');
+      // [DocumentCategory] Forward the chip filter to the backend GET
+      // handler. The CSV variant (?categories=A,B) is intentionally not
+      // exposed here — admins pick one category at a time on this page
+      // so the single-value param keeps the wire contract symmetric
+      // with MyProjectReports.
+      if (filterCategory) params.category = filterCategory;
       if (uploadedById) params.uploadedById = uploadedById;
       if (fromDate) params.from = fromDate;
       if (toDate) params.to = toDate;
@@ -200,7 +216,7 @@ export default function ReportsAdmin() {
     } finally {
       if (append) setLoadingMore(false); else setLoading(false);
     }
-  }, [projectId, activeTypes, uploadedById, fromDate, toDate, accessToken]);
+  }, [projectId, activeTypes, uploadedById, fromDate, toDate, accessToken, filterCategory]);
 
   // Re-fetch when any filter changes — same effect shape as
   // DrawingsAdmin's `useEffect(() => { fetchDrawings(); }, [fetchDrawings])`.
@@ -215,11 +231,12 @@ export default function ReportsAdmin() {
   function clearAllFilters() {
     setProjectId('');
     setActiveTypes([]);
+    setFilterCategory('');
     setUploadedById('');
     setFromDate('');
     setToDate('');
   }
-  const anyFilterActive = projectId || activeTypes.length > 0 || uploadedById || fromDate || toDate;
+  const anyFilterActive = projectId || activeTypes.length > 0 || uploadedById || fromDate || toDate || filterCategory;
 
   // ─── Actions ───────────────────────────────────────────────────────
   async function handleDownload(att) {
@@ -507,6 +524,30 @@ export default function ReportsAdmin() {
             </button>
           )}
         </div>
+        {/* [DocumentCategory] Subject-matter chip filter row. Sits
+            BELOW the type chips so the cadence filter stays visually
+            primary, matching the upload form's order. Uses the shared
+            FilterChip (lifted in round-43) so the admin chip row +
+            the employee MyProjectReports chip row + the upload
+            chip row render identical pills. Mutually exclusive: one
+            category at a time, since the admin toolbar already has 4
+            dropdown filters above. */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center', marginTop: '0.4rem' }}>
+          <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginRight: '0.25rem' }}>Category:</span>
+          <FilterChip
+            label="All"
+            active={filterCategory === ''}
+            onClick={() => setFilterCategory('')}
+          />
+          {DOCUMENT_CATEGORIES.map((c) => (
+            <FilterChip
+              key={c}
+              label={DOCUMENT_CATEGORY_LABELS[c]?.short || c}
+              active={filterCategory === c}
+              onClick={() => setFilterCategory(filterCategory === c ? '' : c)}
+            />
+          ))}
+        </div>
       </div>
 
       {error && (
@@ -582,6 +623,36 @@ export default function ReportsAdmin() {
                       >
                         {PROJECT_REPORT_TYPE_LABELS[r.type]?.short || r.type}
                       </span>
+                      {/* [DocumentCategory] Per-card category badge.
+                          Rendered on a new line under the type badge
+                          so the two classifiers don't compete for
+                          horizontal space inside the card header.
+                          Legacy rows (category=null) get no badge,
+                          keeping the visual surface unchanged for
+                          pre-migration uploads. The purple tint
+                          deliberately differs from every REPORT_TYPE
+                          badge above so the category classifier
+                          stays distinguishable at a glance. */}
+                      {r.category && (
+                        <div style={{ marginTop: '0.25rem' }}>
+                          <span
+                            title={DOCUMENT_CATEGORY_LABELS[r.category]?.label || r.category}
+                            style={{
+                              fontSize: '0.65rem',
+                              fontWeight: 700,
+                              background: '#ede9fe',
+                              color: '#5b21b6',
+                              padding: '2px 8px',
+                              borderRadius: 999,
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.04em',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {DOCUMENT_CATEGORY_LABELS[r.category]?.short || r.category}
+                          </span>
+                        </div>
+                      )}
                       <div style={{ marginTop: '0.4rem', color: 'var(--navy)', fontWeight: 600, fontSize: '0.95rem' }}>
                         {r.project?.name || 'Unknown project'}
                         {r.project?.code ? <span style={{ color: 'var(--steel)', fontWeight: 400 }}> ({r.project.code})</span> : null}
