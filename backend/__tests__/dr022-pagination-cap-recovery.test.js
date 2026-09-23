@@ -62,8 +62,11 @@ const cursorSrc = readFileSync(
 describe('DR-022 — pagination cap recovery (source-text contracts)', () => {
   test('1. projectAttachments: accepts ?cursor + ?limit + ?types=A,B,C and emits nextCursor', () => {
     // List branch destructures type, types, cursor, limit from req.query.
+    // [DocumentCategory] Round-43 also adds `category` + `categories`
+    // to the destructure — keep the regex flexible enough to accept
+    // either ordering (R43 put the new keys between types and cursor).
     expect(projectAttachmentsSrc).toMatch(
-      /const\s*\{\s*type,\s*types,\s*cursor,\s*limit\s*\}\s*=\s*req\.query/,
+      /const\s*\{\s*type,\s*types,[\s\S]*?cursor,\s*limit\s*\}\s*=\s*req\.query/,
     );
     // types validator splits on a single character (typically ',').
     expect(projectAttachmentsSrc).toMatch(/types\.split\(['"][^'"]+['"]\)/);
