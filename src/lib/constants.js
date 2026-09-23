@@ -90,6 +90,105 @@ export const DOCUMENT_CATEGORY_LABELS = {
 };
 export const DOCUMENT_CATEGORIES = Object.keys(DOCUMENT_CATEGORY_LABELS);
 
+// R44 — Flat taxonomy. The Project Reports upload form + filter row used
+// to expose TWO chip rows: the 5 cadence values (PROJECT_REPORT_TYPES)
+// and the 8 subject-matter values (DOCUMENT_CATEGORIES). The split
+// surfaced the implementation choice (category is an additive column,
+// not a replacement for `type`) to the user, where the underlying
+// mental model is "one flat picker." This list merges both axes into a
+// single ordered, single-select taxonomy of 13 values + an "All" sentry.
+//
+// Wire contract:
+//   - `kind: 'type'`     → match `ProjectAttachment.type` (cadence).
+//                          Choosing one of these on upload means a legacy
+//                          review-flow row (type=that-value, category=null).
+//                          `OTHER` is special — when it shows up in the
+//                          filter alongside no category, the backend
+//                          narrows to category IS NULL (true legacy Other).
+//   - `kind: 'category'` → match `ProjectAttachment.category`. Choosing
+//                          one of these on upload silently coerces type to
+//                          'OTHER' (the route's R43 override) and tags the
+//                          row for skipping the admin review queue.
+//
+// Order matters — it defines the canonical chip-row order in the UI.
+// The 5 cadence values stay first so the existing cadence mental model
+// (Weekly / Monthly / …) reads left-to-right, then the 8 categories
+// follow as a second contiguous block. A single-chip-select picker on
+// three surfaces — employee ReportSection, employee MyProjectReports,
+// admin ReportsAdmin — all consume this array verbatim.
+export const UNIFIED_TAXONOMY = [
+  { value: 'WEEKLY_REPORT',                 kind: 'type',     label: 'Weekly',                short: 'Weekly' },
+  { value: 'MONTHLY_REPORT',                kind: 'type',     label: 'Monthly',               short: 'Monthly' },
+  { value: 'DUE_DILIGENCE_REPORT',          kind: 'type',     label: 'Due diligence',         short: 'Due Dil.' },
+  { value: 'QUALITY_REPORT',                kind: 'type',     label: 'Quality',               short: 'Quality' },
+  { value: 'OTHER',                         kind: 'type',     label: 'Other',                 short: 'Other' },
+  { value: 'CLIENT_APPROVALS_DELIVERABLES', kind: 'category', label: 'Client approvals / deliverables', short: 'Approvals' },
+  { value: 'DESIGN_DRAWINGS',               kind: 'category', label: 'Design drawings',       short: 'Drawings' },
+  { value: 'COST_BOQ',                      kind: 'category', label: 'Cost / BOQ',            short: 'Cost / BOQ' },
+  { value: 'PROCUREMENT_VENDOR',            kind: 'category', label: 'Procurement / vendor',  short: 'Procurement' },
+  { value: 'SITE_PROGRESS_INSPECTIONS',     kind: 'category', label: 'Site progress / inspections', short: 'Site progress' },
+  { value: 'QUALITY_SAFETY',                kind: 'category', label: 'Quality / safety',      short: 'Quality / safety' },
+  { value: 'CONTRACTS_CHANGE_ORDERS',       kind: 'category', label: 'Contracts / change orders', short: 'Contracts' },
+  { value: 'HANDOVER_CLOSEOUT',             kind: 'category', label: 'Handover / closeout',   short: 'Handover' },
+];
+
+// Look up a chip's { kind, label, short } by its enum value, or null
+// for an unknown / unset selection. Used by every R44 surface to
+// translate a chip click into the right upload (type vs category) or
+// filter (which query param + value to forward) decision.
+export function getTaxonomyChip(value) {
+  if (!value) return null;
+  return UNIFIED_TAXONOMY.find((c) => c.value === value) || null;
+}
+
+// Translate a chip selection into the upload form's state pair:
+//   - When `value === null` (no chip / "All"), the user is on the
+//     legacy cadence path — pick the default first type and clear the
+//     category so the POST sends a null category.
+//   - When the chip's `kind === 'type'`, the user picked a legacy
+//     cadence — keep the category null and use the picked type.
+//   - When the chip's `kind === 'category'`, the user picked a
+//     subject-matter bucket — silently coerce type to 'OTHER' (the
+//     route's R43 override) and stamp the category. Category-tagged
+//     rows skip the admin review queue by design.
+//
+// The mapped pair is then passed directly to the file picker's
+// 4-step upload pipeline + the existing coerce-effect useEffect
+// (which still flips uploadType on uploadCategory change as a
+// defensive backstop).
+export function taxonomyToUploadState(value, defaultType = PROJECT_REPORT_TYPES[0]) {
+  const chip = getTaxonomyChip(value);
+  if (!chip) return { type: defaultType, category: null };
+  if (chip.kind === 'type') return { type: chip.value, category: null };
+  // kind === 'category' — silently coerce.
+  return { type: 'OTHER', category: chip.value };
+}
+
+// Translate a chip selection into the API query-param pair the GET
+// handlers expect:
+//   - null         → no filter sent (the "All" sentinel clears both
+//                    type and category on every surface).
+//   - type, not OTHER       → { type: 'X' }            (legacy cadence)
+//   - type, OTHER           → { type: 'OTHER' }        (the R44 narrowing
+//                                                  kicks in server-side
+//                                                  — type=OTHER alone now
+//                                                  means category IS NULL)
+//   - category              → { category: 'X' }        (since every
+//                                                  category-tagged row is
+//                                                  already type=OTHER, the
+//                                                  category alone matches
+//                                                  the right rows).
+//
+// Returns a plain object suitable for Object.assign / spread into the
+// existing params dict. Empty objects are emitted for "no filter".
+export function taxonomyToFilterParams(value) {
+  const chip = getTaxonomyChip(value);
+  if (!chip) return {};
+  if (chip.kind === 'type') return { type: chip.value };
+  // kind === 'category'
+  return { category: chip.value };
+}
+
 // Round-14: Employee Training. Mirrors backend/src/lib/trainingRules.js
 // values — keep in sync if the backend caps change.
 //
