@@ -136,7 +136,13 @@ export default function MyProjectReports() {
   // derived at submit time via `taxonomyToUploadState`, which folds
   // the R43 backend override ("category implies type=OTHER") into a
   // pure function. null = no chip picked → default cadence (Weekly).
-  const [uploadTaxonomy, setUploadTaxonomy] = useState(null);
+  // [R44.1] Switched back to a flat <select> dropdown (replacing the
+  // 14-chip row that pushed the form to a second line). Default seed
+  // is 'WEEKLY_REPORT' so the <select> always has a value to show;
+  // the dropdown is a single-select form control, so a "null" state
+  // (no chip picked) is not exposed in the UI — selecting Weekly
+  // explicitly submits {type: 'WEEKLY_REPORT', category: null}.
+  const [uploadTaxonomy, setUploadTaxonomy] = useState('WEEKLY_REPORT');
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadTitle, setUploadTitle] = useState('');
   const [uploadPhase, setUploadPhase] = useState('idle');
@@ -546,6 +552,33 @@ export default function MyProjectReports() {
               </select>
             </div>
             <div>
+              <label htmlFor="mpr-type" style={{ display: 'block', fontSize: '0.8rem', color: 'var(--steel)', marginBottom: 4 }}>
+                Type
+              </label>
+              {/* [R44.1] Flat 13-value <select> replacing the unified
+                  chip row. Cadence values (Weekly…Other) submit
+                  {type, category: null} — go through admin review.
+                  Subject-matter values (Approvals…Handover) submit
+                  {type: 'OTHER', category: value} via the R43
+                  backend override — skip review. `taxonomyToUploadState`
+                  does the wire mapping at submit time so this is a
+                  pure presentation swap. */}
+              <select
+                id="mpr-type"
+                className="form-select"
+                value={uploadTaxonomy}
+                onChange={(e) => setUploadTaxonomy(e.target.value)}
+                disabled={isUploading}
+                style={{ width: '100%', padding: '0.4rem 0.5rem', borderRadius: 4, border: '1px solid #cbd5e1' }}
+              >
+                {UNIFIED_TAXONOMY.map((chip) => (
+                  <option key={chip.value} value={chip.value}>
+                    {chip.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
               <label htmlFor="mpr-title" style={{ display: 'block', fontSize: '0.8rem', color: 'var(--steel)', marginBottom: 4 }}>
                 Title (optional)
               </label>
@@ -587,37 +620,6 @@ export default function MyProjectReports() {
                 {uploadPhase === 'idle' && 'Upload'}
               </button>
             </div>
-          </div>
-          {/* [R44-flat-taxonomy] Single chip row replaces the old dual
-              Type-select + Category-chip rows. Renders all 13 values
-              in canonical order (5 cadence + 8 subject-matter), with
-              a single "None" sentinel meaning "use the default cadence
-              flow → type=Weekly, category=null". Selected chip drives
-              `taxonomyToUploadState(uploadTaxonomy)` at submit time,
-              which implements the R43 backend override ("category
-              implies type=OTHER"). Co-located with the file picker
-              so the chip decision is next to the bytes the user is
-              attaching — mirrors the in-accordion ReportSection UX. */}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center', marginTop: '0.75rem' }}>
-            <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginRight: '0.25rem' }}>
-              Type:
-            </span>
-            <FilterChip
-              label="None"
-              active={uploadTaxonomy === null}
-              onClick={() => setUploadTaxonomy(null)}
-              disabled={isUploading}
-            />
-            {UNIFIED_TAXONOMY.map((chip) => (
-              <FilterChip
-                key={chip.value}
-                label={chip.short}
-                title={chip.label}
-                active={uploadTaxonomy === chip.value}
-                onClick={() => setUploadTaxonomy(uploadTaxonomy === chip.value ? null : chip.value)}
-                disabled={isUploading}
-              />
-            ))}
           </div>
           {uploadError && (
             <div

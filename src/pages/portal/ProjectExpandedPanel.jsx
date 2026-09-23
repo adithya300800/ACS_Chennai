@@ -1911,6 +1911,29 @@ function ReportSection({
           Upload a report
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
+          {/* [R44.1] Flat 13-value <select> replacing the unified chip
+              row. Cadence values (Weekly…Other) submit
+              {type: value, category: null} — go through admin review.
+              Subject-matter values (Approvals…Handover) submit
+              {type: 'OTHER', category: value} via the R43 backend
+              override — skip review. The constraint-protected
+              `applyUploadChip` helper (defined above) still does the
+              dual-state-pair translation on every onChange. */}
+          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', fontSize: '0.75rem', flex: 1, minWidth: 160 }}>
+            <span style={{ color: 'var(--steel, #64748b)' }}>Type</span>
+            <select
+              value={uploadCategory || uploadType}
+              onChange={(e) => applyUploadChip(e.target.value)}
+              disabled={isUploading}
+              style={{ fontSize: '0.82rem', padding: '0.3rem 0.4rem', borderRadius: 4, border: '1px solid #cbd5e1', background: '#fff' }}
+            >
+              {UNIFIED_TAXONOMY.map((chip) => (
+                <option key={chip.value} value={chip.value}>
+                  {chip.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <label style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', fontSize: '0.75rem', flex: 1, minWidth: 180 }}>
             <span style={{ color: 'var(--steel, #64748b)' }}>Title (optional)</span>
             <input
@@ -1947,36 +1970,6 @@ function ReportSection({
             {uploadPhase === 'confirming' && 'Finalizing…'}
             {uploadPhase === 'idle' && 'Upload report'}
           </button>
-        </div>
-        {/* [R44-flat-taxonomy] Single chip row replaces the legacy
-            dual Type-select + Category-chip-row layout. Same 13
-            values + "None" sentry as the MyProjectReports + admin
-            ReportsAdmin upload forms — three surfaces now share the
-            exact same chip order + labels. The unified click goes
-            through `applyUploadChip` which translates the picked
-            value into the right `(uploadType, uploadCategory)` state
-            pair and ships the legacy coerce effect's expectation
-            (category → type=OTHER). */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center', marginTop: '0.4rem' }}>
-          <span style={{ fontSize: '0.72rem', color: 'var(--steel, #64748b)', marginRight: '0.2rem' }}>
-            Type:
-          </span>
-          <FilterChip
-            label="None"
-            active={isUploadChipActive(null)}
-            onClick={() => applyUploadChip(null)}
-            disabled={isUploading}
-          />
-          {UNIFIED_TAXONOMY.map((chip) => (
-            <FilterChip
-              key={chip.value}
-              label={chip.short}
-              title={chip.label}
-              active={isUploadChipActive(chip.value)}
-              onClick={() => applyUploadChip(chip.value)}
-              disabled={isUploading}
-            />
-          ))}
         </div>
         {isUploading && (
           <div
