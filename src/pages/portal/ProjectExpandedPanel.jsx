@@ -33,6 +33,8 @@ import {
   PROJECT_REPORT_TYPES,
   DOCUMENT_CATEGORIES,
   DOCUMENT_CATEGORY_LABELS,
+  UNIFIED_TAXONOMY,
+  getTaxonomyChip,
 } from '../../lib/constants.js';
 import { uploadBlob, BlobUploadError } from '../../lib/blobUpload.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
@@ -97,7 +99,7 @@ const REPORTS_PAGE_SIZE = 100;
 // past the 200th position. With the filter on the wire, the walker
 // only collects matching rows. `exhausted === false` means the server
 // still has more pages; the UI renders "Load more" in that case.
-async function fetchAllAttachments(projectKey, accessToken, cap, typeFilter = null) {
+async function fetchAllAttachments(projectKey, accessToken, cap, typeFilter = null, categoryFilter = null) {
   const PAGE_SIZE = 100; // matches the server's MAX_LIMIT cap.
   const collected = [];
   let cursor = null;
@@ -110,7 +112,16 @@ async function fetchAllAttachments(projectKey, accessToken, cap, typeFilter = nu
     // matching rows. Sending the chip's type here means a project with
     // 500 monthly + 1 weekly reports, filtered to WEEKLY, walks the
     // weekly pages instead of getting stuck on the first 200 monthlies.
+    // [R44-flat-taxonomy] ?type=OTHER now narrows server-side to
+    // category IS NULL (the R44 fix), so a cadence → other chip
+    // doesn't leak category-tagged rows into the result.
     if (typeFilter) params.type = typeFilter;
+    // [R44-flat-taxonomy] Subject-matter classifier forward. When the
+    // user picks a category chip, the walker only collects rows whose
+    // `category` column matches — category-tagged rows live past the
+    // cadence-only cap (e.g. a 500-weekly / 40-design-drawings split),
+    // so server-side filtering is what makes the chip truthful.
+    if (categoryFilter) params.category = categoryFilter;
     const resp = await api.getProjectAttachments(projectKey, params, accessToken);
     const rows = resp?.attachments || resp?.items || (Array.isArray(resp) ? resp : []);
     if (!Array.isArray(rows) || rows.length === 0) break;
@@ -170,7 +181,21 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
   // type" bug.
   const [reports, setReports] = useState({ status: 'idle' });
   const [reportsHasMore, setReportsHasMore] = useState(false);
+  // [DR-019] Lift the type chip into the parent so the fetch effect
+  // can depend on it — sending the chip's value server-side is what
+  // fixes the "Walker stops at 200, locally claims exhaustive empty
+  // results for a type" bug.
+  // [R44-flat-taxonomy] The chip selection now drives BOTH the
+  // legacy cadence (`?type=X`) AND the new subject-matter classifier
+  // (`?category=X`). Two locals (instead of one combined chip state)
+  // so the render-time "active" predicate stays trivial — the unified
+  // chip row sets one of the two to the picked value + the other to
+  // null/empty, via the chip's `kind` discriminator. The
+  // `?type=OTHER` filter still narrows server-side to `category IS
+  // NULL` (the R44 fix) so the two don't double-match category-
+  // tagged rows.
   const [reportsFilterType, setReportsFilterType] = useState(null);
+  const [reportsFilterCategory, setReportsFilterCategory] = useState(null);
 
   // Tile-expansion state — id of the row currently expanded within a
   // section, or null. Keeps the panel tidy when one DPR is open at a
@@ -322,9 +347,21 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
             // accessToken)` shape. Load-more continues to use
             // fetchAllAttachments below so we still walk the cursor past
             // 50 rows on projects with >50 attachments.
+            //
+            // [R44-flat-taxonomy] Forward BOTH the cadence chip (?type=)
+            // and the subject-matter classifier (?category=) to the
+            // GET handler. Picking a chip now re-fetches the first 50
+            // matching rows immediately — no silent client-side post-
+            // filter (the previous behaviour swapped the data with an
+            // unfiltered first 50 then claimed "no X reports"). The
+            // `?type=OTHER` chip triggers the R44 server-side
+            // narrowing to `category IS NULL`.
+            const initialParams = { limit: 50 };
+            if (reportsFilterType) initialParams.type = reportsFilterType;
+            if (reportsFilterCategory) initialParams.category = reportsFilterCategory;
             const resp = await api.getProjectAttachments(
               projectKey,
-              { limit: 50 },
+              initialParams,
               accessToken,
             );
             const rows = resp?.attachments || resp?.items || (Array.isArray(resp) ? resp : []);
@@ -347,7 +384,7 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
     }
 
     Promise.allSettled(tasks);
-  }, [projectKey, isRegistered, projectName, accessToken, reportsFilterType]);
+  }, [projectKey, isRegistered, projectName, accessToken, reportsFilterType, reportsFilterCategory]);
 
   // [Round-33+] Re-fetch only the drawings sub-section when the user
   // saves a new drawing via the inline "+ Add drawing" modal. We skip
@@ -376,6 +413,9 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
   // refetch after an upload. [DR-022] walks the cursor instead of
   // fetching a single 50-row slice. [DR-019] honours the active
   // `reportsFilterType` so the upload doesn't reset the chip.
+  // [R44-flat-taxonomy] Honours the active `reportsFilterCategory`
+  // too — same intent (don't reset the chip on refresh); both chip
+  // axes survive an upload without silently leaking unfiltered rows.
   useEffect(() => {
     if (reportsRefreshKey === 0) return;
     if (!projectKey) return;
@@ -383,7 +423,16 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
     // contract test pins both paths (test 9). The cursor-walking
     // walker is reserved for the load-more path below; here we just
     // want the first 50 fresh rows after an upload / delete.
-    api.getProjectAttachments(projectKey, { limit: 50 }, accessToken)
+    //
+    // [R44-flat-taxonomy] Forward both the cadence + category chip so
+    // a refresh after an upload keeps the active filter honest (the
+    // upload itself uses the unified taxonomy chip too, so the user
+    // expects to see their fresh upload under the same chip they
+    // picked).
+    const refreshParams = { limit: 50 };
+    if (reportsFilterType) refreshParams.type = reportsFilterType;
+    if (reportsFilterCategory) refreshParams.category = reportsFilterCategory;
+    api.getProjectAttachments(projectKey, refreshParams, accessToken)
       .then((resp) => {
         if (!mountedRef.current) return;
         const rows = resp?.attachments || resp?.items || (Array.isArray(resp) ? resp : []);
@@ -395,14 +444,17 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
         if (!mountedRef.current) return;
         setReports({ status: 'error', error: err?.message || 'Failed to load' });
       });
-  }, [reportsRefreshKey, projectKey, accessToken]);
+  }, [reportsRefreshKey, projectKey, accessToken, reportsFilterType, reportsFilterCategory]);
 
   // [DR-019] Reset the lifted filterType when the project changes — a
   // half-set chip from a previous accordion card shouldn't carry over
   // into the next one. Mirrors the local useEffect that previously lived
   // inside ReportSection.
+  // [R44-flat-taxonomy] Reset both the cadence and the subject-matter
+  // chips together — same reason (no carry-over across projects).
   useEffect(() => {
     setReportsFilterType(null);
+    setReportsFilterCategory(null);
   }, [projectKey]);
 
   // [DR-019] Load-more walker — appends the next page onto the existing
@@ -429,6 +481,11 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
         accessToken,
         currentReportsLen + REPORTS_PAGE_SIZE,
         reportsFilterType,
+        // [R44-flat-taxonomy] Subject-matter classifier forward so a
+        // category chip survives the "Load more" walker too (the
+        // previous behaviour only honoured `?type=`, silently mixing
+        // cadence + category rows across pages).
+        reportsFilterCategory,
       );
       if (!mountedRef.current) return;
       setReports({ status: 'ready', data: next.rows });
@@ -441,7 +498,7 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
         console.warn('Load more reports failed', err?.message);
       }
     }
-  }, [projectKey, accessToken, reportsHasMore, reports.data?.length ?? 0, reportsFilterType]);
+  }, [projectKey, accessToken, reportsHasMore, reports.data?.length ?? 0, reportsFilterType, reportsFilterCategory]);
 
   const toggleSection = useCallback((id) => {
     setOpenSections((s) => ({ ...s, [id]: !s[id] }));
@@ -618,8 +675,13 @@ export default function ProjectExpandedPanel({ project, accessToken, onClose, on
             // triggers a server-side re-fetch instead of a silent
             // local-filter pass, and a project with >200 matching
             // reports can be walked page-by-page via "Load more".
+            // [R44-flat-taxonomy] Lift filterCategory the same way so a
+            // subject-matter chip triggers a server-side re-fetch too
+            // and survives the "Load more" walker.
             filterType={reportsFilterType}
             onFilterTypeChange={setReportsFilterType}
+            filterCategory={reportsFilterCategory}
+            onFilterCategoryChange={setReportsFilterCategory}
             hasMore={reportsHasMore}
             onLoadMore={loadMoreReports}
             onUploaded={() => setReportsRefreshKey((k) => k + 1)}
@@ -1284,7 +1346,14 @@ function ReportSection({
   // why these are lifted. The local-state version filtered on the
   // client and silently mis-reported "no X reports" for X-type rows
   // past the 200-row accordion cap.
-  filterType, onFilterTypeChange, hasMore, onLoadMore,
+  // [R44-flat-taxonomy] Lifted filterCategory the same way so a subject-
+  // matter chip row drives the server-side query param and survives
+  // "Load more". Two locals keep the JSX "active chip" predicate
+  // trivial — the unified chip row sets one and clears the other
+  // based on its `kind` discriminator.
+  filterType, onFilterTypeChange,
+  filterCategory, onFilterCategoryChange,
+  hasMore, onLoadMore,
 }) {
   // Upload form state. The 3-step state machine mirrors DPR/Inspection
   // photo uploads: 'idle' → 'sas' → 'uploading' → 'confirming' → 'idle'.
@@ -1380,6 +1449,103 @@ function ReportSection({
   // const so the JSX below doesn't need a wider refactor; with the
   // server filter on, `filterType` always matches `rows` already.
   const filtered = rows;
+
+  // [R44-flat-taxonomy] Helpers for the unified chip row. The upload
+  // form + the filter row both render the same 13-value chip row;
+  // each click must derive the right state pair from the chip's
+  // `kind`. The existing local state shape
+  // (`uploadType` + `uploadCategory` / `filterType` + `filterCategory`)
+  // is preserved verbatim — the chip row is a presentation change
+  // over the same wire contract, so no state-shape migration is
+  // needed and the source-text pins keep working.
+
+  // Translates a chip click into a (type, category) upload pair:
+  //   - null                → reset to default cadence + no category.
+  //   - kind='type'         → pick the cadence, leave category null.
+  //                           (Doesn't touch uploadCategory so the
+  //                           existing coerce effect's dependency
+  //                           stays stable and we don't fight it.)
+  //   - kind='category'     → coerce type to 'OTHER' (the R43
+  //                           backend override) + stamp the category.
+  //                           Setting BOTH state values is required
+  //                           for the coerce effect to remain a no-op
+  //                           and the wire (type=OTHER, category=X)
+  //                           to stay authoritative.
+  function applyUploadChip(chipValue) {
+    if (chipValue === null) {
+      setUploadCategory(null);
+      setUploadType(PROJECT_REPORT_TYPES[0]);
+      return;
+    }
+    const chip = getTaxonomyChip(chipValue);
+    if (!chip || chip.kind === 'type') {
+      // Cadence (or unknown) — set type only; category stays as-is
+      // (a no-op when already null). Avoids triggering the existing
+      // coerce effect on the category dep, which would otherwise
+      // reset uploadType back to the first cadence (PROJECT_REPORT_TYPES[0]).
+      if (chip) setUploadType(chip.value);
+      return;
+    }
+    // kind === 'category' — dual write keeps the wire + the effect
+    // (which re-runs on uploadCategory change) consistent.
+    setUploadType('OTHER');
+    setUploadCategory(chip.value);
+  }
+
+  // True when the chip's intent matches the current local state.
+  // The "None" sentinel is active whenever the user is at default
+  // (uploadCategory null AND uploadType at first cadence) — same
+  // contract as MyProjectReports' `uploadTaxonomy === null`.
+  function isUploadChipActive(chipValue) {
+    if (chipValue === null) {
+      return uploadCategory === null && uploadType === PROJECT_REPORT_TYPES[0];
+    }
+    const chip = getTaxonomyChip(chipValue);
+    if (!chip) return false;
+    if (chip.kind === 'type') {
+      return uploadCategory === null && uploadType === chip.value;
+    }
+    // kind === 'category' — when a category is set, uploadType is
+    // coerced to 'OTHER' (either by the existing effect or by our
+    // click handler). Only the category's identity needs checking.
+    return uploadCategory === chip.value;
+  }
+
+  // Same shape, applied to the lifted filter state. Clicking a
+  // chip writes one of the two parent-owned locals and clears the
+  // other — `null` clears both. The `?type=OTHER` chip is handled
+  // specially: clearing the type filter (to null) lets the backend's
+  // R44 narrowing apply naturally when only the category is set.
+  function applyFilterChip(chipValue) {
+    if (chipValue === null) {
+      onFilterTypeChange?.(null);
+      onFilterCategoryChange?.(null);
+      return;
+    }
+    const chip = getTaxonomyChip(chipValue);
+    if (!chip || chip.kind === 'type') {
+      if (chip) {
+        onFilterTypeChange?.(chip.value);
+        onFilterCategoryChange?.(null);
+      }
+      return;
+    }
+    // kind === 'category' — only set the category; the backend's
+    // R43 contract + the `?type=OTHER → category IS NULL` narrowing
+    // already handles the "category → type=OTHER" wire mapping.
+    onFilterTypeChange?.(null);
+    onFilterCategoryChange?.(chip.value);
+  }
+
+  function isFilterChipActive(chipValue) {
+    if (chipValue === null) return filterType === null && filterCategory === null;
+    const chip = getTaxonomyChip(chipValue);
+    if (!chip) return false;
+    if (chip.kind === 'type') {
+      return filterType === chip.value && filterCategory === null;
+    }
+    return filterCategory === chip.value;
+  }
 
   // [DocumentCategory] Single attachment card — defined as a closure
   // here so it can access ReportSection's local state (actionBusy,
@@ -1745,30 +1911,6 @@ function ReportSection({
           Upload a report
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', fontSize: '0.75rem' }}>
-            <span style={{ color: 'var(--steel, #64748b)' }}>
-              Type
-              {/* [DocumentCategory] When a category is picked, the type
-                  select is silently coerced to 'OTHER' — render the
-                  label with a tiny "auto" hint so the user understands
-                  why the dropdown is stuck. */}
-              {uploadCategory && (
-                <span style={{ marginLeft: 6, fontSize: '0.65rem', color: 'var(--brand)' }}>
-                  auto-other (category picked)
-                </span>
-              )}
-            </span>
-            <select
-              value={uploadType}
-              onChange={(e) => setUploadType(e.target.value)}
-              disabled={isUploading || Boolean(uploadCategory)}
-              style={{ fontSize: '0.82rem', padding: '0.3rem 0.4rem', borderRadius: 4, border: '1px solid #cbd5e1' }}
-            >
-              {PROJECT_REPORT_TYPES.map((t) => (
-                <option key={t} value={t}>{PROJECT_REPORT_TYPE_LABELS[t]?.label || t}</option>
-              ))}
-            </select>
-          </label>
           <label style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', fontSize: '0.75rem', flex: 1, minWidth: 180 }}>
             <span style={{ color: 'var(--steel, #64748b)' }}>Title (optional)</span>
             <input
@@ -1806,31 +1948,32 @@ function ReportSection({
             {uploadPhase === 'idle' && 'Upload report'}
           </button>
         </div>
-        {/* [DocumentCategory] Subject-matter classifier chip group.
-            Appended BELOW the existing cadence UX (Type + Title + File
-            + Upload button row) so the legacy Weekly / Monthly / Due
-            Diligence / Quality flow is visually unchanged when no
-            category is picked. Picking a chip silently coerces type
-            to 'OTHER' (see the [DocumentCategory] coercion effect
-            above) and ships the chosen category to the backend on the
-            existing 4-step upload pipeline. Clear chip (active === null)
-            restores the legacy cadence flow. */}
+        {/* [R44-flat-taxonomy] Single chip row replaces the legacy
+            dual Type-select + Category-chip-row layout. Same 13
+            values + "None" sentry as the MyProjectReports + admin
+            ReportsAdmin upload forms — three surfaces now share the
+            exact same chip order + labels. The unified click goes
+            through `applyUploadChip` which translates the picked
+            value into the right `(uploadType, uploadCategory)` state
+            pair and ships the legacy coerce effect's expectation
+            (category → type=OTHER). */}
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center', marginTop: '0.4rem' }}>
           <span style={{ fontSize: '0.72rem', color: 'var(--steel, #64748b)', marginRight: '0.2rem' }}>
-            Document category:
+            Type:
           </span>
           <FilterChip
             label="None"
-            active={uploadCategory === null}
-            onClick={() => setUploadCategory(null)}
+            active={isUploadChipActive(null)}
+            onClick={() => applyUploadChip(null)}
             disabled={isUploading}
           />
-          {DOCUMENT_CATEGORIES.map((c) => (
+          {UNIFIED_TAXONOMY.map((chip) => (
             <FilterChip
-              key={c}
-              label={DOCUMENT_CATEGORY_LABELS[c]?.short || c}
-              active={uploadCategory === c}
-              onClick={() => setUploadCategory(uploadCategory === c ? null : c)}
+              key={chip.value}
+              label={chip.short}
+              title={chip.label}
+              active={isUploadChipActive(chip.value)}
+              onClick={() => applyUploadChip(chip.value)}
               disabled={isUploading}
             />
           ))}
@@ -1869,24 +2012,29 @@ function ReportSection({
         )}
       </div>
 
-      {/* ─── Type filter chips ─────────────────────────────────────────── */}
-      {/* [DR-019] Chips are now controlled by the parent so the chip's
-          onClick triggers a server-side re-fetch with the new filter.
-          `onFilterTypeChange` may be undefined when ReportSection is
-          mounted standalone (rare — guards `?.` so the JSX doesn't
-          crash in tests / Storybook). */}
+      {/* ─── Unified filter chips ───────────────────────────────────────── */}
+      {/* [R44-flat-taxonomy] Single chip row replaces the legacy Type
+          chips. Same 13 values + "All" sentry as the employee
+          MyProjectReports + admin ReportsAdmin filter rows — three
+          surfaces now share the exact same chip order + labels.
+          `applyFilterChip` translates a chip click into the right
+          pair of lifted-parent-state writes (the parent's
+          `reportsFilterType` + `reportsFilterCategory`) and the
+          server's `?type=` / `?category=` query params stay
+          authoritative. */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center' }}>
         <FilterChip
           label="All"
-          active={filterType === null}
-          onClick={() => onFilterTypeChange?.(null)}
+          active={isFilterChipActive(null)}
+          onClick={() => applyFilterChip(null)}
         />
-        {PROJECT_REPORT_TYPES.map((t) => (
+        {UNIFIED_TAXONOMY.map((chip) => (
           <FilterChip
-            key={t}
-            label={PROJECT_REPORT_TYPE_LABELS[t]?.short || t}
-            active={filterType === t}
-            onClick={() => onFilterTypeChange?.(filterType === t ? null : t)}
+            key={chip.value}
+            label={chip.short}
+            title={chip.label}
+            active={isFilterChipActive(chip.value)}
+            onClick={() => applyFilterChip(chip.value)}
           />
         ))}
       </div>
@@ -1903,7 +2051,22 @@ function ReportSection({
         >
           {rows.length === 0
             ? 'No reports yet for this project. Upload your first weekly or monthly report above.'
-            : `No ${PROJECT_REPORT_TYPE_LABELS[filterType]?.label || filterType} reports for this project.`}
+            : (() => {
+              // [R44-flat-taxonomy] Pick the right human label for the
+              // active chip — covers BOTH the cadence axis (filterType
+              // holds the enum value) AND the subject-matter axis
+              // (filterCategory holds the enum). Other cases fall back
+              // to the raw value so unknown future chips still render
+              // readable copy.
+              if (filterCategory) {
+                const chip = getTaxonomyChip(filterCategory);
+                return `No ${chip?.label || filterCategory} reports for this project.`;
+              }
+              if (filterType) {
+                return `No ${PROJECT_REPORT_TYPE_LABELS[filterType]?.label || filterType} reports for this project.`;
+              }
+              return 'No reports match the current filter for this project.';
+            })()}
         </div>
       ) : (
         <div style={{ display: 'grid', gap: '0.6rem' }}>
