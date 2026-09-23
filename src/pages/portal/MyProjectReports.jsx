@@ -10,7 +10,7 @@
 //
 // ZERO new backend endpoints, ZERO schema changes, ZERO new dependencies.
 // Reuses everything R35 / R36 / R37 already shipped:
-//   - PROJECT_REPORT_TYPES, PROJECT_REPORT_TYPE_LABELS, MAX_REPORT_BYTES,
+//   - PROJECT_REPORT_TYPE_LABELS, MAX_REPORT_BYTES,
 //     ACCEPTED_REPORT_TYPES from src/lib/constants.js
 //   - api.getProjects / getProjectAttachments / getProjectAttachmentReadSas
 //     / deleteProjectAttachment / getReportSasUrl / confirmReportUpload
@@ -31,7 +31,7 @@
 //     machine so any backend contract change here is also a change
 //     ReportSection needs to pick up (single source of truth on the wire).
 
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
@@ -39,10 +39,12 @@ import { formatShortDate, formatBytes } from '../../lib/format.js';
 import {
   MAX_REPORT_BYTES,
   ACCEPTED_REPORT_TYPES,
-  PROJECT_REPORT_TYPES,
   PROJECT_REPORT_TYPE_LABELS,
-  DOCUMENT_CATEGORIES,
   DOCUMENT_CATEGORY_LABELS,
+  UNIFIED_TAXONOMY,
+  taxonomyToUploadState,
+  taxonomyToFilterParams,
+  getTaxonomyChip,
 } from '../../lib/constants.js';
 import { uploadBlob, BlobUploadError } from '../../lib/blobUpload.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
@@ -113,12 +115,14 @@ export default function MyProjectReports() {
   // from every assigned project; the picker is required only for upload.
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState('');
-  const [filterType, setFilterType] = useState(''); // '' = all
-  // [DocumentCategory] Optional category chip filter — mirrors the type
-  // filter above. '' = show every category; a specific value narrows the
-  // list to rows with that subject-matter classifier (and includes
-  // legacy rows with category=null when 'Uncategorised' is picked).
-  const [filterCategory, setFilterCategory] = useState('');
+  // [R44-flat-taxonomy] Single chip selection covers BOTH the legacy
+  // cadence AND the new subject-matter classifier. null = "All" (no
+  // filter). Wire params are derived via taxonomyToFilterParams below
+  // so the backend's `?type=` / `?category=` filters kick in (server-
+  // side, no client-side post-filter). Replaces the old `filterType`
+  // + `filterCategory` pair that used to silently mix category-tagged
+  // rows into a `?type=OTHER` request.
+  const [selectedTaxonomy, setSelectedTaxonomy] = useState(null);
   const [reports, setReports] = useState([]);
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingReports, setLoadingReports] = useState(true);
@@ -126,27 +130,18 @@ export default function MyProjectReports() {
 
   // Upload form state. 3-step state machine mirrors the in-accordion
   // ReportSection (R35): idle → sas → uploading → confirming → idle.
-  const [uploadType, setUploadType] = useState(PROJECT_REPORT_TYPES[0]);
+  // [R44-flat-taxonomy] Single chip selection replaces the dual
+  // `uploadType` + `uploadCategory` state pair (and the coerce-effect
+  // useEffect below). The (type, category) shipped on the POST is
+  // derived at submit time via `taxonomyToUploadState`, which folds
+  // the R43 backend override ("category implies type=OTHER") into a
+  // pure function. null = no chip picked → default cadence (Weekly).
+  const [uploadTaxonomy, setUploadTaxonomy] = useState(null);
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadTitle, setUploadTitle] = useState('');
   const [uploadPhase, setUploadPhase] = useState('idle');
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState(null);
-
-  // [DocumentCategory] Optional subject-matter classifier. Mirrors the
-  // ProjectExpandedPanel#ReportSection behaviour: when set, uploadType
-  // is silently coerced to 'OTHER' (the backend override), the type
-  // <select> is disabled, and the chosen category ships on the POST.
-  // NULL = legacy report upload (Weekly / Monthly / Due Diligence /
-  // Quality / Other cadence flow).
-  const [uploadCategory, setUploadCategory] = useState(null);
-  useEffect(() => {
-    if (uploadCategory) {
-      setUploadType('OTHER');
-    } else {
-      setUploadType(PROJECT_REPORT_TYPES[0]);
-    }
-  }, [uploadCategory]);
 
   // [S7/MyReports] Admin review action bar state. actionBusy is a single
   // in-flight flag (not per-row) — admins act on one row at a time and
@@ -200,15 +195,19 @@ export default function MyProjectReports() {
         setReports([]);
         return;
       }
+      // [R44-flat-taxonomy] The unified chip selection drives BOTH the
+      // legacy `?type=` filter and the new `?category=` filter via
+      // taxonomyToFilterParams (type-only chips forward `?type=X`; the
+      // legacy "Other" chip now narrows server-side to category IS NULL
+      // via the R44 backend fix; category chips forward `?category=X`).
+      // Done at the server so we don't drag down rows we'd immediately
+      // filter out client-side — important for large projects with
+      // hundreds of attachments.
+      const filterParams = taxonomyToFilterParams(selectedTaxonomy);
       const results = await Promise.allSettled(
         projects.map((p) => api.getProjectAttachments(
           p.id || p.name,
-          // [DocumentCategory] Pass the chip-filter through to the
-          // backend GET handler (which forwards it as ?category=...).
-          // Done at the server so we don't drag down rows we'd
-          // immediately filter out client-side — important for large
-          // projects with hundreds of attachments.
-          filterCategory ? { category: filterCategory } : {},
+          filterParams,
           accessToken,
         )),
       );
@@ -236,17 +235,18 @@ export default function MyProjectReports() {
     } finally {
       setLoadingReports(false);
     }
-  }, [projects, accessToken, toast, filterCategory]);
+  }, [projects, accessToken, toast, selectedTaxonomy]);
 
   useEffect(() => { loadProjects(); }, [loadProjects]);
   useEffect(() => { if (!loadingProjects) loadReports(); }, [loadProjects, loadReports, loadingProjects]);
 
   // ─── Filter ────────────────────────────────────────────────────────────
-  // Memoised filter so the chip-change doesn't recompute the sort/merge.
-  const filteredReports = useMemo(() => {
-    if (!filterType) return reports;
-    return reports.filter((r) => r.type === filterType);
-  }, [reports, filterType]);
+  // [R44-flat-taxonomy] No more client-side post-filter — the backend's
+  // `?type=` / `?category=` filters (driven by `selectedTaxonomy`) are
+  // authoritative, so reports already reflect the chip selection.
+  // The previous useMemo filter was redundant with the per-project
+  // Promise.allSettled walker above and silently mixed category-tagged
+  // rows into a `?type=OTHER` request.
 
   // ─── Upload handler ────────────────────────────────────────────────────
   function validateFile(file) {
@@ -292,9 +292,15 @@ export default function MyProjectReports() {
       // Quality cadence uploads). The function's control flow + error
       // handling stay untouched — minimum-impact way to wire the new
       // field through the existing 4-step upload pipeline.
+      // [R44-flat-taxonomy] Translate the single chip selection into the
+      // wire-format (type, category) pair. `taxonomyToUploadState`
+      // implements the R43 backend contract: kind='category' silently
+      // coerces type to 'OTHER'. `null` defaults to the first cadence
+      // type so a "no chip" upload still goes through the review queue.
+      const { type: uploadTypeFinal, category: uploadCategoryFinal } = taxonomyToUploadState(uploadTaxonomy);
       await api.createProjectAttachment(selectedProjectId, {
-        type: uploadType,
-        category: uploadCategory || null,
+        type: uploadTypeFinal,
+        category: uploadCategoryFinal,
         title: uploadTitle.trim() || null,
         filename: uploadFile.name,
         contentType: uploadFile.type,
@@ -540,32 +546,6 @@ export default function MyProjectReports() {
               </select>
             </div>
             <div>
-              <label htmlFor="mpr-type" style={{ display: 'block', fontSize: '0.8rem', color: 'var(--steel)', marginBottom: 4 }}>
-                Type
-                {/* [DocumentCategory] When a category is picked, the
-                    type select is silently coerced to 'OTHER' — render
-                    the label with a tiny "auto" hint so the user
-                    understands why the dropdown is stuck. */}
-                {uploadCategory && (
-                  <span style={{ marginLeft: 6, fontSize: '0.7rem', color: 'var(--brand)' }}>
-                    auto-other (category picked)
-                  </span>
-                )}
-              </label>
-              <select
-                id="mpr-type"
-                className="form-select"
-                value={uploadType}
-                onChange={(e) => setUploadType(e.target.value)}
-                disabled={isUploading || Boolean(uploadCategory)}
-                style={{ width: '100%', padding: '0.4rem 0.5rem', borderRadius: 4, border: '1px solid #cbd5e1' }}
-              >
-                {PROJECT_REPORT_TYPES.map((t) => (
-                  <option key={t} value={t}>{PROJECT_REPORT_TYPE_LABELS[t]?.label || t}</option>
-                ))}
-              </select>
-            </div>
-            <div>
               <label htmlFor="mpr-title" style={{ display: 'block', fontSize: '0.8rem', color: 'var(--steel)', marginBottom: 4 }}>
                 Title (optional)
               </label>
@@ -608,33 +588,33 @@ export default function MyProjectReports() {
               </button>
             </div>
           </div>
-          {/* [DocumentCategory] Subject-matter classifier chip group.
-              Appended BELOW the existing Type + Title + File + Upload
-              row so the legacy Weekly / Monthly / Due Diligence /
-              Quality flow stays visually unchanged when no category
-              is picked. Picking a chip silently coerces type to
-              'OTHER' (see the [DocumentCategory] coercion effect in
-              the upload-form state) and ships the chosen category on
-              the POST. The chip row sits INSIDE the upload form so
-              the "Choose a category to skip the type" affordance is
-              co-located with the file picker — matches the in-
-              accordion ReportSection UX. */}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center', marginTop: '0.5rem' }}>
-            <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginRight: '0.2rem' }}>
-              Document category:
+          {/* [R44-flat-taxonomy] Single chip row replaces the old dual
+              Type-select + Category-chip rows. Renders all 13 values
+              in canonical order (5 cadence + 8 subject-matter), with
+              a single "None" sentinel meaning "use the default cadence
+              flow → type=Weekly, category=null". Selected chip drives
+              `taxonomyToUploadState(uploadTaxonomy)` at submit time,
+              which implements the R43 backend override ("category
+              implies type=OTHER"). Co-located with the file picker
+              so the chip decision is next to the bytes the user is
+              attaching — mirrors the in-accordion ReportSection UX. */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center', marginTop: '0.75rem' }}>
+            <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginRight: '0.25rem' }}>
+              Type:
             </span>
             <FilterChip
               label="None"
-              active={uploadCategory === null}
-              onClick={() => setUploadCategory(null)}
+              active={uploadTaxonomy === null}
+              onClick={() => setUploadTaxonomy(null)}
               disabled={isUploading}
             />
-            {DOCUMENT_CATEGORIES.map((c) => (
+            {UNIFIED_TAXONOMY.map((chip) => (
               <FilterChip
-                key={c}
-                label={DOCUMENT_CATEGORY_LABELS[c]?.short || c}
-                active={uploadCategory === c}
-                onClick={() => setUploadCategory(uploadCategory === c ? null : c)}
+                key={chip.value}
+                label={chip.short}
+                title={chip.label}
+                active={uploadTaxonomy === chip.value}
+                onClick={() => setUploadTaxonomy(uploadTaxonomy === chip.value ? null : chip.value)}
                 disabled={isUploading}
               />
             ))}
@@ -657,48 +637,30 @@ export default function MyProjectReports() {
           )}
         </div>
 
-        {/* Type chip filter */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.5rem' }}>
-          <button
-            type="button"
-            className={`btn btn-sm ${filterType === '' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setFilterType('')}
-          >
-            All
-          </button>
-          {PROJECT_REPORT_TYPES.map((t) => (
-            <button
-              key={t}
-              type="button"
-              className={`btn btn-sm ${filterType === t ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => setFilterType(t)}
-            >
-              {PROJECT_REPORT_TYPE_LABELS[t]?.short || t}
-            </button>
-          ))}
-        </div>
-        {/* [DocumentCategory] Subject-matter chip filter row.
-            Sits BELOW the type filter so the cadence chips stay visually
-            primary (matching the upload form's order: type first, then
-            category). The "All" sentinel maps to the empty string so the
-            backend GET forwards no ?category= and returns every row.
-            The same chip row ships on ReportsAdmin.jsx for the admin
-            registry — keeps the employee + admin surfaces in sync. */}
+        {/* [R44-flat-taxonomy] Single chip-row filter replaces the legacy
+            dual Type + Category chip rows. Same 13 values + "All"
+            sentry, same single-select semantics as the upload form's
+            chip row — visually consistent and matching across the
+            three R44 surfaces (employee ReportSection, employee
+            MyProjectReports, admin ReportsAdmin). Forwarded to the
+            GET handler via taxonomyToFilterParams so the server does
+            the actual filtering (no client-side post-filter). */}
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center', marginBottom: '1rem' }}>
           <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginRight: '0.25rem' }}>
-            Category:
+            Filter:
           </span>
           <FilterChip
             label="All"
-            active={filterCategory === ''}
-            onClick={() => setFilterCategory('')}
+            active={selectedTaxonomy === null}
+            onClick={() => setSelectedTaxonomy(null)}
           />
-          {DOCUMENT_CATEGORIES.map((c) => (
+          {UNIFIED_TAXONOMY.map((chip) => (
             <FilterChip
-              key={c}
-              label={DOCUMENT_CATEGORY_LABELS[c]?.short || c}
-              active={filterCategory === c}
-              onClick={() => setFilterCategory(filterCategory === c ? '' : c)}
+              key={chip.value}
+              label={chip.short}
+              title={chip.label}
+              active={selectedTaxonomy === chip.value}
+              onClick={() => setSelectedTaxonomy(selectedTaxonomy === chip.value ? null : chip.value)}
             />
           ))}
         </div>
@@ -706,7 +668,7 @@ export default function MyProjectReports() {
         {/* Reports list */}
         {loadingReports ? (
           <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--steel)' }}>Loading reports…</div>
-        ) : filteredReports.length === 0 ? (
+        ) : reports.length === 0 ? (
           <div
             style={{
               padding: '2rem',
@@ -719,13 +681,16 @@ export default function MyProjectReports() {
           >
             {projects.length === 0
               ? 'No projects assigned to you yet.'
-              : filterType
-                ? `No ${PROJECT_REPORT_TYPE_LABELS[filterType]?.label || filterType} reports yet.`
+              : selectedTaxonomy
+                ? (() => {
+                    const chip = getTaxonomyChip(selectedTaxonomy);
+                    return `No ${chip?.label || selectedTaxonomy} reports yet.`;
+                  })()
                 : 'No reports uploaded yet.'}
           </div>
         ) : (
           <div style={{ display: 'grid', gap: '0.5rem' }}>
-            {filteredReports.map((r) => {
+            {reports.map((r) => {
               const canDelete = isAdmin || (employee && r.uploadedById === employee.id);
               // [BLOB_GONE recovery] Replace mirrors the PATCH endpoint's
               // (admin OR uploader) gate — same ownership rule as Delete.
