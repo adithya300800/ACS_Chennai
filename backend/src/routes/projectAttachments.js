@@ -482,6 +482,32 @@ router.get('/', asyncHandler(async (req, res) => {
       res.setHeader('X-Total-Count', 0);
       return res.json({ attachments: [], nextCursor: null });
     }
+
+    // [R44-flat-taxonomy] The legacy "Other" filter (`?type=OTHER`) is
+    // now interpreted as "legacy Other reports only" — i.e. rows where
+    // type=OTHER AND category IS NULL. Without this narrowing, every
+    // new-category upload (which is silently type=OTHER under the hood
+    // by the R43 contract) leaks into the Other bucket, so an admin
+    // or employee filtering for genuine Other content would see all
+    // their Drawings / BOQ / Procurement docs mixed in.
+    //
+    // We narrow in two cases:
+    //   1. requestedTypes is exactly ['OTHER'] and no category filter
+    //      is active — the user clearly means "legacy Other".
+    //   2. requestedTypes contains OTHER AND requestedCategories is
+    //      non-empty — when a real category is also pinned, category
+    //      AND'd with type=OTHER still works as before (every
+    //      category-tagged row IS type=OTHER, so the AND is a no-op
+    //      for matching). We keep the existing semantics in this case
+    //      because adding `category: null` would exclude the very rows
+    //      the user asked for.
+    //
+    // Other legacy type values (WEEKLY_REPORT / MONTHLY_REPORT /
+    // DUE_DILIGENCE_REPORT / QUALITY_REPORT) carry no category by
+    // construction, so the narrowing is unnecessary for them.
+    const typesIncludeOther = requestedTypes.includes('OTHER');
+    const narrowingOtherToNullCategory = typesIncludeOther && requestedCategories.length === 0;
+
     const where = {
       projectId,
       deletedAt: null,
@@ -493,6 +519,10 @@ router.get('/', asyncHandler(async (req, res) => {
       // working without a separate index path.
       ...(requestedCategories.length === 1 ? { category: requestedCategories[0] } : {}),
       ...(requestedCategories.length > 1 ? { category: { in: requestedCategories } } : {}),
+      // [R44-flat-taxonomy] Prisma's `category: null` matches
+      // IS NULL. Pair with type=OTHER above so a `?type=OTHER`
+      // request returns only uncategorised legacy Other rows.
+      ...(narrowingOtherToNullCategory ? { category: null } : {}),
       ...(cursorPredicate || {}),
     };
     const rows = await prisma.projectAttachment.findMany({

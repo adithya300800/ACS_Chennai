@@ -443,6 +443,20 @@ router.get('/', async (req, res) => {
   // the caller DID pin projectId via resolveProjectParam, that helper
   // already returned 'invalid' for an archived UUID (404 above), so the
   // relation filter is only needed for the no-projectId path.
+  //
+  // [R44-flat-taxonomy] The legacy "Other" filter (`?type=OTHER`,
+  // alone) is now interpreted as "legacy Other reports only" —
+  // i.e. rows where type=OTHER AND category IS NULL. Without this
+  // narrowing, every new-category upload (silently type=OTHER under
+  // the hood by the R43 contract) leaks into the Other bucket, so
+  // an admin filtering for genuine Other content would see all
+  // their Drawings / BOQ / Procurement docs mixed in. When a real
+  // category is also pinned (via ?category= or ?categories=), the
+  // AND'd type=OTHER + category=X still matches category-tagged
+  // rows by construction — no narrowing is added in that case.
+  const typesIncludeOther = requestedTypes.includes('OTHER');
+  const narrowingOtherToNullCategory = typesIncludeOther && requestedCategories.length === 0;
+
   const where = {
     deletedAt: null,
     ...(projectScope.projectId
@@ -459,6 +473,10 @@ router.get('/', async (req, res) => {
     // no category filter is active.
     ...(requestedCategories.length === 1 ? { category: requestedCategories[0] } : {}),
     ...(requestedCategories.length > 1 ? { category: { in: requestedCategories } } : {}),
+    // [R44-flat-taxonomy] Prisma's `category: null` matches
+    // IS NULL. Pair with type=OTHER above so a `?type=OTHER`
+    // request returns only uncategorised legacy Other rows.
+    ...(narrowingOtherToNullCategory ? { category: null } : {}),
     ...(fromDate || toDate ? {
       uploadedAt: {
         ...(fromDate ? { gte: fromDate } : {}),

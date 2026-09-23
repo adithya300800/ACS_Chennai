@@ -114,6 +114,19 @@ function buildApp({ adminIsAdmin = true, userIsAdmin = false, employeeExists = t
           if (where.projectId && r.projectId !== where.projectId) return false;
           if (where.uploadedById && r.uploadedById !== where.uploadedById) return false;
           if (where.type && r.type !== where.type) return false;
+          // [DocumentCategory] + [R44-flat-taxonomy] Mirror the route's
+          // `category` filter shape. The handler emits one of:
+          //   { category: 'X' }           (single value)
+          //   { category: { in: [a, b] }} (CSV — `categories` param)
+          //   { category: null }          (`?type=OTHER` narrowing —
+          //                                R44 plain-Other semantics)
+          if (where.category === null) {
+            if (r.category !== null && r.category !== undefined) return false;
+          } else if (typeof where.category === 'string') {
+            if (r.category !== where.category) return false;
+          } else if (where.category && typeof where.category === 'object' && Array.isArray(where.category.in)) {
+            if (!where.category.in.includes(r.category)) return false;
+          }
           // [DR-012] Prisma's relational filter — when no projectId is
           // pinned the unscoped list adds `project: { isActive: true }`
           // so attachments for archived projects are excluded.
@@ -191,6 +204,15 @@ function buildApp({ adminIsAdmin = true, userIsAdmin = false, employeeExists = t
           if (where.projectId && r.projectId !== where.projectId) return false;
           if (where.uploadedById && r.uploadedById !== where.uploadedById) return false;
           if (where.type && r.type !== where.type) return false;
+          // [DocumentCategory] + [R44-flat-taxonomy] Same category
+          // filter shape as findMany — see comment above.
+          if (where.category === null) {
+            if (r.category !== null && r.category !== undefined) return false;
+          } else if (typeof where.category === 'string') {
+            if (r.category !== where.category) return false;
+          } else if (where.category && typeof where.category === 'object' && Array.isArray(where.category.in)) {
+            if (!where.category.in.includes(r.category)) return false;
+          }
           // [DR-012] Same relational filter as findMany — see comment above.
           if (where.project && typeof where.project === 'object') {
             const proj = projectRows.get(r.projectId);
@@ -683,5 +705,105 @@ describe('DR-012 — unscoped admin reports exclude archived-project attachments
     // not change the pinned-projectId path.
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('PROJECT_NOT_FOUND');
+  });
+});
+
+describe('R44 — Flat taxonomy: legacy Other filter excludes category-tagged rows', () => {
+  // R44 narrowed the ?type=OTHER filter to mean "legacy Other only"
+  // (type=OTHER AND category IS NULL). Before R44 every new-category
+  // upload was silently type=OTHER, which meant a `?type=OTHER` filter
+  // also dragged in every Drawings / BOQ / Procurement / etc. row in
+  // the unscoped admin list. These tests pin the new semantics so a
+  // future regression on the admin path trips them.
+
+  function seedRow(id, type, category) {
+    return {
+      id, projectId: PROJECT_A, type,
+      title: `${type}-${category || 'none'}`,
+      filename: `${type.toLowerCase()}.pdf`,
+      contentType: 'application/pdf',
+      sizeBytes: 1024,
+      blobPath: `employee-1/${id}.pdf`,
+      uploadedById: USER_ID,
+      uploadedAt: new Date('2026-09-22T10:00:00Z'),
+      deletedAt: null,
+      uploadedByName: 'Test User',
+      uploadedByDesignation: null,
+      status: 'PENDING_REVIEW',
+      reviewedById: null,
+      reviewedAt: null,
+      reviewNotes: null,
+      uploadIntentUlid: null,
+      reviewedByName: null,
+      reviewedByDesignation: null,
+      // R44: category is a first-class field so the mock's category
+      // filter (added in R44) can find / exclude rows correctly.
+      category: category ?? null,
+    };
+  }
+
+  it('21. ?type=OTHER narrows to type=OTHER AND category=null; excludes category-tagged rows', async () => {
+    const { app, attachmentRows } = buildApp();
+    attachmentRows.set('att-legacy-other', seedRow('att-legacy-other', 'OTHER', null));
+    attachmentRows.set('att-drawings',     seedRow('att-drawings',     'OTHER', 'DESIGN_DRAWINGS'));
+    attachmentRows.set('att-boq',          seedRow('att-boq',          'OTHER', 'COST_BOQ'));
+    attachmentRows.set('att-procure',      seedRow('att-procure',      'OTHER', 'PROCUREMENT_VENDOR'));
+    attachmentRows.set('att-weekly',       seedRow('att-weekly',       'WEEKLY_REPORT', null));
+
+    const res = await request(app)
+      .get('/api/admin/reports?type=OTHER')
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    const ids = res.body.reports.map((r) => r.id).sort();
+    expect(ids).toEqual(['att-legacy-other']);
+    expect(res.body.total).toBe(1);
+    // Nothing else leaks in.
+    const responseIds = res.body.reports.map((r) => r.id);
+    expect(responseIds).not.toContain('att-drawings');
+    expect(responseIds).not.toContain('att-boq');
+    expect(responseIds).not.toContain('att-procure');
+    expect(responseIds).not.toContain('att-weekly');
+  });
+
+  it('22. ?type=WEEKLY_REPORT is unaffected by the narrowing', async () => {
+    const { app, attachmentRows } = buildApp();
+    attachmentRows.set('att-weekly',   seedRow('att-weekly',   'WEEKLY_REPORT', null));
+    attachmentRows.set('att-monthly',  seedRow('att-monthly',  'MONTHLY_REPORT', null));
+    attachmentRows.set('att-legacy',   seedRow('att-legacy',   'OTHER', null));
+    attachmentRows.set('att-drawings', seedRow('att-drawings', 'OTHER', 'DESIGN_DRAWINGS'));
+
+    const res = await request(app)
+      .get('/api/admin/reports?type=WEEKLY_REPORT')
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.reports).toHaveLength(1);
+    expect(res.body.reports[0].id).toBe('att-weekly');
+  });
+
+  it('23. ?type=OTHER + ?category=X returns the category-tagged rows (no narrowing when category is set)', async () => {
+    const { app, attachmentRows } = buildApp();
+    attachmentRows.set('att-legacy',    seedRow('att-legacy',    'OTHER', null));
+    attachmentRows.set('att-drawings',  seedRow('att-drawings',  'OTHER', 'DESIGN_DRAWINGS'));
+    attachmentRows.set('att-boq',       seedRow('att-boq',       'OTHER', 'COST_BOQ'));
+
+    const res = await request(app)
+      .get('/api/admin/reports?type=OTHER&category=DESIGN_DRAWINGS')
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.reports).toHaveLength(1);
+    expect(res.body.reports[0].id).toBe('att-drawings');
+  });
+
+  it('24. ?type=OTHER on a list with only category-tagged rows returns empty (not silently all category rows)', async () => {
+    const { app, attachmentRows } = buildApp();
+    attachmentRows.set('att-drawings', seedRow('att-drawings', 'OTHER', 'DESIGN_DRAWINGS'));
+    attachmentRows.set('att-boq',      seedRow('att-boq',      'OTHER', 'COST_BOQ'));
+
+    const res = await request(app)
+      .get('/api/admin/reports?type=OTHER')
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.reports).toHaveLength(0);
+    expect(res.body.total).toBe(0);
   });
 });

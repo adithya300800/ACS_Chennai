@@ -175,16 +175,32 @@ function buildApp() {
         return all.filter((row) => {
           if (where.projectId && row.projectId !== where.projectId) return false;
           if (where.deletedAt === null && row.deletedAt) return false;
-          if (where.type && row.type !== where.type) return false;
+          // Type filter — accepts both `type: 'X'` (single value, the
+          // legacy callers' shape) and `type: { in: ['A', 'B'] }` (the
+          // CSV form rendered by `?types=A,B`). The route emits the
+          // single-value form when exactly one type is requested, the
+          // in-list form when 2+.
+          if (where.type !== undefined) {
+            if (typeof where.type === 'string') {
+              if (row.type !== where.type) return false;
+            } else if (where.type && typeof where.type === 'object' && Array.isArray(where.type.in)) {
+              if (!where.type.in.includes(row.type)) return false;
+            }
+          }
           // [DocumentCategory] Mirror the route's `category` filter
           // shape. The handler emits one of:
           //   { category: 'X' }           (single value)
           //   { category: { in: [a, b] }} (CSV — `categories` param)
+          //   { category: null }          (R44 legacy Other filter
+          //                                narrowing — `?type=OTHER`
+          //                                AND category IS NULL)
           // Legacy rows with category=null must NEVER match a
           // non-null filter so an admin who picks "Drawings" sees
           // only Drawings uploads, not the entire backlog.
           if (where.category !== undefined) {
-            if (typeof where.category === 'string') {
+            if (where.category === null) {
+              if (row.category !== null) return false;
+            } else if (typeof where.category === 'string') {
               if (row.category !== where.category) return false;
             } else if (where.category && typeof where.category === 'object' && Array.isArray(where.category.in)) {
               if (!where.category.in.includes(row.category)) return false;
@@ -750,5 +766,120 @@ describe('R43 - DocumentCategory subject-matter classifier', () => {
         }),
       }),
     );
+  });
+});
+
+describe('R44 — Flat taxonomy: legacy Other filter excludes category-tagged rows', () => {
+  // R44 narrowed the ?type=OTHER filter to mean "legacy Other only"
+  // (type=OTHER AND category IS NULL). Before R44 every new-category
+  // upload was silently type=OTHER, which meant a `?type=OTHER` filter
+  // also dragged in every Drawings / BOQ / Procurement / etc. row.
+  // These tests pin the new semantics so a future regression trips
+  // them instead of silently leaking category rows into the Other
+  // bucket.
+
+  function seedRow(id, type, category) {
+    return {
+      id,
+      projectId: PROJECT_ID,
+      type,
+      title: `${type}-${category || 'none'}`,
+      filename: `${type.toLowerCase()}.pdf`,
+      contentType: 'application/pdf',
+      sizeBytes: 1024,
+      blobPath: `employee-1/${id}.pdf`,
+      uploadedById: USER_ID,
+      uploadedAt: new Date('2026-09-22T10:00:00Z'),
+      deletedAt: null,
+      category: category ?? null,
+    };
+  }
+
+  it('30. ?type=OTHER returns only legacy Other rows (type=OTHER AND category=null); excludes category-tagged Other rows', async () => {
+    const { app, attachmentRows } = buildApp();
+    // Legacy Other — should match
+    attachmentRows.set('att-legacy-other', seedRow('att-legacy-other', 'OTHER', null));
+    // New-category uploads — all are silently type=OTHER by R43 contract.
+    // These MUST be excluded by the new ?type=OTHER filter.
+    attachmentRows.set('att-drawings',  seedRow('att-drawings',  'OTHER', 'DESIGN_DRAWINGS'));
+    attachmentRows.set('att-boq',       seedRow('att-boq',       'OTHER', 'COST_BOQ'));
+    attachmentRows.set('att-procure',   seedRow('att-procure',   'OTHER', 'PROCUREMENT_VENDOR'));
+    // Weekly row — unrelated, should never match ?type=OTHER at all.
+    attachmentRows.set('att-weekly',    seedRow('att-weekly',    'WEEKLY_REPORT', null));
+
+    const res = await request(app)
+      .get(`/api/projects/${PROJECT_ID}/attachments?type=OTHER`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    const ids = res.body.attachments.map((a) => a.id).sort();
+    expect(ids).toEqual(['att-legacy-other']);
+    // The Drawings / BOQ / Procurement rows are silently type=OTHER
+    // but the filter narrows by category IS NULL, so they don't leak in.
+    const responseIds = res.body.attachments.map((a) => a.id);
+    expect(responseIds).not.toContain('att-drawings');
+    expect(responseIds).not.toContain('att-boq');
+    expect(responseIds).not.toContain('att-procure');
+    expect(responseIds).not.toContain('att-weekly');
+  });
+
+  it('31. ?type=WEEKLY_REPORT is unaffected by the R44 narrowing (only WEEKLY rows match, regardless of category)', async () => {
+    const { app, attachmentRows } = buildApp();
+    attachmentRows.set('att-weekly',    seedRow('att-weekly',    'WEEKLY_REPORT', null));
+    attachmentRows.set('att-monthly',   seedRow('att-monthly',   'MONTHLY_REPORT', null));
+    attachmentRows.set('att-legacy',    seedRow('att-legacy',    'OTHER', null));
+
+    const res = await request(app)
+      .get(`/api/projects/${PROJECT_ID}/attachments?type=WEEKLY_REPORT`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.attachments).toHaveLength(1);
+    expect(res.body.attachments[0].id).toBe('att-weekly');
+  });
+
+  it('32. ?type=OTHER + ?category=X returns the category-tagged rows (the AND keeps category=X rows visible; narrowing is only triggered when no category is set)', async () => {
+    const { app, attachmentRows } = buildApp();
+    attachmentRows.set('att-legacy',    seedRow('att-legacy', 'OTHER', null));
+    attachmentRows.set('att-drawings', seedRow('att-drawings', 'OTHER', 'DESIGN_DRAWINGS'));
+    attachmentRows.set('att-boq',      seedRow('att-boq', 'OTHER', 'COST_BOQ'));
+
+    const res = await request(app)
+      .get(`/api/projects/${PROJECT_ID}/attachments?type=OTHER&category=DESIGN_DRAWINGS`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.attachments).toHaveLength(1);
+    expect(res.body.attachments[0].id).toBe('att-drawings');
+    // Legacy Other is excluded because category != DESIGN_DRAWINGS;
+    // BOQ is excluded because category != DESIGN_DRAWINGS. The user's
+    // explicit category pin is honoured.
+  });
+
+  it('33. ?type=OTHER with no legacy Other rows present returns an empty list (not all category-tagged rows)', async () => {
+    const { app, attachmentRows } = buildApp();
+    // Only category-tagged rows exist.
+    attachmentRows.set('att-drawings', seedRow('att-drawings', 'OTHER', 'DESIGN_DRAWINGS'));
+    attachmentRows.set('att-boq',      seedRow('att-boq',      'OTHER', 'COST_BOQ'));
+
+    const res = await request(app)
+      .get(`/api/projects/${PROJECT_ID}/attachments?type=OTHER`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.attachments).toHaveLength(0);
+  });
+
+  it('34. ?types=WEEKLY_REPORT,OTHER (CSV) narrows to (type IN …) AND category=null when no category pin', async () => {
+    const { app, attachmentRows } = buildApp();
+    attachmentRows.set('att-weekly',    seedRow('att-weekly',    'WEEKLY_REPORT', null));
+    attachmentRows.set('att-legacy',    seedRow('att-legacy',    'OTHER', null));
+    attachmentRows.set('att-drawings',  seedRow('att-drawings',  'OTHER', 'DESIGN_DRAWINGS'));
+
+    const res = await request(app)
+      .get(`/api/projects/${PROJECT_ID}/attachments?types=WEEKLY_REPORT,OTHER`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    const ids = res.body.attachments.map((a) => a.id).sort();
+    expect(ids).toEqual(['att-legacy', 'att-weekly']);
+    // The Drawings row is silently type=OTHER but excluded by the
+    // category IS NULL narrowing — keeping the `?types=…` admin
+    // surface consistent with the single-?type= semantics.
   });
 });
