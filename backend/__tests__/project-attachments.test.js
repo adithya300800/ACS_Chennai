@@ -176,6 +176,20 @@ function buildApp() {
           if (where.projectId && row.projectId !== where.projectId) return false;
           if (where.deletedAt === null && row.deletedAt) return false;
           if (where.type && row.type !== where.type) return false;
+          // [DocumentCategory] Mirror the route's `category` filter
+          // shape. The handler emits one of:
+          //   { category: 'X' }           (single value)
+          //   { category: { in: [a, b] }} (CSV — `categories` param)
+          // Legacy rows with category=null must NEVER match a
+          // non-null filter so an admin who picks "Drawings" sees
+          // only Drawings uploads, not the entire backlog.
+          if (where.category !== undefined) {
+            if (typeof where.category === 'string') {
+              if (row.category !== where.category) return false;
+            } else if (where.category && typeof where.category === 'object' && Array.isArray(where.category.in)) {
+              if (!where.category.in.includes(row.category)) return false;
+            }
+          }
           return true;
         }).slice(0, where.take || 100);
       }),
@@ -192,6 +206,10 @@ function buildApp() {
           sizeBytes: data.sizeBytes,
           blobPath: data.blobPath,
           uploadedById: data.uploadedById,
+          // [DocumentCategory] Capture the category on the row so a
+          // subsequent GET ?category= filter can find it. NULL on
+          // legacy rows — matches the Prisma column's nullability.
+          category: data.category ?? null,
           uploadedAt: new Date(),
           deletedAt: null,
         };
@@ -560,5 +578,177 @@ describe('R35.1 — Auto-create project on free-text name in URL', () => {
       .send(baseBody);
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('PROJECT_NOT_FOUND');
+  });
+});
+
+// R43 [DocumentCategory] - subject-matter classifier.
+//
+// Coverage matrix:
+//  23. POST with category=DESIGN_DRAWINGS - 201, row stored with that
+//      category, type silently coerced to OTHER
+//  24. POST with category on an OTHER upload - respects whatever type
+//      the client sent (the coercion only flips non-OTHER types when
+//      no category is explicitly requested; the route keeps the
+//      client's chosen type when a category is set)
+//  25. POST with category=BOGUS - 400 INVALID_CATEGORY
+//  26. GET with ?category=DESIGN_DRAWINGS - returns only matching rows
+//      (legacy category=null rows are excluded)
+//  27. GET with ?categories=DESIGN_DRAWINGS,COST_BOQ CSV - returns the
+//      union of matching categories
+//  28. GET with ?category=BOGUS - 400 INVALID_CATEGORY
+//  29. POST without category - row.category stays null (legacy flow
+//      untouched)
+describe('R43 - DocumentCategory subject-matter classifier', () => {
+  it('23. POST with category=DESIGN_DRAWINGS - 201, row stored with category, type coerced to OTHER', async () => {
+    const { app, prisma } = buildApp();
+    const res = await request(app)
+      .post(`/api/projects/${PROJECT_ID}/attachments`)
+      .set('Authorization', userJwt())
+      .send({ ...baseBody, type: 'WEEKLY_REPORT', category: 'DESIGN_DRAWINGS' });
+    expect(res.status).toBe(201);
+    // [DocumentCategory] The route must echo the chosen category on the
+    // serialized response and coerce `type` to OTHER so the legacy
+    // review state machine doesn't double-book the row.
+    expect(res.body.category).toBe('DESIGN_DRAWINGS');
+    expect(res.body.type).toBe('OTHER');
+    expect(prisma.projectAttachment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          category: 'DESIGN_DRAWINGS',
+          type: 'OTHER',
+        }),
+      }),
+    );
+  });
+
+  it('24. POST with category on an OTHER upload - respects the OTHER type, no double-coercion', async () => {
+    const { app, prisma } = buildApp();
+    const res = await request(app)
+      .post(`/api/projects/${PROJECT_ID}/attachments`)
+      .set('Authorization', userJwt())
+      .send({ ...baseBody, type: 'OTHER', category: 'COST_BOQ' });
+    expect(res.status).toBe(201);
+    expect(res.body.category).toBe('COST_BOQ');
+    expect(res.body.type).toBe('OTHER');
+    expect(prisma.projectAttachment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          category: 'COST_BOQ',
+          type: 'OTHER',
+        }),
+      }),
+    );
+  });
+
+  it('25. POST with category=BOGUS - 400 INVALID_CATEGORY', async () => {
+    const { app } = buildApp();
+    const res = await request(app)
+      .post(`/api/projects/${PROJECT_ID}/attachments`)
+      .set('Authorization', userJwt())
+      .send({ ...baseBody, category: 'BOGUS_CATEGORY' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_CATEGORY');
+  });
+
+  it('26. GET with ?category=DESIGN_DRAWINGS - returns only category-tagged rows, excludes legacy null-category rows', async () => {
+    const { app, attachmentRows } = buildApp();
+    // Tagged row - should match.
+    attachmentRows.set(ATTACHMENT_ID, {
+      id: ATTACHMENT_ID, projectId: PROJECT_ID, type: 'OTHER',
+      title: 'Floor plan', filename: 'plan.pdf',
+      contentType: 'application/pdf', sizeBytes: 100,
+      blobPath: 'x/plan.pdf', uploadedById: USER_ID,
+      category: 'DESIGN_DRAWINGS',
+      uploadedAt: new Date(), deletedAt: null,
+    });
+    // Different category - should NOT match.
+    attachmentRows.set(ATTACHMENT_ID_2, {
+      id: ATTACHMENT_ID_2, projectId: PROJECT_ID, type: 'OTHER',
+      title: 'Quote', filename: 'q.pdf',
+      contentType: 'application/pdf', sizeBytes: 200,
+      blobPath: 'x/q.pdf', uploadedById: USER_ID,
+      category: 'COST_BOQ',
+      uploadedAt: new Date(), deletedAt: null,
+    });
+    // Legacy null-category row - should NOT match.
+    const LEGACY_ID = '99999999-9999-4999-8999-999999999997';
+    attachmentRows.set(LEGACY_ID, {
+      id: LEGACY_ID, projectId: PROJECT_ID, type: 'WEEKLY_REPORT',
+      title: 'W36', filename: 'w36.pdf',
+      contentType: 'application/pdf', sizeBytes: 100,
+      blobPath: 'x/w36.pdf', uploadedById: USER_ID,
+      category: null,
+      uploadedAt: new Date(), deletedAt: null,
+    });
+    const res = await request(app)
+      .get(`/api/projects/${PROJECT_ID}/attachments?category=DESIGN_DRAWINGS`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.attachments).toHaveLength(1);
+    expect(res.body.attachments[0].id).toBe(ATTACHMENT_ID);
+    expect(res.body.attachments[0].category).toBe('DESIGN_DRAWINGS');
+  });
+
+  it('27. GET with ?categories=DESIGN_DRAWINGS,COST_BOQ CSV - returns the union of matching categories', async () => {
+    const { app, attachmentRows } = buildApp();
+    attachmentRows.set(ATTACHMENT_ID, {
+      id: ATTACHMENT_ID, projectId: PROJECT_ID, type: 'OTHER',
+      filename: 'plan.pdf', contentType: 'application/pdf',
+      sizeBytes: 100, blobPath: 'x/plan.pdf', uploadedById: USER_ID,
+      category: 'DESIGN_DRAWINGS',
+      uploadedAt: new Date(), deletedAt: null,
+    });
+    attachmentRows.set(ATTACHMENT_ID_2, {
+      id: ATTACHMENT_ID_2, projectId: PROJECT_ID, type: 'OTHER',
+      filename: 'q.pdf', contentType: 'application/pdf',
+      sizeBytes: 200, blobPath: 'x/q.pdf', uploadedById: USER_ID,
+      category: 'COST_BOQ',
+      uploadedAt: new Date(), deletedAt: null,
+    });
+    const SITE_ID = '99999999-9999-4999-8999-999999999996';
+    attachmentRows.set(SITE_ID, {
+      id: SITE_ID, projectId: PROJECT_ID, type: 'OTHER',
+      filename: 's.pdf', contentType: 'application/pdf',
+      sizeBytes: 300, blobPath: 'x/s.pdf', uploadedById: USER_ID,
+      category: 'SITE_PROGRESS_INSPECTIONS',
+      uploadedAt: new Date(), deletedAt: null,
+    });
+    const res = await request(app)
+      .get(`/api/projects/${PROJECT_ID}/attachments?categories=DESIGN_DRAWINGS,COST_BOQ`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.attachments).toHaveLength(2);
+    const ids = res.body.attachments.map((a) => a.id).sort();
+    expect(ids).toEqual([ATTACHMENT_ID, ATTACHMENT_ID_2].sort());
+  });
+
+  it('28. GET with ?category=BOGUS - 400 INVALID_CATEGORY', async () => {
+    const { app } = buildApp();
+    const res = await request(app)
+      .get(`/api/projects/${PROJECT_ID}/attachments?category=BOGUS`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_CATEGORY');
+  });
+
+  it('29. POST without category - row.category is null (legacy flow untouched)', async () => {
+    const { app, prisma } = buildApp();
+    const res = await request(app)
+      .post(`/api/projects/${PROJECT_ID}/attachments`)
+      .set('Authorization', userJwt())
+      .send(baseBody);
+    expect(res.status).toBe(201);
+    expect(res.body.category).toBeNull();
+    // The user's type was WEEKLY_REPORT and there's no category, so
+    // the legacy weekly-flow type is preserved.
+    expect(res.body.type).toBe('WEEKLY_REPORT');
+    expect(prisma.projectAttachment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          category: null,
+          type: 'WEEKLY_REPORT',
+        }),
+      }),
+    );
   });
 });
