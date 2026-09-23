@@ -18,9 +18,11 @@
 //   - The per-project read-sas + delete helpers (api.getProjectAttachmentReadSas
 //     + api.deleteProjectAttachment) — the admin response includes
 //     `projectId` so no new download/delete endpoints are needed.
-//   - PROJECT_REPORT_TYPES / PROJECT_REPORT_TYPE_LABELS from
-//     src/lib/constants.js — same labels the per-project ReportSection
-//     uses for chips + badges.
+//   - PROJECT_REPORT_TYPE_LABELS from src/lib/constants.js — same labels
+//     the per-project ReportSection uses for the per-card badge.
+//   - UNIFIED_TAXONOMY + taxonomyToFilterParams from src/lib/constants.js —
+//     single chip-row source shared with MyProjectReports + the in-
+//     accordion ReportSection (R44 flat-taxonomy consolidation).
 //   - The filter-chip + card-grid visual vocabulary of DrawingsAdmin.
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -34,10 +36,10 @@ import { formatShortDate, formatBytes } from '../../lib/format.js';
 import {
   MAX_REPORT_BYTES,
   ACCEPTED_REPORT_TYPES,
-  PROJECT_REPORT_TYPES,
   PROJECT_REPORT_TYPE_LABELS,
-  DOCUMENT_CATEGORIES,
   DOCUMENT_CATEGORY_LABELS,
+  UNIFIED_TAXONOMY,
+  taxonomyToFilterParams,
 } from '../../lib/constants.js';
 import FilterChip from '../../components/ui/FilterChip.jsx';
 
@@ -89,14 +91,14 @@ export default function ReportsAdmin() {
   const [projects, setProjects] = useState([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [projectId, setProjectId] = useState('');          // '' = all
-  const [activeTypes, setActiveTypes] = useState([]);        // [] = all
-  // [DocumentCategory] Single-value category chip filter (mutually
-  // exclusive — '' = show every category including uncategorised
-  // legacy rows). Mirrors the MyProjectReports chip row + the
-  // backend's ?category= query param. The admin can pick at most
-  // one category at a time to keep the chip row readable on a 5-row
-  // toolbar that already has 4 dropdown filters.
-  const [filterCategory, setFilterCategory] = useState('');
+  // [R44-flat-taxonomy] Replaces the old multi-type `activeTypes`
+  // array + `filterCategory` pair. One chip selects either a
+  // cadence (kind='type') OR a subject-matter classifier
+  // (kind='category'); the wire params are derived via
+  // taxonomyToFilterParams below. null = "All" (no filter). The
+  // R44 single-select replaces the previous multi-type chip UI as
+  // part of the cross-surface consolidation.
+  const [selectedTaxonomy, setSelectedTaxonomy] = useState(null);
   const [uploadedById, setUploadedById] = useState('');     // '' = all
   const [employees, setEmployees] = useState([]);
   const [employeesLoading, setEmployeesLoading] = useState(true);
@@ -177,23 +179,17 @@ export default function ReportsAdmin() {
     if (append) setLoadingMore(true); else setLoading(true);
     setError('');
     try {
-      // [DR-022] Backend now accepts `?types=A,B,C` (CSV) — the
-      // multi-type chip case used to issue one request per type and
-      // merge in-memory, silently truncating to 50 rows on page 1 and
-      // keeping only the first type's nextCursor. The CSV form is one
-      // round trip, the order is server-stable, and the nextCursor we
-      // forward is the union's, not one bucket's. The previous
-      // truncation (`deduped.slice(0, DEFAULT_LIMIT)`) is gone — every
-      // matching ID is reachable across pages.
-      const params = { limit: String(DEFAULT_LIMIT) };
+      // [R44-flat-taxonomy] The chip selection drives the legacy
+      // `?type=` (or `?types=` for CSV) and the new `?category=`
+      // filters via taxonomyToFilterParams. The legacy "Other" chip
+      // now narrows server-side to category IS NULL (R44 backend fix)
+      // so a `?type=OTHER` request no longer leaks category-tagged
+      // rows. The CSV variant `?types=A,B,C` is no longer needed on
+      // this admin page since R44 demoted multi-type to single-select
+      // (every Reports Admin filter collapses to one params object).
+      const filterParams = taxonomyToFilterParams(selectedTaxonomy);
+      const params = { limit: String(DEFAULT_LIMIT), ...filterParams };
       if (projectId) params.projectId = projectId;
-      if (activeTypes.length > 0) params.types = activeTypes.join(',');
-      // [DocumentCategory] Forward the chip filter to the backend GET
-      // handler. The CSV variant (?categories=A,B) is intentionally not
-      // exposed here — admins pick one category at a time on this page
-      // so the single-value param keeps the wire contract symmetric
-      // with MyProjectReports.
-      if (filterCategory) params.category = filterCategory;
       if (uploadedById) params.uploadedById = uploadedById;
       if (fromDate) params.from = fromDate;
       if (toDate) params.to = toDate;
@@ -216,7 +212,7 @@ export default function ReportsAdmin() {
     } finally {
       if (append) setLoadingMore(false); else setLoading(false);
     }
-  }, [projectId, activeTypes, uploadedById, fromDate, toDate, accessToken, filterCategory]);
+  }, [projectId, uploadedById, fromDate, toDate, accessToken, selectedTaxonomy]);
 
   // Re-fetch when any filter changes — same effect shape as
   // DrawingsAdmin's `useEffect(() => { fetchDrawings(); }, [fetchDrawings])`.
@@ -225,18 +221,14 @@ export default function ReportsAdmin() {
   }, [fetchReports]);
 
   // ─── Filter handlers ───────────────────────────────────────────────
-  function toggleType(t) {
-    setActiveTypes((prev) => prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]);
-  }
   function clearAllFilters() {
     setProjectId('');
-    setActiveTypes([]);
-    setFilterCategory('');
+    setSelectedTaxonomy(null);
     setUploadedById('');
     setFromDate('');
     setToDate('');
   }
-  const anyFilterActive = projectId || activeTypes.length > 0 || uploadedById || fromDate || toDate || filterCategory;
+  const anyFilterActive = projectId || Boolean(selectedTaxonomy) || uploadedById || fromDate || toDate;
 
   // ─── Actions ───────────────────────────────────────────────────────
   async function handleDownload(att) {
@@ -480,31 +472,32 @@ export default function ReportsAdmin() {
             />
           </div>
         </div>
+        {/* [R44-flat-taxonomy] Single chip-row filter replaces the legacy
+          dual Type-buttons + Category-chip rows. Same 13 values +
+          "All" sentry as the employee MyProjectReports + the in-
+          accordion ReportSection surfaces — three surfaces now
+          share the exact same chip order + labels. Single-select
+          semantics (was already single on Category; was multi on
+          Type buttons and is now demoted to single per the R44
+          cross-surface consolidation). Forwarded to the GET handler
+          via taxonomyToFilterParams so the server does the actual
+          filtering. */}
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center', marginTop: '0.6rem' }}>
-          <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginRight: '0.25rem' }}>Type:</span>
-          {PROJECT_REPORT_TYPES.map((t) => {
-            const active = activeTypes.includes(t);
-            return (
-              <button
-                key={t}
-                type="button"
-                aria-pressed={active}
-                onClick={() => toggleType(t)}
-                style={{
-                  fontSize: '0.72rem',
-                  fontWeight: 600,
-                  padding: '0.2rem 0.6rem',
-                  borderRadius: 999,
-                  border: '1px solid ' + (active ? 'var(--brand, #0066ff)' : '#cbd5e1'),
-                  background: active ? 'rgba(0, 102, 255, 0.08)' : 'white',
-                  color: active ? 'var(--brand, #0066ff)' : 'var(--steel, #64748b)',
-                  cursor: 'pointer',
-                }}
-              >
-                {PROJECT_REPORT_TYPE_LABELS[t]?.short || t}
-              </button>
-            );
-          })}
+          <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginRight: '0.25rem' }}>Filter:</span>
+          <FilterChip
+            label="All"
+            active={selectedTaxonomy === null}
+            onClick={() => setSelectedTaxonomy(null)}
+          />
+          {UNIFIED_TAXONOMY.map((chip) => (
+            <FilterChip
+              key={chip.value}
+              label={chip.short}
+              title={chip.label}
+              active={selectedTaxonomy === chip.value}
+              onClick={() => setSelectedTaxonomy(selectedTaxonomy === chip.value ? null : chip.value)}
+            />
+          ))}
           {anyFilterActive && (
             <button
               type="button"
@@ -523,30 +516,6 @@ export default function ReportsAdmin() {
               Clear filters
             </button>
           )}
-        </div>
-        {/* [DocumentCategory] Subject-matter chip filter row. Sits
-            BELOW the type chips so the cadence filter stays visually
-            primary, matching the upload form's order. Uses the shared
-            FilterChip (lifted in round-43) so the admin chip row +
-            the employee MyProjectReports chip row + the upload
-            chip row render identical pills. Mutually exclusive: one
-            category at a time, since the admin toolbar already has 4
-            dropdown filters above. */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center', marginTop: '0.4rem' }}>
-          <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginRight: '0.25rem' }}>Category:</span>
-          <FilterChip
-            label="All"
-            active={filterCategory === ''}
-            onClick={() => setFilterCategory('')}
-          />
-          {DOCUMENT_CATEGORIES.map((c) => (
-            <FilterChip
-              key={c}
-              label={DOCUMENT_CATEGORY_LABELS[c]?.short || c}
-              active={filterCategory === c}
-              onClick={() => setFilterCategory(filterCategory === c ? '' : c)}
-            />
-          ))}
         </div>
       </div>
 
