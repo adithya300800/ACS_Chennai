@@ -93,6 +93,22 @@ const VALID_TYPES = new Set([
   'OTHER',
 ]);
 
+// [DocumentCategory] Subject-matter classifier — same shape as
+// projectAttachments.js VALID_DOCUMENT_CATEGORIES. Mirrors the Prisma
+// enum so the admin chip-row filter accepts the same strings the
+// employee upload form sends. Keep in sync with the enum + the
+// per-project route — all three share the same 8 values.
+const VALID_DOCUMENT_CATEGORIES = new Set([
+  'CLIENT_APPROVALS_DELIVERABLES',
+  'DESIGN_DRAWINGS',
+  'COST_BOQ',
+  'PROCUREMENT_VENDOR',
+  'SITE_PROGRESS_INSPECTIONS',
+  'QUALITY_SAFETY',
+  'CONTRACTS_CHANGE_ORDERS',
+  'HANDOVER_CLOSEOUT',
+]);
+
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 
@@ -176,6 +192,12 @@ function serializeAdminReport(row) {
     // with uploadIntentUlid means the admin diagnostic view can
     // follow the wiring without a separate reconciliation call.
     uploadIntentUlid: row.uploadIntentUlid || null,
+    // [DocumentCategory] Subject-matter classifier. NULL on legacy
+    // Weekly / Monthly / Due Diligence / Quality / Other rows;
+    // present on every row the employee uploaded via the new
+    // category chip path. Drives the admin chip-row filter and the
+    // "by category" grouping on the employee's MyProjectReports view.
+    category: row.category || null,
     project: row.project ? {
       id: row.project.id,
       name: row.project.name,
@@ -246,7 +268,7 @@ router.get('/', async (req, res) => {
   }
 
   // ─── Validate query params ────────────────────────────────────────
-  const { projectId, uploadedById, type, types, from, to } = req.query;
+  const { projectId, uploadedById, type, types, category, categories, from, to } = req.query;
 
   // [DR-022] Resolve the type filter — accept either `?type=` (single
   // enum, legacy callers) or `?types=A,B,C` (CSV, the admin Reports
@@ -283,6 +305,43 @@ router.get('/', async (req, res) => {
       });
     }
     if (!requestedTypes.length) requestedTypes.push(type);
+  }
+
+  // [DocumentCategory] Resolve the category filter — same single / CSV
+  // shape as the type filter. The admin Reports page sends the
+  // chip-row's active categories as `?categories=A,B,C`; unknown
+  // values are 400 INVALID_CATEGORY. NULL category (legacy report
+  // rows) is reachable via `?category=` omitted or via a dedicated
+  // "Uncategorised" chip that the SPA renders when no chip is active.
+  const requestedCategories = [];
+  if (categories) {
+    if (typeof categories !== 'string') {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_CATEGORY',
+        message: 'categories must be a comma-separated string',
+      });
+    }
+    for (const c of categories.split(',').map((s) => s.trim()).filter(Boolean)) {
+      if (!VALID_DOCUMENT_CATEGORIES.has(c)) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          code: 'INVALID_CATEGORY',
+          message: `categories contains unknown value: ${c}`,
+        });
+      }
+      requestedCategories.push(c);
+    }
+  }
+  if (category) {
+    if (!VALID_DOCUMENT_CATEGORIES.has(category)) {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_CATEGORY',
+        message: `category must be one of: ${Array.from(VALID_DOCUMENT_CATEGORIES).join(', ')}`,
+      });
+    }
+    if (!requestedCategories.length) requestedCategories.push(category);
   }
 
   let fromDate = null;
@@ -392,6 +451,14 @@ router.get('/', async (req, res) => {
     ...(uploadedById ? { uploadedById } : {}),
     ...(requestedTypes.length === 1 ? { type: requestedTypes[0] } : {}),
     ...(requestedTypes.length > 1 ? { type: { in: requestedTypes } } : {}),
+    // [DocumentCategory] Category filter — composite index on
+    // (projectId, category, deletedAt) covers the per-project
+    // filtered case; the unscoped path falls back to the same
+    // index via the projectId sub-clause + a category filter on
+    // the resulting set. NULL categories (legacy rows) match when
+    // no category filter is active.
+    ...(requestedCategories.length === 1 ? { category: requestedCategories[0] } : {}),
+    ...(requestedCategories.length > 1 ? { category: { in: requestedCategories } } : {}),
     ...(fromDate || toDate ? {
       uploadedAt: {
         ...(fromDate ? { gte: fromDate } : {}),

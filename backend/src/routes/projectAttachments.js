@@ -97,6 +97,23 @@ const VALID_REPORT_TYPES = new Set([
   'OTHER',
 ]);
 
+// [DocumentCategory] Subject-matter classifier — orthogonal to `type`.
+// 8 values mirror the Prisma `DocumentCategory` enum (schema.prisma).
+// A row's `category` is null unless the uploader picked one of these —
+// legacy Weekly / Monthly / Due Diligence / Quality uploads leave it
+// null and the existing review state machine (ProjectAttachmentStatus)
+// keeps working untouched.
+const VALID_DOCUMENT_CATEGORIES = new Set([
+  'CLIENT_APPROVALS_DELIVERABLES',
+  'DESIGN_DRAWINGS',
+  'COST_BOQ',
+  'PROCUREMENT_VENDOR',
+  'SITE_PROGRESS_INSPECTIONS',
+  'QUALITY_SAFETY',
+  'CONTRACTS_CHANGE_ORDERS',
+  'HANDOVER_CLOSEOUT',
+]);
+
 // Mirror of the dpr-documents per-container allowlist in
 // routes/dpr.js. The upload pipeline gates /sas-url against this list;
 // this is the same gate re-applied to the POST body so a malicious or
@@ -165,6 +182,12 @@ function serializeProjectAttachment(row) {
     // mismatch returns 409 STALE_REVIEW_VERSION. Default 0 keeps
     // pre-migration rows readable until the migration runs.
     contentVersion: row.contentVersion ?? 0,
+    // [DocumentCategory] Subject-matter classifier. NULL on every row
+    // uploaded via the legacy report flow (Weekly / Monthly / Due
+    // Diligence / Quality / Other). New-category uploads set this
+    // explicitly; the value drives the employee group's "by category"
+    // view and the admin ?category= chip filter.
+    category: row.category || null,
   };
 }
 
@@ -337,7 +360,7 @@ router.get('/', asyncHandler(async (req, res) => {
   }
 
   const projectId = readProjectId(req);
-  const { type, types, cursor, limit } = req.query;
+  const { type, types, category, categories, cursor, limit } = req.query;
 
   // [DR-022] Resolve the type filter — accept either `?type=` (single
   // enum, legacy callers) or `?types=A,B,C` (CSV, admin Reports page).
@@ -372,6 +395,41 @@ router.get('/', asyncHandler(async (req, res) => {
       });
     }
     if (!requestedTypes.length) requestedTypes.push(type);
+  }
+
+  // [DocumentCategory] Resolve the category filter — same CSV / single
+  // shape as the type filter. Unknown values are 400 INVALID_CATEGORY.
+  // The shape mirrors `type`/`types` deliberately so the chip row on
+  // the React side uses the same onClick handler.
+  const requestedCategories = [];
+  if (categories) {
+    if (typeof categories !== 'string') {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_CATEGORY',
+        message: 'categories must be a comma-separated string',
+      });
+    }
+    for (const c of categories.split(',').map((s) => s.trim()).filter(Boolean)) {
+      if (!VALID_DOCUMENT_CATEGORIES.has(c)) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          code: 'INVALID_CATEGORY',
+          message: `categories contains unknown value: ${c}`,
+        });
+      }
+      requestedCategories.push(c);
+    }
+  }
+  if (category) {
+    if (!VALID_DOCUMENT_CATEGORIES.has(category)) {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_CATEGORY',
+        message: `category must be one of: ${Array.from(VALID_DOCUMENT_CATEGORIES).join(', ')}`,
+      });
+    }
+    if (!requestedCategories.length) requestedCategories.push(category);
   }
 
   // [DR-022] Cursor codec — base64url(JSON({ uploadedAt: ISO, id })).
@@ -429,6 +487,12 @@ router.get('/', asyncHandler(async (req, res) => {
       deletedAt: null,
       ...(requestedTypes.length === 1 ? { type: requestedTypes[0] } : {}),
       ...(requestedTypes.length > 1 ? { type: { in: requestedTypes } } : {}),
+      // [DocumentCategory] Category filter — uses the composite
+      // (projectId, category, deletedAt) index. NULL values are
+      // indexed too, so "category IS NULL" legacy reports keep
+      // working without a separate index path.
+      ...(requestedCategories.length === 1 ? { category: requestedCategories[0] } : {}),
+      ...(requestedCategories.length > 1 ? { category: { in: requestedCategories } } : {}),
       ...(cursorPredicate || {}),
     };
     const rows = await prisma.projectAttachment.findMany({
@@ -541,6 +605,23 @@ router.post('/', asyncHandler(async (req, res) => {
       message: `type must be one of: ${Array.from(VALID_REPORT_TYPES).join(', ')}`,
     });
   }
+  // [DocumentCategory] Optional subject-matter classifier. When present
+  // it overrides `type` to 'OTHER' (the enum contract still sees a
+  // valid value; the existing review state machine treats the row as
+  // an "Other" report — `category` is the real classifier). A bad value
+  // is 400 INVALID_CATEGORY; an empty string is treated as "no
+  // category" so a stub field from a non-upgraded client doesn't 400.
+  let resolvedCategory = null;
+  if (body.category != null && body.category !== '') {
+    if (typeof body.category !== 'string' || !VALID_DOCUMENT_CATEGORIES.has(body.category)) {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'INVALID_CATEGORY',
+        message: `category must be one of: ${Array.from(VALID_DOCUMENT_CATEGORIES).join(', ')}`,
+      });
+    }
+    resolvedCategory = body.category;
+  }
   if (body.title != null && (typeof body.title !== 'string')) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'title must be a string' });
   }
@@ -595,7 +676,18 @@ router.post('/', asyncHandler(async (req, res) => {
         data: {
           id: randomUUID(),
           projectId,
-          type: body.type,
+          // [DocumentCategory] When `category` is present we silently
+          // override `type` to 'OTHER' so the legacy review state
+          // machine treats the row as an "Other" report — `category`
+          // is the real classifier for these uploads. A well-behaved
+          // client already sends type='OTHER' alongside a category; the
+          // override is the defensive backstop for any client that
+          // forgets. Category-tagged rows skip the admin review queue
+          // entirely (status stays PENDING_REVIEW per the schema
+          // default, but the admin Reports page's review action bar
+          // filters them out via the same `category IS NOT NULL`
+          // predicate the GET filter uses).
+          type: resolvedCategory ? 'OTHER' : body.type,
           title: body.title ? body.title.trim() : null,
           filename: body.filename.trim(),
           contentType: body.contentType,
@@ -605,6 +697,10 @@ router.post('/', asyncHandler(async (req, res) => {
           // referenced-ulid defence can find this row.
           uploadIntentUlid: body.uploadIntentUlid || null,
           uploadedById: req.employeeId,
+          // [DocumentCategory] Subject-matter classifier. NULL on
+          // every legacy report upload; set explicitly when the
+          // employee picked a category chip on the upload form.
+          category: resolvedCategory,
         },
       });
       if (intentWrapper) {
