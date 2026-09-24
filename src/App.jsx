@@ -309,7 +309,14 @@ function App() {
                   <Route path="/contact" element={<Contact />} />
                   {/* A-05: Blog + Careers route stubs wired up so Header/Footer
                       links resolve to a real page instead of bouncing to Home. */}
+                  {/* [DR-041] Blog article route — the list at /blog links to
+                      /blog/:slug and Blog.jsx already has the slug view
+                      with an intentional unknown-slug fallback. The
+                      catch-all /blog MUST come before /blog/:slug so
+                      HashRouter matches the literal first (same lesson
+                      pinned on /training, /projects, /admin/drawings). */}
                   <Route path="/blog" element={<Blog />} />
+                  <Route path="/blog/:slug" element={<Blog />} />
                   <Route path="/careers" element={<Careers />} />
                   {/* A-12: visible 404 for typo'd public URLs (was silent Home render). */}
                   <Route path="*" element={<NotFound />} />
