@@ -1141,7 +1141,14 @@ export default function BillingCertificationsAdmin() {
                     disabled={transitionPending}
                     onClick={() => handleCertify(detailCert)}
                   >
-                    {transitionPending ? 'Working…' : 'Mark Certified'}
+                    {/* [§8.5 Fresh24] Consistent label vocabulary across the
+                        register — "Save draft" / "Mark certified" /
+                        "Create correction". Previously "Mark Certified"
+                        (capital C) clashed with the upper-case status
+                        pills, making it read like a state label rather
+                        than an action. Lower-case 'c' reads as a verb
+                        phrase ("mark this certified"), not a noun. */}
+                    {transitionPending ? 'Working…' : 'Mark certified'}
                   </button>
                 )}
                 {detailCert.status === 'CERTIFIED' && (
@@ -1878,8 +1885,21 @@ function CertificationFormModal({
           <button type="button" className="btn btn-secondary" onClick={onClose} disabled={submitting}>
             Cancel
           </button>
+          {/* [§8.5 Fresh24] Consistent label vocabulary — Save draft /
+              Create correction, replacing the generic "Record certification"
+              that didn't reflect what the button actually does:
+                • create mode  → submitting creates a new DRAFT row, so
+                  the action is "Save draft" (the row is still a DRAFT
+                  until someone clicks "Mark certified").
+                • edit mode    → submitting PATCHes the correction DRAFT
+                  (parentCertificationId is set in this path), so the
+                  action is "Create correction" — the row stays a
+                  correction DRAFT until re-certified.
+              "Save correction" was misleading because the row remains
+              a correction DRAFT after submit; only a subsequent
+              "Mark certified" advances it. */}
           <button type="submit" className="btn btn-primary" disabled={submitting}>
-            {submitting ? (submittingLabel || 'Saving…') : (mode === 'edit' ? 'Save correction' : 'Record certification')}
+            {submitting ? (submittingLabel || 'Saving…') : (mode === 'edit' ? 'Create correction' : 'Save draft')}
           </button>
         </div>
       </form>

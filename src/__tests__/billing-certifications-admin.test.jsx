@@ -278,3 +278,66 @@ describe('DR-029 — billing aggregates refresh on mutation + stale-response gua
     expect(pageSrc).toMatch(/onClick=\{\(\)\s*=>\s*fetchAggregates\(\)\s*\}/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [§8.5 Fresh24 audit, 2026-09-24] — Consistent button-label vocabulary.
+//
+// The audit found that "Add certification saved DRAFT, while the button
+// said 'Record certification'" — the label on the create button did not
+// reflect the resulting state. The fix introduces a 3-label vocabulary
+// aligned with the row's lifecycle:
+//
+//   • "Save draft"        — submitting creates a NEW DRAFT row.
+//   • "Mark certified"    — admin advances a DRAFT to CERTIFIED.
+//   • "Create correction" — submitting PATCHes a correction DRAFT.
+//
+// The legacy literal "Record certification" must be gone — it muddied
+// the audit-trail language (you can't "record" something that lives in
+// DRAFT until someone certifies it).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('§8.5 Fresh24 — Billing Certifications button-label vocabulary', () => {
+  test('1. "Save draft" appears as the create-mode submit button label', () => {
+    // The modal submit button in `mode === 'create'` (default when the
+    // admin clicks "+ Add certification") must read "Save draft" so
+    // the label matches the post-submit row state.
+    expect(pageSrc).toMatch(/Save draft/);
+  });
+
+  test('2. "Mark certified" appears as the certify action button label', () => {
+    // The detail-modal action bar shows a "Mark certified" button when
+    // the row is in DRAFT (transitions to CERTIFIED). Lower-case 'c'
+    // matches the action-verb vocabulary ("Save draft" / "Create
+    // correction") rather than the upper-case status pill
+    // vocabulary (CERTIFIED).
+    expect(pageSrc).toMatch(/Mark certified/);
+  });
+
+  test('3. "Create correction" appears as the edit-mode submit button label', () => {
+    // The modal submit button in `mode === 'edit'` (reached from the
+    // "Edit DRAFT" button on a correction DRAFT) must read "Create
+    // correction" — submitting PATCHes the correction DRAFT.
+    expect(pageSrc).toMatch(/Create correction/);
+  });
+
+  test('4. the legacy literal "Record certification" is gone (outside comments)', () => {
+    // Pre-fix the create-mode submit button read "Record certification"
+    // which didn't match the post-submit state (DRAFT). A regression
+    // that re-introduces this label breaks this test.
+    //
+    // Wave 3 lesson (Fresh24 source-text pins): filter JS comments
+    // before regex matching. Header doc-blocks often quote legacy
+    // labels as part of their "what we replaced" rationale. Strip
+    // block comments so the pin only catches CODE occurrences, not
+    // the explanatory prose.
+    const stripped = pageSrc.replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(stripped).not.toMatch(/Record certification/);
+  });
+
+  test('5. create vs edit mode dispatch uses the new label vocabulary', () => {
+    // The modal submit button's ternary now resolves to "Create
+    // correction" / "Save draft" — verify the source still routes
+    // through mode === 'edit' (regression guard for the lifecycle).
+    expect(pageSrc).toMatch(/mode\s*===\s*['"]edit['"]\s*\?\s*['"]Create correction['"]\s*:\s*['"]Save draft['"]/);
+  });
+});
