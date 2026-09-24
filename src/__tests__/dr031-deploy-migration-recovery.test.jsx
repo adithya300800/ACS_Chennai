@@ -72,48 +72,41 @@ describe('DR-031 — clear-failed-migrations.js guard', () => {
 });
 
 describe('DR-031 — start.sh uses the safe predicate', () => {
-  test('3. start.sh invokes `migrate resolve --rolled-back` for the DR-031 migration', () => {
-    // [DR-032] start.sh does NOT issue a raw DELETE against
-    // _prisma_migrations — auto-recovery is explicitly forbidden
-    // (db-recover.test.js pins this). Instead, start.sh uses
-    // `npx prisma migrate resolve --rolled-back 20260908150000_dr031_leave_constraint_correct_bound`
-    // which is the official Prisma API for clearing an errored ledger
-    // row. The `|| true` swallows the non-zero exit when the named
-    // migration is not in errored state (steady-state after the first
-    // successful recovery).
+  test('3. start.sh documents the known-bad rows + points operators at the explicit reconcile tool', () => {
+    // [DR-035 2026-09-24] start.sh no longer auto-runs `prisma migrate
+    // resolve --rolled-back` on cold start. The bootstrap-resolve loop
+    // body was extracted into
+    // `backend/scripts/reconcile-failed-migrations.sh` and is now
+    // invoked EXPLICITLY — either by setting DR031_RECONCILE=1 on the
+    // CI deploy workflow (gated step) or by an operator running the
+    // script directly. Ordinary pushes do NOT set DR031_RECONCILE so
+    // Render startup never sees the reconcile loop.
     //
-    // [S7-SQLFIX 2026-09-12] start.sh's bootstrap is now a small loop
-    // over known errored rows (DR-031 + S7) instead of an inline
-    // command — both rows get cleared in one pass. The literal
-    // `|| true` is gone but the steady-state-no-op swallow shape
-    // remains: the loop's last command's exit code is intentionally
-    // discarded (we don't `set -e` around the loop body).
+    // What remains in start.sh is documentation:
+    //   - the list of known-bad migration names that operators may
+    //     need to clear (DR-031, S7, DR-025), as COMMENTS only
+    //   - the failure message that points at the new explicit tool
     //
-    // DR-031 audit invariant: the predicate the postinstall hook uses
-    // (finished_at IS NULL OR applied_steps_count = 0) is enforced
-    // INSIDE prisma's `migrate resolve` — the operator-facing API
-    // already refuses to resolve a successfully-applied row, so we
-    // don't need to repeat the predicate in shell.
-    expect(startShSrc).toMatch(
-      /20260908150000_dr031_leave_constraint_correct_bound/,
-    );
-    // The loop pattern must also list the S7 row (so re-syncing the
-    // dashboard to render.yaml's `sh start.sh` doesn't re-introduce
-    // the P3009 hang on cd71893).
-    expect(startShSrc).toMatch(
-      /20260912070000_s7_project_attachment_review/,
-    );
-    // The bootstrap block must invoke the resolve CLI — the literal
-    // `migrate resolve --rolled-back` form (variable may be quoted).
-    expect(startShSrc).toMatch(
-      /npx\s+prisma\s+migrate\s+resolve\s+--rolled-back\s+["']?\$MIG["']?/,
-    );
-    // The loop body must swallow each iteration's exit code so a
-    // steady-state no-op (rc != 0) doesn't trip `set -e` at the
-    // outer scope. `>/dev/null 2>&1` is the canonical swallow; the
-    // shape `\bfor\b` confirms it's now a loop.
-    expect(startShSrc).toMatch(/\bfor\b[^\n]*\bin\b/);
-    expect(startShSrc).toMatch(/2>&1\s*\|\|\s*true|>\/dev\/null[^\n]*\|\|\s*true/);
+    // Pin the documentation contract and pin the ABSENCE of any
+    // executable shell that resolves rows. Filter comments before
+    // scanning for the migration names so the comment block doesn't
+    // false-positive.
+    const codeOnly = startShSrc
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .join('\n');
+    // Failure message points at the explicit operations tool.
+    expect(startShSrc).toMatch(/set DR031_RECONCILE=1 on the deploy workflow/);
+    expect(startShSrc).toMatch(/scripts\/reconcile-failed-migrations\.sh/);
+    expect(startShSrc).toMatch(/npm run db:recover\s+--\s+--confirmed-abandoned/);
+    // No executable resolve call in start.sh — filter comments so the
+    // header doc-block that explains what DR-035 retired doesn't
+    // false-positive.
+    expect(codeOnly).not.toMatch(/prisma\s+migrate\s+resolve/);
+    expect(codeOnly).not.toMatch(/\bfor\s+MIG\s+in/);
+    // The known-bad migration names appear only in comments.
+    expect(codeOnly).not.toMatch(/20260908150000_dr031_leave_constraint_correct_bound/);
+    expect(codeOnly).not.toMatch(/20260912070000_s7_project_attachment_review/);
   });
 });
 
