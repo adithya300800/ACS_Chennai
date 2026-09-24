@@ -39,13 +39,28 @@ echo "[restore] source=$BACKUP_FILE"
 case "$BACKUP_FILE" in
   *.dump.gz)
     echo "[restore] format: gzip-wrapped custom dump"
-    gunzip -c "$BACKUP_FILE" | pg_restore \
+    # DR-036: decompress to a seekable tempfile BEFORE invoking parallel
+    # pg_restore. pg_restore --jobs=N spawns N workers that all read from
+    # the same fd; a stdout pipe is a sequential stream, so the workers
+    # contend for bytes and corrupt the archive. A real tempfile lets each
+    # worker seek independently. The previous branch piped `gunzip -c`
+    # directly into `pg_restore --jobs=4`, which silently garbled the
+    # restore. The .dump branch already passes a seekable file and is
+    # unaffected.
+    WORK=$(mktemp -t acs-restore.XXXXXX.dump)
+    trap 'rm -f "$WORK"' EXIT
+    if ! gunzip -c "$BACKUP_FILE" > "$WORK"; then
+      echo "[restore] ERROR: gunzip failed on $BACKUP_FILE" >&2
+      exit 3
+    fi
+    pg_restore \
       --clean \
       --if-exists \
       --no-owner \
       --no-privileges \
       --dbname="$BACKUP_RESTORE_URL" \
-      --jobs=4
+      --jobs=4 \
+      "$WORK"
     ;;
   *.dump)
     echo "[restore] format: raw custom dump"
