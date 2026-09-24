@@ -1,0 +1,68 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DR-025 (fresh-product audit 2026-09-24) — CANCELLED status on
+--                                            BillingCertification.
+-- ─────────────────────────────────────────────────────────────────────────────
+--
+-- Trigger:
+--   The audit's DR-025 finding traces the failure mode where abandoning a
+--   correction (the "cancel-correction" command) hard-deletes the correction
+--   row AND restores the parent in the same transaction. That has two
+--   concrete consequences:
+--
+--     1. The correction's audit history is destroyed — there's no record of
+--        who created the correction, what amounts it carried, or that it was
+--        abandoned. Re-walking the chain from the parent later shows nothing
+--        ever happened.
+--
+--     2. The cancel-correction endpoint has no version pin and no status
+--        guard — a stale tab can call cancel-correction on a correction that
+--        another writer has already advanced to CERTIFIED, deleting the
+--        CERTIFIED history and restoring the original out from under the
+--        successor chain.
+--
+-- Repair:
+--   Add a new enum value `CANCELLED` to billing_certification_status so the
+--   correction row stays in place with a terminal status. The route now
+--   transitions DRAFT → CANCELLED in place (version +1) and only ever acts
+--   on a leaf-DRAFT target with a matching expectedVersion. The parent is
+--   restored the same way it was before (supersededAt = null, version +1)
+--   and the audit trail — correction row included — remains intact for
+--   history walks.
+--
+-- Effect (1 enum ADD VALUE, additive — zero destructive change to existing
+-- rows or schema):
+--
+--   1. ALTER TYPE billing_certification_status ADD VALUE 'CANCELLED'.
+--      Existing rows keep their status — DRAFT / CERTIFIED / DISPUTED — and
+--      the new value is only assigned by /cancel-correction under the new
+--      guards.
+--
+-- Why a new migration (not an edit to dr019_financial_versioning / r37)
+-- ------------------------------------------------------------------------
+-- Append-only by Phase-4 P0 policy (see memory/phase-4-p0-s3-6-typo-and-
+-- baseline-hazard.md). The originals stay frozen as the audit trail for
+-- the initial R37 / DR-019 schemas.
+--
+-- Idempotency
+-- -----------
+-- ALTER TYPE ... ADD VALUE uses IF NOT EXISTS (Postgres 9.6+) so a re-run
+-- against an already-migrated DB is a no-op. Matches the S7 / R35 / R37 /
+-- DR-021 / DocumentCategory migration convention.
+--
+-- ADD VALUE caveat
+-- ----------------
+-- Postgres 12+ allows ALTER TYPE ... ADD VALUE inside a transaction block,
+-- BUT the new value cannot be used in the SAME transaction it was added
+-- in. This migration adds the value only — the route that writes it runs
+-- in a separate request transaction — so there's no conflict.
+--
+-- Backward compatibility
+-- ----------------------
+-- Existing rows are not touched. The new value only appears on rows the
+-- /cancel-correction endpoint transitions, starting from the deploy of the
+-- matching route change (see backend/src/routes/billingCertifications.js
+-- /cancel-correction handler comments).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+ALTER TYPE "billing_certification_status"
+  ADD VALUE IF NOT EXISTS 'CANCELLED';

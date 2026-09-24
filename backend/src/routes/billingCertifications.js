@@ -34,13 +34,22 @@
 //                                              reason.
 //   POST   /:id/undispute                      DISPUTED → CERTIFIED. Clears
 //                                              disputeReason.
-//   POST   /:id/cancel-correction              [DR-016 followup] Abandon
-//                                              an in-flight DRAFT correction.
-//                                              Restores the parent's
-//                                              supersededAt = null and
-//                                              hard-deletes the correction
-//                                              row, in one transaction.
-//                                              Admin-only.
+//   POST   /:id/cancel-correction              [DR-016 followup + DR-025]
+//                                              Versioned cancellation of
+//                                              an in-flight DRAFT
+//                                              correction. Required body:
+//                                              { expectedVersion }. Guards:
+//                                              leaf DRAFT only (no
+//                                              successor; non-CERTIFIED/
+//                                              DISPUTED/CANCELLED) +
+//                                              CAS-pinned expectedVersion.
+//                                              Sets status=CANCELLED on the
+//                                              correction row (preserves
+//                                              audit history — does NOT
+//                                              hard-delete) and restores the
+//                                              parent's supersededAt=null
+//                                              in one transaction. Admin-
+//                                              only.
 //   DELETE /:id                                soft-delete via deletedAt.
 //                                              Idempotent (already-deleted
 //                                              returns 404 — matches
@@ -1845,27 +1854,62 @@ router.post('/:id/dispute', requireFreshAdmin, asyncHandler(async (req, res) => 
 }));
 
 // ─── POST /api/billing-certifications/:id/cancel-correction ────────────────
-// [DR-016 followup] Abandon an in-flight DRAFT correction.
+// [DR-016 followup + DR-025 (audit 2026-09-24)] Versioned cancellation of
+// an in-flight DRAFT correction.
 //
-// Operator escape hatch when a correction is abandoned mid-flow:
-//   - Refuses if the target row is not a correction (no
-//     parentCertificationId) — calling /cancel-correction on a non-correction
-//     would be a no-op + confusing audit signal. 400 NOT_A_CORRECTION.
+// DR-025 audit verdict (ACS-Portal-Fresh-Product-Audit-2026-09-24-71f183a.md
+// lines 372-382): the previous DR-016 followup implementation
+//   - had no expectedVersion CAS, so a stale tab could cancel a correction
+//     another writer had advanced to CERTIFIED, hard-deleting the audit
+//     history and surfacing a half-corrected parent;
+//   - did not require DRAFT status, so a CERTIFIED or DISPUTED correction
+//     could be cancelled — destroying a fully audited transition;
+//   - did not enforce leaf status, so a correction that already had a
+//     successor could be cancelled, orphaning the descendant's parent FK;
+//   - hard-deleted the correction row, so the correction chain lost any
+//     record of who created the correction, what amounts it carried, or
+//     that it was ever abandoned.
+//
+// Repair (this revision):
+//   - REQUIRE expectedVersion in the body. A missing / non-integer value is
+//     a 400 VALIDATION_ERROR. A value that doesn't match existing.version
+//     is 409 STALE_VERSION (with currentVersion + the read row in the
+//     envelope so the client can re-render without a second round-trip).
+//   - REFUSE non-correction targets: parentCertificationId must be set.
+//     400 NOT_A_CORRECTION. (Mirrors DR-016 followup — kept verbatim.)
+//   - REFUSE non-DRAFT targets. CERTIFIED / DISPUTED are terminal in the
+//     audit sense (a correction has been approved or rejected); CANCELLED
+//     is the terminal state this command itself writes. Anything else is
+//     409 ALREADY_TERMINAL.
+//   - REFUSE non-leaf targets. A correction that already has a successor
+//     (another row whose parentCertificationId points at it, deletedAt IS
+//     NULL) cannot be cancelled without orphaning the successor's parent
+//     FK. 409 HAS_SUCCESSOR — the admin's escape hatch is to open the
+//     successor and cancel THAT instead.
 //   - Inside one $transaction:
-//       (a) restore the parent (supersededAt = null, version + 1) so it
-//           reappears in the active set, then
-//       (b) hard-delete the correction row.
-//   - Idempotent on the second call: the correction row is gone, so the
-//     findUnique above returns null and we 404 CERTIFICATION_NOT_FOUND.
-//   - Admin-only (requireFreshAdmin) — same auth gate as /correct /certify
-//     /dispute /undispute.
+//       (a) flip the correction row from DRAFT to CANCELLED + version +1
+//           (pinned on id+version+status=DRAFT+deletedAt=NULL so a stale
+//           caller whose row moved out from under them surfaces as
+//           count !== 1 → 409 STALE_VERSION), then
+//       (b) restore the parent (supersededAt = null, version + 1) pinned
+//           on (id, supersededAt: NOT NULL) so the parent reappears in
+//           the active set without breaking a concurrent re-correct.
+//   - RETAIN the correction row — CANCELLED is a terminal status, not a
+//     delete. The correction chain history stays walkable via the parent
+//     FK exactly as DR-019 specified. The original audit verdict's
+//     "retain prior amounts, reasons and actors" requirement is preserved.
 //
-// [DR-019] Optimistic-concurrency pin on the parent restore: the WHERE
-// requires `supersededAt: { not: null }`, so a concurrent writer who
-// already restored the parent (or one who re-corrected and re-stamped
-// it) surfaces as `count !== 1` → 409 VERSION_CONFLICT. The hard-delete
-// on the correction is pinned on `(id, parentCertificationId)` so we
-// can't accidentally delete a row whose parent FK has been re-pointed.
+// Why STALE_VERSION (not VERSION_CONFLICT) on the optimistic-concurrency
+// pin
+// --------------------------------------------------------------------
+// DR-025's literal verdict text names STALE_VERSION for the expectedVersion
+// mismatch — DR-019 chose VERSION_CONFLICT for the same shape. We keep
+// STALE_VERSION here so the cancel command's wire contract matches the
+// audit's prescribed envelope; the /correct /certify /dispute handlers
+// keep their existing VERSION_CONFLICT code (no scope creep).
+//
+// Admin-only (requireFreshAdmin) — same auth gate as /correct /certify
+// /dispute /undispute.
 router.post('/:id/cancel-correction', requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma) {
@@ -1874,6 +1918,26 @@ router.post('/:id/cancel-correction', requireFreshAdmin, asyncHandler(async (req
   const { id } = req.params;
   if (!isValidUuid(id)) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'id must be a UUID' });
+  }
+  // [DR-025] expectedVersion is REQUIRED (not optional like /correct /
+  // /certify /dispute) — the audit verdict specifically calls out the
+  // absence of a version pin as one of the three failure modes this
+  // command must close. Missing or non-integer values are a 400, not a
+  // silent fallback to an unconditional read.
+  const expectedVersion = req.body && req.body.expectedVersion;
+  if (expectedVersion === undefined || expectedVersion === null) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      code: 'VALIDATION_ERROR',
+      message: 'expectedVersion is required for cancel-correction (DR-025 CAS pin).',
+    });
+  }
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      code: 'VALIDATION_ERROR',
+      message: 'expectedVersion must be a non-negative integer',
+    });
   }
   try {
     const existing = await prisma.billingCertification.findUnique({ where: { id } });
@@ -1891,9 +1955,75 @@ router.post('/:id/cancel-correction', requireFreshAdmin, asyncHandler(async (req
         message: 'This certification is not a correction (no parentCertificationId) — nothing to cancel.',
       });
     }
+    // [DR-025] Status guard. Only a DRAFT correction can be cancelled.
+    // CERTIFIED / DISPUTED are terminal in the audit sense (a correction
+    // has been approved or rejected — history must stay intact);
+    // CANCELLED is the terminal state this command itself writes.
+    if (existing.status !== 'DRAFT') {
+      return res.status(409).json({
+        error: 'ALREADY_TERMINAL',
+        code: 'ALREADY_TERMINAL',
+        message: `Cannot cancel a correction in status ${existing.status} — only DRAFT corrections can be cancelled.`,
+        status: existing.status,
+      });
+    }
+    // [DR-025] Leaf guard. A correction that already has a successor
+    // (another non-deleted row whose parentCertificationId points at
+    // this id) cannot be cancelled without orphaning the successor's
+    // parent FK. The admin's escape hatch is to open the successor and
+    // cancel THAT instead. The check is cheap (indexed lookup) and
+    // runs outside the transaction — a race that inserts a successor
+    // between this read and the transactional update below would still
+    // be caught by the read-after-write drill-through in the UI.
+    const successor = await prisma.billingCertification.findFirst({
+      where: {
+        parentCertificationId: id,
+        deletedAt: null,
+      },
+      select: { id: true, status: true, version: true },
+    });
+    if (successor) {
+      return res.status(409).json({
+        error: 'HAS_SUCCESSOR',
+        code: 'HAS_SUCCESSOR',
+        message: 'This correction already has a successor. Cancel the successor instead — cancelling a non-leaf correction would orphan its descendants.',
+        successorId: successor.id,
+        successorStatus: successor.status,
+      });
+    }
+    // [DR-025] Version CAS guard (literal audit verdict: 409 STALE_VERSION).
+    if (existing.version !== expectedVersion) {
+      return res.status(409).json({
+        error: 'STALE_VERSION',
+        code: 'STALE_VERSION',
+        message: 'This certification was modified by another action. Please refresh and try again.',
+        currentVersion: existing.version,
+      });
+    }
     const parentId = existing.parentCertificationId;
     const result = await prisma.$transaction(async (tx) => {
-      // 1) Restore the parent — clear supersededAt + bump version.
+      // 1) Flip the correction DRAFT → CANCELLED + bump version. Pinned
+      //    on (id, version, status: DRAFT, deletedAt: null) so a stale
+      //    caller whose row moved out from under them (e.g. another
+      //    writer flipped it to CERTIFIED, or archived it via DELETE)
+      //    surfaces as count !== 1 → 409 STALE_VERSION. The CORRECTION
+      //    ROW STAYS — CANCELLED is a terminal status, not a delete —
+      //    so the correction chain history stays walkable via the
+      //    parent FK.
+      const cancel = await tx.billingCertification.updateMany({
+        where: {
+          id,
+          parentCertificationId: parentId,
+          status: 'DRAFT',
+          version: expectedVersion,
+          deletedAt: null,
+        },
+        data: { status: 'CANCELLED', version: { increment: 1 } },
+      });
+      if (cancel.count !== 1) {
+        throw Object.assign(new Error('correction cancel conflict'), { code: 'P2025' });
+      }
+      // 2) Restore the parent — clear supersededAt + bump version.
       //    Conditional on (id, supersededAt: not null) so a stale caller
       //    whose parent has already been restored (by a concurrent
       //    cancel-correction) surfaces as count !== 1 → 409.
@@ -1904,12 +2034,6 @@ router.post('/:id/cancel-correction', requireFreshAdmin, asyncHandler(async (req
       if (restore.count !== 1) {
         throw Object.assign(new Error('parent restoration conflict'), { code: 'P2025' });
       }
-      // 2) Hard-delete the correction row. Pinned on the FK so we cannot
-      //    accidentally delete a row whose parentCertificationId was
-      //    re-pointed under us.
-      await tx.billingCertification.delete({
-        where: { id, parentCertificationId: parentId },
-      });
       return { cancelled: true, restoredParentId: parentId };
     });
 
@@ -1917,8 +2041,8 @@ router.post('/:id/cancel-correction', requireFreshAdmin, asyncHandler(async (req
   } catch (err) {
     if (err && err.code === 'P2025') {
       return res.status(409).json({
-        error: 'VERSION_CONFLICT',
-        code: 'VERSION_CONFLICT',
+        error: 'STALE_VERSION',
+        code: 'STALE_VERSION',
         message: 'This certification was modified by another action. Please refresh and try again.',
       });
     }

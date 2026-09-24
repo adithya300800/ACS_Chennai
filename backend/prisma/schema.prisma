@@ -1536,6 +1536,14 @@ enum BillingCertificationStatus {
   DRAFT
   CERTIFIED
   DISPUTED
+  // [DR-025] Terminal state stamped by POST /:id/cancel-correction when
+  // an in-flight DRAFT correction is abandoned. Retained on the row (not
+  // hard-deleted) so the correction chain history stays walkable via the
+  // parent FK. CANCELLED rows are excluded from every active-set filter
+  // — same as supersededAt IS NOT NULL — and from /correct's child
+  // check. See backend/src/routes/billingCertifications.js for the
+  // leaf-DRAFT + expectedVersion guard.
+  CANCELLED
 }
 
 model BillingCertification {
