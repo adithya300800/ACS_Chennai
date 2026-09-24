@@ -1686,6 +1686,30 @@ async function kpiHandler(req, res) {
   // See computeKpiWindow below for the rationale + the test that pins it.
   const { fromDay, toDayExclusive } = computeKpiWindow(toDate, days);
 
+  // [DR-028] Chart/KPI contract. The Project Dashboard chart
+  // loaders (ProjectDashboard.jsx#loadChartLists) MUST reuse this
+  // window when fetching the DPR / Inspection / BOQ lists — otherwise
+  // the chart trend and the tile counts drift apart (the audit
+  // found a project with 250 DPRs in the last 30 days rendering as
+  // a 100-row first-page sample). Specifically:
+  //   - `window.from` / `window.to` (UTC-midnight YYYY-MM-DD) is the
+  //     authoritative scope; the SPA's `drillWindow` translates it
+  //     into inclusive YYYY-MM-DD `from`/`to` query params for the
+  //     list endpoints (the list endpoints take inclusive bounds,
+  //     while the KPI window is half-open).
+  //   - The DPR chart series ("PUBLISHED" in audit vocabulary, i.e.
+  //     SUBMITTED + UNDER_REVIEW + APPROVED + REJECTED) MUST exclude
+  //     DRAFT — the list endpoint already supports a single `status`
+  //     filter and the SPA fans out four parallel requests to honour
+  //     the per-series normalisation.
+  //   - The Inspection funnel must use a *windowed* closed count, not
+  //     `totalCount - openCount` where `openCount` is org-wide
+  //     all-date (the previous shape mixed unlike populations). The
+  //     SPA renders the windowed breakdown via the list endpoint.
+  //   - `inspections.openCount` deliberately stays org-wide / all-date
+  //     — that tile is the "what's waiting on me" backlog, not part
+  //     of the windowed funnel.
+
   // Resolve the project (or auto-discovered name).
   const result = await resolveProject(prisma, req.params.idOrName);
   if (result.kind === 'missing') {

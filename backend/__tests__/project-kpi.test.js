@@ -667,6 +667,37 @@ describe('N17 — GET /api/projects/:idOrName/kpis', () => {
   });
 });
 
+// ─── DR-028 — chart/KPI contract comment block ───────────────────────────
+// [DR-028] The audit requires an explicit comment block at the kpiHandler
+// documenting the scope/window/status contract that the SPA chart loader
+// reuses. We pin the comment's existence by source-text match so a future
+// refactor cannot silently remove the contract without a failing test.
+describe('DR-028 — KPI handler chart/KPI contract is documented at the source', () => {
+  it('projects.js kpiHandler carries a [DR-028] comment block citing the chart contract', () => {
+    const { readFileSync } = require('fs');
+    const { resolve } = require('path');
+    const src = readFileSync(
+      resolve(__dirname, '../src/routes/projects.js'),
+      'utf8',
+    );
+    // The block must reference the chart scope, the window
+    // translation, and the per-series status normalisation.
+    expect(src).toMatch(/\[DR-028\]/);
+    expect(src).toMatch(/Chart\/KPI contract/);
+    // drillWindow translation: list endpoints take inclusive
+    // from/to while the KPI window is half-open. The comment
+    // pin makes sure future readers know the contract.
+    expect(src).toMatch(/half-open/i);
+    expect(src).toMatch(/inclusive YYYY-MM-DD|drillWindow/);
+    // The four "PUBLISHED" series — the audit's vocabulary for
+    // "post-DRAFT" — must be enumerated in the comment block.
+    expect(src).toMatch(/SUBMITTED/);
+    expect(src).toMatch(/UNDER_REVIEW/);
+    expect(src).toMatch(/APPROVED/);
+    expect(src).toMatch(/REJECTED/);
+  });
+});
+
 // ─── 10. Soft-delete project ─────────────────────────────────────────────────
 describe('N17 — DELETE /api/projects/:id', () => {
   it('10. admin can soft-delete a project (isActive=false on the returned row)', async () => {

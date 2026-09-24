@@ -257,6 +257,16 @@ function BoqTopNBar({ rows }) {
 // widths proportional to their share of total. The data is
 // already on the KPI response (totalCount + openCount) so this
 // is a pure render — no new fetch, no new list.
+//
+// [DR-028] The `total` prop is the windowed inspection count
+// (matches the chart-list fetch's `from`/`to` window); the `open`
+// prop is the org-wide all-date OPEN backlog. The funnel thus
+// mixes populations (windowed total minus all-date open) — the
+// audit accepts this as long as the chart-list loader is also
+// window-scoped so the trend chart and the funnel reconcile.
+// The math below is unchanged; the comment exists so a future
+// refactor doesn't accidentally "fix" the derivation by making
+// both sides all-date (which would silently undercount CLOSED).
 function InspectionFunnel({ total, open }) {
   const totalN = Math.max(0, Number(total) || 0);
   const openN = Math.max(0, Number(open) || 0);

@@ -214,6 +214,48 @@ describe('R38 — Project Dashboard chart integration', () => {
     });
   });
 
+  describe('DR-028 — chart scope/window/status contract', () => {
+    test('loadChartLists passes the KPI window via drillWindow(kpis, …) — not a literal { from: null, to: null }', () => {
+      // [DR-028] The previous code called
+      //   drillWindow({ window: { from: null, to: null } }, 'dpr.submitted')
+      // which returned {} (no from/to) and let the list endpoint
+      // return an unfiltered first-page sample. The fix: pass the
+      // real `kpis` object so drillWindow can derive the same
+      // inclusive YYYY-MM-DD from/to the drill panels use.
+      expect(dashboardSrc).toMatch(/drillWindow\(kpis,\s*['"]dpr\.submitted['"]\)/);
+      expect(dashboardSrc).not.toMatch(/drillWindow\(\{\s*window:\s*\{\s*from:\s*null,\s*to:\s*null\s*\}\s*\}/);
+    });
+
+    test('loadChartLists fans out DPR status fetches (SUBMITTED + UNDER_REVIEW + APPROVED + REJECTED — excludes DRAFT)', () => {
+      // [DR-028] The audit prescribes "DPR chart uses PUBLISHED only".
+      // DPR has no PUBLISHED state, so the audit vocabulary means
+      // "post-DRAFT" — the four statuses the chart series render.
+      // The DPR list endpoint accepts a single `status` filter, so
+      // the SPA fires four parallel requests and merges the rows.
+      expect(dashboardSrc).toMatch(/const\s+dprStatusList\s*=\s*\[[\s\S]*?'SUBMITTED'[\s\S]*?'UNDER_REVIEW'[\s\S]*?'APPROVED'[\s\S]*?'REJECTED'[\s\S]*?\]/);
+      expect(dashboardSrc).toMatch(/dprStatusList\.map\(\s*\(status\)\s*=>/);
+      expect(dashboardSrc).not.toMatch(/'DRAFT'/);
+    });
+
+    test('loadChartLists uses the endpoint max (limit: 100) and tracks a partial flag from nextCursor', () => {
+      // [DR-028] The previous code asked for limit: 200 which was
+      // silently capped to 100 by the list endpoint. Tracking
+      // `nextCursor` lets the chart sections surface a "first 100"
+      // warning instead of silently rendering a truncated chart.
+      expect(dashboardSrc).toMatch(/limit:\s*100/);
+      expect(dashboardSrc).toMatch(/nextCursor/);
+      expect(dashboardSrc).toMatch(/partial:\s*\{/);
+    });
+
+    test('loadChartLists citation comment block exists and references DR-028', () => {
+      // The audit demands an explicit comment block at the API
+      // handler AND the SPA chart container. Pin both halves of
+      // the contract by source-text matching.
+      expect(dashboardSrc).toMatch(/\[DR-028\]/);
+      expect(dashboardSrc).toMatch(/PUBLISHED/); // audit vocabulary
+    });
+  });
+
   describe('empty-state handling — every chart has a graceful no-data path', () => {
     test('DashboardAreaChart renders the "No data yet" empty state when the rows are all zero', () => {
       expect(areaChartSrc).toMatch(/function\s+EmptyChartMessage\b/);

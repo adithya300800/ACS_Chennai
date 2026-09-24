@@ -24,6 +24,18 @@
 //     components can destructure once without per-function guards.
 //   - Empty / missing inputs return `{ rows: [] }` — never throw. A
 //     freshly-registered project (no DPRs yet) is a happy path here.
+//
+// [DR-028] Chart window alignment. The bucket boundaries above are
+// UTC-midnight days. The KPI window in projects.js#kpiHandler is
+// computed via `computeKpiWindow`, which is half-open over IST
+// calendar days (the ACS business timezone). The two are kept in
+// sync by `ProjectDashboard.jsx#loadChartLists`, which passes the
+// same `drillWindow(kpis, …)` translation to the list endpoints as
+// it does to the drill panels. The list endpoints return windowed
+// rows; the bucket helpers above just slice the first 10 chars of
+// `reportDate` (a YYYY-MM-DD string) and bucket by UTC day. A
+// future IST-native bucketing pass would change the day-key parser
+// here, NOT the call site — the helpers remain pure.
 
 /**
  * Parse a YYYY-MM-DD date string into a UTC-midnight Date. Returns
