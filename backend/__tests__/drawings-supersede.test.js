@@ -62,7 +62,7 @@ function userJwt() {
 // supersede handler reads the predecessor INSIDE the transaction, then
 // updates it + creates the successor, all via tx.* calls. We delegate
 // $transaction(cb) → cb(prisma) so tx === prisma in tests.
-function buildApp({ predecessorStatus = 'ACTIVE', seedPredecessor = true } = {}) {
+function buildApp({ predecessorStatus = 'ACTIVE', seedPredecessor = true, forceClaimLost = false } = {}) {
   const app = express();
   app.use(express.json());
 
@@ -117,7 +117,14 @@ function buildApp({ predecessorStatus = 'ACTIVE', seedPredecessor = true } = {})
       // (id + projectId + status) — only flips a row whose current
       // status matches. Returns the count, not the row, matching
       // Prisma's `updateMany` contract.
+      //
+      // [DR-031] `forceClaimLost` simulates a concurrent supersede
+      // winning the race: even though the row is ACTIVE the claim
+      // returns count=0. Without the DR-031 fix the successor create
+      // would be left in the table; with the fix the tx throw rolls
+      // it back.
       updateMany: jest.fn(async (args) => {
+        if (forceClaimLost) return { count: 0 };
         const row = drawingRows.get(args.where.id);
         if (!row) return { count: 0 };
         if (args.where.projectId != null && row.projectId !== args.where.projectId) return { count: 0 };
@@ -146,7 +153,22 @@ function buildApp({ predecessorStatus = 'ACTIVE', seedPredecessor = true } = {})
         return out;
       }),
     },
-    $transaction: jest.fn(async (cb) => cb(prisma)),
+    // [DR-031] Snapshot drawingRows before the callback runs; if the
+    // callback throws (i.e. the route's tx body hit a typed conflict),
+    // restore the snapshot so the mock behaves like a real DB tx —
+    // the successor insert is undone. This is the behaviour that
+    // distinguishes "409 = rolled back" from the pre-DR-031
+    // "409 = half-applied successor left in the table".
+    $transaction: jest.fn(async (cb) => {
+      const snapshot = new Map(drawingRows);
+      try {
+        return await cb(prisma);
+      } catch (err) {
+        drawingRows.clear();
+        for (const [k, v] of snapshot) drawingRows.set(k, v);
+        throw err;
+      }
+    }),
   };
   app.set('prisma', prisma);
   app.use('/api/drawings', drawingsRouter);
@@ -260,6 +282,33 @@ describe('DR-002 — POST /api/drawings/:id/supersede', () => {
       .send({ revision: '1' });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  // [DR-031] Pre-fix: the tx callback did `return { error: ... }` after
+  // the successor insert when the conditional claim lost. Returning
+  // normally from a $transaction callback RESOLVES the callback —
+  // Prisma commits. So a 409 response was paired with a half-applied
+  // successor row in the table. Post-fix: the claim-loss path throws,
+  // the tx aborts, and the table is exactly as it was. This test
+  // simulates the lost race (`forceClaimLost`) and asserts the table
+  // is unchanged afterwards.
+  it('7. claim lost (concurrent supersede) → 409 + no successor row inserted', async () => {
+    const { app, prisma, drawingRows } = buildApp({ forceClaimLost: true });
+    const res = await request(app)
+      .post(`/api/drawings/${PREDECESSOR_ID}/supersede`)
+      .set('Authorization', adminJwt())
+      .send({ revision: '1' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PREDECESSOR_NOT_ACTIVE');
+
+    // The successor create fired (tx called create), but the throw on
+    // claim-loss rolled the tx back — the only row in the table is
+    // still the original predecessor, and it is still ACTIVE.
+    expect(prisma.drawing.create).toHaveBeenCalledTimes(1);
+    expect(drawingRows.size).toBe(1);
+    expect(drawingRows.has(PREDECESSOR_ID)).toBe(true);
+    expect(drawingRows.get(PREDECESSOR_ID).status).toBe('ACTIVE');
   });
 });
 

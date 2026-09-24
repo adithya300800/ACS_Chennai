@@ -1179,26 +1179,36 @@ router.post('/:id/supersede', requireFreshAdmin, asyncHandler(async (req, res) =
   }
 
   try {
-    // Read the predecessor INSIDE the transaction so the ACTIVE check is
-    // atomic with the flip — no TOCTOU window between the status read
-    // and the update.
+    // [DR-031] Read the predecessor INSIDE the transaction so the
+    // ACTIVE check is atomic with the flip — no TOCTOU window between
+    // the status read and the update. CRUCIALLY: every failure path
+    // below THROWS (not returns an error object) so Prisma actually
+    // rolls back. The pre-DR-031 implementation `return { error }`
+    // inside the tx callback RESOLVED the callback normally, which
+    // means Prisma committed whatever had been written so far — most
+    // importantly the successor row created on line 1230 — even when
+    // we surfaced a 409 to the client. That left a half-applied
+    // successor in the table behind a "failed" response.
     const result = await prisma.$transaction(async (tx) => {
       const predecessor = await tx.drawing.findUnique({ where: { id } });
       if (!predecessor) {
-        return { error: { status: 404, body: { error: 'DRAWING_NOT_FOUND', code: 'DRAWING_NOT_FOUND', message: 'Predecessor drawing not found' } } };
+        throw Object.assign(new Error('Predecessor drawing not found'), {
+          code: 'DRAWING_NOT_FOUND_TX',
+          status: 404,
+          body: { error: 'DRAWING_NOT_FOUND', code: 'DRAWING_NOT_FOUND', message: 'Predecessor drawing not found' },
+        });
       }
       if (predecessor.status !== 'ACTIVE') {
-        return {
-          error: {
-            status: 409,
-            body: {
-              error: 'PREDECESSOR_NOT_ACTIVE',
-              code: 'PREDECESSOR_NOT_ACTIVE',
-              message: `Cannot supersede a drawing in status ${predecessor.status}`,
-              currentStatus: predecessor.status,
-            },
+        throw Object.assign(new Error(`Cannot supersede a drawing in status ${predecessor.status}`), {
+          code: 'PREDECESSOR_NOT_ACTIVE_TX',
+          status: 409,
+          body: {
+            error: 'PREDECESSOR_NOT_ACTIVE',
+            code: 'PREDECESSOR_NOT_ACTIVE',
+            message: `Cannot supersede a drawing in status ${predecessor.status}`,
+            currentStatus: predecessor.status,
           },
-        };
+        });
       }
 
       // Mint the new id server-side (matches the POST convention so the
@@ -1219,14 +1229,16 @@ router.post('/:id/supersede', requireFreshAdmin, asyncHandler(async (req, res) =
         },
       });
 
-      // [DR-009] Conditional ACTIVE claim — the predecessor's status
-      // check is folded into the `where` so two concurrent supersedes
-      // can't both succeed. `update` only accepts `id` in `where`, so
-      // we use `updateMany` (returns count, not row) and require
-      // count==1. On a lost race the whole tx — successor create
-      // included — rolls back and the client gets the same 409
+      // [DR-009 / DR-031] Conditional ACTIVE claim — the predecessor's
+      // status check is folded into the `where` so two concurrent
+      // supersedes can't both succeed. `update` only accepts `id` in
+      // `where`, so we use `updateMany` (returns count, not row) and
+      // require count==1. On a lost race we THROW (not return an
+      // error object — DR-031) so the whole tx — successor create
+      // included — rolls back. The client sees the same 409
       // PREDECESSOR_NOT_ACTIVE it would have seen from the in-tx
-      // status read above.
+      // status read above, but now "409" really means "the table is
+      // exactly as you left it", not "we wrote a row and then gave up".
       const claim = await tx.drawing.updateMany({
         where: {
           id: predecessor.id,
@@ -1236,31 +1248,42 @@ router.post('/:id/supersede', requireFreshAdmin, asyncHandler(async (req, res) =
         data: { status: 'SUPERSEDED' },
       });
       if (claim.count !== 1) {
-        return {
-          error: {
-            status: 409,
-            body: {
-              error: 'PREDECESSOR_NOT_ACTIVE',
-              code: 'PREDECESSOR_NOT_ACTIVE',
-              message: `Cannot supersede a drawing in status ${predecessor.status}`,
-              currentStatus: predecessor.status,
-            },
+        throw Object.assign(new Error('Predecessor claim lost'), {
+          code: 'PREDECESSOR_CLAIM_LOST',
+          status: 409,
+          predecessorId: predecessor.id,
+          body: {
+            error: 'PREDECESSOR_NOT_ACTIVE',
+            code: 'PREDECESSOR_NOT_ACTIVE',
+            message: `Cannot supersede a drawing in status ${predecessor.status}`,
+            currentStatus: predecessor.status,
           },
-        };
+        });
       }
       const updatedPredecessor = { ...predecessor, status: 'SUPERSEDED' };
 
       return { successor, predecessor: updatedPredecessor };
     });
 
-    if (result.error) {
-      return res.status(result.error.status).json(result.error.body);
-    }
     res.status(201).json({
       successor: serializeDrawing(result.successor),
       predecessor: serializeDrawing(result.predecessor),
     });
   } catch (err) {
+    // [DR-031] Typed errors thrown from inside the tx carry the
+    // status + body the outer caller should see. A throw inside the
+    // callback aborts the tx (so the successor create above is
+    // undone) before re-throwing to here. `mapPrismaError` only
+    // recognises Prisma's P-codes, so it would otherwise drop our
+    // typed errors into the generic 500 path — handle them first.
+    if (err && err.body && typeof err.status === 'number') {
+      console.warn('Drawing supersede aborted', {
+        employeeHash: hashIdentifier(req.employeeId),
+        drawingId: id,
+        code: err.code,
+      });
+      return res.status(err.status).json(err.body);
+    }
     console.error('Drawing supersede error', {
       employeeHash: hashIdentifier(req.employeeId),
       drawingId: id,
