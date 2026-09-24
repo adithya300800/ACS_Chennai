@@ -361,6 +361,73 @@ export default function DprSubmit() {
     [uploadStatuses],
   );
 
+  // §8.3 (Fresh24 wave-4 batch-B): required-fields side panel. Mirrors the
+  // DR-013 server-side validator's *client-side mirror*: the same fields
+  // `handleSubmit` (line ~1047) refuses to publish without must surface to
+  // the engineer BEFORE they hit Submit. Each entry points at the form
+  // input's id so the panel's anchor links can focus + scroll into view.
+  //
+  // Shape: [{ field, label, anchorId }]. `anchorId` is the htmlId on the
+  // form input — clicking the link focuses + scrolls the matching field.
+  // When the panel is empty (all required fields populated), the panel
+  // renders nothing so a clean form is silent.
+  //
+  // The fifth entry ("Daily narrative") is conditional on the SUBMITTED
+  // mode — the audit mandates at least one piece of meaningful content
+  // before publish, but DRAFT saves don't need it. We always list it so
+  // the panel can show "Add at least one item before submitting" as a
+  // single banner even when the form is otherwise complete.
+  const blockingRequirements = useMemo(() => {
+    const list = [];
+    if (!form.projectName) {
+      list.push({ field: 'projectName', label: 'Project', anchorId: 'projectId' });
+    }
+    if (!form.location) {
+      list.push({ field: 'location', label: 'Location', anchorId: 'location' });
+    }
+    if (!form.reportDate) {
+      list.push({ field: 'reportDate', label: 'Report date', anchorId: 'reportDate' });
+    }
+    if (!form.workType) {
+      list.push({ field: 'workType', label: 'Primary work category', anchorId: 'workType' });
+    }
+    // SUBMITTED-only: at least one of (workExecutedToday, manpowerSummary,
+    // materialsReceivedSummary, notes, photos). We only list it as
+    // "missing" when the user is on the SUBMITTED path — DRAFT saves
+    // pass with no narrative.
+    const hasNarrative = Boolean(
+      (dailyFields.workExecutedToday && dailyFields.workExecutedToday.trim().length > 0) ||
+      (dailyFields.manpowerSummary && dailyFields.manpowerSummary.trim().length > 0) ||
+      (dailyFields.materialsReceivedSummary && dailyFields.materialsReceivedSummary.trim().length > 0) ||
+      (notes && notes.trim().length > 0) ||
+      photos.length > 0
+    );
+    if (!hasNarrative) {
+      // Anchor the narrative banner to workExecutedToday (the first
+      // narrative field); user can scroll naturally from there.
+      list.push({ field: 'narrative', label: 'Daily narrative (any of: work note / manpower / materials / observations / photos)', anchorId: 'workExecutedToday' });
+    }
+    return list;
+    // The deps intentionally match what handleSubmit reads: form fields,
+    // dailyFields, notes, photos. Re-evaluated on every render but cheap
+    // because each entry is a string/array check.
+  }, [form.projectName, form.location, form.reportDate, form.workType, dailyFields, notes, photos.length]);
+
+  // Focus + scroll-into-view handler for the side panel anchor links.
+  // Native HTML inputs/selects expose `.focus()`; we add scrollIntoView
+  // so the link click survives tall pages (panel lives at the top of
+  // the form on mobile, so scrolling is otherwise unnecessary, but it
+  // keeps the keyboard focus order predictable at every breakpoint).
+  const focusRequirement = useCallback((anchorId) => {
+    const node = document.getElementById(anchorId);
+    if (node && typeof node.focus === 'function') {
+      node.focus({ preventScroll: false });
+      if (typeof node.scrollIntoView === 'function') {
+        node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+  }, []);
+
   // SOL-P0#4: when arriving via ?draftId=…, load the server-side draft and
   // pre-populate the form. The submit handler switches to PUT /:id instead
   // of POST / when editingId is set. The local-autosave banner is suppressed
@@ -1517,6 +1584,41 @@ export default function DprSubmit() {
             },
           ]}
         />
+
+        {/* §8.3 (Fresh24 wave-4 batch-B): required-fields side panel.
+            Renders ONLY when blockingRequirements is non-empty — a clean
+            form stays silent. The panel lists each missing required field
+            as a focus-link so the engineer can jump straight to the gap.
+            Sticky on desktop (≥1024px, via .dpr-required-fields-sticky)
+            and top-of-page on narrower viewports. The panel sits above
+            the draft banner + error banner so a brand-new DPR sees the
+            gaps first, and a draft-resumed DPR sees the gaps above the
+            "Restored unsaved draft" hint. */}
+        {blockingRequirements.length > 0 && (
+          <div
+            id="dpr-required-fields"
+            role="status"
+            aria-live="polite"
+            className="dpr-required-fields"
+          >
+            <div className="dpr-required-fields-title">Required to submit</div>
+            <ul className="dpr-required-fields-list">
+              {blockingRequirements.map((req) => (
+                <li key={req.field}>
+                  <button
+                    type="button"
+                    className="dpr-required-fields-link"
+                    onClick={() => focusRequirement(req.anchorId)}
+                    aria-label={`Focus ${req.label}`}
+                    data-anchor-id={req.anchorId}
+                  >
+                    {req.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {showDraftBanner && (
           <div
