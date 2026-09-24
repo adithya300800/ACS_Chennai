@@ -109,30 +109,33 @@ describe('DR-032 followup — recovery is operator-only', () => {
     expect(startSrc).not.toMatch(/DELETE\s+FROM[^_]*_prisma_migrations/i);
   });
 
-  test('start.sh no longer auto-runs prisma migrate resolve (DR-031-SQLFIX bootstrap excepted)', () => {
+  test('start.sh no longer auto-runs prisma migrate resolve (DR-035 retired bootstrap-resolve)', () => {
     // Resolve was an automatic part of the previous start-time
     // recovery. The operator runs it (after inspecting the ledger)
-    // via db:recover. start.sh must not invoke it — EXCEPT for the
-    // [DR-031-SQLFIX] bootstrap block, which is narrowly scoped to a
-    // single migration name (the broken `''[]''` literal shipped at
-    // commit cf697e7), runs with `|| true` so the steady-state
-    // non-zero exit is swallowed, and is the only sanctioned auto-
-    // recovery in start.sh. Any future `migrate resolve` invocation
-    // in start.sh that targets a different migration, or omits the
-    // `|| true` guard, or is not annotated with [DR-031-SQLFIX] is a
-    // regression that needs re-justification.
-    const resolveCalls = startSrc.match(/prisma\s+migrate\s+resolve[^\n]*/g) || [];
-    expect(resolveCalls.length).toBeLessThanOrEqual(1);
-    if (resolveCalls.length === 1) {
-      expect(resolveCalls[0]).toMatch(/--rolled-back/);
-      // The DR-031 migration name now lives in the `for MIG in ...`
-      // bootstrap loop, NOT on the resolve line itself (line 65
-      // uses `"$MIG"`). The intent is the same — only this one
-      // sanctioned migration is auto-resolved — so we check the
-      // for-loop iterable in the surrounding source.
-      expect(startSrc).toMatch(/for\s+MIG\s+in[\s\S]*20260908150000_dr031_leave_constraint_correct_bound[\s\S]*do/);
-      expect(resolveCalls[0] + '\n' + startSrc).toMatch(/\|\|\s*true/);
-    }
+    // via db:recover OR via the DR031_RECONCILE=1-gated
+    // reconcile-failed-migrations.sh script. DR-035 (2026-09-24)
+    // retired the inline bootstrap-resolve loop entirely — the
+    // previous DR-031-SQLFIX exception is no longer present in
+    // start.sh. The known-bad migration names still appear in
+    // start.sh only as documentation comments pointing operators at
+    // the explicit operations tool. Pin zero resolve calls + the
+    // absence of any for-loop that feeds into one.
+    //
+    // Note: start.sh references `prisma migrate resolve` in the
+    // header comment explaining what DR-035 retired. Filter comment
+    // lines before counting resolve invocations AND before scanning
+    // for the known-bad migration name in executable shell context.
+    const codeOnly = startSrc
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .join('\n');
+    const resolveCalls = codeOnly.match(/prisma\s+migrate\s+resolve[^\n]*/g) || [];
+    expect(resolveCalls.length).toBe(0);
+    expect(codeOnly).not.toMatch(/for\s+MIG\s+in[\s\S]*prisma\s+migrate\s+resolve/);
+    // The known-bad migration names documented in start.sh are kept
+    // as comments only. They must NOT appear in any executed shell
+    // context.
+    expect(codeOnly).not.toMatch(/20260908150000_dr031_leave_constraint_correct_bound/);
   });
 
   test('start.sh runs prisma migrate deploy (failure-before-serving)', () => {
@@ -148,10 +151,16 @@ describe('DR-032 followup — recovery is operator-only', () => {
     expect(startSrc).toMatch(/exit \$?RC/);
   });
 
-  test('start.sh points operators at db:recover on failure', () => {
-    // When migrate deploy fails, start.sh must instruct the operator
-    // to use db:recover — the only sanctioned recovery path.
-    expect(startSrc).toMatch(/npm run db:recover/);
+  test('start.sh points operators at the DR-035 reconcile flow on failure', () => {
+    // When migrate deploy fails, start.sh must instruct the operator.
+    // DR-035 (2026-09-24) reorders the pointers: the primary path is
+    // now DR031_RECONCILE=1 + the extracted reconcile-failed-migrations.sh
+    // script. The legacy `npm run db:recover -- --confirmed-abandoned`
+    // remains as a fallback. Pin both so a regression that drops either
+    // is caught.
+    expect(startSrc).toMatch(/set DR031_RECONCILE=1 on the deploy workflow/);
+    expect(startSrc).toMatch(/scripts\/reconcile-failed-migrations\.sh/);
+    expect(startSrc).toMatch(/npm run db:recover\s+--\s+--confirmed-abandoned/);
   });
 
   // ---- CI is read-only; fails on non-applied rows ----
