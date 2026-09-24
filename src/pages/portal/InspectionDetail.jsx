@@ -179,6 +179,19 @@ export default function InspectionDetail() {
             </div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.5rem', flexShrink: 0 }}>
+            {/* [§8.4 Fresh24] Distinguish workflow / review state from the
+                embedded filing condition (record.data.status). The audit
+                found an NCR row whose top-level review state was CLOSED
+                beside an embedded `Status: Open` field from the filing
+                form — both labelled "Status", both visible side-by-side.
+                Adding the explicit "Review state" heading separates the
+                two concepts: the badge tracks the admin review lifecycle,
+                the embedded field tracks the engineer-reported condition.
+                Same label vocabulary as BillingCertificationsAdmin's
+                `Certification` / `Status` split. */}
+            <span style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--steel)' }}>
+              Review state
+            </span>
             <span className={`dpr-status-badge dpr-status-${(record.status || 'open').toLowerCase()}`}>
               {(record.status || 'OPEN').replace(/_/g, ' ')}
             </span>
@@ -411,12 +424,27 @@ export default function InspectionDetail() {
                   values aren't split / clipped. CSS class `dl-stacked`
                   collapses the grid at ≤640px. */}
               <dl className="dl-stacked">
-                {Object.entries(record.data).map(([key, value]) => (
-                  <React.Fragment key={key}>
-                    <dt>{labelize(key)}:</dt>
-                    <dd>{renderValue(value)}</dd>
-                  </React.Fragment>
-                ))}
+                {Object.entries(record.data).map(([key, value]) => {
+                  // [§8.4 Fresh24] Override the `status` key's label.
+                  // The embedded status is the engineer-reported filing
+                  // condition (Open / In Progress / Pending Verification
+                  // / Closed at time of filing) — NOT the workflow /
+                  // review state tracked by `record.status`, which the
+                  // admin ack/close/reject action bar mutates. The audit
+                  // caught an NCR row whose top-level CLOSED review
+                  // state sat beside an embedded `Status: Open` field
+                  // — both labelled "Status", both visible side-by-side.
+                  // Renaming the embedded key to "Reported condition"
+                  // (matching the BillingCertificationsAdmin vocabulary)
+                  // makes the two distinct concepts unambiguous.
+                  const label = key === 'status' ? 'Reported condition' : labelize(key);
+                  return (
+                    <React.Fragment key={key}>
+                      <dt>{label}:</dt>
+                      <dd>{renderValue(value)}</dd>
+                    </React.Fragment>
+                  );
+                })}
               </dl>
             </div>
           </div>
