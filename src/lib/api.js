@@ -4,6 +4,24 @@
 import { VITE_API_URL } from './env.js';
 const API_BASE = VITE_API_URL;
 
+// SOL DR-001 — cross-tab session coordination. The audit found that
+// shared localStorage lets a second tab sign in as a different employee
+// and overwrite the first tab's tokens while React state still shows
+// the original employee; subsequent refreshes then install the OTHER
+// tab's access token without updating employee. The sessionGeneration
+// counter (in sessionCoordination.js) is bumped on every login/logout/
+// setAuthData so this module can drop late /auth/refresh responses
+// (started under one generation, landing under another) at the
+// doRefresh boundary. The BroadcastChannel listener in AuthContext
+// atomically adopts the new session, so dispatching auth:logout here
+// on SESSION_CHANGED would log the NEW account out as cleanup for the
+// OLD one — that's the third bullet of the audit acceptance.
+import {
+  bumpSessionGeneration,
+  getSessionGeneration,
+  broadcastSessionChange,
+} from './sessionCoordination.js';
+
 // Default request timeout. The browser's native fetch() has no timeout — if
 // the server hangs (Azure slot swap mid-request, Prisma connection-pool
 // warm-up after restart, transient Front-Door cold path, etc.) the call
@@ -116,6 +134,18 @@ function doRefresh() {
   // preemptive, 401-fired reactive, or a manual call to
   // api.refreshToken() — routes through this single guard.
   const epochAtCall = refreshEpoch;
+  // SOL DR-001 — capture the cross-tab sessionGeneration this refresh
+  // call started with. If a peer tab signs in (or out) while the
+  // /auth/refresh is in flight, sessionGeneration advances; the local
+  // refreshEpoch is unchanged (it's module-local per tab), so the
+  // epoch check above would NOT fire and the stale response would be
+  // applied to the new session. The sessionGeneration check rejects
+  // the response with ApiError('SESSION_CHANGED') before any token
+  // gets installed, so the auth:token-refreshed listener that would
+  // otherwise adopt just the accessToken (leaving employee out of
+  // sync) never fires. Audit acceptance: "Delayed A → B sign-in in
+  // two tabs never submits under the wrong displayed identity".
+  const sessionGenAtCall = getSessionGeneration();
   const refresh = localStorage.getItem('acs_refresh');
   if (!refresh) {
     return Promise.reject(new ApiError('No refresh token', 401, 'NO_REFRESH_TOKEN'));
@@ -142,6 +172,17 @@ function doRefresh() {
         );
         if (transient) err.transient = true;
         throw err;
+      }
+      // SOL DR-001 — drop the response if the cross-tab session changed
+      // (e.g. peer tab signed in or out). The BroadcastChannel listener
+      // in AuthContext has already adopted the new session atomically
+      // by the time this check fires, so dispatching auth:logout below
+      // would log the NEW account out as cleanup for the OLD one —
+      // that's the third bullet of audit DR-001 acceptance. We
+      // re-throw ApiError('SESSION_CHANGED') so the caller's refresh
+      // block can recognise it and skip the dispatchLogoutOnce() call.
+      if (sessionGenAtCall !== getSessionGeneration()) {
+        throw new ApiError('Session changed during refresh', 401, 'SESSION_CHANGED');
       }
       // DR-011: drop the response if the session identity changed
       // while we were waiting. Throwing here funnels the caller into
@@ -280,6 +321,19 @@ async function request(method, path, body, token, { _retried, _networkRetried, i
             'REFRESH_TRANSIENT',
           );
         }
+        // SOL DR-001 — SESSION_CHANGED means the cross-tab session was
+        // rewritten mid-flight (e.g. a peer tab signed in or out). The
+        // BroadcastChannel listener in AuthContext has already adopted
+        // the new session atomically by the time this fires, so
+        // dispatchLogoutOnce() here would log the NEW account out as
+        // cleanup for the OLD one — that's the third bullet of audit
+        // DR-001 acceptance. Re-throw with the original code so the
+        // caller's catch block sees a structured failure (the request
+        // genuinely belongs to a session that no longer exists) without
+        // any state-clearing side effects.
+        if (refreshErr?.code === 'SESSION_CHANGED') {
+          throw refreshErr;
+        }
         // Definitive invalid-refresh (4xx) — clear the session.
         dispatchLogoutOnce('refresh_failed');
         throw new ApiError('Session expired. Please sign in again.', 401, data.code);
@@ -356,6 +410,16 @@ export const api = {
               refreshErr.status || 503,
               'REFRESH_TRANSIENT',
             );
+          }
+          // SOL DR-001 — SESSION_CHANGED means the cross-tab session was
+          // rewritten mid-flight. The BroadcastChannel listener in
+          // AuthContext has already adopted the new session atomically,
+          // so dispatchLogoutOnce() here would log the new account out
+          // as cleanup for the old one. Re-throw unchanged so the
+          // caller's catch sees a structured failure without side
+          // effects on the new session.
+          if (refreshErr?.code === 'SESSION_CHANGED') {
+            throw refreshErr;
           }
           dispatchLogoutOnce('refresh_failed');
           // [S6 Item 7] AuthContext's auth:logout listener navigates to
@@ -562,6 +626,28 @@ export const api = {
   // logout/login cycle). Optional chain (`api.getRefreshEpoch?.()`) so
   // an older bundle without this helper doesn't crash.
   getRefreshEpoch: () => refreshEpoch,
+  // SOL DR-001 — cross-tab session coordination. Bump the persisted
+  // sessionGeneration on every login/logout/setAuthData so:
+  //   1. doRefresh's sessionGenAtCall check drops a response whose
+  //      call started under the old session (the OTHER tab's late
+  //      refresh can no longer overwrite the new account's token).
+  //   2. AuthContext's BroadcastChannel listener sees the new value
+  //      in its next get() and knows the in-memory counter is stale.
+  // AuthContext.login / logout / setAuthData call this AFTER persisting
+  // the new tokens so a fresh page load on a peer tab hydrates the
+  // bumped value from localStorage instead of starting at 0.
+  bumpSessionGeneration: () => bumpSessionGeneration(),
+  // Read-only accessor — re-reads from localStorage on every call so
+  // peer-tab writes are visible immediately. Used by doRefresh() to
+  // decide whether to drop the late response.
+  getSessionGeneration: () => getSessionGeneration(),
+  // Tell every other tab in the same origin that the session changed.
+  // AuthContext's BroadcastChannel listener (registered at mount) hears
+  // the message and atomically adopts the new identity — see
+  // AuthContext.jsx for the adoption path. The broadcast itself is
+  // best-effort; the canonical publication is the localStorage write
+  // (read back by getSessionGeneration() in any late-response path).
+  broadcastSessionChange: (detail) => broadcastSessionChange(detail),
   // [S6 Item 7] Recency check for the most recent dispatchLogoutOnce()
   // call. Returns true if logout was dispatched within the last
   // `windowMs` (default 500). Callers in their error catch blocks can
@@ -882,14 +968,23 @@ export const api = {
   updateVariation: (id, data, token) =>
     api.patch(`/variations/${id}`, data, token),
   // DRAFT → SUBMITTED (raiser or admin).
-  submitVariation: (id, expectedVersion, token) =>
+  // [DR-023] Named-options signature (`{ id, expectedVersion, token }`).
+  // The previous positional `(id, expectedVersion, token)` shape was
+  // call-site-fragile: the detail page called it with `(id, accessToken)`
+  // which shoved the token into the `expectedVersion` slot and left
+  // `token` undefined, so the server returned 401 and dispatched
+  // auth:logout on what was actually a valid session. Named-options
+  // prevents that class of argument-shift bug from recurring.
+  submitVariation: ({ id, expectedVersion, token }) =>
     api.post(`/variations/${id}/submit`, { expectedVersion }, token),
   // SUBMITTED → APPROVED (admin only — requireFreshAdmin on the server).
-  approveVariation: (id, expectedVersion, token) =>
+  approveVariation: ({ id, expectedVersion, token }) =>
     api.post(`/variations/${id}/approve`, { expectedVersion }, token),
   // SUBMITTED → REJECTED (admin only). `reason` is required by the server
-  // (rejected_reason column); passing null/empty will 400.
-  rejectVariation: (id, { reason }, expectedVersion, token) =>
+  // (rejected_reason column); passing null/empty will 400. Same named-
+  // options shape as submit/approve — `{ id, expectedVersion, token,
+  // reason }`.
+  rejectVariation: ({ id, expectedVersion, token, reason }) =>
     api.post(`/variations/${id}/reject`, { reason, expectedVersion }, token),
 
   // N3 (Phase F) — Drawing Revision Register frontend wiring. Backend

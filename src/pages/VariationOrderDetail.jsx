@@ -82,7 +82,11 @@ export default function VariationOrderDetail() {
   const handleSubmit = async () => {
     setSubmitting(true);
     try {
-      await api.submitVariation(id, accessToken);
+      // [DR-023] Pass the displayed version and the authenticated token in
+      // named-options shape — the previous `(id, accessToken)` call left
+      // `token` undefined and shoved the token into `expectedVersion`,
+      // so the server 401'd and dispatched auth:logout on a valid session.
+      await api.submitVariation({ id, expectedVersion: variation.version, token: accessToken });
       toast.push('Variation submitted for review.', 'success');
       await load();
     } catch (err) {
@@ -95,7 +99,7 @@ export default function VariationOrderDetail() {
   const handleApprove = async () => {
     setApproving(true);
     try {
-      await api.approveVariation(id, accessToken);
+      await api.approveVariation({ id, expectedVersion: variation.version, token: accessToken });
       toast.push('Variation approved.', 'success');
       await load();
     } catch (err) {
@@ -113,7 +117,12 @@ export default function VariationOrderDetail() {
     }
     setRejecting(true);
     try {
-      await api.rejectVariation(id, { reason: rejectReason.trim() }, accessToken);
+      await api.rejectVariation({
+        id,
+        expectedVersion: variation.version,
+        token: accessToken,
+        reason: rejectReason.trim(),
+      });
       toast.push('Variation rejected.', 'success');
       setShowRejectForm(false);
       setRejectReason('');
