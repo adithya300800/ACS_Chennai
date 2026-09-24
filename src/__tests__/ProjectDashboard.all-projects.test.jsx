@@ -201,7 +201,7 @@ describe('R38.1 — Page subtitle reflects all-projects mode', () => {
 describe('R38.1 — sumKpiPayloads math (eval sanity)', () => {
   // eslint-disable-next-line no-new-func
   const evalSource = new Function(
-    `${dashboardSrc.match(/function emptyKpiPayload[\s\S]*?\n\}/)[0]}\n${dashboardSrc.match(/function sumKpiPayloads[\s\S]*?\n\}/)[0]}\nreturn { emptyKpiPayload, sumKpiPayloads };`,
+    `${(dashboardSrc.match(/function\s+toPortfolioRow[\s\S]*?\n\}/) || [''])[0]}\n${dashboardSrc.match(/function emptyKpiPayload[\s\S]*?\n\}/)[0]}\n${dashboardSrc.match(/function sumKpiPayloads[\s\S]*?\n\}/)[0]}\nreturn { toPortfolioRow, emptyKpiPayload, sumKpiPayloads };`,
   );
 
   test('emptyKpiPayload returns the same shape a real backend response carries', () => {
@@ -234,11 +234,17 @@ describe('R38.1 — sumKpiPayloads math (eval sanity)', () => {
     // Summed: contract 300000 / executed 230000 → recomputed -23.33…%
     // (NOT the simple average of 30 + -50 = -10 — the pin is on the
     // recompute, not on a copy-paste from the input variancePcts.)
+    //
+    // DR-027 — inputs are now in the canonical backend WIRE shape
+    // (boqVariance.* / people.onLeaveToday) instead of the SPA-internal
+    // short shape. The reducer's toPortfolioRow adapter normalizes
+    // before summation. People counts are ORG-wide so they are sourced
+    // once from the first payload (a), NOT summed across projects.
     const a = {
       dpr: { submittedCount: 3, pendingReviewCount: 5, approvedCount: 10, rejectedCount: 1, draftCount: 2 },
       inspections: { totalCount: 4, openCount: 2, byType: { 'cube_casting': 3, 'safety': 1 } },
-      boq: { itemCount: 20, contractValue: 100000, executedValue: 130000, variancePct: 30 },
-      people: { onLeaveTodayCount: 1, pendingLeaveCount: 0, overdueTrainingCount: 2 },
+      boqVariance: { itemsCount: 20, totalContractValue: 100000, totalExecutedValue: 130000, variancePercent: 30 },
+      people: { onLeaveToday: 1, pendingLeaveCount: 0, overdueTrainingCount: 2 },
       pendingReviewTrend: [
         { date: '2026-09-01', submitted: 2, underReview: 1 },
       ],
@@ -247,8 +253,8 @@ describe('R38.1 — sumKpiPayloads math (eval sanity)', () => {
     const b = {
       dpr: { submittedCount: 2, pendingReviewCount: 4, approvedCount: 5, rejectedCount: 0, draftCount: 1 },
       inspections: { totalCount: 3, openCount: 1, byType: { 'cube_casting': 2, 'quality': 1 } },
-      boq: { itemCount: 10, contractValue: 200000, executedValue: 100000, variancePct: -50 },
-      people: { onLeaveTodayCount: 0, pendingLeaveCount: 2, overdueTrainingCount: 1 },
+      boqVariance: { itemsCount: 10, totalContractValue: 200000, totalExecutedValue: 100000, variancePercent: -50 },
+      people: { onLeaveToday: 0, pendingLeaveCount: 2, overdueTrainingCount: 1 },
       pendingReviewTrend: [
         { date: '2026-09-02', submitted: 1, underReview: 1 },
         { date: '2026-09-01', submitted: 0, underReview: 2 }, // same date → merge
@@ -267,9 +273,11 @@ describe('R38.1 — sumKpiPayloads math (eval sanity)', () => {
     expect(out.inspections.byType.cube_casting).toBe(5);
     expect(out.inspections.byType.safety).toBe(1);
     expect(out.inspections.byType.quality).toBe(1);
+    // DR-027 — people are counted ONCE (from payload a), NOT summed.
     expect(out.people.onLeaveTodayCount).toBe(1);
-    expect(out.people.pendingLeaveCount).toBe(2);
-    expect(out.people.overdueTrainingCount).toBe(3);
+    expect(out.people.pendingLeaveCount).toBe(0);
+    expect(out.people.overdueTrainingCount).toBe(2);
+    // BOQ sums run via the adapter (boqVariance.* on input → boq.* on output).
     expect(out.boq.itemCount).toBe(30);
     expect(out.boq.contractValue).toBe(300000);
     expect(out.boq.executedValue).toBe(230000);
@@ -282,6 +290,9 @@ describe('R38.1 — sumKpiPayloads math (eval sanity)', () => {
     expect(out.pendingReviewTrend[0].underReview).toBe(3); // 1 + 2
     expect(out.pendingReviewTrend[1].date).toBe('2026-09-02');
     expect(out.warnings).toContain('one warning from project B');
+    // DR-027 — population declared, no failures.
+    expect(out.includedProjectCount).toBe(2);
+    expect(out.failedProjectCount).toBe(0);
   });
 
   test('Empty input → emptyKpiPayload shape (zero counts, empty maps)', () => {
@@ -291,16 +302,34 @@ describe('R38.1 — sumKpiPayloads math (eval sanity)', () => {
     expect(out.inspections.byType).toEqual({});
     expect(out.boq.variancePct).toBe(0);
     expect(out.pendingReviewTrend).toEqual([]);
+    // DR-027 — empty input is "0 of 0", so no partial-availability warning.
+    expect(out.includedProjectCount).toBe(0);
+    expect(out.failedProjectCount).toBe(0);
+    expect(out.warnings).toEqual([]);
   });
 
-  test('Null entries (a failed fan-out call) are silently dropped', () => {
+  test('Null entries (a failed fan-out call) are counted and surface a partial-availability warning', () => {
+    // DR-027 — pre-fix this test pinned "silently dropped" behaviour.
+    // Audit acceptance: "explicitly indicate partial availability
+    // rather than silently dropping failed projects". Failed fan-out
+    // rows are now surfaced via failedProjectCount + a synthetic
+    // warning string so the dashboard can show "X of Y included".
     const { sumKpiPayloads } = evalSource();
-    const out = sumKpiPayloads([
-      null,
-      { dpr: { submittedCount: 1, pendingReviewCount: 1, approvedCount: 0, rejectedCount: 0, draftCount: 0 }, inspections: { totalCount: 0, openCount: 0, byType: {} }, boq: { itemCount: 0, contractValue: 0, executedValue: 0, variancePct: 0 }, people: { onLeaveTodayCount: 0, pendingLeaveCount: 0, overdueTrainingCount: 0 }, pendingReviewTrend: [], warnings: [] },
-      undefined,
-    ]);
+    const a = {
+      dpr: { submittedCount: 1, pendingReviewCount: 1, approvedCount: 0, rejectedCount: 0, draftCount: 0 },
+      inspections: { totalCount: 0, openCount: 0, byType: {} },
+      boqVariance: { itemsCount: 0, totalContractValue: 0, totalExecutedValue: 0, variancePercent: 0 },
+      people: { onLeaveToday: 0, pendingLeaveCount: 0, overdueTrainingCount: 0 },
+      pendingReviewTrend: [],
+      warnings: [],
+    };
+    const out = sumKpiPayloads([a, null, undefined]);
     expect(out.dpr.submittedCount).toBe(1);
+    expect(out.includedProjectCount).toBe(1);
+    expect(out.failedProjectCount).toBe(2);
+    expect(out.warnings).toEqual(
+      expect.arrayContaining([expect.stringMatching(/^1 of 3 projects included \(2 failed\)$/)])
+    );
   });
 
   test('R38.1.1 — sumKpiPayloads mirrors summed BOQ into the long-shape boqVariance the tiles read', () => {
@@ -310,20 +339,25 @@ describe('R38.1 — sumKpiPayloads math (eval sanity)', () => {
     // sum passes, the rolled-up payload must mirror the short `boq`
     // shapes into `boqVariance` so all-projects BOQ tiles render real
     // numbers (without this copy every BOQ tile was 0 in the roll-up).
+    //
+    // DR-027 — inputs are now in canonical wire shape (boqVariance on
+    // the input, no boq short-shape on the input). The adapter
+    // populates `boq` from `boqVariance`, the mirror at the bottom of
+    // sumKpiPayloads copies it back into the long-shape tiles.
     const { sumKpiPayloads } = evalSource();
     const a = {
       dpr: { submittedCount: 0, pendingReviewCount: 0, approvedCount: 0, rejectedCount: 0, draftCount: 0 },
       inspections: { totalCount: 0, openCount: 0, byType: {} },
-      boq: { itemCount: 5, contractValue: 100000, executedValue: 130000, variancePct: 30 },
-      people: { onLeaveTodayCount: 0, pendingLeaveCount: 0, overdueTrainingCount: 0 },
+      boqVariance: { itemsCount: 5, totalContractValue: 100000, totalExecutedValue: 130000, variancePercent: 30 },
+      people: { onLeaveToday: 0, pendingLeaveCount: 0, overdueTrainingCount: 0 },
       pendingReviewTrend: [],
       warnings: [],
     };
     const b = {
       dpr: { submittedCount: 0, pendingReviewCount: 0, approvedCount: 0, rejectedCount: 0, draftCount: 0 },
       inspections: { totalCount: 0, openCount: 0, byType: {} },
-      boq: { itemCount: 10, contractValue: 200000, executedValue: 100000, variancePct: -50 },
-      people: { onLeaveTodayCount: 0, pendingLeaveCount: 0, overdueTrainingCount: 0 },
+      boqVariance: { itemsCount: 10, totalContractValue: 200000, totalExecutedValue: 100000, variancePercent: -50 },
+      people: { onLeaveToday: 0, pendingLeaveCount: 0, overdueTrainingCount: 0 },
       pendingReviewTrend: [],
       warnings: [],
     };
@@ -332,6 +366,121 @@ describe('R38.1 — sumKpiPayloads math (eval sanity)', () => {
     expect(out.boqVariance.totalContractValue).toBe(300000); // 100k + 200k
     expect(out.boqVariance.totalExecutedValue).toBe(230000); // 130k + 100k
     expect(out.boqVariance.variancePercent).toBeCloseTo(-23.3333, 3); // recomputed from sum
+  });
+});
+
+// ─── DR-027 — DTO adapter + people count-once semantics ──────────────────────
+//
+// Pre-fix the all-projects reducer (a) read fields (`p.boq.*`,
+// `p.people.onLeaveTodayCount`) that didn't match the backend's wire
+// shape (`boqVariance.*`, `people.onLeaveToday`), so every BOQ tile
+// rendered NaN/0 from undefined inputs; and (b) summed org-wide people
+// counts once per project, multiplying the workforce number by the
+// project count. The fix introduces a small `toPortfolioRow` adapter
+// at the boundary and counts global people once.
+describe('DR-027 — toPortfolioRow DTO adapter + people count-once', () => {
+  // Extend the eval source to also surface `toPortfolioRow` so the
+  // tests can pin the adapter contract independently from the
+  // reducer. The regex tolerates an absent match by falling back to
+  // an empty string — that way this describe block is also safe to
+  // run against a pre-fix source (it just won't find the symbol).
+  // eslint-disable-next-line no-new-func
+  const evalSource = new Function(
+    `${(dashboardSrc.match(/function\s+toPortfolioRow[\s\S]*?\n\}/) || [''])[0]}\n${dashboardSrc.match(/function emptyKpiPayload[\s\S]*?\n\}/)[0]}\n${dashboardSrc.match(/function sumKpiPayloads[\s\S]*?\n\}/)[0]}\nreturn { toPortfolioRow, emptyKpiPayload, sumKpiPayloads };`,
+  );
+
+  test('toPortfolioRow maps canonical wire shape (boqVariance, onLeaveToday) → SPA-internal (boq, onLeaveTodayCount)', () => {
+    const { toPortfolioRow } = evalSource();
+    const wire = {
+      boqVariance: { itemsCount: 5, totalContractValue: 100, totalExecutedValue: 130, variancePercent: 30 },
+      people: { onLeaveToday: 3, pendingLeaveCount: 2, overdueTrainingCount: 1 },
+    };
+    const out = toPortfolioRow(wire);
+    expect(out.boq.itemCount).toBe(5);
+    expect(out.boq.contractValue).toBe(100);
+    expect(out.boq.executedValue).toBe(130);
+    expect(out.boq.variancePct).toBe(30);
+    expect(out.people.onLeaveTodayCount).toBe(3);
+    expect(out.people.pendingLeaveCount).toBe(2);
+    expect(out.people.overdueTrainingCount).toBe(1);
+  });
+
+  test('toPortfolioRow handles null safely (failed fan-out rows)', () => {
+    const { toPortfolioRow } = evalSource();
+    expect(toPortfolioRow(null)).toBeNull();
+    expect(toPortfolioRow(undefined)).toBeNull();
+  });
+
+  test('toPortfolioRow defaults to zeros when boqVariance / people are missing', () => {
+    const { toPortfolioRow } = evalSource();
+    const out = toPortfolioRow({});
+    expect(out.boq.itemCount).toBe(0);
+    expect(out.boq.contractValue).toBe(0);
+    expect(out.boq.executedValue).toBe(0);
+    expect(out.boq.variancePct).toBe(0);
+    expect(out.people.onLeaveTodayCount).toBe(0);
+    expect(out.people.pendingLeaveCount).toBe(0);
+    expect(out.people.overdueTrainingCount).toBe(0);
+  });
+
+  test('toPortfolioRow accepts the legacy SPA-internal short shape (forward-compat with emptyKpiPayload rows)', () => {
+    // The dashboard's emptyKpiPayload returns BOTH shapes (boq +
+    // boqVariance) so legacy code paths and the all-projects reducer
+    // both work. The adapter must accept that shape too.
+    const { toPortfolioRow } = evalSource();
+    const mixed = {
+      boq: { itemCount: 7, contractValue: 200, executedValue: 250, variancePct: 25 },
+      people: { onLeaveTodayCount: 9, pendingLeaveCount: 0, overdueTrainingCount: 0 },
+    };
+    const out = toPortfolioRow(mixed);
+    expect(out.boq.itemCount).toBe(7);
+    expect(out.people.onLeaveTodayCount).toBe(9);
+  });
+
+  test('People counts are sourced once (first payload wins) — workforce does not multiply', () => {
+    // DR-027 acceptance: "Adding projects does not multiply workforce
+    // counts." Pre-fix this would be 5+7=12 (for onLeaveToday) and
+    // 3+9=12 (for pendingLeaveCount). Post-fix the first payload's
+    // global counts win because every per-project /kpis response
+    // returns the same org-wide numbers.
+    const { sumKpiPayloads } = evalSource();
+    const a = {
+      dpr: { submittedCount: 0, pendingReviewCount: 0, approvedCount: 0, rejectedCount: 0, draftCount: 0 },
+      inspections: { totalCount: 0, openCount: 0, byType: {} },
+      boqVariance: { itemsCount: 0, totalContractValue: 0, totalExecutedValue: 0, variancePercent: 0 },
+      people: { onLeaveToday: 5, pendingLeaveCount: 3, overdueTrainingCount: 1 },
+      pendingReviewTrend: [],
+      warnings: [],
+    };
+    const b = {
+      dpr: { submittedCount: 0, pendingReviewCount: 0, approvedCount: 0, rejectedCount: 0, draftCount: 0 },
+      inspections: { totalCount: 0, openCount: 0, byType: {} },
+      boqVariance: { itemsCount: 0, totalContractValue: 0, totalExecutedValue: 0, variancePercent: 0 },
+      people: { onLeaveToday: 7, pendingLeaveCount: 9, overdueTrainingCount: 4 }, // would multiply under pre-fix behavior
+      pendingReviewTrend: [],
+      warnings: [],
+    };
+    const out = sumKpiPayloads([a, b]);
+    expect(out.people.onLeaveTodayCount).toBe(5); // first wins, NOT 5+7=12
+    expect(out.people.pendingLeaveCount).toBe(3); // first wins, NOT 3+9=12
+    expect(out.people.overdueTrainingCount).toBe(1); // first wins, NOT 1+4=5
+  });
+
+  test('All-failed fan-out produces an all-zero payload + a 0-of-N warning', () => {
+    // Edge case: every project request failed. The reducer must
+    // return the empty-payload shape (so tile renderers don't crash)
+    // and surface the failure count so the dashboard shows "0 of N
+    // projects included" rather than silently rendering zeros.
+    const { sumKpiPayloads } = evalSource();
+    const out = sumKpiPayloads([null, null, null]);
+    expect(out.dpr.submittedCount).toBe(0);
+    expect(out.boq.itemCount).toBe(0);
+    expect(out.people.onLeaveTodayCount).toBe(0);
+    expect(out.includedProjectCount).toBe(0);
+    expect(out.failedProjectCount).toBe(3);
+    expect(out.warnings).toEqual(
+      expect.arrayContaining([expect.stringMatching(/^0 of 3 projects included \(3 failed\)$/)])
+    );
   });
 });
 

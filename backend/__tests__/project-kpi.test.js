@@ -294,10 +294,25 @@ function makePrisma(opts = {}) {
       }),
     },
     leaveRequest: {
-      count: jest.fn(async () => ({ onLeave: 1, pending: 2, overdueTraining: 3 }[Symbol.for('case')] ?? 0)),
+      // DR-027 — switch on where.status so the People roll-up's three
+      // counts come back distinguishable. Pre-fix this mock was a
+      // dead-coded object-key lookup (`{ onLeave: 1, ... }[Symbol.for('case')]`)
+      // that always returned 0; no existing test asserted the People
+      // wire shape, so it slipped through. The new test below pins
+      // the canonical `{ onLeaveToday, pendingLeaveCount,
+      // overdueTrainingCount }` response shape — if a future refactor
+      // renames `onLeaveToday` → `onLeaveTodayCount` on the wire, the
+      // SPA's `toPortfolioRow` adapter would need to follow.
+      count: jest.fn(async ({ where } = {}) => {
+        switch (where && where.status) {
+          case 'APPROVED': return 1; // onLeaveToday
+          case 'PENDING': return 2; // pendingLeaveCount
+          default: return 0;
+        }
+      }),
     },
     trainingEnrollment: {
-      count: jest.fn(async () => 3),
+      count: jest.fn(async () => 3), // overdueTrainingCount
     },
     employee: {
       findUnique: jest.fn(async ({ where }) => {
@@ -620,6 +635,35 @@ describe('N17 — GET /api/projects/:idOrName/kpis', () => {
       .set('Authorization', userJwt());
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('PROJECT_NOT_FOUND');
+  });
+
+  // DR-027 — pin the canonical wire shape so a future backend refactor
+  // that renames `boqVariance` → `boq` or `people.onLeaveToday` →
+  // `people.onLeaveTodayCount` is caught here, not silently in
+  // production via a multiplied-workforce or zeroed-BOQ tile.
+  //
+  // The SPA reducer's `toPortfolioRow` adapter translates these wire
+  // names into the SPA-internal short shapes (`boq.*`,
+  // `people.onLeaveTodayCount`) before summation. If the wire shape
+  // ever drifts, the adapter must follow.
+  it('9e-dr027. KPI endpoint emits the canonical wire shape (boqVariance long-shape + people.onLeaveToday)', async () => {
+    const prisma = makePrisma();
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .get(`/api/projects/${T_NAGAR_ID}/kpis`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    // BOQ: long-shape `boqVariance` (NOT the short-shape `boq`).
+    expect(res.body).toHaveProperty('boqVariance');
+    expect(res.body).not.toHaveProperty('boq');
+    // People: wire uses `onLeaveToday` (no "Count" suffix). The mock
+    // returns 1 for APPROVED, 2 for PENDING, 3 for OVERDUE.
+    expect(res.body).toHaveProperty('people.onLeaveToday', 1);
+    expect(res.body).toHaveProperty('people.pendingLeaveCount', 2);
+    expect(res.body).toHaveProperty('people.overdueTrainingCount', 3);
+    // People do NOT carry the "Count" suffix on the wire — that's the
+    // SPA-internal name, not the wire name.
+    expect(res.body.people).not.toHaveProperty('onLeaveTodayCount');
   });
 });
 

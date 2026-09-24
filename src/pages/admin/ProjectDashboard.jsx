@@ -455,6 +455,55 @@ const ICONS = {
 // Empty KPI payload — same shape as a real response so downstream code
 // (the tile renderers + chart consumers) doesn't need to special-case
 // "no projects yet".
+// DR-027 — DTO adapter. The per-project /kpis endpoint emits the
+// canonical wire contract: `boqVariance.{itemsCount,totalContractValue,
+// totalExecutedValue,variancePercent}` and `people.onLeaveToday` (note:
+// no "Count" suffix on the wire). The reducer below reads the short-
+// shape `boq` + `people.onLeaveTodayCount`, so we normalize at the
+// boundary here instead of patching every read site. Without this
+// adapter the BOQ tiles read undefined fields and render NaN, and the
+// people tile sums across projects (workforce count gets multiplied
+// by the number of projects — see DR-027 acceptance criterion:
+// "Adding projects does not multiply workforce counts").
+function toPortfolioRow(dbRow) {
+  if (!dbRow) return null;
+  const bv = dbRow.boqVariance || {};
+  // Forward-compat: if the input is already in the SPA-internal short
+  // shape (e.g. emptyKpiPayload rows that pre-populate both `boq` and
+  // `boqVariance`), prefer that over the boqVariance.* wire fields —
+  // the short shape is what the rest of the reducer reads and we
+  // shouldn't double-map.
+  const hasInternalBoq = dbRow.boq && (
+    dbRow.boq.itemCount !== undefined
+    || dbRow.boq.contractValue !== undefined
+    || dbRow.boq.executedValue !== undefined
+    || dbRow.boq.variancePct !== undefined
+  );
+  const pe = dbRow.people || {};
+  return {
+    ...dbRow,
+    boq: hasInternalBoq ? {
+      itemCount: Number(dbRow.boq.itemCount) || 0,
+      contractValue: Number(dbRow.boq.contractValue) || 0,
+      executedValue: Number(dbRow.boq.executedValue) || 0,
+      variancePct: Number(dbRow.boq.variancePct) || 0,
+    } : {
+      itemCount: Number(bv.itemsCount) || 0,
+      contractValue: Number(bv.totalContractValue) || 0,
+      executedValue: Number(bv.totalExecutedValue) || 0,
+      variancePct: Number(bv.variancePercent) || 0,
+    },
+    people: {
+      // Backend wire uses `onLeaveToday` (no "Count" suffix); the SPA
+      // reducer's internal name is `onLeaveTodayCount`. Accept both so
+      // a future wire rename doesn't break the boundary.
+      onLeaveTodayCount: Number(pe.onLeaveToday ?? pe.onLeaveTodayCount) || 0,
+      pendingLeaveCount: Number(pe.pendingLeaveCount) || 0,
+      overdueTrainingCount: Number(pe.overdueTrainingCount) || 0,
+    },
+  };
+}
+
 function emptyKpiPayload() {
   return {
     window: { from: null, to: null },
@@ -479,6 +528,11 @@ function emptyKpiPayload() {
     cubeTests: { dueSoonCount: 0, overdueCount: 0, passedCount: 0 },
     pendingReviewTrend: [],
     warnings: [],
+    // DR-027 — declare the actual included project population so the
+    // dashboard can render "X of Y projects included" instead of
+    // silently dropping failed fan-out calls.
+    includedProjectCount: 0,
+    failedProjectCount: 0,
   };
 }
 
@@ -488,11 +542,30 @@ function emptyKpiPayload() {
 // pendingReviewTrend is appended across projects then re-sorted by
 // date bucket (the project endpoint returns one row per UTC-midnight
 // date; combining across projects is a true merge).
+//
+// DR-027 — every raw payload is first run through `toPortfolioRow` so
+// the reducer reads the SPA-internal short shapes (`boq.*`,
+// `people.onLeaveTodayCount`) regardless of the backend wire shape.
+// People counts are ORG-wide (the backend's leave/training roll-ups are
+// not project-scoped — see projects.js comments above the People
+// roll-up), so we source them once from the first successful payload
+// instead of summing them across projects (the audit-named
+// "workforce-multiplied" bug). Failed fan-out rows (null entries) are
+// counted into `failedProjectCount` and surface a partial-availability
+// warning so the dashboard can show "X of Y projects included"
+// instead of silently dropping them.
 function sumKpiPayloads(payloads) {
   const out = emptyKpiPayload();
   const trend = new Map();
-  payloads.forEach((p) => {
-    if (!p) return;
+  const requestedCount = Array.isArray(payloads) ? payloads.length : 0;
+  let peopleSourced = false;
+  payloads.forEach((raw) => {
+    const p = toPortfolioRow(raw);
+    if (!p) {
+      out.failedProjectCount += 1;
+      return;
+    }
+    out.includedProjectCount += 1;
     if (p.window && p.window.from) {
       // Earliest from — earliest wins; latest to — latest wins; the
       // window is "where the data lives" so the union window is the
@@ -524,10 +597,16 @@ function sumKpiPayloads(payloads) {
       // contract / executed so it stays mathematically consistent.
       // (We can't just average or it'll drift.)
     }
-    if (p.people) {
-      out.people.onLeaveTodayCount += Number(p.people.onLeaveTodayCount) || 0;
-      out.people.pendingLeaveCount += Number(p.people.pendingLeaveCount) || 0;
-      out.people.overdueTrainingCount += Number(p.people.overdueTrainingCount) || 0;
+    if (!peopleSourced && p.people) {
+      // DR-027 — people counts are ORG-wide, not project-scoped. Each
+      // per-project /kpis response carries the same global numbers
+      // (leave/training are HR concepts, not site concepts). Summing
+      // would yield "3x workforce" for 3 projects; the right semantic
+      // is "count once". Take from the first successful payload.
+      out.people.onLeaveTodayCount = Number(p.people.onLeaveTodayCount) || 0;
+      out.people.pendingLeaveCount = Number(p.people.pendingLeaveCount) || 0;
+      out.people.overdueTrainingCount = Number(p.people.overdueTrainingCount) || 0;
+      peopleSourced = true;
     }
     if (Array.isArray(p.pendingReviewTrend)) {
       p.pendingReviewTrend.forEach((row) => {
@@ -541,6 +620,15 @@ function sumKpiPayloads(payloads) {
     }
     if (Array.isArray(p.warnings)) out.warnings.push(...p.warnings);
   });
+  // DR-027 — surface partial availability when any fan-out call failed.
+  // The dashboard's existing toast handler picks the first warning up
+  // and renders it as a non-blocking banner; the count is also exposed
+  // on the payload so a future tile can render "X of Y included".
+  if (requestedCount > 0 && out.failedProjectCount > 0) {
+    out.warnings.push(
+      `${out.includedProjectCount} of ${requestedCount} projects included (${out.failedProjectCount} failed)`,
+    );
+  }
   // Recompute variancePct from summed contract + executed so the
   // "All projects" tile reads the same number it would if there were
   // a single org-wide BOQ row.
@@ -869,7 +957,31 @@ export default function ProjectDashboard() {
   // is null while its first load is in flight (so the chart sections
   // can render their own "Loading…" sub-line) and stays null when
   // the load fails (the empty-state path takes over).
-  const [chartLists, setChartLists] = useState({ dprs: null, inspections: null, boq: null });
+  //
+  // [DR-028] Chart contract. The dashboard used to call the list
+  // endpoints with `limit: 200` and no date filter — that silently
+  // capped DPR / Inspection / BOQ at the endpoint max (100) and
+  // returned the most-recent 100 rows, which is *not* "all DPRs in
+  // the last 30 days". The funnel then derived CLOSED as
+  // `totalCount - openCount`, mixing a windowed total with an
+  // org-wide all-date OPEN backlog. We now:
+  //   1. Reuse the same `drillWindow(kpis, …)` translation the
+  //      drill panels use, so the chart lists and the KPI tiles
+  //      see the same scope/window/status contract.
+  //   2. Apply the per-series status normalisation the audit
+  //      prescribes: the DPR trend excludes DRAFT (the chart series
+  //      are SUBMITTED/UNDER_REVIEW/APPROVED/REJECTED — "PUBLISHED"
+  //      in the audit's vocabulary); the Inspection funnel uses the
+  //      windowed total + windowed CLOSED count, leaving the
+  //      all-date OPEN backlog for the inspection.open tile only.
+  //   3. Track a `partial` flag per list (true when the endpoint
+  //      returned `nextCursor`) so the chart sections can surface a
+  //      "first 100 — narrow window" message instead of silently
+  //      rendering a truncated chart as if it were complete.
+  // The "all-date OPEN" inspection.open tile is intentionally
+  // untouched — that tile's contract is "all OPEN inspections" and
+  // is rendered separately from the funnel.
+  const [chartLists, setChartLists] = useState({ dprs: null, inspections: null, boq: null, partial: null });
   const chartEpochRef = useRef(0);
 
   const loadChartLists = useCallback(async () => {
@@ -880,33 +992,55 @@ export default function ProjectDashboard() {
     // without a scope). The chart components are unchanged; they consume
     // the rows the same way they consume per-project rows.
     const scope = isAllProjects ? {} : drillScope(selectedProject);
-    const w = drillWindow({ window: { from: null, to: null } }, 'dpr.submitted');
-    // Use the same window as the KPI call so the trend chart matches
-    // the tile counts. For the "all-date" inspection.open path we
-    // intentionally pass an empty window so OPEN inspections from
-    // any date are counted.
-    const inspScope = { ...scope, limit: 200, ...(days ? {} : {}) };
-    const dprScope = { ...scope, limit: 200, ...w };
-    const boqScope = { ...scope, limit: 200 };
+    // [DR-028] Pass the *actual* KPI window (not the literal `null`s
+    // the previous code passed) so the list endpoints' `from`/`to`
+    // predicates match the tile counts. drillWindow already handles
+    // the half-open → inclusive YYYY-MM-DD translation; the empty
+    // window fallback (no kpis yet) returns `{}` and the endpoint
+    // serves its unfiltered first page — same behaviour as before
+    // when the KPI hasn't resolved yet.
+    const w = drillWindow(kpis, 'dpr.submitted');
+    // [DR-028] The DPR trend series is SUBMITTED + UNDER_REVIEW +
+    // APPROVED + REJECTED ("PUBLISHED" in the audit's vocabulary,
+    // i.e. post-DRAFT). The DPR list endpoint accepts a single
+    // `status` filter, so we fan out to four parallel requests and
+    // merge the rows — each request is window-scoped to the same
+    // `from`/`to` as the KPI tiles so the chart cannot under- or
+    // over-count. DRAFT rows are excluded server-side so the
+    // endpoint's 100-row cap can't be eaten by draft spam.
+    const dprStatusList = ['SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'];
+    const dprFetches = dprStatusList.map((status) =>
+      api.getDprs({ ...scope, status, limit: 100, ...w }, accessToken)
+        .catch(() => ({ dprs: [], nextCursor: null })),
+    );
+    const inspScope = { ...scope, limit: 100, ...w };
+    const boqScope = { ...scope, limit: 100 };
     try {
-      const [dprsRes, inspRes, boqRes] = await Promise.all([
-        api.getDprs(dprScope, accessToken).catch(() => ({ dprs: [] })),
-        api.getInspections(inspScope, accessToken).catch(() => ({ inspections: [] })),
-        api.getBoqItems(boqScope, accessToken).catch(() => ({ items: [] })),
+      const [dprResults, inspRes, boqRes] = await Promise.all([
+        Promise.all(dprFetches),
+        api.getInspections(inspScope, accessToken).catch(() => ({ inspections: [], nextCursor: null })),
+        api.getBoqItems(boqScope, accessToken).catch(() => ({ items: [], nextCursor: null })),
       ]);
       if (!mountedRef.current || myEpoch !== chartEpochRef.current) return; // stale
+      const dprRows = dprResults.flatMap((r) => (Array.isArray(r?.dprs) ? r.dprs : []));
+      const dprPartial = dprResults.some((r) => !!r?.nextCursor);
       setChartLists({
-        dprs: Array.isArray(dprsRes?.dprs) ? dprsRes.dprs : [],
+        dprs: dprRows,
         inspections: Array.isArray(inspRes?.inspections) ? inspRes.inspections : (Array.isArray(inspRes?.records) ? inspRes.records : []),
         boq: Array.isArray(boqRes?.items) ? boqRes.items : (Array.isArray(boqRes?.boq) ? boqRes.boq : []),
+        partial: {
+          dprs: dprPartial,
+          inspections: !!inspRes?.nextCursor,
+          boq: !!boqRes?.nextCursor,
+        },
       });
     } catch (err) {
       if (!mountedRef.current || myEpoch !== chartEpochRef.current) return; // stale
       // Fall through to empty state — the chart components handle
       // null/empty data with their own "No data yet" message.
-      setChartLists({ dprs: [], inspections: [], boq: [] });
+      setChartLists({ dprs: [], inspections: [], boq: [], partial: { dprs: false, inspections: false, boq: false } });
     }
-  }, [selectedProject, isAllProjects, days, accessToken]);
+  }, [selectedProject, isAllProjects, days, accessToken, kpis]);
 
   useEffect(() => {
     if (selectedProject) loadChartLists();
