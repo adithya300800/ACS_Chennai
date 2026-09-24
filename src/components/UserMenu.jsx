@@ -120,26 +120,38 @@ export default function UserMenu() {
       const insideTrigger = triggerRef.current && triggerRef.current === document.activeElement;
       if (!insideMenu && !insideTrigger) return;
       const lastIndex = menuItems.length - 1;
+      // DR-045: single helper that synchronizes the roving tabindex
+      // state with the DOM focus. Pre-fix: Home / End only moved DOM
+      // focus but never updated activeIndex, so aria-activedescendant
+      // (the screen-reader announcer) lagged the focused item, and
+      // ArrowDown from Logout (focused via End with activeIndex stale
+      // at 0) computed next = 0 + 1 = 1 and landed on Dashboard
+      // instead of wrapping to Help. Routing every key handler through
+      // this helper makes the two impossible to drift again.
+      const focusMenuItem = (idx) => {
+        setActiveIndex(idx);
+        itemRefs.current[idx]?.focus();
+      };
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         setActiveIndex((i) => {
           const next = i < 0 ? 0 : (i + 1 > lastIndex ? 0 : i + 1);
-          itemRefs.current[next]?.focus();
+          focusMenuItem(next);
           return next;
         });
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         setActiveIndex((i) => {
           const next = i < 0 ? lastIndex : (i - 1 < 0 ? lastIndex : i - 1);
-          itemRefs.current[next]?.focus();
+          focusMenuItem(next);
           return next;
         });
       } else if (e.key === 'Home') {
         e.preventDefault();
-        itemRefs.current[0]?.focus();
+        focusMenuItem(0);
       } else if (e.key === 'End') {
         e.preventDefault();
-        itemRefs.current[lastIndex]?.focus();
+        focusMenuItem(lastIndex);
       }
     };
     document.addEventListener('click', onDoc);
