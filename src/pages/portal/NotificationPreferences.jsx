@@ -67,6 +67,16 @@ export default function NotificationPreferences() {
   const { push } = useToast();
 
   const [loading, setLoading] = useState(true);
+  // DR-006: distinct baselineLoaded gate. Untouched until the initial GET
+  // resolves successfully, so the Save button can stay disabled during
+  // a load failure. Without this gate, the form would render populated
+  // with the default prefs (from useState's initial value), the user
+  // could tweak the hour field, the dirty check would flip true, and
+  // Save would happily overwrite their unknown saved opt-outs / type
+  // mutes with the in-memory defaults. Also tracks loadFailed so the
+  // page can render an inline error + Retry instead of an empty form.
+  const [baselineLoaded, setBaselineLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [sendingTest, setSendingTest] = useState(false);
   const [prefs, setPrefs] = useState({
@@ -89,36 +99,47 @@ export default function NotificationPreferences() {
   }));
   const [types, setTypes] = useState([]);
 
+  // DR-006: extracted so the Retry button can re-invoke it after a
+  // failure. The cancelledRef guards against late resolves from the
+  // initial mount firing on a Refresh or token change.
+  const cancelledRef = React.useRef(false);
+
   // Load on mount. The GET returns { preferences, types[] }; we only re-fetch
   // on mount (no polling) — the page is short-lived and edit-in-place.
+  const loadPrefs = React.useCallback(async () => {
+    try {
+      const res = await api.getNotificationPreferences(token);
+      if (cancelledRef.current) return;
+      const loaded = {
+        emailEnabled: res.preferences.emailEnabled,
+        digestEnabled: res.preferences.digestEnabled,
+        digestHourLocal: res.preferences.digestHourLocal,
+        typeMutes: res.preferences.typeMutes || {},
+      };
+      setPrefs(loaded);
+      // S4-B: snapshot what the server just confirmed so the dirty check
+      // has a real baseline. Without this, every pref starts out as
+      // 'dirty' on first mount.
+      baselineRef.current = JSON.stringify(loaded);
+      setTypes(res.types || []);
+      setBaselineLoaded(true);
+      setLoadFailed(false);
+    } catch (err) {
+      if (cancelledRef.current) return;
+      // DR-006: surface the failure inline so the user knows the form
+      // they're seeing is the default baseline, not their saved prefs.
+      push(err.message || 'Failed to load preferences', 'error');
+      setBaselineLoaded(false);
+      setLoadFailed(true);
+    } finally {
+      if (!cancelledRef.current) setLoading(false);
+    }
+  }, [token, push]);
+
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await api.getNotificationPreferences(token);
-        if (cancelled) return;
-        const loaded = {
-          emailEnabled: res.preferences.emailEnabled,
-          digestEnabled: res.preferences.digestEnabled,
-          digestHourLocal: res.preferences.digestHourLocal,
-          typeMutes: res.preferences.typeMutes || {},
-        };
-        setPrefs(loaded);
-        // S4-B: snapshot what the server just confirmed so the dirty check
-        // has a real baseline. Without this, every pref starts out as
-        // 'dirty' on first mount.
-        baselineRef.current = JSON.stringify(loaded);
-        setTypes(res.types || []);
-      } catch (err) {
-        if (cancelled) return;
-        push(err.message || 'Failed to load preferences', 'error');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+    loadPrefs();
+    return () => { cancelledRef.current = true; };
+  }, [loadPrefs]);
 
   // Toggle a single type's mute flag. The server stores `typeMutes = { TYPE: true }`
   // where `true` means MUTED — the inverse of the visible switch. Keep that
@@ -181,6 +202,31 @@ export default function NotificationPreferences() {
   if (loading) {
     return <div className="notification-pref-page notification-pref-loading">Loading preferences…</div>;
   }
+
+  // DR-006: failed baseline-load. Render the form (so the structure stays
+  // familiar on retry) but pin a clear inline error with a Retry action,
+  // and gate Save on `baselineLoaded` (set in the effect) so the user
+  // can't submit placeholder defaults over their unknown saved baseline.
+  const errorBanner = loadFailed && !loading ? (
+    <div
+      className="notification-pref-error"
+      role="alert"
+      aria-live="polite"
+    >
+      <span className="notification-pref-error-text">
+        Couldn&rsquo;t load your saved preferences. The form below is showing
+        defaults &mdash; changes are disabled until the load succeeds.
+      </span>
+      <button
+        type="button"
+        className="btn btn-secondary notification-pref-retry-btn"
+        onClick={() => { setLoading(true); loadPrefs(); }}
+        disabled={loading}
+      >
+        Retry
+      </button>
+    </div>
+  ) : null;
 
   // Group types: IMMEDIATE first, then DAILY. The server already returns
   // types in this order; we re-sort defensively in case it ever changes.
@@ -326,12 +372,14 @@ export default function NotificationPreferences() {
         </section>
       )}
 
+      {errorBanner}
+
       <div className="notification-pref-actions">
         <button
           type="button"
           className="btn btn-primary"
           onClick={save}
-          disabled={saving || !anyDirty}
+          disabled={saving || !anyDirty || !baselineLoaded}
         >
           {saving ? 'Saving…' : 'Save preferences'}
         </button>
