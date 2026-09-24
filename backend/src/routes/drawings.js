@@ -125,6 +125,12 @@ function serializeDrawing(row) {
     // traceable end-to-end; not used by the React UI yet.
     uploadIntentUlid: row.uploadIntentUlid,
     supersedesId: row.supersedesId,
+    // [DR-032] Monotonic counter stamped on every PATCH that mutates a
+    // content field (`pdfBlobPath`; `uploadIntentUlid` rides the same
+    // bump because it vouches for that blob). Echoed so downstream
+    // readers (DPR / Inspection) can capture it at stamp time and
+    // detect a later blob replacement on the same drawing row.
+    contentVersion: row.contentVersion ?? 1,
     createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
     updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt,
   };
@@ -889,6 +895,30 @@ router.get('/:id/read-sas', asyncHandler(async (req, res) => {
 // revision — those are the natural key, and changing them would silently
 // orphan the references. To "rename" a drawing, supersede it with a new
 // drawingNumber instead. To change the project, delete + recreate.
+//
+// [DR-032] Content vs metadata split
+// --------------------------------
+// "Content" fields are the bytes that historical stamps resolve to:
+// `pdfBlobPath` and its companion `uploadIntentUlid` (which vouches for
+// that blob). Mutating either without bumping `contentVersion` would
+// let a later reader's cached stamp resolve to different bytes under
+// the same drawing ID + revision label.
+//
+// `pdfBlobPath` is the obvious one — it's the literal blob pointer.
+// `uploadIntentUlid` rides the same bump because switching intents
+// while keeping the blob is incoherent (and switching intents without
+// switching blobs is the exact race we want to detect). Other PATCH
+// fields (title / issuedDate / issuedById / status) are safe metadata
+// corrections that don't change the bytes a downstream stamp resolves
+// to — they never trigger a version bump.
+//
+// CAS contract (DR-032): when PATCH touches a content field, the
+// client must echo the row's current `contentVersion` back as
+// `expectedVersion`. A mismatch returns 409 STALE_VERSION with the
+// row's current version, so a stale admin tab cannot silently replace
+// bytes that downstream records (DPR / Inspection) have already
+// stamped against. Metadata-only PATCHes accept (and ignore)
+// `expectedVersion` — the version is unchanged.
 router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   if (!prisma) {
@@ -908,7 +938,7 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
 
   // Guardrail: the natural key + cross-table pointer are immutable. Allow
   // every other field on the model.
-  const ALLOWED_PATCH_FIELDS = ['title', 'status', 'issuedDate', 'issuedById', 'pdfBlobPath', 'uploadIntentUlid'];
+  const ALLOWED_PATCH_FIELDS = ['title', 'status', 'issuedDate', 'issuedById', 'pdfBlobPath', 'uploadIntentUlid', 'expectedVersion'];
   const unknown = Object.keys(req.body || {}).filter(k => !ALLOWED_PATCH_FIELDS.includes(k));
   if (unknown.length) {
     return res.status(400).json({
@@ -918,11 +948,62 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
     });
   }
 
+  // [DR-032] Compute "is content change" BEFORE we touch the row, so the
+  // expectedVersion guard runs once and applies to both update paths
+  // below (status=ACTIVE restore + plain update). A PATCH "touches
+  // content" when the client is replacing either the blob pointer or
+  // its vouching intent — both ride the same contentVersion bump.
+  const touchesContent = data.pdfBlobPath !== undefined || data.uploadIntentUlid !== undefined;
+
   try {
-    const existing = await prisma.drawing.findUnique({ where: { id } });
+    const existing = await prisma.drawing.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        projectId: true,
+        drawingNumber: true,
+        title: true,
+        status: true,
+        pdfBlobPath: true,
+        uploadIntentUlid: true,
+        contentVersion: true,
+      },
+    });
     if (!existing) {
       return res.status(404).json({ error: 'DRAWING_NOT_FOUND', code: 'DRAWING_NOT_FOUND', message: 'Drawing not found' });
     }
+
+    // [DR-032] CAS guard for content-touching PATCHes. Required when
+    // pdfBlobPath / uploadIntentUlid is being replaced; a value that
+    // doesn't match the row's current contentVersion is 409 STALE_VERSION
+    // so an admin's stale tab cannot silently replace bytes that
+    // downstream DPR/Inspection stamps have already captured.
+    if (touchesContent) {
+      const expectedVersion = req.body && req.body.expectedVersion;
+      if (expectedVersion === undefined || expectedVersion === null) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          code: 'INVALID_EXPECTED_VERSION',
+          message: 'expectedVersion is required when pdfBlobPath or uploadIntentUlid is being changed (DR-032 CAS pin).',
+        });
+      }
+      if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          code: 'INVALID_EXPECTED_VERSION',
+          message: 'expectedVersion must be a non-negative integer',
+        });
+      }
+      if (existing.contentVersion !== expectedVersion) {
+        return res.status(409).json({
+          error: 'STALE_VERSION',
+          code: 'STALE_VERSION',
+          message: `Drawing contentVersion is ${existing.contentVersion}; expected ${expectedVersion}. Refresh and retry.`,
+          currentVersion: existing.contentVersion,
+        });
+      }
+    }
+
     // If the row is already SUPERSEDED, only allow title / pdfBlobPath /
     // status updates so the admin can correct metadata without
     // resurrecting an old revision.
@@ -966,15 +1047,16 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
             },
           } };
         }
-        // Conditional update — require the row to still NOT be
-        // SUPERSEDED. If a concurrent supersede flipped it after our
-        // read, count=0 and we refuse the restore.
+        // [DR-032] Restore path bumps contentVersion when the client
+        // is also replacing the content fields in the same PATCH.
+        // Pinned on (id, contentVersion: expectedVersion) so a stale
+        // caller who lost the CAS races the conditional updateMany to
+        // count=0 → 409 STALE_VERSION.
+        const whereWithCas = touchesContent
+          ? { id: existing.id, projectId: existing.projectId, status: { not: 'SUPERSEDED' }, contentVersion: req.body.expectedVersion }
+          : { id: existing.id, projectId: existing.projectId, status: { not: 'SUPERSEDED' } };
         const claim = await tx.drawing.updateMany({
-          where: {
-            id: existing.id,
-            projectId: existing.projectId,
-            status: { not: 'SUPERSEDED' },
-          },
+          where: whereWithCas,
           data: {
             title: data.title !== undefined ? data.title : existing.title,
             status: 'ACTIVE',
@@ -982,9 +1064,29 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
             issuedById: data.issuedById !== undefined ? data.issuedById : existing.issuedById,
             pdfBlobPath: data.pdfBlobPath !== undefined ? data.pdfBlobPath : existing.pdfBlobPath,
             uploadIntentUlid: data.uploadIntentUlid !== undefined ? data.uploadIntentUlid : existing.uploadIntentUlid,
+            // [DR-032] { increment: 1 } so concurrent restores can't both
+            // land on the same version. Only fires on content-touching
+            // restores — metadata-only restores don't bump.
+            ...(touchesContent ? { contentVersion: { increment: 1 } } : {}),
           },
         });
         if (claim.count !== 1) {
+          // [DR-032] Distinguish the CAS-lost path (the content-version
+          // didn't match — a concurrent writer bumped it) from the
+          // status-flipped path (a concurrent supersede resurrected /
+          // superseded the row). The CAS-lost path returns STALE_VERSION
+          // so the SPA can refresh; the status-flipped path returns
+          // DRAWING_SUPERSEDED.
+          if (touchesContent) {
+            return { error: {
+              status: 409,
+              body: {
+                error: 'STALE_VERSION',
+                code: 'STALE_VERSION',
+                message: 'Drawing was modified by another action. Please refresh and try again.',
+              },
+            } };
+          }
           return { error: {
             status: 409,
             body: {
@@ -1021,8 +1123,53 @@ router.patch('/:id', requireFreshAdmin, asyncHandler(async (req, res) => {
         // into 500s. The intent is still CONFIRMED + boundAt=NULL; the
         // sweep retires it gracefully on its next fire.
         uploadIntentUlid: data.uploadIntentUlid !== undefined ? data.uploadIntentUlid : existing.uploadIntentUlid,
+        // [DR-032] Atomic version bump on content changes. The CAS
+        // guard above already validated expectedVersion against the
+        // row's current contentVersion, so the unconditional `update`
+        // below trusts that no concurrent writer slipped in. The
+        // `{ increment: 1 }` is monotonic and survives a second
+        // concurrent writer — at worst they both bump and the next
+        // CAS pin rejects the loser.
+        ...(touchesContent ? { contentVersion: { increment: 1 } } : {}),
       },
     });
+    // [DR-032] Post-write audit log for content bumps on ACTIVE
+    // referenced drawings. Downstream DPR/Inspection rows reference
+    // this drawingId but don't carry the per-read contentVersion yet
+    // (audit scope: this round closes the writer side; the reader-side
+    // propagation is a follow-up). A console.warn is enough to make
+    // the event discoverable via the existing structured-log pipeline
+    // (Round-40) without inventing a new notification channel.
+    if (touchesContent && updated.status === 'ACTIVE') {
+      try {
+        const [dprCount, inspCount] = await Promise.all([
+          prisma.dPR.count({ where: { drawingId: id } }).catch(() => null),
+          prisma.inspectionRecord.count({ where: { drawingId: id } }).catch(() => null),
+        ]);
+        const refs = (dprCount || 0) + (inspCount || 0);
+        if (refs > 0) {
+          console.warn('[DR-032] drawing contentVersion bumped on referenced ACTIVE drawing', {
+            drawingId: id,
+            projectId: updated.projectId,
+            drawingNumber: updated.drawingNumber,
+            revision: updated.revision,
+            fromVersion: existing.contentVersion,
+            toVersion: updated.contentVersion,
+            referencedByCount: refs,
+            dprCount,
+            inspCount,
+          });
+        }
+      } catch (countErr) {
+        // Defensive: the count is diagnostic, not authoritative — a
+        // flaky count must not turn a successful write into a 500.
+        console.warn('[DR-032] drawing reference count failed', {
+          drawingId: id,
+          prismaCode: countErr.code,
+          message: countErr.message?.split('\n')[0],
+        });
+      }
+    }
     res.json(serializeDrawing(updated));
   } catch (err) {
     console.error('Drawing update error', {

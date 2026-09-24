@@ -1232,6 +1232,17 @@ model Drawing {
   // referenced-blobPath sweep defence for protection.
   uploadIntentUlid String?   @map("upload_intent_ulid")
   supersedesId     String?   @map("supersedes_id")
+  // [DR-032] Monotonic counter stamped on every successful PATCH that
+  // mutates a content field (`pdfBlobPath`; `uploadIntentUlid` rides
+  // the same bump because it is the intent that vouches for that blob).
+  // Metadata corrections (title / issuedDate / issuedById / status
+  // transitions) do NOT bump the version — those are safe to amend in
+  // place and don't change the bytes a historical stamp resolves to.
+  // PATCH callers must echo the current version back as
+  // `expectedVersion`; a mismatch returns 409 STALE_VERSION so a
+  // stale admin tab cannot silently replace bytes that downstream
+  // records (DPR / Inspection) have already stamped against.
+  contentVersion   Int       @default(1) @map("content_version")
   createdAt        DateTime  @default(now()) @map("created_at")
   updatedAt        DateTime  @updatedAt @map("updated_at")
 
@@ -1258,6 +1269,10 @@ model Drawing {
   //   `SELECT upload_intent_ulid FROM drawing`
   // — an index keeps that read bounded by the indexed rows, not the table.
   @@index([uploadIntentUlid])
+  // [DR-032] Symmetric with project_attachment's (status, content_version)
+  // composite (DR-037); keeps version-bounded lookups covered if/when one
+  // is added. No read currently filters by version — present for symmetry.
+  @@index([status, contentVersion])
   @@map("drawing")
 }
 
