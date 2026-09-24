@@ -1,7 +1,6 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 -- DR-025 (fresh-product audit 2026-09-24) — CANCELLED status on
 --                                            BillingCertification.
--- ─────────────────────────────────────────────────────────────────────────────
 --
 -- Trigger:
 --   The audit's DR-025 finding traces the failure mode where abandoning a
@@ -32,7 +31,7 @@
 -- Effect (1 enum ADD VALUE, additive — zero destructive change to existing
 -- rows or schema):
 --
---   1. ALTER TYPE billing_certification_status ADD VALUE 'CANCELLED'.
+--   1. ALTER TYPE "BillingCertificationStatus" ADD VALUE 'CANCELLED'.
 --      Existing rows keep their status — DRAFT / CERTIFIED / DISPUTED — and
 --      the new value is only assigned by /cancel-correction under the new
 --      guards.
@@ -62,7 +61,69 @@
 -- /cancel-correction endpoint transitions, starting from the deploy of the
 -- matching route change (see backend/src/routes/billingCertifications.js
 -- /cancel-correction handler comments).
+--
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 2026-09-24 RECOVERY: identifier spelling corrected in place
+-- ─────────────────────────────────────────────────────────────────────────────
+--
+-- Original SQL in this file used the lowercase identifier
+-- `billing_certification_status` in the ALTER TYPE statement. Prisma's
+-- CREATE TYPE for the enum emits the QUOTED PascalCase identifier
+-- `"BillingCertificationStatus"`, so the first deploy hit:
+--
+--     P3018 — Database error: ERROR: type "billing_certification_status"
+--     does not exist (SQLSTATE 42704)
+--
+-- The DDL never ran; the enum value was never added. The migrator left an
+-- unfinished row in `_prisma_migrations` and refused to apply any further
+-- migration until the row was resolved.
+--
+-- Why this is permitted under Phase-4 P0
+-- --------------------------------------
+-- Phase-4 P0 forbids editing an *applied* migration in place. This
+-- migration never applied — the SQL failed before any DDL executed, so no
+-- schema state on the live DB corresponds to this file's old SQL. Editing
+-- the identifier in place is the same recovery pattern used by:
+--
+--   * 20260908150000_dr031_leave_constraint_correct_bound
+--     (DR-031-SQLFIX, 2026-09-10) — doubled-quote literal typo fixed in
+--     place, bootstrap-resolve added.
+--   * 20260912070000_s7_project_attachment_review
+--     (S7-SQLFIX, 2026-09-12) — singular "employee" FK target corrected
+--     to plural "employees" in place, bootstrap-resolve added.
+--
+-- Why a sibling migration is NOT used here
+-- ----------------------------------------
+-- The original draft of this recovery (commit aef38d4) added a sibling
+-- migration `20260924220000_dr025b_apply_cancelled_status` carrying the
+-- corrected PascalCase SQL, and added the failed migration to the
+-- Bootstrap-resolve loop. That approach failed in practice:
+--
+--   1. CI's `prisma migrate resolve --rolled-back
+--      20260924100000_dr025_correction_cancelled` correctly marks the
+--      errored ledger row as rolled-back (finished_at SET, rolled_back_at SET).
+--   2. The next `prisma migrate deploy` (inside Render's startup or the
+--      Render-API-triggered deploy) sees the row in rolled-back state and
+--      RE-APPLIES the migration SQL — i.e. the original snake_case SQL,
+--      because the sibling migration file sits in the filesystem at a
+--      LATER timestamp. Prisma's pre-flight check applies migrations in
+--      chronological order, and a rolled-back migration is treated as
+--      "not yet applied" from the schema-state perspective.
+--   3. The re-applied snake_case SQL fails again with the same 42704.
+--      The sibling's corrected SQL never runs.
+--
+-- The in-place edit removes the broken SQL entirely, so the re-apply
+-- succeeds on the first attempt and the sibling is no longer needed.
+--
+-- Recovery plan (in deploy order)
+-- --------------------------------
+--   1. Push this commit.
+--   2. CI's Bootstrap resolve marks the existing errored ledger row as
+--      rolled-back.
+--   3. Render's `npx prisma migrate deploy` re-applies this migration
+--      (now PascalCase) → ALTER TYPE succeeds → row marked as applied.
+--   4. No sibling migration runs (it's been removed in this commit).
 -- ─────────────────────────────────────────────────────────────────────────────
 
-ALTER TYPE "billing_certification_status"
+ALTER TYPE "BillingCertificationStatus"
   ADD VALUE IF NOT EXISTS 'CANCELLED';
