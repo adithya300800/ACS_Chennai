@@ -1058,7 +1058,14 @@ export default function InspectionSubmit() {
           reportDate: form.reportDate || (isDraftSave ? getBusinessToday() : null),
           weather: form.weather || null,
           contractor: form.contractor || null,
-          dprId: queryDprId || null,
+          // SOL DR-017: do NOT send dprId on resume. Resuming a draft
+          // via ?draftId=<id> never carries a `?dpr=` deep-link, so
+          // the previous `dprId: queryDprId || null` literal silently
+          // nulled the existing FK on every save. The dprId link is
+          // set at create time (POST below) and intentionally left
+          // alone on resume — the backend now ignores a stray null
+          // dprId unless the explicit `unlinkDpr: true` sentinel is
+          // also present. Sending nothing at all is cleaner.
           inspectionType: workEntry?.workType || 'material_inspection',
           data: workEntry?.data || null,
           boqItemId: form.boqItemId || null,
