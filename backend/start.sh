@@ -1,10 +1,27 @@
 #!/bin/sh
 # start.sh — Render container start command
 #
+# [DR-035 2026-09-24] Bootstrap-resolve is RETIRED from ordinary
+# startup. Pre-DR-035, start.sh auto-issued `prisma migrate resolve
+# --rolled-back` for an allowlisted set (DR-031 + S7) on every cold
+# start. That meant a newly failed migration matching the allowlist
+# would be silently reclassified by ordinary startup — exactly the
+# "ordinary startup still performs migration recovery exceptions"
+# hazard DR-035 calls out.
+#
+# The recovery loop body now lives in backend/scripts/reconcile-failed-migrations.sh
+# and is invoked EXPLICITLY — either by setting DR031_RECONCILE=1 on
+# the CI deploy workflow (which then calls the script from a gated
+# step), or by an operator running the script directly after
+# inspecting partial DDL. Ordinary pushes do NOT set DR031_RECONCILE,
+# so the gated CI step is skipped and Render's startup never sees
+# the reconcile loop.
+#
 # [DR-032] Recovery is NOT performed at start time. Operators run
-# `npm run db:recover -- --confirmed-abandoned` explicitly after inspecting
-# the ledger and verifying backup readiness — install/upgrade is now
-# DB-free, and recovery is not duplicated between postinstall and start.
+# `npm run db:recover -- --confirmed-abandoned` explicitly after
+# inspecting the ledger and verifying backup readiness — install/upgrade
+# is now DB-free, and recovery is not duplicated between postinstall
+# and start.
 #
 # This script's only job is to apply pending migrations and fail before
 # serving if anything is wrong (failure-before-serving):
@@ -13,65 +30,27 @@
 #      will exit non-zero here, and the container does NOT start.
 #   2. On success, `node src/index.js` execs and serves.
 #
-# Known-bad migrations that operators may need to clear via db:recover
-# (kept here as documentation; the script no longer touches them):
-#   - 20260905020000_n17_projects    — original n17 migration referenced
-#       the wrong table for the FK (employee singular vs employees
-#       plural); the corrective migration 20260905030000_fix_n17_employee_fk
-#       recreates the project table correctly.
-#   - 20260906000000_n1_project_fk    — original n1 migration referenced
-#       snake_case "project_name" in the backfill, but the DPR /
-#       InspectionRecord columns are camelCase quoted "projectName" (no
-#       @map on the schema field). The corrective migration
-#       20260906000001_n1_project_fk_fix re-runs the DDL with corrected
-#       backfill column names.
-#   - 20260908150000_dr031_leave_constraint_correct_bound — shipped
-#       with a SQL syntax bug at lines 82/113 (`''[]''` parsed as
-#       empty-string + stray-array + empty-string). Fixed in the
-#       migration file (SQL now uses `'[]'`); the bootstrap resolve
-#       block below clears the errored ledger row so migrate deploy
-#       can re-apply the corrected SQL on the first start after the
-#       fix lands. Idempotent: `migrate resolve --rolled-back` on a
-#       migration that's not in errored state exits non-zero, so we
-#       swallow that. After the first successful re-apply, this block
-#       is a no-op on every subsequent start.
+# Known-bad migrations that operators may need to clear via the
+# reconcile script (kept here as documentation; the script no longer
+# touches them — see backend/scripts/reconcile-failed-migrations.sh
+# for the operations tool):
+#   - 20260908150000_dr031_leave_constraint_correct_bound — broken `''[]''`
+#       literal (DR-031-SQLFIX 2026-09-10). SQL fixed in place.
+#   - 20260912070000_s7_project_attachment_review         — singular "employee"
+#       FK target (S7-SQLFIX 2026-09-12). SQL corrected to "employees".
+#   - 20260924100000_dr025_correction_cancelled           — lowercase
+#       enum identifier (DR-025 2026-09-24). SQL corrected to PascalCase.
 
 set -e
 
-# [DR-031-SQLFIX] Bootstrap recovery: clear the errored ledger row for
-# the DR-031 migration so `prisma migrate deploy` can re-apply the
-# (now-fixed) SQL. `migrate resolve` exits non-zero when the named
-# migration is not in errored state, which is the steady-state for
-# every start after the first successful recovery. The `|| true`
-# swallows that non-zero exit so we don't fail-fast on the steady
-# state. If the DB is unreachable, `migrate resolve` exits
-# non-zero AND `migrate deploy` below will also fail — the same
-# failure surface as before this block was added, no worse.
-#
-# NOTE: as of 2026-09-10 the LIVE Render service's dashboard
-# startCommand is `npx prisma migrate deploy && node src/index.js`,
-# which bypasses this script. render.yaml declares
-# `startCommand: sh start.sh` and the dashboard comment notes that
-# the dashboard value is authoritative. The bootstrap recovery ALSO
-# lives in the backend-deploy.yml workflow's "Bootstrap resolve" step,
-# which runs before the CI triggers Render's deploy, so the deploy
-# recovers even while the dashboard is out of sync. Once the
-# dashboard is re-synced, this script's bootstrap is the canonical
-# path and the CI step is a redundant safety net.
-echo "[start.sh] one-shot ledger resolve for known errored rows (no-op once recovered)"
-for MIG in \
-  20260908150000_dr031_leave_constraint_correct_bound \
-  20260912070000_s7_project_attachment_review; do
-  npx prisma migrate resolve --rolled-back "$MIG" >/dev/null 2>&1 || true
-done
-
-echo "[start.sh] Running prisma migrate deploy (failure-before-serving; no recovery auto-runs)"
+echo "[start.sh] Running prisma migrate deploy (failure-before-serving; no auto-recovery)"
 npx prisma migrate deploy
 RC=$?
 if [ "$RC" -ne 0 ]; then
   echo "[start.sh] prisma migrate deploy FAILED with rc=$RC"
-  echo "[start.sh] Inspect the ledger with: npm run db:recover"
-  echo "[start.sh] After confirming DDL + backup readiness, clear with: npm run db:recover -- --confirmed-abandoned"
+  echo "[start.sh] If this is a known-bad allowlisted migration, set DR031_RECONCILE=1 on the deploy workflow to clear it before retrying."
+  echo "[start.sh] For one-off / partial DDL inspection, run: sh backend/scripts/reconcile-failed-migrations.sh"
+  echo "[start.sh] Or: npm run db:recover -- --confirmed-abandoned"
   exit $RC
 fi
 

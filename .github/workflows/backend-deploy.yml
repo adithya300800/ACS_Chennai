@@ -31,6 +31,18 @@ on:
 permissions:
   contents: read
 
+# [DR-035 2026-09-24] Operator opt-in for the reconcile step. Default
+# empty string → the gated step below (`env.DR031_RECONCILE == '1'`)
+# is skipped on ordinary pushes. Operators set this repo variable in
+# GH → Settings → Secrets and variables → Actions → Variables
+# (DR031_RECONCILE=1) when they need the reconcile loop to run before
+# a deploy — typically once after a DR-031 / S7 / DR-025-style fix
+# lands, then unset it again. See
+# backend/scripts/reconcile-failed-migrations.sh for the operations
+# tool itself.
+env:
+  DR031_RECONCILE: ${{ vars.DR031_RECONCILE || '' }}
+
 # DR-010 fix: serialize backend deploys. Pre-fix, two concurrent
 # pushes to `add-react-website` could trigger overlapping Render
 # deploys — the second's PUT DEPLOY_SHA would race the first's
@@ -129,65 +141,55 @@ jobs:
         env:
           SCHEMA_PUSH_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
 
-      # [DR-031-SQLFIX 2026-09-10] Bootstrap recovery for the broken
-      # `''[]''` literal at lines 82/113 of migration
-      # 20260908150000_dr031_leave_constraint_correct_bound. The SQL
-      # is now fixed in the migration file, but the ledger still
-      # carries an errored row from the failed deploy at commit cf697e7
-      # (Prisma's `migrate deploy` refuses to read any migration file
-      # until the errored row is resolved — `Error: P3009`). This
-      # step runs `prisma migrate resolve --rolled-back` for the
-      # specific migration name to clear the errored state, so the
-      # subsequent deploy (CI-triggered below) can re-apply the
-      # now-fixed SQL.
+      # [DR-035 2026-09-24] Reconcile errored ledger rows. Pre-DR-035
+      # this step ran the inline loop unconditionally on every push;
+      # ordinary releases could silently reclassify a newly failed
+      # migration because the allowlist was checked on every deploy,
+      # not on operator confirmation. The step is now gated behind
+      # env.DR031_RECONCILE (the workflow-level env above, sourced
+      # from vars.DR031_RECONCILE). Default push triggers do NOT set
+      # the variable, so the step is skipped.
       #
-      # [S7-SQLFIX 2026-09-12] Same pattern: the original
-      # 20260912070000_s7_project_attachment_review migration
-      # referenced the singular "employee" table; the live DB has
-      # the plural snake_case "employees" (see 20260905030000_fix_n17_employee_fk
-      # for the earlier instance of the same mistake). First deploy
-      # at cd71893 failed at FK ADD with `42P01: relation "employee"
-      # does not exist`. SQL corrected to "employees"; this step
-      # clears the errored ledger row so the next deploy re-applies
-      # the corrected DDL.
+      # The reconcile loop body now lives in
+      # backend/scripts/reconcile-failed-migrations.sh and is invoked
+      # only when the operator explicitly enables the gate. Operators
+      # set DR031_RECONCILE=1 in the GH repo variables when the
+      # deployment pipeline is allowed to recover a known errored
+      # migration (typically once after a DR-031 / S7 / DR-025-style
+      # fix lands, then unset it again).
       #
-      # Idempotent:
-      #   - If the migration is in errored state: rc=0, row is cleared
-      #   - If the migration is in applied state: rc=non-zero, swallowed
-      #   - If the migration is rolled-back: rc=non-zero, swallowed
-      # After the first successful re-apply, this step is a no-op.
+      # Idempotency preserved: if the migration is in errored state
+      # → rc=0, row cleared. If applied / rolled-back → rc=non-zero,
+      # swallowed by the script's `|| true`. After the first
+      # successful re-apply, the step is a no-op.
       #
-      # Why this MUST run BEFORE the drift gate below: `migrate status`
+      # Allowlist (preserved verbatim from the pre-DR-035 inline loop, now
+      # lives ONLY in backend/scripts/reconcile-failed-migrations.sh).
+      # Step MUST run BEFORE the drift gate below: `migrate status`
       # emits "Following migration have failed" with exit code 1, and
-      # the drift gate's regex `grep -qiE 'drift|error|failed'` trips on
-      # the word "failed" — even though the failure is a known-recoverable
-      # ledger entry the bootstrap is about to clear. Without this
-      # reordering, the bootstrap never runs and Render's `migrate deploy`
-      # never gets to apply the corrected SQL.
-      #
-      # Why this lives in CI, not start.sh: the live Render service
-      # config (dashboard) overrides render.yaml and currently runs
-      # `npx prisma migrate deploy && node src/index.js` directly,
-      # bypassing start.sh. render.yaml's `startCommand: sh start.sh`
-      # carries the bootstrap recovery for the next time the service
-      # is re-synced to render.yaml. Until then, CI is the only path
-      # that runs before `migrate deploy` hits the errored row.
-      - name: Bootstrap resolve (clear errored ledger rows)
-        run: |
-          echo "[bootstrap-resolve] running one-shot resolve for known errored rows…"
-          set +e
-          for MIG in \
-            20260908150000_dr031_leave_constraint_correct_bound \
-            20260912070000_s7_project_attachment_review \
-            20260924100000_dr025_correction_cancelled; do
-            echo "[bootstrap-resolve]   $MIG"
-            npx prisma migrate resolve --rolled-back "$MIG"
-            echo "[bootstrap-resolve]   rc=$? (0=cleared, non-zero=steady-state no-op)"
-          done
-          set -e
+      # the drift gate's regex `grep -qiE 'drift|error|failed'` trips
+      # on the word "failed" — even though the failure is a
+      # known-recoverable ledger entry the reconcile step is about to
+      # clear. Without this reordering, the reconcile never runs and
+      # Render's `migrate deploy` never gets to apply the corrected SQL.
+      - name: Reconcile errored ledger rows (DR031_RECONCILE=1 only)
+        if: env.DR031_RECONCILE == '1'
+        run: sh scripts/reconcile-failed-migrations.sh
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
           DIRECT_DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+
+      # [DR-035 2026-09-24] Schema-parity check (model-only drift
+      # detection). Pre-DR-035 the audit called out that "a model-only
+      # change is detected even when migration history says up to
+      # date" — this is the standalone tool that satisfies that
+      # acceptance. NOT wired into this workflow by default; operators
+      # invoke explicitly when they want to verify the migration
+      # history matches schema.prisma after a non-trivial model edit:
+      #   SHADOW_DATABASE_URL=postgresql://... \
+      #     sh scripts/check-schema-parity.sh
+      # Exits 0 = match, 1 = drift, 2 = prereq missing. See
+      # backend/scripts/check-schema-parity.sh for the contract.
 
       # LPR-001: dry-run the migration plan first so the workflow logs which
       # migrations WOULD be applied without actually applying anything. If the
