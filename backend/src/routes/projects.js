@@ -934,10 +934,43 @@ router.post('/', requireFreshAdmin, asyncHandler(async (req, res) => {
 // projectId. This endpoint closes the gap by promoting the name to a real
 // row BEFORE submission, so DrawingPicker fires with a valid FK.
 //
+// [DR-014] Transactional promotion — when /resolve creates a NEW Project
+// row, it ALSO atomically re-links orphaned child rows (DPR /
+// InspectionRecord / BoqItem) whose projectId is null and whose
+// projectName case-insensitively matches the requested name. Without
+// this, registering a discovered project hides its unresolved history:
+// (a) the discovery list stops listing the name once a curated row
+// exists, (b) the ProjectExpandedPanel switches to UUID queries that
+// exclude the orphaned rows, and (c) the merge-orphan-source endpoint
+// refuses same-name merges with 409 SAME_PROJECT so there is no
+// recovery path. The fix wraps create + three updateManys in a single
+// $transaction so a partial failure rolls back the Project create —
+// the user never sees a half-registered state.
+//
+// WHERE shape locks to { projectId: null, projectName: { equals,
+// mode: 'insensitive' } } — already-linked rows (projectId set) are
+// NEVER touched, making the re-link idempotent and safe to re-run.
+// This mirrors the WHERE shape the merge-orphan-source endpoint uses
+// (same three tables, same null-FK cohort).
+//
+// `dryRun: true` returns per-table counts WITHOUT creating the Project
+// or touching any rows. The frontend preview modal uses this so callers
+// can confirm the cohort before committing the registration. Browsing
+// the preview must never mutate the database — "Do not call mutating
+// /resolve merely to browse" (audit DR-014 acceptance).
+//
 // Behaviour:
 //   - name already registered → return the curated row, isRegistered=true.
-//   - name not registered, active=true → create with minimal defaults
-//     (name + createdById = caller; admin can curate later via PATCH).
+//     No re-link is run on this branch: the audit brief scopes the fix to
+//     NEW registrations (the existing branch is non-mutating by design —
+//     re-running it would silently re-link orphans every time the picker
+//     resolves an already-known name, which the audit rejects as
+//     "silently granting project membership" without an explicit
+//     operator gesture).
+//   - name not registered, dryRun=true → return counts only.
+//   - name not registered, dryRun omitted/false, active=true → create +
+//     re-link orphans inside $transaction; response includes
+//     `linkedCounts` and `linkedTotal`.
 //   - name not registered, matched an inactive row → 409 (the admin
 //     archived it; reuse-after-archive is a deliberate manual step).
 //
@@ -958,6 +991,8 @@ router.post('/resolve', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'name must be 200 characters or fewer' });
   }
 
+  const dryRun = !!(req.body && req.body.dryRun === true);
+
   try {
     // Case-insensitive lookup first — same precedence as resolveProject()
     // so a user who typed "t-nagar" gets the existing "T-Nagar" row
@@ -976,18 +1011,77 @@ router.post('/resolve', asyncHandler(async (req, res) => {
       return res.json({ ...serializeProject(existing), isRegistered: true });
     }
 
-    // No row yet — create a minimal Project. `code` is intentionally left
-    // null (admin can curate later via PATCH /api/projects/:id); we
-    // default isActive=true so the user can immediately submit a DPR
-    // referencing it.
-    const created = await prisma.project.create({
-      data: {
+    // [DR-014] Orphan cohort WHERE shape — locks to projectId:null so
+    // already-linked rows are never touched (idempotent + safe to re-run).
+    // Case-insensitive match mirrors the merge-orphan-source WHERE shape
+    // and the kpiHandler exact-name filter.
+    const orphanWhere = {
+      projectId: null,
+      projectName: { equals: rawName, mode: 'insensitive' },
+    };
+
+    if (dryRun) {
+      // Three COUNTs in parallel — no transaction needed for a read.
+      // Browsing the cohort must NEVER mutate ("Do not call mutating
+      // /resolve merely to browse" — DR-014 acceptance).
+      const [dprCount, inspectionCount, boqCount] = await Promise.all([
+        prisma.dPR.count({ where: orphanWhere }),
+        prisma.inspectionRecord.count({ where: orphanWhere }),
+        prisma.boqItem.count({ where: orphanWhere }),
+      ]);
+      return res.json({
+        dryRun: true,
         name: rawName,
-        createdById: req.employeeId,
-        isActive: true,
-      },
+        counts: { dpr: dprCount, inspection: inspectionCount, boq: boqCount },
+        total: dprCount + inspectionCount + boqCount,
+      });
+    }
+
+    // Commit path. No row yet — create a minimal Project AND atomically
+    // re-link the orphan cohort inside a single $transaction. `code` is
+    // intentionally left null (admin can curate later via PATCH
+    // /api/projects/:id); we default isActive=true so the user can
+    // immediately submit a DPR referencing the new row.
+    const result = await prisma.$transaction(async (tx) => {
+      const created = await tx.project.create({
+        data: {
+          name: rawName,
+          createdById: req.employeeId,
+          isActive: true,
+        },
+      });
+      // [DR-014] Re-link the null-FK cohort to the new canonical row.
+      // The data shape rewrites BOTH projectId AND projectName — the
+      // exact-name KPI filter on kpiHandler would otherwise miss the
+      // just-re-linked rows (same correctness hook as
+      // merge-orphan-source's AMENDMENT 2).
+      const dataShape = { projectId: created.id, projectName: created.name };
+      const [dprRes, inspectionRes, boqRes] = await Promise.all([
+        tx.dPR.updateMany({ where: orphanWhere, data: dataShape }),
+        tx.inspectionRecord.updateMany({ where: orphanWhere, data: dataShape }),
+        tx.boqItem.updateMany({ where: orphanWhere, data: dataShape }),
+      ]);
+      return {
+        created,
+        counts: {
+          dpr: dprRes.count,
+          inspection: inspectionRes.count,
+          boq: boqRes.count,
+        },
+      };
     });
-    return res.status(201).json({ ...serializeProject(created), isRegistered: true });
+
+    // [DR-014] Surface the linked-cohort counts so the frontend can
+    // render a "X orphans re-linked" banner. Same shape as the dryRun
+    // preview minus `dryRun: true` — keeps the response surface
+    // symmetric so the picker can show the same UI in preview and
+    // commit states.
+    return res.status(201).json({
+      ...serializeProject(result.created),
+      isRegistered: true,
+      linkedCounts: result.counts,
+      linkedTotal: result.counts.dpr + result.counts.inspection + result.counts.boq,
+    });
   } catch (err) {
     // P2002 = unique violation on Project.name — a concurrent resolve
     // request just won the race. Re-read the canonical row so we still
