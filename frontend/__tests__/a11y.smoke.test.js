@@ -218,6 +218,118 @@ describe('DR-022 — a11y smoke gate', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────
+// §8.13c — Shared <Modal> contrast across viewport sizes.
+//
+// What this catches:
+//   - color-contrast violations in the shared dialog primitive that
+//     the Attendance / Admin migrations both consume (DR-017 / §8.13
+//     wave-4 batch-C).
+//   - heading / label / button-name regressions in the modal shape
+//     Attendance / Admin now render.
+//   - dialog semantics regressions (role/aria-modal/aria-labelledby).
+//
+// Why three viewports, not one:
+//   axe-core runs against computed styles, so a CSS-only viewport-
+//   dependent style would need a media query. The Modal primitive
+//   uses inline styles only — there is no @media in src/components/
+//   Modal.jsx, so the contrast verdict is viewport-invariant by
+//   construction. Running the same render at 375 / 768 / 1280 px is
+//   the honest way to express "this is asserted at every breakpoint
+//   the portal ships against" without lying that the viewport
+//   changes anything. If a future change adds a media query to
+//   Modal.jsx, this test file is the place that captures it.
+//
+// Why a fixture, not the real Attendance / Admin page:
+//   - The project-wide fixture pattern (LPR-014 in this file's header)
+//     keeps a11y gates fast + hermetic.
+//   - The modal-rendering shape under test is the Modal primitive
+//     itself, which Attendance.jsx and Admin.jsx now consume via the
+//     exact same props as this fixture.
+//
+// Run: cd frontend && npx jest --testPathPattern="a11y.smoke"
+// ─────────────────────────────────────────────────────────────────────
+
+describe('§8.13c — shared <Modal> contrast across viewport sizes', () => {
+  // The viewport list the portal ships against (DR-046 mobile follow-up).
+  const VIEWPORTS = [
+    { name: 'mobile',  width: 375,  height: 812  },
+    { name: 'tablet',  width: 768,  height: 1024 },
+    { name: 'desktop', width: 1280, height: 800  },
+  ];
+
+  // Render a fixture modal that mirrors the shape Attendance.jsx and
+  // Admin.jsx now render after the §8.13 migration. The fixture uses
+  // the actual shared Modal primitive — this is an integration test
+  // for that primitive's a11y surface, not a stub.
+  const renderFixtureModal = () => {
+    const Modal = require('../../src/components/Modal.jsx').default;
+    const Page = () =>
+      React.createElement(
+        'main',
+        null,
+        React.createElement(Modal, {
+          open: true,
+          onClose: () => {},
+          ariaLabelledBy: 'fixture-modal-title',
+        },
+          React.createElement(
+            'div',
+            null,
+            React.createElement('h3', { id: 'fixture-modal-title' }, 'Session detail'),
+            React.createElement(
+              'button',
+              { type: 'button', 'aria-label': 'Close modal', onClick: () => {} },
+              '×'
+            ),
+            React.createElement(
+              'p',
+              { style: { color: '#0f172a', fontSize: '0.9rem', margin: '0.5rem 0 0' } },
+              'Check-in 09:00 → Check-out 17:30'
+            )
+          )
+        )
+      );
+    return render(React.createElement(Page));
+  };
+
+  VIEWPORTS.forEach(({ name, width, height }) => {
+    test(`the shared Modal has no contrast / label / dialog violations at ${name} viewport (${width}x${height})`, async () => {
+      // jsdom does not enforce layout, but it does honor window.innerWidth /
+      // window.innerHeight reads (some a11y heuristics key off them).
+      // We set them before rendering so any future viewport-aware axe
+      // rule sees the right value.
+      const originalInnerWidth = window.innerWidth;
+      const originalInnerHeight = window.innerHeight;
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: height });
+
+      try {
+        renderFixtureModal();
+        // Modal.jsx renders into a portal on document.body, so the
+        // dialog DOM is OUTSIDE the @testing-library container. axe-core
+        // accepts the full document body — that's where the role="dialog"
+        // subtree actually lives after createPortal.
+        const results = await axe(document.body);
+        expect(results).toHaveNoViolations();
+
+        // Dialog semantics — the §8.13 acceptance contract. Query the
+        // document directly (createPortal escapes the container root).
+        const dialog = document.querySelector('[role="dialog"]');
+        expect(dialog).not.toBeNull();
+        expect(dialog.getAttribute('aria-modal')).toBe('true');
+        expect(dialog.getAttribute('aria-labelledby')).toBe('fixture-modal-title');
+        const heading = document.getElementById('fixture-modal-title');
+        expect(heading).not.toBeNull();
+        expect(heading.tagName).toMatch(/^H[1-6]$/);
+      } finally {
+        Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth });
+        Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalInnerHeight });
+      }
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
 // §8.6 — Mobile filter chip rows: 44×44 touch target + consistent
 // gap + visible focus ring on every state.
 //
