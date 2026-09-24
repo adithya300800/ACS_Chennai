@@ -152,7 +152,12 @@ export default function Home() {
               Six integrated practice areas covering the full construction project lifecycle — from planning and scheduling through to execution oversight, quality control, and commercial management.
             </p>
           </div>
-          <div className="services-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+          {/* DR-042: rely on the responsive `.services-grid` class so the
+              column count collapses to 2 at <=1024px and to 1 at <=480px.
+              The prior inline `gridTemplateColumns: 'repeat(3, 1fr)'` overrode
+              those breakpoints and forced ~101.5px columns at 375px, chopping
+              headings and body copy. */}
+          <div className="services-grid">
             {SERVICES.map((svc) => (
               <div className="service-card reveal" data-reveal key={svc.title}>
                 <div className="service-icon">{svc.icon}</div>
@@ -174,7 +179,11 @@ export default function Home() {
               Our PMC expertise spans chemical, pharmaceutical, residential, commercial, industrial, and infrastructure projects across Tamil Nadu and South India.
             </p>
           </div>
-          <div className="grid-3" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+          {/* DR-042: rely on the responsive `.grid-3` class so the column
+              count collapses to 1 at <=480px. The prior inline
+              `gridTemplateColumns: 'repeat(3, 1fr)'` overrode the breakpoint
+              and forced ~101.5px columns at 375px, chopping sector labels. */}
+          <div className="grid-3">
             {SECTORS.map((s) => (
               <div className="service-card reveal" data-reveal key={s.label}>
                 <span style={{ fontSize: '2rem', marginBottom: '0.5rem', display: 'block' }}>{s.icon}</span>

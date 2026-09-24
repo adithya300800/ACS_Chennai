@@ -63,12 +63,18 @@
   --warning: var(--amber);
 }
 
-* { box-sizing: border-box; overflow-x: hidden; }
+/* DR-042: drop universal `overflow-x: hidden` from the `*` selector.
+   The prior rule clipped every grid child individually, hiding layout
+   overflows (long words, 3-column grids squeezed into 101.5px tracks at
+   375px) instead of fixing the column counts. Page-level horizontal
+   scroll is still prevented by the `overflow-x: hidden` on `body` below. */
+* { box-sizing: border-box; }
 body {
   margin: 0;
   font-family: 'Inter', sans-serif;
   color: var(--navy);
   background: var(--white);
+  overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -389,6 +395,11 @@ nav a.active { color: var(--blue); background: rgba(0,102,255,0.06); border-bott
   padding: 1.6rem 1.3rem;
   transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
   box-shadow: var(--shadow-sm);
+  /* DR-042: let the grid item shrink inside its `1fr` track so long
+     headings (e.g. "Quality Assurance & Control") wrap instead of
+     pushing the column past the viewport on phones. The universal
+     `* { overflow-x: hidden }` rule that used to mask this is gone. */
+  min-width: 0;
 }
 .service-card:hover {
   transform: translateY(-5px);
@@ -1021,8 +1032,12 @@ footer {
   .grid-3, .grid-2 { grid-template-columns: 1fr; }
   .footer-grid { grid-template-columns: 1fr; }
   .hero .display-xl { font-size: 2.2rem; }
-  body { overflow-x: hidden; }
-  .section { overflow-x: hidden; }
+  /* DR-042: the `body { overflow-x: hidden }` and
+     `.section { overflow-x: hidden }` rules that previously sat here
+     were redundant — body now sets `overflow-x: hidden` at the top of
+     the file (replacing the universal `*` rule). Section-level clipping
+     was masking layout bugs (chopped 3-column grids on phones); we let
+     the responsive column counts fix the layout instead. */
 }
 
 /* === FOCUS VISIBILITY (Accessibility) === */
