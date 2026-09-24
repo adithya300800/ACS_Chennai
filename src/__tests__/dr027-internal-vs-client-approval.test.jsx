@@ -37,16 +37,26 @@ describe('DR-027 — internal vs client approval labels', () => {
     expect(voDetailSrc).toMatch(/variation\.status\s*===\s*['"]APPROVED['"][\s\S]*?<strong>\{variation\.clientApprovalRequired\s*\?\s*['"]Internal approval['"]\s*:\s*['"]Approved['"]\}/);
   });
 
-  test('2. "Client decision pending" footer banner shows under the timeline when clientApprovalRequired', () => {
+  test('2. Footer banner explains the invoicing gate when clientApprovalRequired', () => {
     // The yellow callout is rendered inside the same <li> as the
     // APPROVED timeline row, gated on clientApprovalRequired. The
     // exact copy explains WHY the variation can't be invoiced yet.
-    expect(voDetailSrc).toMatch(/Client decision pending[\s\S]*?this variation cannot be invoiced/);
+    // [DR-033] The opener switched from "Client decision pending"
+    // (which inferred a fact the portal does not track) to "Client
+    // approval required — tracked outside this portal." The
+    // invoicing-gate clause that this test was actually pinning is
+    // preserved verbatim. (Source uses capital "This" — the regex
+    // mirrors it exactly.)
+    expect(voDetailSrc).toMatch(/tracked outside this portal[\s\S]*?This variation cannot be invoiced/);
   });
 
-  test('3. Metadata block shows "Required — pending decision" when status=APPROVED & clientApprovalRequired', () => {
-    expect(voDetailSrc).toMatch(/Required\s*—\s*pending decision/);
-    expect(voDetailSrc).toMatch(/variation\.clientApprovalRequired\s*\?\s*\([\s\S]*?Required\s*—\s*pending decision[\s\S]*?\)/);
+  test('3. Metadata block shows "Required — tracked outside this portal" when status=APPROVED & clientApprovalRequired', () => {
+    // [DR-033] "Required — pending decision" was misleading: the
+    // portal has no model + no action to record a client decision,
+    // so "pending" inferred a fact the system does not track. The
+    // new copy is honest about that.
+    expect(voDetailSrc).toMatch(/Required\s*—\s*tracked outside this portal/);
+    expect(voDetailSrc).toMatch(/variation\.clientApprovalRequired\s*\?\s*\([\s\S]*?Required\s*—\s*tracked outside this portal[\s\S]*?\)/);
   });
 
   test('4. The audit\'s "execution gate" language is present', () => {

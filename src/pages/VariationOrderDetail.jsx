@@ -317,7 +317,15 @@ export default function VariationOrderDetail() {
                       color: '#78350f',
                     }}
                   >
-                    Client decision pending — this variation cannot be invoiced until the client authorises the change.
+                    {/* [DR-033] The portal has no model/action to capture an
+                        offline client decision — calling this "pending"
+                        would infer a fact the system does not actually
+                        track. The copy now says so explicitly. The
+                        invoicing gate (cannot-be-invoiced-until-authorised)
+                        is preserved verbatim so the downstream-execution
+                        contract from DR-027 still surfaces to a billing
+                        engineer reading the row. */}
+                    Client approval required — tracked outside this portal. This variation cannot be invoiced until the client authorises the change.
                   </div>
                 )}
               </li>
@@ -346,16 +354,20 @@ export default function VariationOrderDetail() {
           {variation.clientApprovalRequired !== undefined && (
             // [DR-027] Make the client-approval requirement a first-class
             // fact in the metadata block, not a tiny greyed-out label.
-            // When the row is APPROVED but client authorisation hasn't
-            // been captured, the label upgrades to 'Required — pending'
-            // so a billing engineer reading the row understands the
-            // status gap.
+            // When the row is APPROVED the label upgrades to surface the
+            // status gap. [DR-033] narrows the wording further: we
+            // don't actually track a client decision in this portal
+            // (no model + no action), so saying "pending decision"
+            // would infer a fact the system does not know. The copy
+            // now states that explicitly; the amber colour is kept
+            // because the requirement is still load-bearing for
+            // invoicing (see DR-027 gate below).
             <>
               <dt><ClockIcon size={13} /> Client approval:</dt>
               <dd>
                 {variation.clientApprovalRequired
                   ? (variation.status === 'APPROVED'
-                      ? <span style={{ color: '#d97706', fontWeight: 600 }}>Required — pending decision</span>
+                      ? <span style={{ color: '#d97706', fontWeight: 600 }}>Required — tracked outside this portal</span>
                       : 'Required')
                   : 'Not required'}
               </dd>
