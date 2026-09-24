@@ -410,7 +410,8 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
                     {' — '}
                     <span>{dpr.boqItem.description}</span>
                     {' · '}
-                    <Link to={`/portal/boq?projectName=${encodeURIComponent((dpr.project?.name || dpr.projectName) || '')}`}>View variance</Link>
+                    {/* [§8.2 Fresh24] Canonical projectId instead of name. */}
+                    <Link to={`/portal/boq?projectId=${encodeURIComponent(dpr.project?.id || '')}`}>View variance</Link>
                   </>
                 ) : (
                   <em className="text-placeholder">Not linked</em>

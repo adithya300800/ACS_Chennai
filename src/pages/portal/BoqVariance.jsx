@@ -56,14 +56,22 @@ export default function BoqVariance() {
   useDocumentTitle('BOQ Variance');
   const { accessToken, employee } = useAuth();
   const toast = useToast();
-  // Round-28 Bug 2a: when navigated from a ProjectDetail tab the URL
-  // carries ?projectName=; pre-fill the input + auto-apply so the
-  // employee lands on results, not the empty state.
+  // [§8.2 Fresh24] When navigated from a ProjectDetail tab the URL now
+  // carries ?projectId= as the canonical key (matching DprAll / Drawing
+  // browse). The legacy ?projectName= is still accepted for back-compat
+  // — older links + browser history keep working. projectId wins when
+  // both are present. The backend's /boq/variance endpoint still keys
+  // by projectName, so an ID is resolved through getProject() before
+  // the variance call fires.
   const [searchParams] = useSearchParams();
+  const initialProjectId = searchParams.get('projectId') || '';
   const initialProjectName = searchParams.get('projectName') || '';
+  const initialLookupById = !!initialProjectId;
+  const initialLookupKey = initialProjectId || initialProjectName;
 
-  const [projectName, setProjectName] = useState(initialProjectName);
-  const [appliedProject, setAppliedProject] = useState(initialProjectName);
+  const [projectKey, setProjectKey] = useState(initialLookupKey);
+  const [appliedProject, setAppliedProject] = useState(initialLookupKey);
+  const [appliedById, setAppliedById] = useState(initialLookupById);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -76,7 +84,21 @@ export default function BoqVariance() {
     setLoading(true);
     setError('');
     try {
-      const data = await api.getBoqVariance(appliedProject, accessToken);
+      // [§8.2 Fresh24] If the URL keyed the lookup by projectId, resolve
+      // the project name through getProject() first. The backend variance
+      // route is name-keyed; the ID is the canonical external handle,
+      // the name is the lookup key. The `|| appliedProject` fallback
+      // keeps the original ID visible in the error message if the
+      // getProject call fails — so the engineer can see what was looked
+      // up instead of a bare "undefined".
+      let projectName;
+      if (appliedById) {
+        const project = await api.getProject(appliedProject, accessToken);
+        projectName = project?.name || appliedProject;
+      } else {
+        projectName = appliedProject;
+      }
+      const data = await api.getBoqVariance(projectName, accessToken);
       setItems(data.items || []);
     } catch (err) {
       setError(err.message || 'Failed to load variance');
@@ -84,7 +106,19 @@ export default function BoqVariance() {
     } finally {
       setLoading(false);
     }
-  }, [accessToken, appliedProject]);
+  }, [accessToken, appliedProject, appliedById]);
+
+  // [§8.2 Fresh24] Apply the input's current value as the lookup key.
+  // When the user clicks "Show variance" or presses Enter in the input,
+  // the input value is treated as a project NAME — the input is free
+  // text with a name-shaped placeholder, and a user typing into it is
+  // almost certainly typing a name rather than a UUID. The pre-fill
+  // from the URL still uses projectId if that's what the URL carried;
+  // only the post-input path switches to name lookup.
+  function applyLookupKey(key) {
+    setAppliedProject(key.trim());
+    setAppliedById(false);
+  }
 
   useEffect(() => { load(); }, [load]);
 
@@ -137,25 +171,25 @@ export default function BoqVariance() {
       <div className="dpr-card" style={{ marginBottom: '1rem' }}>
         <div className="form-row" style={{ alignItems: 'flex-end' }}>
           <div className="form-group" style={{ flex: 1 }}>
-            <label htmlFor="boq-variance-project">Project name</label>
+            <label htmlFor="boq-variance-project">Project name or ID</label>
             <input
               id="boq-variance-project"
               type="text"
               className="form-input"
-              value={projectName}
-              onChange={(e) => setProjectName(e.target.value)}
+              value={projectKey}
+              onChange={(e) => setProjectKey(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') setAppliedProject(projectName.trim());
+                if (e.key === 'Enter') applyLookupKey(projectKey);
               }}
-              placeholder="e.g. Metro Station Phase 2"
+              placeholder="e.g. Metro Station Phase 2 or project UUID"
             />
           </div>
           <div className="form-group" style={{ alignSelf: 'flex-end' }}>
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => setAppliedProject(projectName.trim())}
-              disabled={!projectName.trim()}
+              onClick={() => applyLookupKey(projectKey)}
+              disabled={!projectKey.trim()}
             >
               Show variance
             </button>

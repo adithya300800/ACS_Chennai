@@ -1065,7 +1065,8 @@ export default function DprList() {
                           {' — '}
                           <span>{expandedDpr.boqItem.description}</span>
                           {' · '}
-                          <Link to={`/portal/boq?projectName=${encodeURIComponent((expandedDpr.project?.name || expandedDpr.projectName) || '')}`}>
+                          {/* [§8.2 Fresh24] Canonical projectId instead of name. */}
+                          <Link to={`/portal/boq?projectId=${encodeURIComponent(expandedDpr.project?.id || '')}`}>
                             View variance
                           </Link>
                         </>

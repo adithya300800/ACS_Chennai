@@ -126,8 +126,11 @@ export default function ProjectDetail() {
     const projectName = encodeURIComponent(project?.name || idOrName);
     switch (tab.id) {
       case 'boq':
-        // BoqVariance pre-fills via ?projectName= and applies on mount.
-        navigate(`/portal/boq?projectName=${projectName}`);
+        // [§8.2 Fresh24] BoqVariance now prefers ?projectId= (canonical,
+        // matches DprAll / Drawing browse). The page falls back to
+        // ?projectName= for back-compat, but every internal caller that
+        // has the FK on hand should thread the ID.
+        navigate(`/portal/boq?projectId=${pid}`);
         break;
       case 'dprs':
         navigate(`/portal/dpr/all?projectId=${pid}`);

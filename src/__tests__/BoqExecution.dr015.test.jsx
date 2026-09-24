@@ -156,8 +156,12 @@ describe('DR-015 — BOQ execution ledger frontend wiring', () => {
       // The variance page is the consumer of the BoqExecution sum.
       // It already fetches via getBoqVariance (pinned by Boq.frontend.test.jsx);
       // here we re-pin it as a regression guard so anyone who swaps
-      // the wrapper for a direct fetch() is caught.
-      expect(varianceSource).toMatch(/api\.getBoqVariance\(\s*appliedProject/);
+      // the wrapper for a direct fetch() is caught. [§8.2 Fresh24]
+      // Accept either the resolved-name variable (`projectName` —
+      // populated from getProject when projectId is the lookup key)
+      // or the raw applied key (`appliedProject` — used directly
+      // when projectName is the lookup key).
+      expect(varianceSource).toMatch(/api\.getBoqVariance\(\s*(projectName|appliedProject)/);
     });
 
     test('renders the audit-criterion contract: executedQty + varianceQty', () => {

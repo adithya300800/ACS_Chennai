@@ -190,7 +190,13 @@ describe('N7 — BOQ frontend wiring', () => {
     });
 
     test('fetches variance via api.getBoqVariance with the applied project name', () => {
-      expect(varianceSource).toMatch(/api\.getBoqVariance\(\s*appliedProject/);
+      // [§8.2 Fresh24] Allow either the resolved-name variable
+      // (`projectName` — populated from getProject when projectId is the
+      // lookup key) or the raw applied key (`appliedProject` — used
+      // directly when projectName is the lookup key). The intent: the
+      // variance call goes through the api wrapper with the resolved
+      // name as the first arg, not a direct fetch.
+      expect(varianceSource).toMatch(/api\.getBoqVariance\(\s*(projectName|appliedProject)/);
     });
 
     test('offers an admin-only shortcut to the registry when no items exist', () => {

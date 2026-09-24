@@ -378,7 +378,11 @@ export default function InspectionDetail() {
                 {' — '}
                 <span>{record.boqItem.description}</span>
                 {' · '}
-                <Link to={`/portal/boq?projectName=${encodeURIComponent((record.project?.name || record.projectName) || '')}`}>
+                {/* [§8.2 Fresh24] Thread projectId (canonical) instead of
+                    projectName so the variance route's ID-first lookup
+                    resolves directly. Falls back to projectName only
+                    when no FK join is present (rare legacy rows). */}
+                <Link to={`/portal/boq?projectId=${encodeURIComponent(record.project?.id || '')}`}>
                   View variance
                 </Link>
               </>
