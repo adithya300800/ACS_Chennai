@@ -5,6 +5,19 @@ import {
   clearForUser as clearScopedDraftForUser,
   clearAllExcept as clearAllScopedDraftsExcept,
 } from '../lib/ownerScopedDraft.js';
+// SOL DR-001 — cross-tab session coordination. The audit found that
+// a second tab signing in as a different employee overwrites the
+// shared localStorage tokens while the first tab still holds the
+// original employee in React state; subsequent refreshes on the first
+// tab then install the SECOND tab's access token without updating
+// employee (because the auth:token-refreshed listener only installs
+// `accessToken`, never `employee`). Fix: bump sessionGeneration on
+// every login/logout/setAuthData AND subscribe to peer-tab broadcasts
+// so this tab atomically adopts the new identity (or detaches to an
+// empty state) instead of submitting under a stale React identity.
+// BroadcastChannel was chosen over the 'storage' event for same-origin
+// delivery semantics — see sessionCoordination.js for the rationale.
+import { subscribeToSessionChanges } from '../lib/sessionCoordination.js';
 
 // SOL DR-003 — every form that autosaves (DPR, Inspection) subscribes to
 // this event and wipes its in-memory state. We also clear the persisted
@@ -197,6 +210,84 @@ export function AuthProvider({ children }) {
     return () => window.removeEventListener('auth:logout', handler);
   }, []);
 
+  // SOL DR-001 — cross-tab session coordination.
+  //
+  // Subscribe to BroadcastChannel('acs-session') and atomically adopt
+  // the new session whenever a peer tab signs in, signs out, or runs
+  // setAuthData (Zoho OAuth callback). The handler:
+  //
+  //   1. Reads `acs_auth` from localStorage — the WRITING tab's
+  //      storage is the source of truth; this tab does NOT touch it.
+  //      That is the "atomically adopt the reconciled session" half
+  //      of the audit's minimal implementation.
+  //
+  //   2. Compares the incoming `employee.id` to the React state via
+  //      `employeeRef.current` (we subscribe once; refs let the worker
+  //      read the latest value without re-subscribing on every state
+  //      change). Same-account rotation (token-only refresh on a peer
+  //      tab) → preserve drafts (audit: "Preserve drafts during same-
+  //      account rotation"). Cross-account → clear drafts belonging to
+  //      the PREVIOUS employee (matches the existing logout path).
+  //
+  //   3. Never calls localStorage.removeItem here — the peer tab
+  //      already cleared the keys during logout, and clearing again on
+  //      THIS side would race the writer. That is the "do not have
+  //      the stale tab clear the new account's shared storage" half
+  //      of the audit's minimal implementation.
+  const employeeRef = useRef(null);
+  // Keep the ref in sync with the latest employee so the subscription
+  // (registered below with empty deps) reads the current value at
+  // message-arrival time instead of capturing the mount-time value.
+  useEffect(() => { employeeRef.current = employee; }, [employee]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToSessionChanges((msg) => {
+      let stored;
+      try {
+        stored = localStorage.getItem('acs_auth');
+      } catch {
+        return;
+      }
+      const previousEmployeeId = employeeRef.current?.id ?? null;
+      if (!stored) {
+        // Peer logged out — adopt empty state. Don't clear drafts here;
+        // the peer already ran its own draft cleanup, and clearing
+        // again on this tab would race the writer (audit: do not have
+        // the stale tab clear the new account's shared storage).
+        setAccessToken(null);
+        setEmployee(null);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(stored);
+        const incomingEmployeeId = parsed?.employee?.id ?? null;
+        if (incomingEmployeeId !== previousEmployeeId) {
+          // Cross-account rotation: clear the previous employee's
+          // drafts (matches the logout path). The NEW account's draft
+          // state is unaffected — those live under different scoped
+          // keys.
+          clearAllDraftsForEmployee(previousEmployeeId);
+        }
+        // Same-account (incomingEmployeeId === previousEmployeeId):
+        // drafts preserved — token-only refresh / Zoho re-bind on a
+        // peer tab does not justify wiping the user's in-flight work.
+        setAccessToken(parsed.accessToken || null);
+        setEmployee(parsed.employee || null);
+      } catch {
+        // Malformed storage — leave our state alone; the next page
+        // load will read canonical storage again.
+      }
+      // Reference `msg` so linters don't flag the parameter unused.
+      // The current payload shape is `{ type, sessionGeneration,
+      // reason }`; we don't need any field beyond what localStorage
+      // already provides, but the subscription contract reserves the
+      // message so future broadcasts can carry richer detail (e.g. the
+      // peer's identity fingerprint for sanity checks).
+      void msg;
+    });
+    return unsubscribe;
+  }, []);
+
   const login = useCallback(async (email, password) => {
     const data = await api.post('/auth/login', { email, password });
     const { accessToken, refreshToken, employee } = data;
@@ -209,9 +300,21 @@ export function AuthProvider({ children }) {
     // response could overwrite the freshly-installed access token for
     // the new account with one for the previous account.
     api.bumpRefreshEpoch();
+    // SOL DR-001 — bump the cross-tab sessionGeneration too. doRefresh
+    // captures `getSessionGeneration()` at call time and rejects a late
+    // response if the value has advanced by the time it lands. The
+    // bump also persists to localStorage so a fresh page load on a
+    // peer tab hydrates the new value instead of starting at 0.
+    api.bumpSessionGeneration();
 
     localStorage.setItem('acs_auth', JSON.stringify({ accessToken, employee }));
     localStorage.setItem('acs_refresh', refreshToken);
+
+    // SOL DR-001 — tell peer tabs the session changed. The
+    // BroadcastChannel listener (registered at mount below) hears this
+    // and atomically adopts the new identity, so peer tabs never submit
+    // under the wrong displayed identity (audit acceptance bullet 1).
+    api.broadcastSessionChange({ reason: 'login' });
 
     setAccessToken(accessToken);
     setEmployee(employee);
@@ -225,10 +328,16 @@ export function AuthProvider({ children }) {
     // reason as login() — otherwise a stale response can land and
     // overwrite the new identity's tokens.
     api.bumpRefreshEpoch();
+    // SOL DR-001 — bump + broadcast for Zoho OAuth. Without it, a peer
+    // tab signing in via /auth/zoho/callback could overwrite shared
+    // localStorage while this tab still shows the previous employee —
+    // same threat model as the credentials login above.
+    api.bumpSessionGeneration();
     localStorage.setItem('acs_auth', JSON.stringify({ accessToken, employee }));
     if (refreshToken) {
       localStorage.setItem('acs_refresh', refreshToken);
     }
+    api.broadcastSessionChange({ reason: 'setAuthData' });
     setAccessToken(accessToken);
     setEmployee(employee);
   }, []);
@@ -258,6 +367,13 @@ export function AuthProvider({ children }) {
     // right after logout could re-populate localStorage with tokens for
     // the user who just signed out — see SESSION_CHANGED in api.js.)
     api.bumpRefreshEpoch();
+    // SOL DR-001 — bump + broadcast on logout. Peer tabs atomically
+    // adopt the empty state (and DO NOT touch localStorage, which is
+    // already cleared), so the stale tab doesn't restore A over B and
+    // doesn't log B out as cleanup for A — audit acceptance bullets 2
+    // and 3. The local clear is the source of truth; the broadcast is
+    // just the cross-tab wake-up.
+    api.bumpSessionGeneration();
     // SOL DR-003 — capture the id before we null out employee so subscribers
     // can correlate the event with the user being logged out. Cleanup runs
     // for both persisted keys and in-memory form state.
@@ -266,6 +382,7 @@ export function AuthProvider({ children }) {
     localStorage.removeItem('acs_refresh');
     clearAllDraftsForEmployee(previousEmployeeId);
     window.dispatchEvent(new CustomEvent('draft:clear-current', { detail: { employeeId: previousEmployeeId } }));
+    api.broadcastSessionChange({ reason: 'logout' });
     setAccessToken(null);
     setEmployee(null);
   }, [accessToken, employee]);
