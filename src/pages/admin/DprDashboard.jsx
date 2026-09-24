@@ -371,12 +371,18 @@ export default function DprDashboard() {
     loadAll();
   }, [filter, projectFilter, fromFilter, toFilter, loadAll]);
 
-  // When the filter changes, the previously selected IDs may no longer be
-  // visible — clear them so the floating action bar doesn't show "3 selected"
-  // for IDs the admin can't see in the queue anymore.
+  // DR-021: when ANY scope filter changes (status, project, from, to), the
+  // previously selected IDs may no longer match the visible list. Clear the
+  // selection AND the pending confirmation dialog so a hidden record can
+  // never be mutated by a bulk action the user confirmed against a
+  // different visible set. Mirrors the InspectionDashboard pattern
+  // (line ~225) where every filter is a reset trigger. Counts, record
+  // labels and request IDs must always agree: if you select A, change
+  // project filter, confirm visible B → hidden A is never touched.
   useEffect(() => {
     setSelectedIds(new Set());
-  }, [filter]);
+    setConfirmAction(null);
+  }, [filter, projectFilter, fromFilter, toFilter]);
 
   // SOL-P0#5: close the confirmation modal on Escape.
   useEffect(() => {
