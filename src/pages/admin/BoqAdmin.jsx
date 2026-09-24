@@ -286,16 +286,35 @@ function BoqFormModal({ open, initial, onClose, onSave }) {
             />
           </div>
           <div className="form-group" style={{ alignSelf: 'flex-end' }}>
-            <label htmlFor="boq-isActive" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+            {/*
+              [DR-030] The Active checkbox is intentionally read-only.
+              The backend PATCH allowlist (backend/src/routes/boq.js
+              ALLOWED_UPDATE_FIELDS) deliberately excludes `isActive` —
+              deactivation is a soft-delete and goes through DELETE
+              /api/boq/:id only, never via this edit form. Rendering an
+              enabled toggle here made it look like changes persisted
+              when they silently didn't. Keep the checkbox visible so
+              the admin can still see the current activity status, but
+              disable it and surface the guidance inline.
+            */}
+            <label htmlFor="boq-isActive" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--steel)' }}>
               <input
                 id="boq-isActive"
                 name="isActive"
                 type="checkbox"
                 checked={!!form.isActive}
-                onChange={handleChange}
+                disabled
+                readOnly
+                title="To deactivate (archive) this BOQ item, use the Archive action in the row actions menu. The edit form does not change active state."
               />
               Active
             </label>
+            <small
+              style={{ display: 'block', marginTop: '0.25rem', color: 'var(--steel)', fontSize: '0.75rem' }}
+              title="To deactivate (archive) this BOQ item, use the Archive action in the row actions menu."
+            >
+              Read-only. Use the row's Archive action to deactivate.
+            </small>
           </div>
         </div>
         {/* Live amount preview. Server recomputes on save — this is just
