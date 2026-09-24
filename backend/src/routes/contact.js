@@ -112,7 +112,11 @@ router.post('/', async (req, res) => {
   const projectCategory = deriveProjectCategory(rawProjectType);
 
   try {
-    await resendClient.emails.send({
+    // [DR-038] Resend 4.x resolves with `{data, error}` for HTTP/transport
+    // failures rather than always throwing. Awaiting without inspecting the
+    // result caused us to report success even when the email was rejected,
+    // leaving the visitor with no working retry and a fake confirmation.
+    const result = await resendClient.emails.send({
       from: `${RESEND_FROM_NAME} <${RESEND_FROM_EMAIL}>`,
       to: `${RESEND_FROM_NAME} <${RESEND_FROM_EMAIL}>`,
       replyTo: email,
@@ -129,7 +133,30 @@ router.post('/', async (req, res) => {
 <p>${escapeHtml(message).replace(/\n/g, '<br/>')}</p>`,
     });
 
-    res.json({ success: true, projectCategory });
+    // [DR-038] Treat provider rejection as a failure. Resend returns
+    // `{data: null, error: ErrorResponse}` when the request is rejected
+    // (validation, rate-limit, auth, etc.). A populated `error` field —
+    // or the absence of an acceptance `id` — both mean the email did
+    // not get handed off to the inbox.
+    if (result && result.error) {
+      console.error('[contact] Resend rejected submission', result.error);
+      return res.status(502).json({
+        error: 'We couldn\'t send your message; please try again or email us directly at ' + RESEND_FROM_EMAIL + '.',
+        code: 'EMAIL_PROVIDER_REJECTED',
+      });
+    }
+    if (!result || !result.data || !result.data.id) {
+      console.error('[contact] Resend returned no acceptance id', result);
+      return res.status(502).json({
+        error: 'We couldn\'t send your message; please try again or email us directly at ' + RESEND_FROM_EMAIL + '.',
+        code: 'EMAIL_PROVIDER_REJECTED',
+      });
+    }
+
+    // [DR-038] Phrase success as accepted, not "sent". Return the
+    // provider's correlation id so support can trace a ticket without
+    // echoing any visitor content.
+    res.json({ success: true, accepted: true, projectCategory, id: result.data.id });
   } catch (err) {
     console.error('[contact] Resend error', err.message);
     res.status(500).json({ error: 'Failed to send message' });
