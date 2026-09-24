@@ -178,7 +178,8 @@ jobs:
           set +e
           for MIG in \
             20260908150000_dr031_leave_constraint_correct_bound \
-            20260912070000_s7_project_attachment_review; do
+            20260912070000_s7_project_attachment_review \
+            20260924100000_dr025_correction_cancelled; do
             echo "[bootstrap-resolve]   $MIG"
             npx prisma migrate resolve --rolled-back "$MIG"
             echo "[bootstrap-resolve]   rc=$? (0=cleared, non-zero=steady-state no-op)"
