@@ -201,6 +201,143 @@ const REQUIRED_ARRAY_FIELDS_BY_TYPE = {
 // the actionStatus lives free-form inside `data.actionStatus` and is
 // rendered verbatim on the admin queue card.
 
+// DR-013: per-subtype required-scalar contract. Server-side mirror of the
+// `required: true` flag on plain (non-checklist) fields in WORK_TYPE_FIELDS
+// (src/pages/portal/WorkTypes.jsx). Server is authoritative: a stale
+// frontend, a curl, an admin resurrecting an old draft, or the Owner
+// Dashboard "Publish" button (which bypasses WorkEntryForm entirely) cannot
+// land a row whose critical subtype fields are missing or out-of-range.
+//
+// `kind` controls which wire values we accept. Keep this list small and
+// EXPLICIT — every new entry here is a contract change. The list mirrors
+// the cube_casting + cube_testing schemas verbatim (those two carry the
+// `isCritical: true` flag in the frontend and are the exact subtypes the
+// audit flagged). The remaining typed subtypes (material_inspection etc.)
+// have string/select fields that the existing TYPE/STREETLENGTH guards
+// already cover adequately — extending those would be a separate audit
+// round, not DR-013's mandate.
+//
+// Audit acceptance contract (DR-013):
+//   - Blank material drafts can save (existing DRAFT exemption).
+//   - Final create / editable-final update / publish all reject the same
+//     blank payload with REQUIRED_FIELD_MISSING_OR_INVALID.
+//   - Negative / non-integer cube counts (cube_casting.numberOfCubes,
+//     cube_testing.ageOfCube) fail with REQUIRED_FIELD_MISSING_OR_INVALID.
+//   - Valid engineering decimals (compressiveStrength 23.45) remain valid.
+//   - Existing imperfect historical evidence stays readable — this
+//     validator runs at write time only, never on read.
+const REQUIRED_FIELDS_BY_TYPE = {
+  cube_casting: [
+    { name: 'cubeId', kind: 'nonEmptyString' },
+    { name: 'grade', kind: 'nonEmptyString' },
+    { name: 'pourLocation', kind: 'nonEmptyString' },
+    { name: 'pourActivity', kind: 'nonEmptyString' },
+    { name: 'quantityOfConcrete', kind: 'finiteNumber' },
+    { name: 'cubeSize', kind: 'nonEmptyString' },
+    { name: 'numberOfCubes', kind: 'positiveInteger' },
+    { name: 'curingMethod', kind: 'nonEmptyString' },
+    { name: 'daysToTest', kind: 'nonEmptyString' },
+    { name: 'mixDesignRef', kind: 'nonEmptyString' },
+    { name: 'slumpRecorded', kind: 'finiteNumber' },
+    { name: 'castBy', kind: 'nonEmptyString' },
+    { name: 'supervisedBy', kind: 'nonEmptyString' },
+  ],
+  cube_testing: [
+    { name: 'cubeId', kind: 'nonEmptyString' },
+    { name: 'grade', kind: 'nonEmptyString' },
+    { name: 'ageOfCube', kind: 'positiveInteger' },
+    { name: 'castingDate', kind: 'nonEmptyString' },
+    { name: 'loadAtFailure', kind: 'positiveNumber' },
+    { name: 'compressiveStrength', kind: 'finiteNumber' },
+    { name: 'requiredStrength', kind: 'positiveNumber' },
+    { name: 'percentageOfRequired', kind: 'finiteNumber' },
+    { name: 'result', kind: 'nonEmptyString' },
+    { name: 'testingMachineId', kind: 'nonEmptyString' },
+    { name: 'testedBy', kind: 'nonEmptyString' },
+  ],
+};
+
+// DR-013: per-subtype validator helper. Each `kind` returns `null` when
+// the value satisfies the contract, or a one-line detail string when it
+// doesn't. Engineered so the same routine catches `data: -1`,
+// `data: "abc"`, and `data: 0.5` for the positiveInteger kind — the three
+// exact symptoms the audit flagged.
+function checkRequiredFieldValue(value, kind) {
+  if (kind === 'nonEmptyString') {
+    if (typeof value !== 'string' || !value.trim()) {
+      return 'must be a non-empty string';
+    }
+    return null;
+  }
+  // Numeric kinds — accept numeric values and numeric strings (the
+  // draft form stores strings from <input type="number">, so allowing
+  // strings here mirrors what the UI actually ships). NaN, Infinity,
+  // '', null, undefined all reject.
+  let n;
+  if (typeof value === 'number') {
+    n = value;
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return 'must be a finite number';
+    n = Number(trimmed);
+  } else {
+    return 'must be a finite number';
+  }
+  if (!Number.isFinite(n)) return 'must be a finite number';
+  if (kind === 'positiveNumber') {
+    if (n <= 0) return 'must be greater than zero';
+    return null;
+  }
+  if (kind === 'positiveInteger') {
+    // cube_testing.ageOfCube etc — must be a strict integer ≥ 1. The
+    // half-cast "0.5" / "-1" / "0" payloads the audit caught all reject
+    // here. Engineering decimals still pass for the finiteNumber kinds.
+    if (n < 1 || !Number.isInteger(n)) return 'must be a positive integer';
+    return null;
+  }
+  // kind === 'finiteNumber' — already passed isFinite above.
+  return null;
+}
+
+// DR-013: single server-side final-subtype validator. Returns `null`
+// when the (inspectionType, data) pair is valid for a final (non-DRAFT)
+// write, or a violation descriptor `{ code, field, message }` for the
+// FIRST failing rule otherwise. The check ordering is: scalar required
+// fields first (DR-013), then required arrays (DR-009). Mirrors the
+// existing `REQUIRED_ARRAY_FIELDS_BY_TYPE` contract so a single call at
+// the write boundary replaces both scattered checks.
+//
+// `inspectionType === null/undefined` is treated as "no rules" — the
+// DRAFT pre-type branch (resume flow) is exempt because the audit
+// explicitly calls out "Keep minimal drafts permissive".
+function validateFinalInspection({ inspectionType, data }) {
+  if (!inspectionType) return null;
+  const record = data || {};
+  const scalarFields = REQUIRED_FIELDS_BY_TYPE[inspectionType] || [];
+  for (const field of scalarFields) {
+    const detail = checkRequiredFieldValue(record[field.name], field.kind);
+    if (detail) {
+      return {
+        code: 'REQUIRED_FIELD_MISSING_OR_INVALID',
+        field: `data.${field.name}`,
+        message: `${field.name} ${detail} for final ${inspectionType} inspection`,
+      };
+    }
+  }
+  const requiredArrays = REQUIRED_ARRAY_FIELDS_BY_TYPE[inspectionType] || [];
+  for (const fieldName of requiredArrays) {
+    const arr = record[fieldName];
+    if (!Array.isArray(arr) || arr.length === 0) {
+      return {
+        code: 'REQUIRED_FIELD_EMPTY',
+        field: `data.${fieldName}`,
+        message: `${fieldName} must contain at least one entry`,
+      };
+    }
+  }
+  return null;
+}
+
 // Walk an arbitrary JSON object and cap every string value at `max` chars.
 // Stops a malicious client from POSTing { data: { someField: '<2GB string>' } }
 // and blowing up the row. Returns a list of violation paths so the error
@@ -483,26 +620,32 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // DR-009: server-side enforcement of required-array fields. The
-    // frontend validates each field, but a checked-then-unchecked checklist
-    // (e.g. Day Activity `checklistItems: []`) used to slip past the form
-    // because the empty array is truthy in WorkEntryForm.jsx's
-    // `if (field.required && !formData[field.name])` check. Pin the
-    // contract server-side so an empty required array rejects with a
-    // actionable field path. DRAFT is exempt — the barest bones (just a
-    // project name) is the whole point of "Save as Draft".
+    // DR-009 + DR-013: server-side enforcement of required-field contracts.
+    // The single `validateFinalInspection` helper covers BOTH the
+    // per-subtype required ARRAY contract (Day Activity's `checklistItems`
+    // — DR-009's exact symptom) AND the per-subtype required SCALAR
+    // contract (cube_casting.numberOfCubes must be a positive integer;
+    // cube_testing.compressiveStrength must be a finite number — DR-013's
+    // exact symptom). The frontend validates each field, but:
+    //   - Day Activity: a checked-then-unchecked checklist produced
+    //     `checklistItems: []` and slipped past WorkEntryForm.jsx's
+    //     empty-array truthy check.
+    //   - Cube Casting / Testing: a draft saved bare-bones (just project
+    //     name) could be resumed + published without the cube count
+    //     fields, and a stale frontend / curl bypass accepted e.g.
+    //     `numberOfCubes: -1` because no field-level numeric guard existed.
+    // Pin both contracts server-side at the write boundary. DRAFT is
+    // exempt — the barest bones (just a project name) is the whole point
+    // of "Save as Draft"; SUBMIT enforces the contracts separately.
     if (requestedStatus !== 'DRAFT') {
-      const requiredArrays = REQUIRED_ARRAY_FIELDS_BY_TYPE[inspectionType] || [];
-      for (const fieldName of requiredArrays) {
-        const arr = data[fieldName];
-        if (!Array.isArray(arr) || arr.length === 0) {
-          return res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            code: 'REQUIRED_FIELD_EMPTY',
-            message: `${fieldName} must contain at least one entry`,
-            field: `data.${fieldName}`,
-          });
-        }
+      const violation = validateFinalInspection({ inspectionType, data });
+      if (violation) {
+        return res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          code: violation.code,
+          message: violation.message,
+          field: violation.field,
+        });
       }
     }
 
@@ -989,6 +1132,80 @@ router.get('/', asyncHandler(async (req, res) => {
     }
     const reportDateWhere = Object.keys(mergedDate).length > 0 ? mergedDate : undefined;
 
+    // [DR-015] Name-only inspection queries can display another site's
+    // records. ProjectExpandedPanel.jsx sends `projectName` (free-text) to
+    // this endpoint when the panel is showing a discovered / unregistered
+    // project, but the list handler used to extract `projectNameFilter`
+    // and silently drop it from the where clause — so an admin visiting a
+    // discovered project saw every inspection in the system that matched
+    // the other filters, including rows from a similarly-named site they
+    // weren't allocated to. Two scopes leaked: a substring "Tower" pull
+    // could surface "Tower Annex" / "Tower B" rows, and shared project
+    // names ("Phase II") could surface another site's records.
+    //
+    // Fix:
+    //   1. Apply the projectName filter to the where clause (exact,
+    //      case-insensitive match — no substring bleed).
+    //   2. Constrain the lookup to the caller's authorized projects:
+    //        - admin  → all (no extra scope)
+    //        - employee → intersect with ProjectAssignment.employeeId,
+    //          matching BOTH the curated FK (projectId is set) AND the
+    //          legacy typed-name rows (projectId IS NULL, projectName
+    //          matches a curated Project.name on the roster).
+    //   3. UUID precedence preserved — if projectId is supplied the
+    //      name filter is skipped entirely; the canonical FK is the only
+    //      identity we trust for a curated project.
+    //   4. An employee with no ProjectAssignment rows sees no rows for
+    //      any name filter — better than the previous "silently show
+    //      all" behaviour.
+    let nameScopeWhere = {};
+    if (!projectId && typeof projectNameFilter === 'string' && projectNameFilter.trim()) {
+      const trimmed = projectNameFilter.trim();
+      if (isAdmin) {
+        // Admin: name filter only — they already see across all sites.
+        nameScopeWhere = { projectName: { equals: trimmed, mode: 'insensitive' } };
+      } else {
+        // Employee: intersect with ProjectAssignment.employeeId. Mirror
+        // the projects.js ?scope=assigned pattern (lines 708-797) so
+        // both endpoints define "authorized scope" identically.
+        const assignRows = await prisma.projectAssignment.findMany({
+          where: { employeeId: req.employeeId },
+          select: { projectId: true },
+        });
+        const assignedIds = Array.from(new Set(
+          assignRows.map((r) => r.projectId).filter(Boolean),
+        ));
+        let assignedNames = [];
+        if (assignedIds.length > 0) {
+          const projects = await prisma.project.findMany({
+            where: { id: { in: assignedIds } },
+            select: { name: true },
+          });
+          assignedNames = Array.from(new Set(
+            projects.map((p) => p.name).filter(Boolean),
+          ));
+        }
+        // Both lists empty ⇒ no assignments ⇒ empty result rather than
+        // the previous "treat unsupported filter as all projects" leak.
+        const orClauses = [];
+        if (assignedIds.length > 0) {
+          orClauses.push({ projectId: { in: assignedIds } });
+        }
+        if (assignedNames.length > 0) {
+          orClauses.push({
+            projectId: null,
+            projectName: { in: assignedNames, mode: 'insensitive' },
+          });
+        }
+        nameScopeWhere = {
+          AND: [
+            { projectName: { equals: trimmed, mode: 'insensitive' } },
+            { OR: orClauses },
+          ],
+        };
+      }
+    }
+
     const where = {
       ...(restrictToSelf ? { submittedById: req.employeeId } : {}),
       ...(dprId ? { dprId } : {}),
@@ -997,11 +1214,10 @@ router.get('/', asyncHandler(async (req, res) => {
       ...(severity ? { severity } : {}),
       ...(reportDateWhere ? { reportDate: reportDateWhere } : {}),
       // [N1] projectId FK filter on the list endpoint — mirror of the
-      // DPR list. projectName (free-text) is left out by default; the
-      // KPI endpoint still groups on the denormalized column. If a
-      // caller really needs a name filter, they can resolve via the
-      // projects router first.
+      // DPR list. projectName is handled by nameScopeWhere above, gated
+      // on `!projectId` so the canonical UUID always wins precedence.
       ...(projectId ? { projectId } : {}),
+      ...nameScopeWhere,
       ...(cursor ? cursorWhere : {}),
     };
 
@@ -1386,7 +1602,7 @@ router.put('/:id', async (req, res) => {
     // resolution contract as the DPR PUT handler below — see dpr.js
     // for the full rationale and the resolveTargetProjectName helper.
     'projectName', 'projectId', 'location', 'reportDate', 'weather', 'contractor',
-    'inspectionType', 'data', 'severity', 'dprId',
+    'inspectionType', 'data', 'severity',
     // N7 (round-28): BOQ link — same allowlist extension as DPR PUT.
     'boqItemId',
     // [N3] Phase E: drawing link — same allowlist extension as DPR PUT.
@@ -1397,6 +1613,21 @@ router.put('/:id', async (req, res) => {
     // non-existent scalar. The validation block + dedupe + binding all
     // run below in the same transaction as the row update.
     'photos',
+    // DR-017 (round-44.1): `unlinkDpr` is a control field — the only
+    // way to clear an existing dprId on PUT. See the dprId block
+    // below for the full rationale. We allow it on the wire so the
+    // unknown-field gate doesn't reject an explicit unlink intent,
+    // but the field itself is stripped from the data spread (it's not
+    // a column on the row).
+    'unlinkDpr',
+    // DR-017: `dprId` is ONLY honoured when the client is
+    // intentionally setting/changing the link (or explicitly unlinking
+    // via unlinkDpr). Sending `dprId: null` without the unlinkDpr
+    // sentinel is the exact resume bug — see the dprId block below.
+    // We keep it on the allowlist so a legitimate "relink to a new
+    // DPR" edit still validates + persists; the block below strips
+    // it from the update payload when no explicit intent was sent.
+    'dprId',
   ];
   const unknown = Object.keys(fields).filter(k => !ALLOWED_UPDATE_FIELDS.includes(k));
   if (unknown.length) {
@@ -1406,6 +1637,69 @@ router.put('/:id', async (req, res) => {
       fields: unknown,
     });
   }
+
+  // DR-017 (round-44.1): preserve the existing dprId on resume.
+  //
+  // Background: the SPA's InspectionSubmit resume flow sends
+  //   editPayload.dprId = queryDprId || null
+  // and most resumes don't carry a `?dpr=` deep-link (the resume URL
+  // is just `?draftId=<id>`). Every save therefore PUTs `dprId: null`
+  // and the data spread below would silently null the FK on every
+  // save, breaking supported cross-engineer associations (audit
+  // DR-017, evidence: InspectionSubmit.jsx:1061).
+  //
+  // Contract enforced here:
+  //   - `dprId: '<valid uuid>'`  → set / change the link (same UUID +
+  //     existence validation as POST).
+  //   - `unlinkDpr: true`        → clear the link (set dprId to null).
+  //   - `dprId: null` (or '') WITHOUT `unlinkDpr: true`
+  //     → ignored — the existing link is preserved. This is the
+  //     exact resume path the audit flagged.
+  //   - `dprId` field absent entirely → also leaves the existing
+  //     link alone (no implicit clear).
+  const DRAFT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const unlinkDprRequested = fields.unlinkDpr === true;
+  if (unlinkDprRequested) {
+    // Explicit unlink. Strip any stray `dprId` payload (the client
+    // is allowed to send both `unlinkDpr: true` AND `dprId: null` for
+    // clarity, but we don't trust a non-null `dprId` alongside an
+    // unlink — that's a contradictory intent).
+    if (fields.dprId !== undefined && fields.dprId !== null && fields.dprId !== '') {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'DPR_UNLINK_CONFLICT',
+        message: 'unlinkDpr:true must not be combined with a non-null dprId',
+      });
+    }
+    fields.dprId = null;
+  } else if (fields.dprId !== undefined && fields.dprId !== null && fields.dprId !== '') {
+    // Client is intentionally setting/changing the link — same
+    // shape + existence validation as the POST handler.
+    if (typeof fields.dprId !== 'string' || !DRAFT_UUID_RE.test(fields.dprId)) {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'dprId must be a UUID',
+      });
+    }
+    const exists = await prisma.dPR.findUnique({ where: { id: fields.dprId }, select: { id: true } });
+    if (!exists) {
+      return res.status(404).json({
+        error: 'DPR_NOT_FOUND',
+        code: 'DPR_NOT_FOUND',
+        message: 'Linked DPR does not exist',
+      });
+    }
+  } else if ('dprId' in fields) {
+    // Client sent dprId: null / '' WITHOUT unlinkDpr: true. Strip it
+    // from the data spread so the existing link is preserved — the
+    // exact path the audit flagged as "save sends the query value or
+    // null".
+    delete fields.dprId;
+  }
+  // `unlinkDpr` is a control field, not a column. Strip from the
+  // data spread so Prisma doesn't try to set it.
+  delete fields.unlinkDpr;
 
   // Read the existing row up front. The boqItemId validation below
   // (round-28) already falls back to `existing.projectName` when the
@@ -1545,23 +1839,27 @@ router.put('/:id', async (req, res) => {
     }
   }
 
-  // DR-008-F + DR-009: required-array contract enforcement on PUT. Runs
-  // whenever a non-DRAFT row's effective (type, data) pair is about to be
-  // committed — including type-only PUTs that omit `data` (the merged pair
-  // is `new type + existing data`). DRAFT rows are exempt — the barest
-  // bones is the whole point of "Save as Draft".
+  // DR-008-F + DR-009 + DR-013: required-field contract enforcement on PUT.
+  // Runs whenever a non-DRAFT row's effective (type, data) pair is about
+  // to be committed — including type-only PUTs that omit `data` (the
+  // merged pair is `new type + existing data`). The single
+  // `validateFinalInspection` helper covers BOTH the per-subtype required
+  // ARRAY contract (Day Activity's `checklistItems` — DR-009 symptom) AND
+  // the per-subtype required SCALAR contract (cube_casting.numberOfCubes
+  // must be a positive integer — DR-013 symptom). DRAFT rows are exempt —
+  // the barest bones is the whole point of "Save as Draft".
   if (existing.status !== 'DRAFT') {
-    const requiredArrays = REQUIRED_ARRAY_FIELDS_BY_TYPE[effectiveInspectionType] || [];
-    for (const fieldName of requiredArrays) {
-      const arr = effectiveData && effectiveData[fieldName];
-      if (!Array.isArray(arr) || arr.length === 0) {
-        return res.status(400).json({
-          error: 'VALIDATION_ERROR',
-          code: 'REQUIRED_FIELD_EMPTY',
-          message: `${fieldName} must contain at least one entry`,
-          field: `data.${fieldName}`,
-        });
-      }
+    const violation = validateFinalInspection({
+      inspectionType: effectiveInspectionType,
+      data: effectiveData,
+    });
+    if (violation) {
+      return res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        code: violation.code,
+        message: violation.message,
+        field: violation.field,
+      });
     }
   }
 
@@ -1963,26 +2261,31 @@ async function transitionInspectionRecord(prisma, id, action, payload, actorEmpl
     // required arrays by a separate PUT between save and publish — the
     // SUBMIT must validate the row's CURRENT data, not assume the
     // create-time payload is still valid. Mirrors the POST handler's
-    // required-array check (inspection.js:455) so direct create, edit
-    // and publish enforce the same contract. DRAFT rows in the audit
-    // scenario never reach this branch (they would have been blocked by
-    // the create-time gate), but a row that landed here via a PUT that
-    // emptied the checklist must still be rejected.
+    // required-field check so direct create, edit and publish enforce
+    // the same contract. DRAFT rows in the audit scenario never reach
+    // this branch (they would have been blocked by the create-time
+    // gate), but a row that landed here via a PUT that emptied the
+    // checklist / cube count must still be rejected. The single
+    // `validateFinalInspection` helper covers BOTH the per-subtype
+    // required ARRAY contract (Day Activity checklist — DR-009) AND the
+    // per-subtype required SCALAR contract (cube_casting/cube_testing —
+    // DR-013). The error shape mirrors what the POST / PUT paths
+    // surface so the SPA's requiredField / REQUIRED_FIELD_EMPTY handling
+    // works for every entry path.
     if (action === 'SUBMIT') {
-      const requiredArrays = REQUIRED_ARRAY_FIELDS_BY_TYPE[record.inspectionType] || [];
-      const recordData = record.data || {};
-      for (const fieldName of requiredArrays) {
-        const arr = recordData[fieldName];
-        if (!Array.isArray(arr) || arr.length === 0) {
-          throw Object.assign(
-            new Error(`${fieldName} must contain at least one entry`),
-            {
-              _code: 'REQUIRED_FIELD_EMPTY',
-              _status: 400,
-              field: `data.${fieldName}`,
-            }
-          );
-        }
+      const violation = validateFinalInspection({
+        inspectionType: record.inspectionType,
+        data: record.data,
+      });
+      if (violation) {
+        throw Object.assign(
+          new Error(violation.message),
+          {
+            _code: violation.code,
+            _status: 400,
+            field: violation.field,
+          }
+        );
       }
     }
 
