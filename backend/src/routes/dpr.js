@@ -2102,14 +2102,41 @@ router.delete('/:id', async (req, res) => {
     });
   }
 
+  // [DR-011] Capture the observed (id, owner, status, version) at read time.
+  // The destructive transaction below is predicated on this tuple; if a
+  // concurrent SUBMIT (or PUT) lands between this read and the guarded
+  // update, Prisma throws P2025 → 409 VERSION_CONFLICT and the transaction
+  // rolls back. The now-published report and its photo/revision rows
+  // survive intact (and the FK cascade never fires). Server-captured
+  // version is sufficient; no new DELETE field is required.
+  const observedVersion = existing.version;
+
   try {
     await prisma.$transaction([
-      // Null the dprId on any inspections that referenced this draft so they
-      // survive as standalone records (their own photo cascade handles itself).
+      // [DR-011] Step 1 — CAS guard. Predicate on
+      // (id, submittedById, status=DRAFT, version). If status flipped to
+      // SUBMITTED (or version moved because of a concurrent PUT) between
+      // our read and this write, Prisma throws P2025 and the transaction
+      // aborts. We bump the version so the predicate-lost P2025 is the
+      // canonical "stale write" signal; the bump is semantically moot
+      // because the row is deleted immediately after on the happy path.
+      prisma.dPR.update({
+        where: {
+          id,
+          submittedById: req.employeeId,
+          status: 'DRAFT',
+          version: observedVersion,
+        },
+        data: { version: { increment: 1 } },
+      }),
+      // Step 2 — Null the dprId on any inspections that referenced this
+      // draft so they survive as standalone records (their own photo
+      // cascade handles itself; FK constraint is ON DELETE SET NULL).
       prisma.inspectionRecord.updateMany({
         where: { dprId: id },
         data: { dprId: null },
       }),
+      // Step 3 — Delete the DPR. FK cascade handles photos + revisions.
       prisma.dPR.delete({ where: { id } }),
     ]);
     res.json({ deleted: true, id });
@@ -2119,6 +2146,17 @@ router.delete('/:id', async (req, res) => {
       prismaCode: err.code,
       message: err.message?.split('\n')[0],
     });
+    if (err.code === 'P2025') {
+      // [DR-011] Predicate was lost to a concurrent mutation (most
+      // commonly: SUBMIT published the draft between our read and our
+      // guarded update). Map to 409 VERSION_CONFLICT so the client
+      // refreshes and retries, not the generic 404 NOT_FOUND that
+      // mapPrismaError would emit on P2025.
+      return res.status(409).json({
+        error: 'DPR was modified by another action. Please refresh and try again.',
+        code: 'VERSION_CONFLICT',
+      });
+    }
     const mapped = mapPrismaError(err);
     if (mapped) {
       return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
