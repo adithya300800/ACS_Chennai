@@ -337,7 +337,7 @@ export default function TrainingDetail() {
         <div className="training-detail-inactive" role="status">
           {isCancelled
             ? 'This assignment has been cancelled and cannot be completed. Contact your administrator if you believe this is in error.'
-            : 'This assignment is overdue and can no longer be completed here. Contact your administrator to reopen or reassign.'}
+            : 'This assignment is overdue and can no longer be completed here. Ask your administrator for a new assignment.'}
         </div>
       ) : (
         <>
