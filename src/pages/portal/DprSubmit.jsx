@@ -10,6 +10,7 @@ import FormProgress from '../../components/FormProgress.jsx';
 import DrawingPicker from '../../components/DrawingPicker.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { formatShortDate } from '../../lib/format.js';
+import { parseManpowerSummary, serializeManpowerRows } from '../../lib/manpowerSerialization.js';
 import {
   load as loadScopedDraft,
   save as saveScopedDraft,
@@ -25,31 +26,16 @@ const WEATHER_OPTIONS = ['Sunny', 'Cloudy', 'Rainy', 'Windy', 'Haze', 'Foggy'];
 // is needed. `parseManpowerSummary` splits a stored value into rows;
 // `serializeManpowerRows` is the inverse for submit and draft save.
 //
-// Format on the wire: "Trade — Count — Hours" joined by " | ". Each
-// row segment uses an em dash (U+2014) which is what the previous
-// placeholder guidance already used, so legacy values parse cleanly.
+// DR-022 (Fresh-24 audit 2026-09-24): the prior implementation split
+// on the same em-dash / pipe characters used as separators, so a trade
+// like "Senior — Lead" was corrupted on round-trip. The serializer +
+// parser now live in `src/lib/manpowerSerialization.js` and use a v2
+// escape-aware format — em-dash / pipe / backslash inside any field are
+// backslash-escaped on write and un-escaped on read. Legacy strings
+// (no backslash) are still read with the original naive split so
+// existing ambiguous records remain unchanged until explicitly
+// reconciled by the engineer editing the row builder.
 const MAX_MANPOWER_ROWS = 10;
-const parseManpowerSummary = (str) => {
-  if (!str || typeof str !== 'string') return [{ trade: '', count: '', hours: '' }];
-  return str
-    .split('|')
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((segment) => {
-      const parts = segment.split('—').map((p) => p.trim());
-      if (parts.length >= 3) {
-        return { trade: parts[0], count: parts[1], hours: parts[2] };
-      }
-      // Fallback: legacy free-text — keep the whole string as the trade
-      // field so the engineer can see + edit what was originally typed.
-      return { trade: segment, count: '', hours: '' };
-    });
-};
-const serializeManpowerRows = (rows) =>
-  rows
-    .filter((r) => r && r.trade && String(r.trade).trim().length > 0)
-    .map((r) => `${String(r.trade).trim()} — ${r.count || ''} — ${r.hours || ''}`)
-    .join(' | ');
 // SOL DR-003 — owner-scoped keys. The previous unscoped `dpr_draft_v1` kept
 // the previous account's draft on a shared computer. See ownerScopedDraft.js
 // for the migration / clearing contract.
