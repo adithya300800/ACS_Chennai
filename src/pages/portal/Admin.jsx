@@ -5,6 +5,12 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatDate, formatFullDate, formatMonthLabel, formatTimeOrDash, getMapUrl } from '../../lib/format.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+// §8.13 (Fresh24 wave-4 batch-C): migrate the session-detail overlay
+// from a hand-rolled `<div className="modal-overlay">` to the shared
+// Modal primitive (DR-017). The shared primitive supplies role/aria-
+// modal/focus-trap/Escape/focus-return; the page only needs to provide
+// an `ariaLabelledBy` id and a labelled close control.
+import Modal from '../../components/Modal.jsx';
 
 // (Round-15+ C-03: format helpers moved to src/lib/format.js. Admin.jsx
 // originally returned '—' for null formatTime callsites, so we import
@@ -312,58 +318,67 @@ export default function Admin() {
       )}
 
       {/* Detail Modal */}
-      {selectedRecord && (
-        <div className="modal-overlay" onClick={() => setSelectedRecord(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <div>
-                <h3 className="modal-title">{selectedRecord.employee.name}</h3>
-                <p className="modal-subtitle">{formatFullDate(selectedRecord.date)}</p>
-              </div>
-              <button className="modal-close" aria-label="Close modal" onClick={() => setSelectedRecord(null)}>×</button>
+      <Modal
+        open={!!selectedRecord}
+        onClose={() => setSelectedRecord(null)}
+        ariaLabelledBy="admin-session-modal-title"
+      >
+        <div style={{ position: 'relative' }}>
+          <div className="modal-header">
+            <div>
+              <h3 id="admin-session-modal-title" className="modal-title">{selectedRecord?.employee?.name}</h3>
+              <p className="modal-subtitle">{formatFullDate(selectedRecord?.date)}</p>
             </div>
-            <div className="modal-body">
-              {selectedRecord.sessions.map((session, i) => (
-                <div key={session.id} className="session-card">
-                  <div className="session-title">Session {i + 1}</div>
-                  <div className="session-times">
-                    <div className="session-time-item">
-                      <span className="time-label">Check-in</span>
-                      <span className="time-value">{formatTime(session.checkIn)}</span>
-                    </div>
-                    {session.checkOut && (
-                      <div className="session-time-item">
-                        <span className="time-label">Check-out</span>
-                        <span className="time-value">{formatTime(session.checkOut)}</span>
-                      </div>
-                    )}
+            <button
+              type="button"
+              className="modal-close"
+              aria-label="Close modal"
+              onClick={() => setSelectedRecord(null)}
+            >
+              ×
+            </button>
+          </div>
+          <div className="modal-body">
+            {selectedRecord?.sessions.map((session, i) => (
+              <div key={session.id} className="session-card">
+                <div className="session-title">Session {i + 1}</div>
+                <div className="session-times">
+                  <div className="session-time-item">
+                    <span className="time-label">Check-in</span>
+                    <span className="time-value">{formatTime(session.checkIn)}</span>
                   </div>
-                  {session.checkInAddr && (
-                    <div className="session-addr">
-                      <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{verticalAlign:'middle',marginRight:'4px'}} aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
-                      {session.checkInAddr}
-                    </div>
-                  )}
-                  {session.checkInLat && session.checkInLng && getMapUrl(parseFloat(session.checkInLat), parseFloat(session.checkInLng)) && (
-                    <div className="session-map">
-                      <iframe
-                        title="Location"
-                        width="100%"
-                        height="160"
-                        frameBorder="0"
-                        scrolling="no"
-                        loading="lazy"
-                        src={getMapUrl(parseFloat(session.checkInLat), parseFloat(session.checkInLng))}
-                        style={{ border: 0, borderRadius: '8px' }}
-                      />
+                  {session.checkOut && (
+                    <div className="session-time-item">
+                      <span className="time-label">Check-out</span>
+                      <span className="time-value">{formatTime(session.checkOut)}</span>
                     </div>
                   )}
                 </div>
-              ))}
-            </div>
+                {session.checkInAddr && (
+                  <div className="session-addr">
+                    <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{verticalAlign:'middle',marginRight:'4px'}} aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                    {session.checkInAddr}
+                  </div>
+                )}
+                {session.checkInLat && session.checkInLng && getMapUrl(parseFloat(session.checkInLat), parseFloat(session.checkInLng)) && (
+                  <div className="session-map">
+                    <iframe
+                      title="Location"
+                      width="100%"
+                      height="160"
+                      frameBorder="0"
+                      scrolling="no"
+                      loading="lazy"
+                      src={getMapUrl(parseFloat(session.checkInLat), parseFloat(session.checkInLng))}
+                      style={{ border: 0, borderRadius: '8px' }}
+                    />
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         </div>
-      )}
+      </Modal>
     </div>
   );
 }
