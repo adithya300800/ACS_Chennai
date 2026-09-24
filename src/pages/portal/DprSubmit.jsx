@@ -1088,6 +1088,18 @@ export default function DprSubmit() {
 
     setStatus('submitting');
 
+    // DR-012 audit fix: own one idempotency key at handler scope
+    // (closure variable, not module-scope), so the resumed-edit
+    // publish branch — which doesn't mint its own key — can still be
+    // reconciled in the catch via buildSubmitAckKey without a
+    // ReferenceError on TDZ access. The previous code declared
+    // `const idempotencyKey` inside the createDpr-only else branch
+    // and referenced it from the outer catch, so any error during
+    // the edit-publish path threw a second exception before the
+    // normal setError / setStatus('idle') / toast cleanup could run,
+    // leaving the user with a stuck "submitting" UI and no message.
+    let idempotencyKey;
+
     try {
       // SOL DR-004: only send NEW additions on Save. Server-loaded
       // photos carry `persisted: true` from the hydration path above;
@@ -1238,16 +1250,17 @@ export default function DprSubmit() {
             lastPutVersionRef.current = acknowledged;
           }
 
-          // [S6 Item 1] Stamp the submit-ack flag BEFORE the publish POST
-          // so a transient response-loss (server committed, response lost)
-          // is recognized as "we already submitted" by the catch block
-          // below instead of re-enabling the form. Keyed by editingId +
-          // draftId — submitDpr has no idempotencyKey on the wire, so we
-          // use the server-side row identity. Cleared on success below;
-          // preserved across the navigate so a follow-up click with the
-          // same identity also short-circuits.
-          const submitAckKey = buildSubmitAckKey({ editingId, draftId });
-          setSubmitAck(submitAckKey);
+          // DR-012 audit fix: no pre-ack. Per the audit, "Treat only a
+          // server response or explicit server reconciliation as
+          // success; do not equate 'request started' with 'record
+          // saved.'" The previous code stamped a localStorage ack flag
+          // BEFORE the publish POST so the catch could claim success on
+          // a transient NETWORK_ERROR — but that route ran without any
+          // server confirmation, so a validation failure or 4xx would
+          // still see ackFound=true and falsely announce "DPR
+          // submitted successfully" while clearing the user's draft.
+          // The publish round-trip itself is the only success signal;
+          // we only navigate away on a confirmed SUBMITTED response.
           const submitted = await api.submitDpr(editingId, versionToSubmit, accessToken);
           // Show success ONLY for the returned terminal state. If the
           // server returned something else (e.g. an idempotent retry
@@ -1259,16 +1272,13 @@ export default function DprSubmit() {
             // additive flag flips and any subsequent edit treats them
             // as already persisted. Same keying as the Save branch.
             markPhotosPersisted(photosToSubmit);
-            clearSubmitAck(submitAckKey);
             toast.push('DPR submitted successfully.', 'success');
             lastPutVersionRef.current = null;
             navigate('/portal/dpr/my');
           } else {
-            // [S6 Item 1] Server returned a non-SUBMITTED payload — the
-            // publish didn't actually land. Drop the ack flag so the
-            // next retry starts fresh, surface the existing error, and
-            // stay on the form.
-            clearSubmitAck(submitAckKey);
+            // Server returned a non-SUBMITTED payload — the publish
+            // didn't actually land. Surface the existing error and stay
+            // on the form. No ack flag to clear (DR-012).
             toast.push('Submit did not complete. Please refresh and try again.', 'error');
             setStatus('idle');
             submittingRef.current = false;
@@ -1314,20 +1324,15 @@ export default function DprSubmit() {
         // instead of creating a duplicate DPR + duplicate admin
         // notification email. Submitting twice intentionally mints
         // TWO keys (a second submit click is a fresh user intent).
-        const idempotencyKey = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        //
+        // Assigned to the handler-scope `let` declared above so the
+        // catch can reference it without TDZ violations; the resumed-edit
+        // publish branch (if/else above) never assigns a key, leaving
+        // it `undefined`, which buildSubmitAckKey filters out via
+        // `.filter(Boolean)`.
+        idempotencyKey = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
           ? crypto.randomUUID()
           : `dpr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-        // [S6 Item 1] Stamp the submit-ack flag BEFORE the create POST
-        // so a transient response-loss is recognized as "we already
-        // submitted" by the catch block below. Keyed by the just-minted
-        // idempotencyKey + draftId — the server replays the cached 201
-        // for this key on retry (api.js auto-retry preserves it), so a
-        // manual user retry would also dedup. Cleared on success below;
-        // the next fresh submit mints a NEW idempotencyKey and gets its
-        // own ack slot, so stale flags can't cross-contaminate.
-        const submitAckKey = buildSubmitAckKey({ idempotencyKey, draftId });
-        setSubmitAck(submitAckKey);
 
         // SOL DR-005: build the create body via the shared helper. The
         // previous inline literal omitted `drawingId` and `drawingRev`,
@@ -1345,53 +1350,24 @@ export default function DprSubmit() {
         });
         await api.createDpr(createPayload, accessToken, idempotencyKey);
         clearDraftForEmployee(currentEmployeeId);
-        clearSubmitAck(submitAckKey);
         toast.push(submitStatus === 'DRAFT' ? 'Draft saved.' : 'DPR submitted successfully.', 'success');
         navigate('/portal/dpr/my');
       }
     } catch (err) {
-      // [S6 Item 1] Reconcile "already submitted" BEFORE re-enabling the
-      // form. The submit-ack flag was stamped right before each
-      // createDpr/submitDpr POST, so if it's still set on the catch
-      // path the server MAY have committed but the response was lost
-      // (NETWORK_ERROR / TIMEOUT). For those transient failures we route
-      // to the success state instead of re-enabling the form — the user
-      // can verify on /portal/dpr/my and a manual retry would either:
-      // (a) hit the server-side idempotency-key cache and return the
-      //     cached row (DR-012/DR-017), or
-      // (b) on submitDpr paths land cleanly on an already-SUBMITTED row.
-      // For non-transient errors (server 4xx/5xx with a structured
-      // message, e.g. PHOTO_BINDING_LOST), the flag is NOT a reliable
-      // "we succeeded" signal — the server explicitly rejected — so we
-      // fall through to the existing error UI.
+      // DR-012 audit fix: surface an unambiguous error. Per the audit
+      // ("Ensure the error path either fully retries or surfaces an
+      // unambiguous error to the client"), we no longer route transient
+      // failures through a localStorage "ack found" branch — that path
+      // previously announced "DPR submitted successfully", cleared the
+      // user's draft, and navigated to /portal/dpr/my WITHOUT a server
+      // confirmation, so a 4xx like PHOTO_BINDING_LOST could silently
+      // look like a success. Recovery from real network drops is now
+      // handled by (a) api.js auto-retry of NETWORK_ERROR / TIMEOUT on
+      // the same idempotency key (server returns the cached row, no
+      // duplicate), and (b) the user verifying on /portal/dpr/my if
+      // they want to confirm. We only claim success on a confirmed
+      // server response — see the success branches above.
       //
-      // Reconstruct the same key the success path built. `idempotencyKey`
-      // is in scope from the createDpr branch; `editingId` + `draftId`
-      // are in scope for the resumed-edit publish branch. At most one
-      // submit attempt is in flight per handleSubmit call, so at most
-      // one of these key shapes will match.
-      const submitAckKey = buildSubmitAckKey({ idempotencyKey, editingId, draftId });
-      const ackFound = hasSubmitAck(submitAckKey);
-      const isTransient = err?.transient === true
-        || err?.code === 'NETWORK_ERROR'
-        || err?.code === 'TIMEOUT';
-      if (ackFound && isTransient) {
-        // Server likely committed; route to success so the user doesn't
-        // re-click and double-submit. We clear the local draft so the
-        // next visit doesn't restore the now-stale form state, and
-        // reset the retry ref so a manual re-entry into the page
-        // doesn't take the lastPutVersionRef branch.
-        toast.push('DPR submitted successfully.', 'success');
-        clearDraftForEmployee(currentEmployeeId);
-        clearSubmitAck(submitAckKey);
-        lastPutVersionRef.current = null;
-        navigate('/portal/dpr/my');
-        return;
-      }
-      // No ack, or non-transient error — fall through to the existing
-      // error UI. Drop the ack flag so the next retry starts fresh.
-      if (ackFound) clearSubmitAck(submitAckKey);
-
       // [DR-006 client] Surface a specific message when the server rolls
       // back because a photo claim was lost mid-submit. Generic
       // "Failed to submit…" would leave the user thinking the form was
