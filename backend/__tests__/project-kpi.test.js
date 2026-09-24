@@ -252,13 +252,45 @@ function makePrisma(opts = {}) {
     } : {
       findMany: jest.fn(async ({ where }) => {
         let rows = [
-          { projectName: 'T-Nagar', quantity: 10, rate: 100, amount: 800, isActive: true },
-          { projectName: 'T-Nagar', quantity: 5, rate: 200, amount: 1100, isActive: true },
-          { projectName: 'Anna Nagar', quantity: 1, rate: 999, amount: 999, isActive: true },
+          // [DR-026] `id` added to the projection so the rollup's
+          // accepted-execution groupBy can join items to their exec
+          // ledger rows. amount column intentionally matches
+          // quantity*rate (the production invariant) — the old test
+          // fixture used mismatched amounts to fabricate "executed",
+          // which masked the DR-026 bug.
+          { id: 'boq-tn-1', projectName: 'T-Nagar', quantity: 10, rate: 100, amount: 1000, isActive: true },
+          { id: 'boq-tn-2', projectName: 'T-Nagar', quantity: 5, rate: 200, amount: 1000, isActive: true },
+          { id: 'boq-an-1', projectName: 'Anna Nagar', quantity: 1, rate: 999, amount: 999, isActive: true },
         ];
         if (where.projectName) rows = rows.filter((r) => r.projectName === where.projectName);
         if (where.isActive !== undefined) rows = rows.filter((r) => r.isActive === where.isActive);
         return rows;
+      }),
+    },
+    // [DR-026] accepted-execution ledger — feeds the project KPI
+    // rollup. Default state: ONE accepted execution of 4 units against
+    // boq-tn-1 (the 10-unit contract), so totalContract stays 10 000
+    // and totalExecuted = 4 × 100 = 400 (variance -96%). accepted=false
+    // rows are excluded by the route's `accepted: true` predicate.
+    boqExecution: {
+      groupBy: jest.fn(async ({ where = {} } = {}) => {
+        const rows = [
+          { boqItemId: 'boq-tn-1', accepted: true, executedQuantity: 4 },
+          { boqItemId: 'boq-tn-1', accepted: false, executedQuantity: 99 }, // retracted, must NOT count
+          { boqItemId: 'boq-tn-2', accepted: true, executedQuantity: 0 }, // zero-execution accepted, no-op
+        ];
+        const ids = (where.boqItemId && where.boqItemId.in) || [];
+        const filtered = rows.filter((r) =>
+          (ids.length === 0 || ids.includes(r.boqItemId))
+          && (where.accepted === undefined || r.accepted === where.accepted)
+        );
+        const map = new Map();
+        for (const r of filtered) {
+          const prev = map.get(r.boqItemId) || { boqItemId: r.boqItemId, _sum: { executedQuantity: 0 } };
+          prev._sum.executedQuantity += Number(r.executedQuantity) || 0;
+          map.set(r.boqItemId, prev);
+        }
+        return [...map.values()];
       }),
     },
     leaveRequest: {
@@ -520,6 +552,13 @@ describe('N17 — GET /api/projects/:idOrName/kpis', () => {
   // response anymore. Test intentionally omitted.)
 
   // 9b. KPI: BOQ variance calculation when present
+  // [DR-026] Rewrite: contract = sum(qty*rate); executed = sum of
+  // ACCEPTED executions × item rate (NOT the stored `amount` column,
+  // which equals qty*rate and so always produced 0% variance in
+  // production). Fixture: T-Nagar has two active items
+  //   boq-tn-1: 10 units @ ₹100 → contract ₹1,000, accepted exec 4 → executed ₹400
+  //   boq-tn-2:  5 units @ ₹200 → contract ₹1,000, accepted exec 0 → executed ₹0
+  // totalContract = 2,000; totalExecuted = 400; variance = (400-2000)/2000 = -80%.
   it('9b. KPI boqVariance roll-up computes contract / executed / variance', async () => {
     const prisma = makePrisma();
     const app = buildApp(prisma);
@@ -527,15 +566,35 @@ describe('N17 — GET /api/projects/:idOrName/kpis', () => {
       .get(`/api/projects/${T_NAGAR_ID}/kpis`)
       .set('Authorization', userJwt());
     expect(res.status).toBe(200);
-    // T-Nagar rows: quantity=10 rate=100 amount=800; quantity=5 rate=200 amount=1100
-    // totalContract = 10*100 + 5*200 = 1000 + 1000 = 2000
-    // totalExecuted = 800 + 1100 = 1900
-    // variancePercent = (1900 - 2000) / 2000 * 100 = -5%
     expect(res.body.boqVariance).toEqual({
       itemsCount: 2,
       totalContractValue: 2000,
-      totalExecutedValue: 1900,
-      variancePercent: -5,
+      totalExecutedValue: 400,
+      variancePercent: -80,
+    });
+  });
+
+  // [DR-026] Acceptance: a project with active items but ZERO
+  // accepted executions must report totalExecutedValue=0, NOT the
+  // contract total (the old code summed `amount` = contract value and
+  // reported 0% variance even with zero executions). Pin both the
+  // contract-side rollup stays correct AND the executed side drops to
+  // 0 when no accepted rows exist.
+  it('9b-dr026. KPI boqVariance reports zero executed when no executions accepted', async () => {
+    const prisma = makePrisma();
+    // Override the default execution fixture with an EMPTY groupBy —
+    // simulates a freshly-curated BOQ with no executions yet.
+    prisma.boqExecution.groupBy = jest.fn(async () => []);
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .get(`/api/projects/${T_NAGAR_ID}/kpis`)
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.boqVariance).toEqual({
+      itemsCount: 2,
+      totalContractValue: 2000,
+      totalExecutedValue: 0,
+      variancePercent: -100,
     });
   });
 

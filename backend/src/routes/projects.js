@@ -1784,11 +1784,26 @@ async function kpiHandler(req, res) {
   const cubeTests = { dueSoonCount: 0, overdueCount: 0, passedCount: 0 };
 
   // ─── BOQ variance roll-up ────────────────────────────────────────────────
-  // BoqItem has direct projectName. "Variance" = (totalExecuted -
-  // totalContract) / totalContract. With no executed line yet the field
-  // is 0 and variance is -100%; that's the spec's expected behaviour for
-  // a brand-new project. Items without `amount` (rate * quantity) are
-  // skipped — they will land as `amount` once the admin fills the rate.
+  // [DR-026 — Fresh24 audit, 2026-09-24] Bug: the v1 rollup summed the
+  // `amount` column for BOTH contract and executed. `amount` is the
+  // STORED contract value (quantity × rate, written on every create +
+  // patch — see boq.js create/patch handlers), so totalContract and
+  // totalExecuted were identical and variancePercent was always 0. The
+  // live fixture: 10 units @ INR 2.50, one accepted INSTALLED execution
+  // of 4 units → /variance showed contract INR 25 / executed INR 10;
+  // the project dashboard tile showed contract INR 25 / executed INR 25
+  // / variance 0%. Fix: reuse the accepted-execution projection from
+  // DR-015 (round-15 audit, 2026-09-08) — the SAME source-of-truth that
+  // feeds /api/boq/variance — and compute `executedAmount` from
+  // sum(accepted executedQuantity) × item.rate. `totalContractValue`
+  // stays as sum(quantity × rate) over active items.
+  //
+  // Wire contract (preserved — SPA tiles + charts + all-projects
+  // aggregator all key off these exact field names):
+  //   boqVariance.itemsCount           — active line items in project
+  //   boqVariance.totalContractValue   — INR, sum(quantity × rate)
+  //   boqVariance.totalExecutedValue   — INR, sum(accepted exec × rate)
+  //   boqVariance.variancePercent      — (executed - contract) / contract
   let boqVariance = {
     itemsCount: 0,
     totalContractValue: 0,
@@ -1798,14 +1813,41 @@ async function kpiHandler(req, res) {
   try {
     const items = await prisma.boqItem.findMany({
       where: { projectName, isActive: true },
-      select: { quantity: true, rate: true, amount: true },
+      select: { id: true, quantity: true, rate: true },
     });
+    // [DR-026] Reuse DR-015's accepted-execution projection. Items
+    // without any accepted BoqExecution rows contribute zero to
+    // executedAmount (acceptance: "New item with no execution reports
+    // zero executed"). accepted=false rows are explicitly excluded —
+    // they're audit rows the admin retracted and must NOT inflate the
+    // executed total.
+    const executedQtyByItem = new Map();
+    if (items.length > 0) {
+      const itemIds = items.map((i) => i.id);
+      const execRows = await prisma.boqExecution.groupBy({
+        by: ['boqItemId'],
+        where: {
+          boqItemId: { in: itemIds },
+          accepted: true,
+        },
+        _sum: { executedQuantity: true },
+      });
+      for (const r of execRows) {
+        executedQtyByItem.set(r.boqItemId, Number(r._sum.executedQuantity) || 0);
+      }
+    }
     let totalContract = 0;
     let totalExecuted = 0;
     for (const it of items) {
-      const lineTotal = (Number(it.quantity) || 0) * (Number(it.rate) || 0);
-      totalContract += lineTotal;
-      totalExecuted += Number(it.amount) || 0;
+      const rate = Number(it.rate) || 0;
+      const quantity = Number(it.quantity) || 0;
+      totalContract += quantity * rate;
+      // executedAmount = accepted exec qty × item rate. If no
+      // accepted executions, `executedQtyByItem.get(it.id)` is
+      // undefined → 0 (Map.get-or-zero), which is exactly the
+      // acceptance condition for "no execution = zero executed".
+      const executedQty = executedQtyByItem.get(it.id) || 0;
+      totalExecuted += executedQty * rate;
     }
     const variancePercent = totalContract > 0
       ? Math.round(((totalExecuted - totalContract) / totalContract) * 10000) / 100
