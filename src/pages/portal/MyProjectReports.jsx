@@ -127,6 +127,15 @@ export default function MyProjectReports() {
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingReports, setLoadingReports] = useState(true);
   const [error, setError] = useState('');
+  // [DR-020] Partial-failure tracker — one entry per project whose GET
+  // promise rejected during loadReports. Successful rows are still
+  // merged into the cross-project `reports` list (mirroring the audit's
+  // "preserve successes" acceptance), but the failed scopes are surfaced
+  // as a per-project Retry instead of being silently swallowed by the
+  // Promise.allSettled walker. Prevents "No reports uploaded yet" from
+  // being shown when every project's fetch failed.
+  //   Shape: [{ projectId, projectName, error }, ...]
+  const [failedProjects, setFailedProjects] = useState([]);
 
   // Upload form state. 3-step state machine mirrors the in-accordion
   // ReportSection (R35): idle → sas → uploading → confirming → idle.
@@ -193,9 +202,22 @@ export default function MyProjectReports() {
   // Load reports across every assigned project. Per-project calls run in
   // parallel via Promise.allSettled so one project's 404 doesn't sink the
   // rest (mirrors the pattern used in the My Projects accordion loader).
+  //
+  // [DR-020] Per-project failure tracking. Promise.allSettled preserves
+  // successful rows, but the previous walker silently DROPPED every
+  // rejected reason — so if every assigned project's GET failed (server
+  // down, scope 500, transient network), the user saw "No reports
+  // uploaded yet" and assumed the data was checked and found empty.
+  // Fix: build a parallel `failedProjects` array carrying each rejected
+  // projectId + projectName + error.message, then surface it as a
+  // per-scope Retry banner. Successful rows are still merged into the
+  // cross-project `reports` list so one project's failure never blanks
+  // another project's data (audit acceptance: "one failed project leaves
+  // other records usable").
   const loadReports = useCallback(async () => {
     setLoadingReports(true);
     setError('');
+    setFailedProjects([]);
     try {
       if (projects.length === 0) {
         setReports([]);
@@ -218,14 +240,48 @@ export default function MyProjectReports() {
         )),
       );
       const merged = [];
+      const failed = [];
       results.forEach((res, idx) => {
-        if (res.status !== 'fulfilled') return;
+        // [DR-020] Per-project envelope — both branches capture the
+        // same `{ projectId, projectName, ... }` metadata so the UI
+        // can address failed scopes by name without re-iterating
+        // `projects`. Mirrors the audit's minimal implementation
+        // shape `{ projectId, status, attachments, error?, nextCursor? }`.
         const project = projects[idx];
-        const rows = Array.isArray(res.value) ? res.value : (res.value?.attachments || res.value?.items || []);
-        rows.forEach((r) => {
-          if (r && r.deletedAt) return; // soft-deleted rows are filtered by backend already, but double-check
-          merged.push({ ...r, projectName: project.name || project.code || project.id });
-        });
+        const projectId = project?.id || project?.name || null;
+        const projectName = project?.name || project?.code || project?.id || 'project';
+        if (res.status === 'fulfilled') {
+          const payload = res.value;
+          const rows = Array.isArray(payload) ? payload : (payload?.attachments || payload?.items || []);
+          rows.forEach((r) => {
+            if (r && r.deletedAt) return; // soft-deleted rows are filtered by backend already, but double-check
+            merged.push({ ...r, projectName });
+          });
+          // Audit acceptance: a successful fetch's nextCursor is exposed
+          // on the per-project result so a future paginated variant can
+          // page each project independently. The current "first page
+          // only" walker doesn't consume it — keeping the slot for
+          // symmetry with the failure branch below.
+          // res.value?.nextCursor → see projectAttachments.js:352.
+        } else {
+          // [DR-020] Rejection. Copy only the bits the UI needs from
+          // the ApiError shape — `api.get` throws an ApiError carrying
+          // { message, status, code, transient? }. Avoid leaking the
+          // whole error object (token-bearing headers, internal
+          // stacks) into render output.
+          const reason = res.reason;
+          failed.push({
+            projectId,
+            projectName,
+            // 401s are already handled by the global api wrapper (it
+            // bounces to /portal/login via AuthContext). Falling through
+            // here means a transient or non-auth error — surface a
+            // short, human-readable copy instead of the raw message.
+            error: (reason?.status === 401)
+              ? 'Session expired for this project.'
+              : (reason?.message || 'Could not load reports for this project.'),
+          });
+        }
       });
       // Newest first.
       merged.sort((a, b) => {
@@ -234,7 +290,12 @@ export default function MyProjectReports() {
         return bT - aT;
       });
       setReports(merged);
+      setFailedProjects(failed);
     } catch (err) {
+      // [DR-020] Only run-level errors reach here — Promise.allSettled
+      // swallows per-project rejections, so this catches structural
+      // failures (missing projects[], dependency blow-up). Per-project
+      // failures are handled in the forEach above.
       const msg = err?.message || 'Failed to load reports.';
       setError(msg);
       if (err?.status !== 401) toast.push(msg, 'error');
@@ -703,25 +764,38 @@ export default function MyProjectReports() {
         {loadingReports ? (
           <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--steel)' }}>Loading reports…</div>
         ) : reports.length === 0 ? (
-          <div
-            style={{
-              padding: '2rem',
-              textAlign: 'center',
-              color: 'var(--steel)',
-              background: '#f8fafc',
-              borderRadius: 6,
-              border: '1px dashed #cbd5e1',
-            }}
-          >
-            {projects.length === 0
-              ? 'No projects assigned to you yet.'
-              : selectedTaxonomy
-                ? (() => {
-                    const chip = getTaxonomyChip(selectedTaxonomy);
-                    return `No ${chip?.label || selectedTaxonomy} reports yet.`;
-                  })()
-                : 'No reports uploaded yet.'}
-          </div>
+          // [DR-020] If every assigned project's GET failed, do NOT
+          // render the "No reports uploaded yet" card — that copy
+          // falsely suggests the data was checked and found empty.
+          // Audit acceptance: "All-failed never means 'No reports
+          // uploaded yet.'" The partial-failure banner below is the
+          // actual UI in that case; render a zero-height spacer here
+          // so the banner keeps its margin from the page body.
+          failedProjects.length > 0
+            && failedProjects.length === projects.length
+            && projects.length > 0 ? (
+              <div style={{ height: 0 }} aria-hidden="true" />
+            ) : (
+              <div
+                style={{
+                  padding: '2rem',
+                  textAlign: 'center',
+                  color: 'var(--steel)',
+                  background: '#f8fafc',
+                  borderRadius: 6,
+                  border: '1px dashed #cbd5e1',
+                }}
+              >
+                {projects.length === 0
+                  ? 'No projects assigned to you yet.'
+                  : selectedTaxonomy
+                    ? (() => {
+                        const chip = getTaxonomyChip(selectedTaxonomy);
+                        return `No ${chip?.label || selectedTaxonomy} reports yet.`;
+                      })()
+                    : 'No reports uploaded yet.'}
+              </div>
+            )
         ) : (
           <div style={{ display: 'grid', gap: '0.5rem' }}>
             {reports.map((r) => {
@@ -963,6 +1037,83 @@ export default function MyProjectReports() {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {/* [DR-020] Partial-failure indicator. Sits below the list (or
+            below the all-failed zero-height spacer) and surfaces every
+            project whose GET promise rejected. Two copy variants:
+              - All-failed: a single full-width banner carrying the
+                "reports unavailable" message + Retry (covers the
+                audit acceptance "All-failed never means 'No reports
+                uploaded yet'").
+              - Some-failed: a compact "X of N project(s) couldn't
+                load" line with Retry, so successful rows remain
+                usable (audit acceptance: "One failed project leaves
+                other records usable and an explicit partial
+                indicator").
+            The Retry button calls the same loadReports used on
+            mount — no new handler, no new state. */}
+        {!loadingReports && failedProjects.length > 0 && (
+          <div
+            role="alert"
+            data-testid="mpr-partial-failure"
+            style={{
+              marginTop: '1rem',
+              padding: '0.75rem 0.9rem',
+              background: failedProjects.length === projects.length && projects.length > 0
+                ? '#fef2f2'
+                : '#fffbeb',
+              border: failedProjects.length === projects.length && projects.length > 0
+                ? '1px solid #fecaca'
+                : '1px solid #fde68a',
+              borderRadius: 6,
+              fontSize: '0.85rem',
+              color: '#7c2d12',
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '0.75rem',
+              flexWrap: 'wrap',
+            }}
+          >
+            <div style={{ flex: '1 1 240px' }}>
+              {failedProjects.length === projects.length && projects.length > 0 ? (
+                <>
+                  <strong>Reports couldn't load.</strong>{' '}
+                  {failedProjects.length} project{failedProjects.length === 1 ? '' : 's'}{' '}
+                  unavailable — try again in a moment.
+                  <ul style={{ margin: '0.4rem 0 0 1rem', padding: 0, fontSize: '0.8rem' }}>
+                    {failedProjects.map((f) => (
+                      <li key={f.projectId || f.projectName}>
+                        {f.projectName}: {f.error}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <>
+                  <strong>Partial load.</strong>{' '}
+                  {reports.length} report{reports.length === 1 ? '' : 's'} loaded
+                  from {projects.length - failedProjects.length} of {projects.length} project{projects.length === 1 ? '' : 's'};
+                  {' '}{failedProjects.length} could not load.
+                  <ul style={{ margin: '0.4rem 0 0 1rem', padding: 0, fontSize: '0.8rem' }}>
+                    {failedProjects.map((f) => (
+                      <li key={f.projectId || f.projectName}>
+                        {f.projectName}: {f.error}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={loadReports}
+              disabled={loadingReports}
+            >
+              Retry
+            </button>
           </div>
         )}
 

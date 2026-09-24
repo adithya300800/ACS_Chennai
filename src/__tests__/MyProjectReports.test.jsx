@@ -422,4 +422,111 @@ describe('S7/MyReports — Project Reports page source contracts', () => {
     // switch.
     expect(appCssSrc).toMatch(/\.mpr-card__actions\s*\{[\s\S]*?flex-wrap:\s*wrap/);
   });
+
+  // ─── DR-020 (2026-09-24) — Partial report-fetch failure UI ────────
+  // The page deliberately uses Promise.allSettled to preserve successes,
+  // but the original walker silently dropped the rejection branch — if
+  // every project's GET failed (transient outage, scope 500, etc.) the
+  // user saw "No reports uploaded yet" and assumed the data was checked
+  // and found empty. The audit's acceptance criteria:
+  //   1. One failed project leaves other records usable and an explicit
+  //      partial indicator.
+  //   2. All-failed never means "No reports uploaded yet."
+  // These tests pin the structural contracts that make the fix safe to
+  // refactor — drop the failedProjects state and a future Promise.all
+  // swap could silently re-break the audit without anyone noticing.
+
+  test('32. page declares a failedProjects state for the partial-failure UI', () => {
+    // The state slot must be an array initialised to []. A ref or a
+    // plain variable would lose the partial indicator across re-renders
+    // (the React state model is load-bearing for the Retry affordance).
+    expect(pageSrc).toMatch(
+      /const\s+\[\s*failedProjects\s*,\s*setFailedProjects\s*\]\s*=\s*useState\(\s*\[\s*\]\s*\)/
+    );
+  });
+
+  test('33. loadReports captures per-project rejection reasons (no silent drop)', () => {
+    // The walker must branch on res.status === 'fulfilled' for successes
+    // AND push the rejected reasons into a separate accumulator. The
+    // audit's minimal fix:
+    //   const merged = [];
+    //   const failed = [];
+    //   results.forEach((res, idx) => { ... if (res.status === 'fulfilled') ... else failed.push(...) });
+    // If the `failed` accumulator disappears (e.g. someone re-introduces
+    // the old `if (res.status !== 'fulfilled') return;` short-circuit),
+    // these pins fire before a regression ships.
+    expect(pageSrc).toMatch(
+      /results\.forEach\(\s*\(\s*res\s*,\s*idx\s*\)\s*=>\s*\{[\s\S]*?if\s*\(\s*res\.status\s*===\s*['"]fulfilled['"]\s*\)/,
+    );
+    expect(pageSrc).toMatch(/setFailedProjects\(\s*failed\s*\)/);
+  });
+
+  test('34. per-project failure entry carries projectId + projectName + error', () => {
+    // Audit minimal implementation shape:
+    //   { projectId, status: 'ok'|'error', attachments, error?, nextCursor? }
+    // The SPA version uses { projectId, projectName, error } — the
+    // audit's `attachments` / `status` / `status: 'ok'|'error'` fields
+    // aren't needed because the consumer is the same React tree that
+    // already has `reports` (attachments) and `projects` (status). Pin
+    // the minimal subset the UI relies on (and pin the literals in
+    // order so a future refactor can't drop a field without breaking
+    // the audit).
+    const failedIdx = pageSrc.indexOf('failed.push');
+    expect(failedIdx).toBeGreaterThan(-1);
+    // Walk forward up to 600 chars to cover the whole object literal
+    // (the error ternary is multi-line, so the field can sit a few
+    // hundred chars after the open brace).
+    const obj = pageSrc.slice(failedIdx, failedIdx + 600);
+    const projectIdIdx = obj.search(/projectId\b/);
+    const projectNameIdx = obj.search(/projectName\b/);
+    const errorIdx = obj.search(/error\s*:/);
+    expect(projectIdIdx).toBeGreaterThan(-1);
+    expect(projectNameIdx).toBeGreaterThan(projectIdIdx);
+    expect(errorIdx).toBeGreaterThan(projectNameIdx);
+  });
+
+  test('35. partial-failure banner renders below the reports list with a Retry button', () => {
+    // The audit's "explicit partial indicator" lives in a single
+    // data-testid-anchored container that mounts whenever
+    // `failedProjects.length > 0`. The Retry button MUST call the same
+    // `loadReports` used on mount (no new handler, no new state) so a
+    // future refactor that introduces a parallel refetch path can't
+    // silently drift away from the per-project walker.
+    expect(pageSrc).toMatch(/data-testid\s*=\s*['"]mpr-partial-failure['"]/);
+    expect(pageSrc).toMatch(
+      /onClick\s*=\s*\{\s*loadReports\s*\}/
+    );
+  });
+
+  test('36. all-failed case does not render the "No reports uploaded yet" copy', () => {
+    // Audit acceptance: "All-failed never means 'No reports uploaded
+    // yet.'" The empty-state ternary must check whether every assigned
+    // project failed before falling back to the literal "No reports
+    // uploaded yet." string. Pin the conditional shape so a future
+    // refactor that drops the `failedProjects.length === projects.length`
+    // guard breaks this test instead of regressing live UX.
+    // Loose regex — the exact comparison may be `===`, `<`, or the
+    // audit's normalised form. The literal text "No reports uploaded
+    // yet" MUST sit inside an `else` branch (the genuine-empty fallback).
+    const noReportsIdx = pageSrc.indexOf('No reports uploaded yet.');
+    expect(noReportsIdx).toBeGreaterThan(-1);
+    // Find the closest enclosing conditional that also references the
+    // failure-tracker. Walk backwards from the literal looking for the
+    // first `: (` (else branch) and confirm `failedProjects` appears
+    // in the preceding 800 chars (covers the ternary that gates the
+    // "No reports" copy).
+    const precedingWindow = pageSrc.slice(Math.max(0, noReportsIdx - 1200), noReportsIdx);
+    expect(precedingWindow).toMatch(/failedProjects/);
+  });
+
+  test('37. all-failed banner surfaces a Retry + per-project error list', () => {
+    // The all-failed copy MUST mention "couldn't load" (or the
+    // audit-aligned "Reports couldn't load") and list each failed
+    // project by name so the user can see which projects are
+    // unavailable. Pin the message skeleton and the per-row map.
+    expect(pageSrc).toMatch(/Reports couldn't load|Reports couldn.t load|Reports unavailable/);
+    expect(pageSrc).toMatch(
+      /failedProjects\.map\(\s*\(\s*f\s*\)\s*=>\s*\([\s\S]*?\{f\.projectName\}[\s\S]*?\{f\.error\}/
+    );
+  });
 });
