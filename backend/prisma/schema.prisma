@@ -1810,9 +1810,21 @@ model RequestDedupe {
   // WHERE expires_at < now() to bound the table. PENDING slots are
   // GC'd separately by the state_created_at index.
   expiresAt    DateTime? @map("expires_at")
+  // [DR-037] Fresh24 audit (2026-09-24) — separate identity retention
+  // from response-body retention. NULL = body is live (the normal state
+  // after complete()). Non-NULL = body was compacted by the
+  // idempotency-compact cron; identity (key, payloadHash, state,
+  // recordKind, recordId, updatedAt) is preserved so a same-key retry
+  // still recognises the request as completed and does NOT re-run the
+  // handler. After IDEMPOTENCY_IDENTITY_TTL_HOURS (default 30d) the row
+  // is deleted by the same cron. See
+  // backend/prisma/migrations/20260924150000_dr037_idempotency_body_compaction
+  // for the schema rationale + the two TTL knobs.
+  bodyCompactedAt DateTime? @map("body_compacted_at")
 
   @@index([recordKind, recordId])
   @@index([state, createdAt])
+  @@index([state, bodyCompactedAt])
   @@map("request_dedupe")
 }
 

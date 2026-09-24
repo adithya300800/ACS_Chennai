@@ -1,0 +1,69 @@
+# compact-idempotency.yml — daily body-compaction sweep for
+# `request_dedupe` (DR-037, Fresh24 audit 2026-09-24).
+#
+# Owner: the GH Actions runner. NOT Render cron — the free plan blocks
+# TCP/587 cron expressions, and using GH Actions keeps the schedule
+# aligned with the R40 AppLog retention cron.
+#
+# Schedule: 03:30 UTC daily (off-peak for the portal's morning burst
+# traffic from Chennai).
+#
+# Failure modes:
+#   - compactIdempotencyRecords throws (DB unreachable, schema drift):
+#     workflow exits non-zero, surfaces in the workflow run list.
+#   - Persistent zero-compact runs are NOT workflow failures — they're
+#     a signal that the TTLs are loose; observe via the log artifact.
+#
+# Manual trigger:
+#   gh workflow run compact-idempotency.yml
+# (useful after a known-burst deploy when operators want to compact
+#  early rather than wait for the next 03:30 UTC window).
+
+name: Compact idempotency records (DR-037)
+
+on:
+  schedule:
+    # 03:30 UTC daily. Off-peak. NOT a :00 or :30 minute-mark on a
+    # round-hour boundary — see the round-4 cron guidance for why we
+    # avoid those.
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+    inputs:
+      note:
+        description: 'Optional human note for the run log'
+        required: false
+        default: 'manual trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  compact:
+    name: Run compactIdempotencyRecords sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install backend deps (for the @prisma/client module the script requires)
+        working-directory: backend
+        run: npm ci
+
+      - name: Run compact-idempotency-records.sh
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+          DIRECT_DATABASE_URL: ${{ secrets.SUPABASE_DB_PASSWORD && format('postgresql://postgres.tqmmspqvqtajbijbbsii:{0}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require', secrets.SUPABASE_DB_PASSWORD) || secrets.DATABASE_URL }}
+        run: sh scripts/compact-idempotency-records.sh
+
+      - name: Annotate manual runs
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.note != ''
+        run: |
+          echo "::notice::Manual compact trigger: ${{ github.event.inputs.note }}"

@@ -17,6 +17,21 @@
 //      Map forgot the lock the moment the process died, so a retry
 //      after a restart happily created a duplicate.
 //
+//   3. [DR-037] Fresh24 audit (2026-09-24) — the COMPLETED response-body
+//      retention has its own lifecycle, separate from the identity
+//      retention. Body compact + identity delete are owned by the
+//      idempotency-compact cron (compact-idempotency-records.sh +
+//      .github/workflows/cron-idempotency-compact.yml). Two TTLs:
+//        IDEMPOTENCY_BODY_TTL_HOURS      (default 72)
+//        IDEMPOTENCY_IDENTITY_TTL_HOURS  (default 720 = 30d)
+//      Within the body window a same-key replay returns the full
+//      cached response. After the body window but before the identity
+//      window, the row is preserved as a tombstone (body_compacted_at
+//      non-NULL, result_body NULL) — reserve() returns a replay marker
+//      with the original status + a sentinel body so the route does
+//      NOT re-run the business logic. After the identity window the
+//      row is deleted; a retry then falls through to the fresh path.
+//
 // Two layers, kept in one file for the surface-area they share:
 //
 //   - Legacy in-memory cache: tryReplay / recordSuccess (round-10).
@@ -82,7 +97,52 @@ const PENDING_EVICT_MS = 5 * 60 * 1000;
 // realistic retry window (browser refresh within an hour) without
 // letting the table grow unboundedly. Admin query can DELETE WHERE
 // expires_at < now() to keep the table bounded.
+//
+// [DR-037] Note: this legacy in-memory COMPLETED TTL is only consulted
+// by the in-memory cache path (DPR). The durable request_dedupe
+// lifecycle is governed by IDEMPOTENCY_BODY_TTL_HOURS +
+// IDEMPOTENCY_IDENTITY_TTL_HOURS below, not by this constant.
 const COMPLETED_TTL_MS = 60 * 60 * 1000;
+// [DR-037] Two-tier retention knobs for the durable request_dedupe
+// table. Both are env-overridable so an operator can tighten or relax
+// the window without redeploying code.
+//
+//   IDEMPOTENCY_BODY_TTL_HOURS — how long the cached JSONB response
+//     body is kept on a COMPLETED row. After this window the cron
+//     compacts the body (sets result_body = NULL, body_compacted_at =
+//     now()) but preserves the row identity so a same-key retry
+//     still recognises the request as completed. Default 72h covers
+//     an overnight retry window with comfortable headroom.
+//
+//   IDEMPOTENCY_IDENTITY_TTL_HOURS — how long the COMPLETED row's
+//     identity (key, payload_hash, state, record_kind, record_id,
+//     updated_at, body_compacted_at) is preserved. After this window
+//     the cron deletes the row entirely; a retry then falls through
+//     to the fresh path (no P2002 conflict, no cached replay, the
+//     handler re-runs). Default 720h = 30d mirrors the AppLog
+//     retention window from round-40 so the two retention sweeps can
+//     share operational monitoring.
+const DEFAULT_IDEMPOTENCY_BODY_TTL_HOURS = 72;
+const DEFAULT_IDEMPOTENCY_IDENTITY_TTL_HOURS = 720;
+
+function parsePositiveInt(value, fallback) {
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getBodyTtlHours() {
+  return parsePositiveInt(
+    process.env.IDEMPOTENCY_BODY_TTL_HOURS,
+    DEFAULT_IDEMPOTENCY_BODY_TTL_HOURS,
+  );
+}
+
+function getIdentityTtlHours() {
+  return parsePositiveInt(
+    process.env.IDEMPOTENCY_IDENTITY_TTL_HOURS,
+    DEFAULT_IDEMPOTENCY_IDENTITY_TTL_HOURS,
+  );
+}
 
 // ─── Legacy in-memory cache (round-10) ──────────────────────────────────────
 // Kept for DPR. New callers should use the DR-020 durable helpers.
@@ -295,6 +355,36 @@ async function reserve({ prisma, route, req, ttlMs = COMPLETED_TTL_MS }) {
 
     // COMPLETED — return the cached response.
     if (existing.state === STATE_COMPLETED) {
+      // [DR-037] Identity retention outlives the body retention. If the
+      // cron has compacted this row (body_compacted_at non-NULL,
+      // result_body NULL), the identity is still preserved so a same-
+      // key, same-body retry must NOT re-run the handler. Emit the
+      // original status with a sentinel body so the route's existing
+      // `res.status(cached.status).json(cached.body)` flow still
+      // returns without re-executing the business logic. The sentinel
+      // carries the recordKind/recordId pair so an operator or client
+      // can still identify the originally-committed record.
+      if (existing.resultBody == null) {
+        return {
+          key: rawKey,
+          bodyHash,
+          replay: true,
+          compacted: true,
+          cached: {
+            status: existing.resultStatus,
+            body: {
+              __idempotent_replay__: 'tombstone',
+              message: 'Original response body was compacted by retention sweep',
+              recordKind: existing.recordKind || null,
+              recordId: existing.recordId || null,
+              originalStatus: existing.resultStatus || null,
+              compactedAt: existing.bodyCompactedAt
+                ? existing.bodyCompactedAt.toISOString()
+                : null,
+            },
+          },
+        };
+      }
       return {
         key: rawKey,
         bodyHash,
@@ -345,6 +435,12 @@ async function complete({ prisma, reservation, status, body, recordKind, recordI
       recordKind: recordKind || null,
       recordId: recordId || null,
       expiresAt: new Date(Date.now() + ttlMs),
+      // [DR-037] Fresh write — body is live. The compact cron flips
+      // this to a timestamp on the next pass that exceeds the body
+      // TTL; resetting to null here keeps the column honest in the
+      // unusual case where a row was previously compacted (e.g. via
+      // an admin query) and then re-completed by a same-key retry.
+      bodyCompactedAt: null,
       updatedAt: new Date(),
     },
   });
@@ -382,6 +478,93 @@ async function release({ prisma, reservation }) {
   });
 }
 
+// ─── [DR-037] Body-compaction + identity-deletion sweep ─────────────────────
+//
+// Runs two passes over the durable `request_dedupe` table:
+//
+//   1. COMPACT:  COMPLETED rows whose body is still live AND whose
+//                `updated_at` is older than the body TTL. Sets
+//                `result_body = NULL`, stamps `body_compacted_at =
+//                now()`, and leaves the row identity intact. The next
+//                same-key retry sees a tombstone replay (cached.status
+//                preserved, cached.body replaced by a sentinel).
+//
+//   2. DELETE:   COMPLETED rows whose `updated_at` is older than the
+//                identity TTL AND whose body is already compacted.
+//                Hard-deletes the row. The next same-key retry sees
+//                no row → falls through to the fresh path → handler
+//                re-runs.
+//
+// PENDING / FAILED rows are NOT touched by this sweep. PENDING is
+// reclaimed by the in-memory PENDING_EVICT_MS logic; FAILED is held
+// until the operator manually clears it (its poison-pin is by design,
+// see `fail()`).
+//
+// Both TTLs are env-overridable (see IDEMPOTENCY_BODY_TTL_HOURS /
+// IDEMPOTENCY_IDENTITY_TTL_HOURS). Returns counts so the cron can
+// surface `compactedCount` / `deletedCount` in the GH Actions log —
+// a run that persistently compacts or deletes zero is a signal that
+// either the TTLs are too generous or the cron is stuck.
+async function compactIdempotencyRecords({
+  prisma,
+  bodyTtlHours,
+  identityTtlHours,
+  now = () => new Date(),
+} = {}) {
+  if (!prisma || !prisma.requestDedupe) {
+    return { compactedCount: 0, deletedCount: 0, skipped: 'no-prisma-requestdedupe' };
+  }
+  const resolvedBodyHours = parsePositiveInt(
+    bodyTtlHours,
+    getBodyTtlHours(),
+  );
+  const resolvedIdentityHours = parsePositiveInt(
+    identityTtlHours,
+    getIdentityTtlHours(),
+  );
+  const timestamp = now();
+
+  // Pass 1 — compact bodies. Two atomic guards: state must be
+  // COMPLETED, body must still be live. The `updated_at < now() -
+  // body_ttl` filter keeps recently-completed rows untouched even if
+  // the cron fires before the TTL elapses.
+  const compactResult = await prisma.requestDedupe.updateMany({
+    where: {
+      state: STATE_COMPLETED,
+      resultBody: { not: null },
+      bodyCompactedAt: null,
+      updatedAt: { lt: new Date(timestamp.getTime() - resolvedBodyHours * 60 * 60 * 1000) },
+    },
+    data: {
+      resultBody: null,
+      bodyCompactedAt: timestamp,
+      updatedAt: timestamp,
+    },
+  });
+
+  // Pass 2 — delete expired identities. Same state guard, plus the
+  // `body_compacted_at IS NOT NULL` precondition: we only delete rows
+  // that have ALREADY gone through the compact pass, so a row that
+  // somehow completed > identity_ttl ago but whose body is still
+  // "live" (cron was off for a long stretch) is NOT silently dropped
+  // before being compacted.
+  const deleteResult = await prisma.requestDedupe.deleteMany({
+    where: {
+      state: STATE_COMPLETED,
+      bodyCompactedAt: { not: null },
+      updatedAt: { lt: new Date(timestamp.getTime() - resolvedIdentityHours * 60 * 60 * 1000) },
+    },
+  });
+
+  return {
+    compactedCount: typeof compactResult?.count === 'number' ? compactResult.count : 0,
+    deletedCount: typeof deleteResult?.count === 'number' ? deleteResult.count : 0,
+    bodyTtlHours: resolvedBodyHours,
+    identityTtlHours: resolvedIdentityHours,
+    ranAt: timestamp.toISOString(),
+  };
+}
+
 module.exports = {
   // Legacy in-memory API (DPR + DR-012 inspection). Kept unchanged so
   // the round-10 unit tests + the DR-012 test suite pass without
@@ -395,6 +578,10 @@ module.exports = {
   complete,
   fail,
   release,
+  // [DR-037] Two-tier retention sweep — compact bodies, then delete
+  // expired identities. Called by the idempotency-compact cron
+  // endpoint and exercised directly by the DR-037 unit tests.
+  compactIdempotencyRecords,
   // Exported for unit tests that want to inspect canonical-json
   // behavior without going through the request lifecycle.
   canonicalJsonStringify,
@@ -405,7 +592,11 @@ module.exports = {
   IDEMPOTENCY_TTL_MS,
   PENDING_EVICT_MS,
   COMPLETED_TTL_MS,
+  DEFAULT_IDEMPOTENCY_BODY_TTL_HOURS,
+  DEFAULT_IDEMPOTENCY_IDENTITY_TTL_HOURS,
   STATE_PENDING,
   STATE_COMPLETED,
   STATE_FAILED,
+  getBodyTtlHours,
+  getIdentityTtlHours,
 };

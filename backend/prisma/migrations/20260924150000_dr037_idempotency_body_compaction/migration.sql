@@ -1,0 +1,86 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DR-037 (Fresh24 audit, 2026-09-24) — idempotency body-compaction lifecycle
+--
+-- The Fresh24 product audit (`ACS-Portal-Fresh-Product-Audit-2026-09-24-
+-- 71f183a.md` line 518, AR-017) flagged that the COMPLETED response-body
+-- retention on `request_dedupe` is unbounded. The durable table was added
+-- by DR-020 (migration 20260909200000) but never given an owned janitor:
+--
+--   - Existing handler logic (`backend/src/lib/idempotency.js`) writes
+--     COMPLETED rows with `result_body` JSONB + an `expires_at` of
+--     `now() + 1h`. Nothing enforces that 1h: `reserve()` only consults
+--     `state`, not `expires_at`, so a COMPLETED row replays its full
+--     body indefinitely until something DELETEs it.
+--   - The only janitor path documented for COMPLETED bodies was "admin
+--     query DELETE WHERE expires_at < now()" — never wired to a cron
+--     and not observable.
+--   - The PENDING-side eviction (PENDING_EVICT_MS in-memory reclaim)
+--     only covers the reservation slot, not the response body. So
+--     DR-037's complaint stands: there is no owned lifecycle for the
+--     COMPLETED body record.
+--
+-- Smallest correct fix — additive column only:
+--
+--   1. Add `body_compacted_at TIMESTAMPTZ NULL` to `request_dedupe`.
+--      NULL = body is live (the normal state right after `complete()`).
+--      non-NULL = body was compacted by the cron; identity (key,
+--      payload_hash, state, record_kind, record_id, completed_at) is
+--      preserved so a same-key retry still recognises the request as
+--      completed and does NOT re-run the business logic. The cached
+--      `result_status` is also preserved; only `result_body` is set
+--      to NULL.
+--
+--   2. Two retentions, both env-overridable, both bounded by the cron:
+--        IDEMPOTENCY_BODY_TTL_HOURS      (default 72)  — bodies are
+--                               JSON text + a URL or two, not GBs; 72h
+--                               comfortably covers an overnight retry
+--                               window.
+--        IDEMPOTENCY_IDENTITY_TTL_HOURS  (default 720 = 30d) — identity
+--                               must outlive the body so a slow client
+--                               retry does not accidentally re-create
+--                               the same business row. 30 days matches
+--                               the AppLog retention window (round-40).
+--
+-- Why a NULL + tombed body instead of a separate "deleted" flag:
+--
+--   - The natural shape of the cleanup query is
+--       UPDATE request_dedupe SET result_body = NULL, body_compacted_at = NOW()
+--         WHERE state = 'COMPLETED' AND result_body IS NOT NULL
+--           AND updated_at < NOW() - body_ttl
+--     — one pass, no extra index needed. The `state_created_idx` already
+--     covers the lookup; updated_at is cheap to filter on a small per-
+--     run batch (the cron pulls by state + created_at).
+--
+--   - Identity is preserved by NOT deleting the row. A same-key, same-
+--     body retry returns `replay: true, compacted: true` from
+--     `reserve()` and the route emits the original 2xx with a sentinel
+--     body — the handler does NOT re-run. This is the property the
+--     audit demands: "retrying an old committed key never silently
+--     creates a duplicate operation."
+--
+--   - After the identity TTL (default 30d), the cron DELETEs the row
+--     entirely. A retry after that point sees no row, falls through
+--     to the no-reservation branch, and proceeds as fresh — which is
+--     the audit's "retry after identity window" semantics.
+--
+─ Backward compatibility ─────────────────────────────────────────────────────
+--
+-- The column is additive + nullable; every existing row gets
+-- `body_compacted_at = NULL` on the ALTER, meaning "body live". No
+-- code path reads the column before this migration's app code ships,
+-- so the deploy is safe regardless of migration order.
+--
+-- A re-run against a partially-applied DB is a no-op (`IF NOT EXISTS`).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+ALTER TABLE "request_dedupe"
+  ADD COLUMN IF NOT EXISTS "body_compacted_at" TIMESTAMP(3);
+
+-- Hot read path for the cron: list compacted-or-not rows grouped by
+-- state. The existing `state_created_idx` covers the state+created_at
+-- scan; the new `state_compacted_idx` covers the new compact pass
+-- (state + updated_at, where body_compacted_at IS NULL means "still
+-- live"). Keeping the compact query on a single btree keeps the cron
+-- to a bounded range scan even on a 30-day backlog.
+CREATE INDEX IF NOT EXISTS "request_dedupe_state_compacted_idx"
+  ON "request_dedupe" ("state", "body_compacted_at");
