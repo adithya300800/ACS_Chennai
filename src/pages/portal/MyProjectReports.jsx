@@ -708,18 +708,10 @@ export default function MyProjectReports() {
               return (
                 <div
                   key={r.id}
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'auto 1fr auto auto',
-                    gap: '0.75rem',
-                    alignItems: 'center',
-                    padding: '0.6rem 0.75rem',
-                    background: '#fff',
-                    border: '1px solid #e2e8f0',
-                    borderRadius: 6,
-                  }}
+                  className="mpr-card"
                 >
                   <span
+                    className="mpr-card__type"
                     style={{
                       fontSize: '0.75rem',
                       fontWeight: 600,
@@ -732,7 +724,7 @@ export default function MyProjectReports() {
                   >
                     {typeLabel}
                   </span>
-                  <div style={{ minWidth: 0 }}>
+                  <div className="mpr-card__content" style={{ minWidth: 0 }}>
                     <div style={{ fontWeight: 500, color: 'var(--navy)', overflowWrap: 'anywhere' }}>
                       {r.title || r.filename}
                     </div>
@@ -877,34 +869,36 @@ export default function MyProjectReports() {
                       </div>
                     )}
                   </div>
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => handleDownload(r)}
-                  >
-                    Download
-                  </button>
-                  {canReplace && (
+                  <div className="mpr-card__actions">
                     <button
                       type="button"
                       className="btn btn-secondary btn-sm"
-                      onClick={() => startReplaceFile(r)}
-                      disabled={replaceBusyId === r.id || (replaceBusyId !== null && replaceBusyId !== r.id)}
-                      title="Re-upload a new file in place — use this if Download returned BLOB_GONE"
+                      onClick={() => handleDownload(r)}
                     >
-                      {replaceBusyId === r.id ? 'Uploading…' : 'Replace'}
+                      Download
                     </button>
-                  )}
-                  {canDelete && (
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => handleDelete(r)}
-                      title="Delete this report"
-                    >
-                      Delete
-                    </button>
-                  )}
+                    {canReplace && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => startReplaceFile(r)}
+                        disabled={replaceBusyId === r.id || (replaceBusyId !== null && replaceBusyId !== r.id)}
+                        title="Re-upload a new file in place — use this if Download returned BLOB_GONE"
+                      >
+                        {replaceBusyId === r.id ? 'Uploading…' : 'Replace'}
+                      </button>
+                    )}
+                    {canDelete && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => handleDelete(r)}
+                        title="Delete this report"
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
                 </div>
               );
             })}

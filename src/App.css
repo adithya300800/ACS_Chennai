@@ -5888,3 +5888,71 @@ footer {
     font-size: 0.95rem;
   }
 }
+
+/* ===== DR-046: MyProjectReports card — mobile-first responsive layout =====
+   Replaces the legacy inline `auto 1fr auto auto auto` grid that collapsed
+   the title column to 0px on 320/375px viewports. The 3 fixed-width badge
+   columns plus the 3 non-wrapping action buttons (`Download`, `Replace`,
+   `Delete`) competed with the only `1fr` identifying column for intrinsic
+   width; under that pressure the `1fr` column went to 0 and the title text
+   wrapped onto ~820px of vertical height, producing the "blank cards with
+   floating action buttons" the audit captured.
+
+   Mobile-first contract (< 768px = phone):
+     - Single column. Type pill, title/project/status block, and the action
+       buttons each occupy a full-width row.
+     - Buttons flex-wrap inside their own row so Download/Replace/Delete
+       never overflow the card even if all three are visible.
+     - `min-width: 0` on the content area lets long titles shrink inside
+       their row instead of pushing the card past the viewport.
+
+   Desktop contract (>= 768px = tablet+):
+     - Three-column grid `auto | minmax(0, 1fr) | auto` (type | content |
+       actions). Matches the layout goal of the legacy `auto 1fr auto auto`
+       grid but uses one auto track for the now-grouped actions instead of
+       three competing `auto` tracks.
+     - Actions are right-justified.
+
+   NO `overflow: hidden` and NO font-size shrink — the audit explicitly
+   rejected both. Long titles wrap via the existing `overflowWrap: 'anywhere'`
+   inline style on the title row. */
+.mpr-card {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-areas:
+    "type"
+    "content"
+    "actions";
+  gap: 0.5rem;
+  align-items: start;
+  padding: 0.6rem 0.75rem;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+.mpr-card__type {
+  grid-area: type;
+  align-self: start;
+}
+.mpr-card__content {
+  grid-area: content;
+  min-width: 0;
+}
+.mpr-card__actions {
+  grid-area: actions;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+@media (min-width: 768px) {
+  .mpr-card {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "type content actions";
+    gap: 0.75rem;
+    align-items: center;
+  }
+  .mpr-card__actions {
+    justify-content: flex-end;
+  }
+}

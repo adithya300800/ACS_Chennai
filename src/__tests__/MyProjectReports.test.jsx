@@ -44,9 +44,11 @@ import { resolve as resolvePath } from 'path';
 const pagePath = resolvePath(__dirname, '../pages/portal/MyProjectReports.jsx');
 const appPath = resolvePath(__dirname, '../App.jsx');
 const layoutPath = resolvePath(__dirname, '../components/PortalLayout.jsx');
+const appCssPath = resolvePath(__dirname, '../App.css');
 const pageSrc = readFileSync(pagePath, 'utf8');
 const appSrc = readFileSync(appPath, 'utf8');
 const layoutSrc = readFileSync(layoutPath, 'utf8');
+const appCssSrc = readFileSync(appCssPath, 'utf8');
 
 describe('S7/MyReports — Project Reports page source contracts', () => {
   test('1. page file exists at the expected portal path', () => {
@@ -300,5 +302,116 @@ describe('S7/MyReports — Project Reports page source contracts', () => {
     expect(pageSrc).toMatch(/value=\{rNotes\}/);
     expect(pageSrc).toMatch(/onChange=\{[^}]*setReviewNotesById[^}]*\}/);
     expect(pageSrc).toMatch(/maxLength=\{2000\}/);
+  });
+
+  // ─── DR-046 (2026-09-23) — Mobile report cards responsive layout ──
+  // The prior card used an inline `auto 1fr auto auto auto` grid. Under
+  // that grid the only flexible `1fr` column collapsed to 0px at 320/375px
+  // because the 3 fixed-width `auto` tracks (type pill + 3 action buttons,
+  // none of which can wrap) consumed all the available width. Result:
+  // title text wrapped onto ~820px of vertical height and the user saw
+  // blank cards with floating action buttons. Fix = move to a responsive
+  // class that stacks under 768px and uses 3 columns from 768px up.
+  // These tests pin the BEM-ish classnames, the DOM structure (actions
+  // grouped under one wrapper), and the contract that the fix did NOT
+  // silently regress to the audit's banned approaches (overflow:hidden
+  // hiding content, or shrinking text).
+
+  test('25. card outer div uses the responsive class "mpr-card" (not inline grid)', () => {
+    // Banned shape: inline `gridTemplateColumns: 'auto 1fr auto auto'`
+    // on the card-level div. Acceptable shape: `className="mpr-card"`
+    // with the responsive CSS in App.css.
+    // Source uses bare JSX attributes (not expression containers) for
+    // these static class names — accept either form.
+    expect(pageSrc).toMatch(
+      /<div[\s\S]*?key=\{r\.id\}[\s\S]*?className=(?:\{['"]mpr-card['"]\s*\}|['"]mpr-card['"])/
+    );
+    // Also assert no inline `gridTemplateColumns` sits near the card
+    // div — an inline style would override the responsive CSS and
+    // silently re-break mobile. Take a window from the key up to
+    // ~600 chars to cover the open + first few attributes without
+    // trying to track the closing-tag stack (the card div has 5+
+    // nested children so a close-tag regex is brittle).
+    const keyIdx = pageSrc.search(/key=\{r\.id\}/);
+    expect(keyIdx).toBeGreaterThan(-1);
+    const cardOpener = pageSrc.slice(keyIdx, keyIdx + 600);
+    expect(cardOpener).not.toMatch(/gridTemplateColumns/);
+  });
+
+  test('26. type pill, content, and actions each have their own grid-area class', () => {
+    // Each card-level child must own one named grid area so the mobile
+    // single-column stack and the desktop 3-column grid both address
+    // the same nodes via `grid-template-areas`.
+    expect(pageSrc).toMatch(/className=(?:\{['"]mpr-card__type['"]\s*\}|['"]mpr-card__type['"])/);
+    expect(pageSrc).toMatch(/className=(?:\{['"]mpr-card__content['"]\s*\}|['"]mpr-card__content['"])/);
+    expect(pageSrc).toMatch(/className=(?:\{['"]mpr-card__actions['"]\s*\}|['"]mpr-card__actions['"])/);
+  });
+
+  test('27. Download / Replace / Delete buttons are all wrapped in .mpr-card__actions', () => {
+    // The fix's contract: the 3 action buttons that previously each
+    // occupied their own `auto` grid column must now be siblings under
+    // one wrapper. If a future refactor moves any of them OUT of that
+    // wrapper (or adds a fourth standalone button), the responsive
+    // flex-wrap will silently stop working on phones because the buttons
+    // would no longer share their own flex container.
+    const openTag = pageSrc.indexOf('className="mpr-card__actions"');
+    expect(openTag).toBeGreaterThan(-1);
+    // The wrapper opens with a `<div` and closes with a matching `</div>`
+    // before the parent card's `</div>`. Capture up to the next
+    // `</div>` (the actions wrapper close tag) — this is accurate
+    // because the parent card is the next enclosing element.
+    const wrapperEnd = pageSrc.indexOf('</div>', openTag);
+    expect(wrapperEnd).toBeGreaterThan(openTag);
+    const wrapperBody = pageSrc.slice(openTag, wrapperEnd);
+    expect(wrapperBody).toMatch(/handleDownload\(\s*r\s*\)/);
+    // Replace and Delete are conditional — assert their handler symbols
+    // appear inside the wrapper body so they stay grouped.
+    expect(wrapperBody).toMatch(/startReplaceFile\(\s*r\s*\)/);
+    expect(wrapperBody).toMatch(/handleDelete\(\s*r\s*\)/);
+  });
+
+  test('28. App.css defines a mobile-first responsive card with a single-column phone stack', () => {
+    // Mobile-first contract (the audit's "give title/project/status a
+    // full-width row" requirement): under 768px the card is single-
+    // column with three vertically-stacked grid areas.
+    expect(appCssSrc).toMatch(/\.mpr-card\s*\{/);
+    expect(appCssSrc).toMatch(/grid-template-areas:\s*\n?\s*"type"\s+"content"\s+"actions"/);
+    // Default (mobile) grid must be one column — not the prior broken
+    // `auto 1fr auto auto`.
+    const mprCardBlockMatch = appCssSrc.match(/\.mpr-card\s*\{([\s\S]*?)\}/);
+    expect(mprCardBlockMatch).not.toBeNull();
+    expect(mprCardBlockMatch[1]).toMatch(/grid-template-columns:\s*1fr/);
+  });
+
+  test('29. App.css switches to a 3-column grid at the tablet+ breakpoint (DR-046 acceptance: desktop behavior preserved)', () => {
+    // Acceptance: "Desktop behavior and actual download/review actions
+    // still work." Pin the @media rule that promotes the layout from
+    // single-column to the 3-column desktop grid, and the columns
+    // themselves.
+    expect(appCssSrc).toMatch(/@media\s*\(\s*min-width:\s*768px\s*\)\s*\{[\s\S]*?\.mpr-card\s*\{/);
+    expect(appCssSrc).toMatch(/grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)\s+auto/);
+    // Grid areas at desktop must be horizontal: type | content | actions.
+    expect(appCssSrc).toMatch(/"type\s+content\s+actions"/);
+  });
+
+  test('30. fix did NOT ban-list the audit-rejected approaches (no overflow:hidden, no title font shrink)', () => {
+    // The audit explicitly rejected both as repair paths: "Do not
+    // repair this by hiding more overflow or shrinking text." Even the
+    // title's existing `overflowWrap: 'anywhere'` is preserved (it lets
+    // the title wrap *within* its track instead of pushing the card
+    // past the viewport — that's the opposite of hiding overflow).
+    expect(appCssSrc).not.toMatch(/\.mpr-card[^{]*\{[^}]*overflow:\s*hidden/);
+    // Source-side: no `font-size` shrinking on the title row.
+    const titleRow = pageSrc.match(/<div[^>]*color:\s*['"]var\(--navy\)['"][^>]*>/);
+    expect(titleRow).not.toBeNull();
+    expect(titleRow[0]).not.toMatch(/font-size/);
+  });
+
+  test('31. actions wrapper has flex-wrap so Download+Replace+Delete fit on a 375px row', () => {
+    // Pin flex-wrap on the actions container — without it the 3
+    // buttons (each ~80-95px) could overflow the actions row on narrow
+    // tablets. flex-wrap is the mobile-friendly complement to the grid
+    // switch.
+    expect(appCssSrc).toMatch(/\.mpr-card__actions\s*\{[\s\S]*?flex-wrap:\s*wrap/);
   });
 });
