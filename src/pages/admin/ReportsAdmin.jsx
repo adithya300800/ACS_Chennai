@@ -509,7 +509,7 @@ export default function ReportsAdmin() {
           cross-surface consolidation). Forwarded to the GET handler
           via taxonomyToFilterParams so the server does the actual
           filtering. */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center', marginTop: '0.6rem' }}>
+        <div className="filter-chip-row" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center', marginTop: '0.6rem' }}>
           <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginRight: '0.25rem' }}>Filter:</span>
           <FilterChip
             label="All"

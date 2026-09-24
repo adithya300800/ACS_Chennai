@@ -740,7 +740,7 @@ export default function MyProjectReports() {
             MyProjectReports, admin ReportsAdmin). Forwarded to the
             GET handler via taxonomyToFilterParams so the server does
             the actual filtering (no client-side post-filter). */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center', marginBottom: '1rem' }}>
+        <div className="filter-chip-row" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center', marginBottom: '1rem' }}>
           <span style={{ fontSize: '0.75rem', color: 'var(--steel)', marginRight: '0.25rem' }}>
             Filter:
           </span>

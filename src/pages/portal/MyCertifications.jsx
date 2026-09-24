@@ -343,7 +343,7 @@ export default function MyCertifications() {
           </label>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
             <span style={{ fontSize: '0.75rem', color: 'var(--steel)', fontWeight: 600 }}>Status</span>
-            <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
+            <div className="filter-chip-row" style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
               <FilterChip active={!status} onClick={() => setStatus('')}>All</FilterChip>
               {Object.values(BILLING_CERTIFICATION_STATUSES).map((s) => (
                 <FilterChip key={s} active={status === s} onClick={() => setStatus(s)} tone={STATUS_BADGE_STYLES[s]}>

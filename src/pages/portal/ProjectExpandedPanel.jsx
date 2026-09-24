@@ -2043,7 +2043,7 @@ function ReportSection({
           `reportsFilterType` + `reportsFilterCategory`) and the
           server's `?type=` / `?category=` query params stay
           authoritative. */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center' }}>
+      <div className="filter-chip-row" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center' }}>
         <FilterChip
           label="All"
           active={isFilterChipActive(null)}

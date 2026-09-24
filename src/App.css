@@ -2639,6 +2639,89 @@ footer {
 .severity-pill-high     { background: #ffedd5; color: #9a3412; border-color: #fb923c; }
 .severity-pill-critical { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
 
+/* §8.12 (Fresh24): shared record-state pill. Replaces the ad-hoc
+   `training-pill-archived` / inline "Inactive" pill / inline archive
+   error string that used to drift across modules. Three distinct
+   states so users can tell archived (kept, but inactive) from deleted
+   (recoverable) from unavailable (gone). Colours mirror the
+   severity-pill vocabulary so a user who learned one pill shape can
+   read the other without re-learning. */
+.record-status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.3rem 0.85rem;
+  border-radius: 9999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+  border: 1px solid transparent;
+}
+.record-status-pill-archived    { background: #f1f5f9; color: #334155; border-color: #cbd5e1; }
+.record-status-pill-deleted     { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
+.record-status-pill-unavailable { background: #e2e8f0; color: #475569; border-color: #cbd5e1; }
+
+/* §8.3 (Fresh24): DPR required-fields side panel. Sticky on desktop
+   (≥1024px) so it stays visible while the engineer scrolls through
+   the form. Collapses to a top-of-page banner on narrower viewports
+   so it doesn't squeeze the form columns. Uses the same flat-blue
+   palette as the draft banner so it reads as a sibling of that
+   affordance, not a third pattern. */
+.dpr-required-fields {
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-left: 3px solid var(--blue, #0066FF);
+  border-radius: 6px;
+  padding: 0.75rem 0.875rem;
+  font-size: 0.85rem;
+  color: #0c4a6e;
+  margin-bottom: 1rem;
+}
+@media (min-width: 1024px) {
+  /* Sticky behaviour only at desktop widths — at narrow widths the
+     panel would overlap the form fields and the engineer can't scroll
+     past it. The sticky value is clamped to the top of the viewport
+     via top: 1rem; .dpr-card is the scroll container and is taller than
+     the panel, so the stickiness has room to operate. */
+  .dpr-required-fields {
+    position: sticky;
+    top: 1rem;
+    z-index: 4;
+    margin-bottom: 1rem;
+  }
+}
+.dpr-required-fields-title {
+  font-weight: 600;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--steel, #475569);
+  margin-bottom: 0.35rem;
+}
+.dpr-required-fields-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.dpr-required-fields-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  text-align: left;
+}
+.dpr-required-fields-link:focus-visible {
+  outline: 2px solid var(--blue, #0066FF);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 /* ─── DPR Form ─── */
 .dpr-form {
   display: flex;
@@ -5970,4 +6053,39 @@ footer {
   .mpr-card__actions {
     justify-content: flex-end;
   }
+}
+
+/* ─── §8.6 — Mobile filter chip rows ─────────────────────────────────
+   DR-042 / DR-046 shipped responsive grids for cards but did not
+   address chip-row touch-targets. At 375px the prior inline gap
+   (0.3–0.4rem ≈ 5–6px) made adjacent chips feel cramped, and the
+   chip button's intrinsic height (~24px from 0.2rem vertical padding
+   + 0.72rem font + 1px borders) failed WCAG 2.5.5 / Apple HIG
+   44×44 minimum target size.
+
+   The fix is a parent class with `!important` on `gap` so it overrides
+   the inline `style={{ gap: '0.3rem' / '0.4rem' }}` on the chip-row
+   wrappers, plus child rules for `min-height: 44px; min-width: 44px`
+   (which the inline FilterChip styles never set, so they take effect
+   cleanly without specificity gymnastics) and a visible `:focus-visible`
+   ring (also new — FilterChip never declared one).
+
+   The `.filter-chip-row` selector matches the parent <div> wrapping
+   <FilterChip> buttons on ProjectExpandedPanel#ReportSection,
+   MyProjectReports, ReportsAdmin, and the local status-chip row on
+   MyCertifications. Pin tests in a11y.smoke.test.js enforce these
+   three values stay in App.css. */
+.filter-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem !important; /* override inline 0.3–0.4rem gap */
+}
+.filter-chip-row > button {
+  min-height: 44px;
+  min-width: 44px;
+}
+.filter-chip-row > button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
