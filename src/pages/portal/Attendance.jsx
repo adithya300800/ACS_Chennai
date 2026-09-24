@@ -5,6 +5,12 @@ import { api } from '../../lib/api.js';
 import { formatDate, formatFullDate, formatMonthLabel, formatTime, getMapUrl, formatCoords, getCurrentIstMonth } from '../../lib/format.js';
 import { getBusinessToday } from '../../lib/businessDate.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+// §8.13 (Fresh24 wave-4 batch-C): migrate the date-detail overlay from
+// a hand-rolled `<div className="modal-overlay">` to the shared Modal
+// primitive (DR-017). The shared primitive supplies role/aria-modal/
+// focus-trap/Escape/focus-return; the page only needs to provide an
+// `ariaLabelledBy` id and a labelled close control.
+import Modal from '../../components/Modal.jsx';
 
 // (Round-15+ C-03: format helpers moved to src/lib/format.js — the file
 // is the source of truth. Behavior matches what was here verbatim.)
@@ -50,8 +56,6 @@ export default function Attendance() {
   //   'unsupported' — navigator.permissions.query rejected the geolocation name
   const [geoState, setGeoState] = useState('prompt');
   const [selectedRecord, setSelectedRecord] = useState(null);
-  const modalRef = useRef(null);
-  const closeButtonRef = useRef(null);
   // DR-023 (SOL audit 2026-09-08): the dashboard "Check in now" shortcut
   // navigates here with `?action=check-in`. The page consumes the hint
   // once (and then strips it from the URL so reload doesn't re-fire the
@@ -59,13 +63,6 @@ export default function Attendance() {
   // flight so a stale hint cannot race with a manual click.
   const [searchParams, setSearchParams] = useSearchParams();
   const autoCheckInFiredRef = useRef(false);
-
-  // Focus trap for modal
-  useEffect(() => {
-    if (selectedRecord && closeButtonRef.current) {
-      closeButtonRef.current.focus();
-    }
-  }, [selectedRecord]);
 
   // Parse month for display. `formatMonthLabel` is the canonical helper
   // introduced in the S5 refactor; we keep the destructuring so the
@@ -598,52 +595,61 @@ export default function Attendance() {
       </div>
 
       {/* Date Detail Modal */}
-      {selectedRecord && (
-        <div className="modal-overlay" onClick={() => setSelectedRecord(null)} role="dialog" aria-modal="true" aria-labelledby="modal-title">
-          <div className="modal" ref={modalRef} onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3 id="modal-title">{formatFullDate(selectedRecord.date)}</h3>
-              <button ref={closeButtonRef} className="btn-icon modal-close" aria-label="Close modal" onClick={() => setSelectedRecord(null)}>×</button>
-            </div>
+      <Modal
+        open={!!selectedRecord}
+        onClose={() => setSelectedRecord(null)}
+        ariaLabelledBy="attendance-date-modal-title"
+      >
+        <div style={{ position: 'relative' }}>
+          <div className="modal-header">
+            <h3 id="attendance-date-modal-title">{formatFullDate(selectedRecord?.date)}</h3>
+            <button
+              type="button"
+              className="btn-icon modal-close"
+              aria-label="Close modal"
+              onClick={() => setSelectedRecord(null)}
+            >
+              ×
+            </button>
+          </div>
 
-            <div className="modal-body">
-              {selectedRecord.sessions.map((session, i) => (
-                <div key={session.id} className="session-item">
-                  <div className="session-header">Session {i + 1}</div>
-                  <div className="session-detail">
-                    <span className="session-time">
-                      <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{verticalAlign:'middle',marginRight:'4px'}} aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                      {formatTime(session.checkIn)}
-                    </span>
-                    {session.checkOut && (
-                      <span className="session-time"> → {formatTime(session.checkOut)}</span>
-                    )}
-                  </div>
-                  {session.checkInAddr && (
-                    <div className="session-addr">
-                      <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{verticalAlign:'middle',marginRight:'4px'}} aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
-                      {session.checkInAddr}
-                    </div>
-                  )}
-                  {session.checkInLat && (
-                    <div className="session-map">
-                      <iframe
-                        title="Location"
-                        width="100%"
-                        height="150"
-                        frameBorder="0"
-                        scrolling="no"
-                        src={getMapUrl(parseFloat(session.checkInLat), parseFloat(session.checkInLng))}
-                        style={{ border: 0, borderRadius: '8px' }}
-                      />
-                    </div>
+          <div className="modal-body">
+            {selectedRecord?.sessions.map((session, i) => (
+              <div key={session.id} className="session-item">
+                <div className="session-header">Session {i + 1}</div>
+                <div className="session-detail">
+                  <span className="session-time">
+                    <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{verticalAlign:'middle',marginRight:'4px'}} aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                    {formatTime(session.checkIn)}
+                  </span>
+                  {session.checkOut && (
+                    <span className="session-time"> → {formatTime(session.checkOut)}</span>
                   )}
                 </div>
-              ))}
-            </div>
+                {session.checkInAddr && (
+                  <div className="session-addr">
+                    <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{verticalAlign:'middle',marginRight:'4px'}} aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                    {session.checkInAddr}
+                  </div>
+                )}
+                {session.checkInLat && (
+                  <div className="session-map">
+                    <iframe
+                      title="Location"
+                      width="100%"
+                      height="150"
+                      frameBorder="0"
+                      scrolling="no"
+                      src={getMapUrl(parseFloat(session.checkInLat), parseFloat(session.checkInLng))}
+                      style={{ border: 0, borderRadius: '8px' }}
+                    />
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         </div>
-      )}
+      </Modal>
     </div>
   );
 }
