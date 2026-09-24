@@ -444,20 +444,27 @@ router.get('/enrollments/my', asyncHandler(async (req, res) => {
   if (req.query.status && ALLOWED_STATUSES.has(req.query.status)) {
     where.status = req.query.status;
   }
-  const rows = await prisma.trainingEnrollment.findMany({
-    where,
-    orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { assignedAt: 'desc' }],
-    take: 200,
-    include: {
-      course: {
-        select: {
-          id: true, title: true, description: true,
-          externalUrl: true, provider: true, category: true, durationHint: true,
+  // [DR-009] Row cap (200) does not expose the true count. Run count in
+  // parallel so the UI can render "showing first 200 of <total>" instead
+  // of treating the bounded batch as the full enrollment list. additive
+  // — the existing `enrollments` array contract stays intact.
+  const [rows, total] = await Promise.all([
+    prisma.trainingEnrollment.findMany({
+      where,
+      orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { assignedAt: 'desc' }],
+      take: 200,
+      include: {
+        course: {
+          select: {
+            id: true, title: true, description: true,
+            externalUrl: true, provider: true, category: true, durationHint: true,
+          },
         },
       },
-    },
-  });
-  res.json({ enrollments: rows.map(serializeEnrollment) });
+    }),
+    prisma.trainingEnrollment.count({ where }),
+  ]);
+  res.json({ enrollments: rows.map(serializeEnrollment), total });
 }));
 
 // GET /api/training/enrollments — admin queue
@@ -469,22 +476,29 @@ router.get('/enrollments', asyncHandler(async (req, res) => {
   if (req.query.employeeId) where.employeeId = String(req.query.employeeId);
   if (req.query.courseId) where.courseId = String(req.query.courseId);
 
-  const rows = await prisma.trainingEnrollment.findMany({
-    where,
-    orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { assignedAt: 'desc' }],
-    take: 500,
-    include: {
-      employee: { select: { id: true, name: true, email: true, department: true } },
-      assignedBy: { select: { id: true, name: true, email: true } },
-      course: {
-        select: {
-          id: true, title: true, description: true,
-          externalUrl: true, provider: true, category: true, durationHint: true,
+  // [DR-009] Row cap (500) does not expose the true count. Run count in
+  // parallel so the UI can render "showing first 500 of <total>" instead
+  // of treating the bounded batch as the full company queue. additive
+  // — the existing `enrollments` array contract stays intact.
+  const [rows, total] = await Promise.all([
+    prisma.trainingEnrollment.findMany({
+      where,
+      orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { assignedAt: 'desc' }],
+      take: 500,
+      include: {
+        employee: { select: { id: true, name: true, email: true, department: true } },
+        assignedBy: { select: { id: true, name: true, email: true } },
+        course: {
+          select: {
+            id: true, title: true, description: true,
+            externalUrl: true, provider: true, category: true, durationHint: true,
+          },
         },
       },
-    },
-  });
-  res.json({ enrollments: rows.map(serializeEnrollment) });
+    }),
+    prisma.trainingEnrollment.count({ where }),
+  ]);
+  res.json({ enrollments: rows.map(serializeEnrollment), total });
 }));
 
 // GET /api/training/enrollments/:id — owner or admin
@@ -827,7 +841,8 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
   }
 
   // Decide evidence class:
-  //   - explicit (caller-passed) wins
+  //   - explicit (caller-passed) wins, EXCEPT ADMIN_OVERRIDE on an owner —
+  //     see DR-003 below.
   //   - owner → SELF_ATTESTED (no player data on this path)
   //   - admin on non-owner → ADMIN_OVERRIDE
   // PLAYER_OBSERVED cannot be set from this endpoint — the player path is
@@ -836,6 +851,17 @@ router.put('/enrollments/:id/complete', trainingWriteLimiter, asyncHandler(async
   let evidenceClass = result.value.evidenceClass;
   if (!evidenceClass) {
     evidenceClass = isOwner ? 'SELF_ATTESTED' : 'ADMIN_OVERRIDE';
+  } else if (isOwner && evidenceClass === 'ADMIN_OVERRIDE') {
+    // DR-003 (Fresh24 audit, 2026-09-24): an enrollment owner can submit
+    // { evidenceClass: 'ADMIN_OVERRIDE' } in this manual-complete call.
+    // validateCompletePayload accepts the value as a valid enum, but the
+    // server-side authority for ADMIN_OVERRIDE is the admin-only
+    // POST /enrollments/:id/admin-override route (gated by requireFreshAdmin
+    // and a dedicated audit trail). On the owner path there is no admin
+    // actor to attach, so the label is normalized to SELF_ATTESTED — the
+    // row's completedBy still records the employee, which is the
+    // provenance signal that the badge reads.
+    evidenceClass = 'SELF_ATTESTED';
   } else if (evidenceClass === 'PLAYER_OBSERVED' || evidenceClass === 'PROVIDER_VERIFIED') {
     return res.status(400).json({
       error: `${evidenceClass} can only be set via the player or provider path, not manual mark-complete`,
