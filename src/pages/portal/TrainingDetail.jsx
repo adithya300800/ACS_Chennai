@@ -97,6 +97,30 @@ export default function TrainingDetail() {
     }
   }, [id, accessToken, push]);
 
+  // DR-005: reconcile the local enrollment with the server's response.
+  // Pre-fix the success branches merged only `status` + `progressPct`,
+  // which dropped `completedAt`, `evidenceClass`, `evidenceMetadata`,
+  // `lastWatchedSec`, and `startedAt` — so the UI kept showing a stale
+  // "no completion time" + "no evidence badge" right after the server
+  // had already flipped the row. Worse, mid-watch progress pings (20 →
+  // 40 → 60) only refreshed `pendingPct`; `enrollment.progressPct`
+  // stayed at the value it had when the page mounted, so the rendered
+  // progress bar (which reads `enrollment.progressPct`) didn't move.
+  //
+  // Spread every returned field, then preserve any joined relations
+  // the progress endpoint omits (`employee`, `assignedBy`) so the
+  // breadcrumb / detail chrome doesn't blank out mid-session.
+  const reconcileEnrollment = useCallback((prev, updated) => {
+    if (!updated) return prev;
+    if (!prev) return updated;
+    return {
+      ...prev,
+      ...updated,
+      employee: updated.employee ?? prev.employee,
+      assignedBy: updated.assignedBy ?? prev.assignedBy,
+    };
+  }, []);
+
   useEffect(() => {
     fetchEnrollment();
   }, [fetchEnrollment]);
@@ -112,7 +136,13 @@ export default function TrainingDetail() {
     if (!enrollment) return undefined;
     if (isTrainingInactive(enrollment.status)) return undefined;
 
-    const id = setInterval(async () => {
+    // DR-005: the previous version declared `const id = setInterval(...)`,
+    // which shadowed the outer `id` from `useParams()`. The 409-recovery
+    // catch then called `api.getTrainingEnrollment(id, accessToken)` with
+    // the interval handle (a Timeout object) instead of the enrollment id,
+    // so every recovery round-trip 404'd. Use a distinct handle name and
+    // pass `enrollment.id` to the refetch.
+    const progressTimer = setInterval(async () => {
       if (!dirtyRef.current) return;
       const { pct, currentSec } = latestRef.current;
       dirtyRef.current = false;
@@ -124,22 +154,21 @@ export default function TrainingDetail() {
           { sessionId: sessionIdRef.current },
           accessToken
         );
+        // DR-005: reconcile every returned field. Pre-fix the success
+        // branch only merged status + progressPct (and only when the
+        // status actually changed), so a progress ping that bumped
+        // progressPct 20 → 40 → 60 without a status flip left the
+        // rendered progress bar stuck at 0%.
+        setEnrollment((prev) => reconcileEnrollment(prev, updated));
         setPendingPct(updated.progressPct || 0);
         setLastPingAt(Date.now());
-        // Mirror status into local state so the pill / progress bar update
-        // without a full refetch. Important when we transition to a
-        // terminal state mid-watch — the interval must stop firing after
-        // that.
-        if (updated.status !== enrollment.status) {
-          setEnrollment((prev) => ({ ...prev, status: updated.status, progressPct: updated.progressPct }));
+        if (isTrainingTerminal(updated.status) && !isTrainingTerminal(enrollment.status)) {
           // DR-020: success-completion toast gated on isTrainingTerminal
           // (not isTrainingInactive). Pre-fix the success branch fired
           // "Course marked complete." on ANY status change into an
           // inactive state, including CANCELLED + OVERDUE — misleading
           // since neither is an actual completion.
-          if (isTrainingTerminal(updated.status)) {
-            push('Course marked complete.', 'success');
-          }
+          push('Course marked complete.', 'success');
         }
       } catch (err) {
         // 409 ENROLLMENT_LOCKED / ENROLLMENT_CANCELLED / ENROLLMENT_OVERDUE
@@ -148,9 +177,13 @@ export default function TrainingDetail() {
         // The previous code mapped ANY 409 to status=COMPLETED/100,
         // letting a stale cancelled/overdue response announce
         // completion.
+        // DR-005: pause further progress writes while we reconcile the
+        // canonical row, so a stale dirty bit can't race the refetch
+        // and re-fire the same 409 in the next tick.
         if (err?.code === 'ENROLLMENT_LOCKED' || err?.code === 'ENROLLMENT_CANCELLED' || err?.code === 'ENROLLMENT_OVERDUE' || err?.status === 409) {
+          dirtyRef.current = false;
           try {
-            const fresh = await api.getTrainingEnrollment(id, accessToken);
+            const fresh = await api.getTrainingEnrollment(enrollment.id, accessToken);
             setEnrollment(fresh);
           } catch (refetchErr) {
             push(refetchErr?.message || 'Could not refresh enrollment state.', 'error');
@@ -160,8 +193,8 @@ export default function TrainingDetail() {
       }
     }, TRAINING_PROGRESS_PING_MS);
 
-    return () => clearInterval(id);
-  }, [enrollment, accessToken, push]);
+    return () => clearInterval(progressTimer);
+  }, [enrollment, accessToken, push, reconcileEnrollment]);
 
   // Called by VideoPlayer every ~5s (YT/Vimeo native cadence). We buffer
   // the latest values and mark dirty so the interval POST picks them up.
@@ -202,7 +235,10 @@ export default function TrainingDetail() {
         { sessionId: sessionIdRef.current },
         accessToken
       );
-      setEnrollment((prev) => ({ ...prev, status: updated.status, progressPct: updated.progressPct }));
+      // DR-005: reconcile the full server row so completedAt,
+      // evidenceClass, evidenceMetadata and lastWatchedSec surface in
+      // the UI instead of staying at the pre-completion values.
+      setEnrollment((prev) => reconcileEnrollment(prev, updated));
       setPendingPct(100);
       if (isTrainingTerminal(updated.status)) {
         push('Course completed! 🎉', 'success');
@@ -212,7 +248,7 @@ export default function TrainingDetail() {
       // user can hit "Mark as Complete" as the fallback.
       push(err?.message || 'Could not save completion — try Mark as Complete.', 'error');
     }
-  }, [enrollment, accessToken, push]);
+  }, [enrollment, accessToken, push, reconcileEnrollment]);
 
   // Manual mark-complete — required for non-trackable providers; also
   // serves as the employee-side safety net if the auto-capture missed
@@ -227,14 +263,16 @@ export default function TrainingDetail() {
     setCompleting(true);
     try {
       const updated = await api.markTrainingComplete(enrollment.id, '', accessToken);
-      setEnrollment((prev) => ({ ...prev, status: updated.status, progressPct: updated.progressPct }));
+      // DR-005: reconcile the full server row so completedAt +
+      // evidenceClass + evidenceMetadata surface alongside the status flip.
+      setEnrollment((prev) => reconcileEnrollment(prev, updated));
       push('Course marked complete.', 'success');
     } catch (err) {
       push(err?.message || 'Failed to mark complete', 'error');
     } finally {
       setCompleting(false);
     }
-  }, [enrollment, accessToken, push]);
+  }, [enrollment, accessToken, push, reconcileEnrollment]);
 
   if (loading) {
     return (

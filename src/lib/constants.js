@@ -1,5 +1,7 @@
 // Shared client-side constants. Keep in sync with backend validation rules.
 
+import { isOverdue as isDueDateOverdue, getBusinessToday } from './businessDate.js';
+
 export const MAX_PHOTO_BYTES = 10 * 1024 * 1024; // 10MB — matches backend photos[] sizeBytes cap
 export const MAX_PHOTOS_PER_DPR = 10;
 export const ACCEPTED_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
@@ -269,6 +271,57 @@ export const TRAINING_INACTIVE_STATUSES = Object.freeze([
 export const TRAINING_INACTIVE_STATUS_SET = new Set(TRAINING_INACTIVE_STATUSES);
 
 export const isTrainingInactive = (status) => TRAINING_INACTIVE_STATUS_SET.has(status);
+
+// DR-005: "attention-list" exclusion predicate. The union of every
+// completion-state and CANCELLED — rows in any of these statuses are no
+// longer actionable for the employee and must not surface in the
+// overdue / due-soon attention lists on the dashboard, training hub, or
+// admin queue. Importantly this set does NOT include OVERDUE: a row the
+// backend has already persisted as OVERDUE is exactly what the
+// attention list is meant to surface, so its badge still has to light
+// up. (See the audit doc for the rationale.)
+export const TRAINING_ATTENTION_EXCLUDED_STATUSES = Object.freeze([
+  ...TRAINING_TERMINAL_STATUSES,
+  'CANCELLED',
+]);
+
+export const TRAINING_ATTENTION_EXCLUDED_STATUS_SET = new Set(TRAINING_ATTENTION_EXCLUDED_STATUSES);
+
+export const isTrainingAttentionExcluded = (status) => TRAINING_ATTENTION_EXCLUDED_STATUS_SET.has(status);
+
+// DR-005: shared overdue predicate for every employee/admin training
+// surface. Centralised so the three pages (Training.jsx,
+// TrainingDashboard.jsx, EmployeeDashboard.jsx) can't drift — pre-fix
+// each file had its own local `isOverdue` that only excluded terminal
+// completion states, so CANCELLED rows with a past dueDate kept showing
+// up as "overdue" on the dashboard. The shared helper excludes the
+// attention-excluded set (completion states + CANCELLED) and reuses the
+// businessDate isOverdue for the date comparison so the predicate stays
+// in lockstep with the displayed business-day clock.
+export function isOverdueEnrollment(enrollment, optsOrNow) {
+  if (!enrollment?.dueDate) return false;
+  if (isTrainingAttentionExcluded(enrollment.status)) return false;
+  return isDueDateOverdue(enrollment.dueDate, optsOrNow);
+}
+
+// DR-005: shared "due in the next N days" predicate for the dashboard's
+// due-soon list. Mirrors the overdue helper — same exclusion set, same
+// clock. `windowDays` defaults to 7 so the employee dashboard's "Nothing
+// due in the next week." copy stays accurate.
+export function isDueSoonEnrollment(enrollment, optsOrNow, windowDays = 7) {
+  if (!enrollment?.dueDate) return false;
+  if (isTrainingAttentionExcluded(enrollment.status)) return false;
+  // Already overdue is handled by the overdue list — don't double-count.
+  if (isDueDateOverdue(enrollment.dueDate, optsOrNow)) return false;
+  const due = String(enrollment.dueDate).split('T')[0];
+  const today = getBusinessToday(
+    (optsOrNow && optsOrNow.now) || undefined,
+    (optsOrNow && optsOrNow.timezone) || undefined
+  );
+  const diff = (new Date(`${due}T00:00:00Z`).getTime() - new Date(`${today}T00:00:00Z`).getTime())
+    / (1000 * 60 * 60 * 24);
+  return diff >= 0 && diff <= windowDays;
+}
 
 // Priority — used to sort + colour the pill on admin rows.
 export const TRAINING_PRIORITIES = {

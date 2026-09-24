@@ -3,9 +3,9 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { TRAINING_PROVIDER_LABELS, TRAINING_STATUSES, TRACKABLE_PROVIDERS, isTrainingTerminal, isTrainingInactive, TRAINING_TERMINAL_STATUSES } from '../../lib/constants.js';
+import { TRAINING_PROVIDER_LABELS, TRAINING_STATUSES, TRACKABLE_PROVIDERS, isTrainingTerminal, isTrainingInactive, TRAINING_TERMINAL_STATUSES, isOverdueEnrollment } from '../../lib/constants.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
-import { getBusinessToday, useBusinessDateKey } from '../../lib/businessDate.js';
+import { useBusinessDateKey } from '../../lib/businessDate.js';
 import { formatShortDate } from '../../lib/format.js';
 
 // "My Learning" hub for the employee. Mirrors the Leave page's
@@ -39,17 +39,6 @@ const FILTERS = [
   { key: 'COMPLETED', label: 'Completed' },
   { key: 'OVERDUE', label: 'Overdue' },
 ];
-
-// LPR-009: terminal-check uses the canonical list — a row in any of the
-// four *_COMPLETED evidence states is no longer eligible to be flagged
-// overdue (the enrollment is done).
-const isOverdue = (enrollment) => {
-  if (!enrollment?.dueDate) return false;
-  if (isTrainingTerminal(enrollment.status)) return false;
-  const due = String(enrollment.dueDate).split('T')[0];
-  const today = getBusinessToday();
-  return due < today;
-};
 
 const TrainingStatusPill = ({ status }) => {
   const cls = `training-pill training-pill-${(status || 'ASSIGNED').toLowerCase()}`;
@@ -101,14 +90,14 @@ export default function Training() {
       if (e.status === TRAINING_STATUSES.ASSIGNED) c.ASSIGNED += 1;
       else if (e.status === TRAINING_STATUSES.IN_PROGRESS) c.IN_PROGRESS += 1;
       else if (isTrainingTerminal(e.status)) c.COMPLETED += 1;
-      if (isOverdue(e)) c.OVERDUE += 1;
+      if (isOverdueEnrollment(e)) c.OVERDUE += 1;
     });
     return c;
   }, [enrollments, businessDateKey]);
 
   const visible = useMemo(() => {
     if (filter === 'ALL') return enrollments;
-    if (filter === 'OVERDUE') return enrollments.filter(isOverdue);
+    if (filter === 'OVERDUE') return enrollments.filter((e) => isOverdueEnrollment(e));
     if (filter === 'COMPLETED') return enrollments.filter((e) => isTrainingTerminal(e.status));
     return enrollments.filter((e) => e.status === filter);
   }, [enrollments, filter, businessDateKey]);
@@ -221,8 +210,8 @@ export default function Training() {
                     {e.dueDate && (
                       <>
                         <span className="training-card-dot">·</span>
-                        <span className={`training-card-due ${isOverdue(e) ? 'training-card-due-overdue' : ''}`}>
-                          {isOverdue(e) ? 'Overdue · ' : 'Due '}{formatShortDate(e.dueDate)}
+                        <span className={`training-card-due ${isOverdueEnrollment(e) ? 'training-card-due-overdue' : ''}`}>
+                          {isOverdueEnrollment(e) ? 'Overdue · ' : 'Due '}{formatShortDate(e.dueDate)}
                         </span>
                       </>
                     )}

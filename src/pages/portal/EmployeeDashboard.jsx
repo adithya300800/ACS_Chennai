@@ -6,7 +6,7 @@ import { formatDateOnly, formatFullDate, formatShortDate, formatTime } from '../
 import { getBusinessToday } from '../../lib/businessDate.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { MapPinIcon, ClockIcon, DocIcon, BookIcon, PlaneIcon, BellIcon } from '../../components/Icons.jsx';
-import { isTrainingTerminal } from '../../lib/constants.js';
+import { isOverdueEnrollment, isDueSoonEnrollment } from '../../lib/constants.js';
 
 // SOL-P2#16: employee home dashboard. Lands employees on a single screen
 // with their today-check-in status, open DPR draft, training due,
@@ -22,26 +22,11 @@ import { isTrainingTerminal } from '../../lib/constants.js';
 //   /leave/my                               → leave balance widget
 //   /dpr/notifications/list                 → last 5 notifications
 
-// LPR-009: terminal-check uses the canonical list — a row in any of the
-// four *_COMPLETED evidence states is no longer eligible for overdue/due-soon
-// counters.
-const isOverdue = (e) => {
-  if (!e?.dueDate) return false;
-  if (isTrainingTerminal(e.status)) return false;
-  const due = String(e.dueDate).split('T')[0];
-  return due < getBusinessToday();
-};
-
-const isDueSoon = (e) => {
-  if (!e?.dueDate) return false;
-  if (isTrainingTerminal(e.status)) return false;
-  const due = String(e.dueDate).split('T')[0];
-  const today = getBusinessToday();
-  if (due < today) return false; // overdue already handled separately
-  // "Soon" = within 7 days
-  const diff = (new Date(due) - new Date(today)) / (1000 * 60 * 60 * 24);
-  return diff <= 7;
-};
+// DR-005: training attention predicates now live in src/lib/constants.js
+// (isOverdueEnrollment / isDueSoonEnrollment) so the dashboard, the
+// training hub, and the admin dashboard can't drift. The local copies
+// pre-fix only excluded terminal completion states — a CANCELLED row
+// with a past dueDate still lit up the "Overdue" badge here.
 
 const formatDateShort = (s) => {
   const out = formatShortDate(s);
@@ -184,8 +169,12 @@ export default function EmployeeDashboard() {
     navigate('/portal/attendance?action=check-in');
   };
 
-  const overdueTraining = training.filter(isOverdue);
-  const dueSoonTraining = training.filter(isDueSoon);
+  // DR-005: wrap each predicate so the third positional arg from
+  // Array.prototype.filter (the source array) doesn't override the
+  // predicate's `windowDays` default — `1 <= training` would otherwise
+  // coerce the array to NaN and silently drop every row.
+  const overdueTraining = training.filter((e) => isOverdueEnrollment(e));
+  const dueSoonTraining = training.filter((e) => isDueSoonEnrollment(e));
 
   const firstName = employee?.name?.split(' ')[0] || 'there';
   const friendlyDate = formatFullDate(today);

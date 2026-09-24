@@ -7,9 +7,10 @@ import {
   TRAINING_PROVIDER_LABELS,
   TRAINING_STATUSES,
   isTrainingTerminal,
+  isOverdueEnrollment,
 } from '../../lib/constants.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
-import { getBusinessToday, useBusinessDateKey } from '../../lib/businessDate.js';
+import { useBusinessDateKey } from '../../lib/businessDate.js';
 import { formatShortDate, formatDateTime } from '../../lib/format.js';
 
 /**
@@ -59,17 +60,16 @@ const FILTERS = [
   { key: 'ALL', label: 'All' },
   { key: 'ASSIGNED', label: 'Assigned' },
   { key: 'IN_PROGRESS', label: 'In Progress' },
+  // DR-005: the 'COMPLETED' filter is handled client-side (see
+  // visibleEnrollments below) — the backend's ALLOWED_STATUSES set only
+  // contains the four *_COMPLETED evidence classes plus the bookkeeping
+  // states, NOT the legacy 'COMPLETED' literal, so `?status=COMPLETED`
+  // would silently pass through and return the entire queue. The admin
+  // tab counts everything terminal (incl. legacy COMPLETED rows) via
+  // isTrainingTerminal — see the counts memo below.
   { key: 'COMPLETED', label: 'Completed' },
   { key: 'OVERDUE', label: 'Overdue' },
 ];
-
-const isOverdue = (e) => {
-  if (!e?.dueDate) return false;
-  if (isTrainingTerminal(e.status)) return false;
-  const due = String(e.dueDate).split('T')[0];
-  const today = getBusinessToday();
-  return due < today;
-};
 
 const StatusPill = ({ status }) => {
   // Round-20 (DR-010): all four completed-states collapse to one pill label
@@ -152,7 +152,15 @@ export default function TrainingDashboard() {
     setError('');
     try {
       const params = {};
-      if (filter !== 'ALL' && filter !== 'OVERDUE') params.status = filter;
+      // DR-005: COMPLETED and OVERDUE are derived client-side views.
+      // COMPLETED requires the union of the four *_COMPLETED evidence
+      // classes (the backend allowlist only knows those, not the legacy
+      // 'COMPLETED' literal), and OVERDUE is a status-flip the backend
+      // doesn't yet emit — both need to come from the full queue and be
+      // narrowed in the visibleEnrollments memo below.
+      if (filter !== 'ALL' && filter !== 'OVERDUE' && filter !== 'COMPLETED') {
+        params.status = filter;
+      }
       if (courseFilter !== 'ALL') params.courseId = courseFilter;
       const data = await api.getAllTrainingEnrollments(params, accessToken);
       setEnrollments(data.enrollments || []);
@@ -173,11 +181,16 @@ export default function TrainingDashboard() {
     fetchEnrollments();
   }, [employee?.isAdmin, fetchEnrollments]);
 
-  // Overdue derived view — client-side filter so the admin can see what
-  // needs attention at a glance.
+  // DR-005: client-side derived views for COMPLETED + OVERDUE filters.
+  // The COMPLETED tab narrows to the canonical terminal list (legacy
+  // 'COMPLETED' + the four *_COMPLETED evidence classes); the OVERDUE
+  // tab narrows to rows whose dueDate is past today AND whose status is
+  // not a terminal completion / CANCELLED state — see isOverdueEnrollment
+  // in src/lib/constants.js for the shared predicate.
   const visibleEnrollments = useMemo(() => {
-    if (filter !== 'OVERDUE') return enrollments;
-    return enrollments.filter(isOverdue);
+    if (filter === 'OVERDUE') return enrollments.filter((e) => isOverdueEnrollment(e));
+    if (filter === 'COMPLETED') return enrollments.filter((e) => isTrainingTerminal(e.status));
+    return enrollments;
   }, [enrollments, filter, businessDateKey]);
 
   // Round-20 (DR-010): every terminal evidence class is bucketed into
@@ -186,13 +199,17 @@ export default function TrainingDashboard() {
   // `c[e.status] != null` lookup silently dropped all four *_COMPLETED
   // values because the counter object only had a literal `COMPLETED` key.
   // Mirrors src/pages/portal/Training.jsx:~109.
+  // DR-005: OVERDUE reuses the shared isOverdueEnrollment predicate so a
+  // CANCELLED row with a past dueDate no longer inflates the Overdue tile
+  // (the local copy of isOverdue pre-fix only filtered terminal completion
+  // states, not CANCELLED).
   const counts = useMemo(() => {
     const c = { ALL: enrollments.length, ASSIGNED: 0, IN_PROGRESS: 0, COMPLETED: 0, OVERDUE: 0 };
     enrollments.forEach((e) => {
       if (e.status === TRAINING_STATUSES.ASSIGNED) c.ASSIGNED += 1;
       else if (e.status === TRAINING_STATUSES.IN_PROGRESS) c.IN_PROGRESS += 1;
       else if (isTrainingTerminal(e.status)) c.COMPLETED += 1;
-      if (isOverdue(e)) c.OVERDUE += 1;
+      if (isOverdueEnrollment(e)) c.OVERDUE += 1;
     });
     return c;
   }, [enrollments, businessDateKey]);
@@ -402,9 +419,9 @@ export default function TrainingDashboard() {
                     {e.dueDate && (
                       <>
                         <span className="training-card-dot">·</span>
-                        <span className={isOverdue(e) ? 'training-card-due-overdue' : ''}>
+                        <span className={isOverdueEnrollment(e) ? 'training-card-due-overdue' : ''}>
                           Due {formatShortDate(e.dueDate)}
-                          {isOverdue(e) && ' (overdue)'}
+                          {isOverdueEnrollment(e) && ' (overdue)'}
                         </span>
                       </>
                     )}
