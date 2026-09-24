@@ -1565,6 +1565,15 @@ function ReportSection({
     const showReviewBar = isAdmin && (canApprove || canRevise || canReject);
     const attNotes = reviewNotesById[att.id] || '';
     const statusPalette = STATUS_COLOR[attStatus] || STATUS_COLOR.PENDING_REVIEW;
+    // [DR-019] Disable review when the row's contentVersion is unknown.
+    // Same rationale as ReportsAdmin + MyProjectReports — the server
+    // requires expectedVersion on every PATCH; a phantom 0 substitutes
+    // for nothing and lets a stale tab approve a freshly-replaced
+    // blob. Force a parent re-fetch instead of inventing a version.
+    const versionMissing = !Number.isInteger(att.contentVersion) || att.contentVersion < 0;
+    const versionTooltip = versionMissing
+      ? 'Refresh the page — the row\'s content version is unknown'
+      : '';
     return (
       <div
         style={{
@@ -1662,9 +1671,10 @@ function ReportSection({
               <button
                 type="button"
                 className="btn btn-success btn-sm"
-                disabled={actionBusy}
+                disabled={actionBusy || versionMissing}
                 onClick={() => runReviewAction(att, 'APPROVED')}
                 style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+                title={versionTooltip || 'Approve this report'}
               >
                 ✓ Approve
               </button>
@@ -1677,7 +1687,7 @@ function ReportSection({
                 placeholder={canRevise ? 'Reason for revision (required)' : 'Reject reason (required)'}
                 maxLength={2000}
                 aria-label="Review notes"
-                disabled={actionBusy}
+                disabled={actionBusy || versionMissing}
                 style={{
                   flex: '1 1 180px',
                   minWidth: 0,
@@ -1692,10 +1702,10 @@ function ReportSection({
               <button
                 type="button"
                 className="btn btn-warning btn-sm"
-                disabled={actionBusy || !attNotes.trim()}
+                disabled={actionBusy || versionMissing || !attNotes.trim()}
                 onClick={() => runReviewAction(att, 'REVISION_REQUESTED')}
                 style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
-                title={!attNotes.trim() ? 'Enter a reason to enable Request revision' : 'Send back to uploader for revision'}
+                title={versionMissing ? versionTooltip : (!attNotes.trim() ? 'Enter a reason to enable Request revision' : 'Send back to uploader for revision')}
               >
                 ↺ Request revision
               </button>
@@ -1704,10 +1714,10 @@ function ReportSection({
               <button
                 type="button"
                 className="btn btn-danger btn-sm"
-                disabled={actionBusy || !attNotes.trim()}
+                disabled={actionBusy || versionMissing || !attNotes.trim()}
                 onClick={() => runReviewAction(att, 'REJECTED')}
                 style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
-                title={!attNotes.trim() ? 'Enter a reason to enable Reject' : 'Reject this report'}
+                title={versionMissing ? versionTooltip : (!attNotes.trim() ? 'Enter a reason to enable Reject' : 'Reject this report')}
               >
                 ✗ Reject
               </button>
@@ -1842,12 +1852,30 @@ function ReportSection({
   // the child's perspective) — easier to let the parent re-fetch.
   async function runReviewAction(att, action) {
     if (actionBusy) return;
+    // [DR-019] Guard against an unknown contentVersion. The backend's
+    // atomic CAS requires the version the caller saw; substituting 0
+    // would silently land on schema-default rows or 400
+    // INVALID_EXPECTED_VERSION on rows the SPA hasn't refreshed yet.
+    // Force a parent re-pull so the next click has the real value.
+    if (!Number.isInteger(att.contentVersion) || att.contentVersion < 0) {
+      onUploaded && onUploaded();
+      if (toast) toast.push('Refresh required — this report is missing a contentVersion. The list refreshed; please try again.', 'error');
+      return;
+    }
     const notes = (reviewNotesById[att.id] || '').trim();
     if ((action === 'REVISION_REQUESTED' || action === 'REJECTED') && !notes) return;
     setActionBusy(true);
     try {
       await api.reviewProjectAttachment(
-        projectKey, att.id, { status: action, reviewNotes: notes || null }, accessToken,
+        projectKey, att.id,
+        // [DR-037/DR-019] Echo the row's contentVersion at click-time
+        // so the server can 409 if a parallel replace already moved it.
+        // DR-019 tightened the contract: missing expectedVersion is a
+        // 400 INVALID_EXPECTED_VERSION (no silent 0 substitute) and
+        // callers MUST send the value they see. The guard above catches
+        // the missing case before we ever reach this wire body.
+        { status: action, reviewNotes: notes || null, expectedVersion: att.contentVersion },
+        accessToken,
       );
       setReviewNotesById((prev) => {
         if (!prev[att.id]) return prev;

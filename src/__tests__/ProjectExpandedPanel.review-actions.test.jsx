@@ -33,9 +33,11 @@ describe('S7/MyReports — ReportSection admin action bar source contracts', () 
     // att.projectId || projects.find(...).id), ReportSection already
     // owns projectKey as a prop. Wire shape must mirror the cross-
     // project surface so a backend regression is caught at both call
-    // sites.
+    // sites. DR-019 added `expectedVersion: att.contentVersion` to the
+    // body — pin it here too so a future refactor that drops the
+    // atomic-CAS version is caught at both call sites.
     expect(pageSrc).toMatch(
-      /api\.reviewProjectAttachment\(\s*projectKey\s*,\s*att\.id\s*,\s*\{\s*status:\s*action\s*,\s*reviewNotes/,
+      /api\.reviewProjectAttachment\(\s*projectKey\s*,\s*att\.id[\s\S]{0,800}?\{\s*status:\s*action\s*,\s*reviewNotes[\s\S]{0,400}?expectedVersion:\s*att\.contentVersion/,
     );
   });
 
@@ -48,9 +50,12 @@ describe('S7/MyReports — ReportSection admin action bar source contracts', () 
   test('4. Reject + Request-revision buttons are disabled while reviewNotes is empty', () => {
     // The action bar in the accordion uses `attNotes` (not `rNotes`
     // like MyProjectReports). Pin the local name so a future refactor
-    // that drops the trim() check is caught here too.
+    // that drops the trim() check is caught here too. DR-019 also
+    // threads a `versionMissing` flag into the disabled expression —
+    // allow either shape so the pin survives future additions to the
+    // action-bar gating.
     expect(pageSrc).toMatch(
-      /disabled\s*=\s*\{[^}]*actionBusy\s*\|\|\s*!attNotes\.trim\(\s*\)[^}]*\}/,
+      /disabled\s*=\s*\{[^}]*actionBusy\s*\|\|[\s\S]{0,40}?!attNotes\.trim\(\s*\)[^}]*\}/,
     );
   });
 

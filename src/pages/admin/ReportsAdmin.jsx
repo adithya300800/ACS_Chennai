@@ -290,6 +290,15 @@ export default function ReportsAdmin() {
     }
     setReplaceBusyId(att.id);
     setReplaceError(null);
+    // [DR-019] Same version guard as runReviewAction — the replace PATCH
+    // requires the version the caller saw at click-time so a parallel
+    // review/replace can't land on a stale row. Admin's table is admin-
+    // scoped, so a GET refresh is via fetchReports().
+    if (!Number.isInteger(att.contentVersion) || att.contentVersion < 0) {
+      fetchReports();
+      toast.push('Refresh required — this report is missing a contentVersion. The list refreshed; please try again.', 'error');
+      return;
+    }
     try {
       // 1. Mint a presigned PUT URL for the new bytes.
       const { sasUrl, ulid, blobPath } = await api.getReportSasUrl(
@@ -310,6 +319,11 @@ export default function ReportsAdmin() {
           filename: file.name,
           contentType: file.type,
           sizeBytes: file.size,
+          // [DR-037/DR-019] Same atomic CAS contract as the review PATCH
+          // — the server bumps contentVersion on success and 409s on
+          // mismatch. The guard above catches the missing case before we
+          // reach this wire body.
+          expectedVersion: att.contentVersion,
         }, accessToken,
       );
       // 4. Patch the row in place so the new filename/size + reset
@@ -336,6 +350,17 @@ export default function ReportsAdmin() {
   // the optimistic patch is reverted via fetchReports().
   const runReviewAction = useCallback(async (att, action) => {
     if (actionBusy) return;
+    // [DR-019] Guard against an unknown contentVersion. The backend's
+    // atomic CAS requires the version the caller saw; substituting 0
+    // would silently land on schema-default rows or 400
+    // INVALID_EXPECTED_VERSION on rows the SPA hasn't refreshed yet.
+    // Force a GET so the next click has the real value, and refuse the
+    // current click.
+    if (!Number.isInteger(att.contentVersion) || att.contentVersion < 0) {
+      fetchReports();
+      toast.push('Refresh required — this report is missing a contentVersion. The list refreshed; please try again.', 'error');
+      return;
+    }
     const notes = (reviewNotesById[att.id] || '').trim();
     if ((action === 'REVISION_REQUESTED' || action === 'REJECTED') && !notes) return;
     setActionBusy(true);
@@ -346,11 +371,13 @@ export default function ReportsAdmin() {
     try {
       const updated = await api.reviewProjectAttachment(
         att.projectId, att.id,
-        // [DR-037] Echo the row's contentVersion at click-time so the
-        // server can 409 if a parallel replace already moved it. This
-        // is captured from `att.contentVersion` (the optimistic-updated
-        // local row above sets it from the prior server response).
-        { status: action, reviewNotes: notes || null, expectedVersion: att.contentVersion ?? 0 },
+        // [DR-037/DR-019] Echo the row's contentVersion at click-time
+        // so the server can 409 if a parallel replace already moved it.
+        // DR-019 tightened the contract: missing expectedVersion is a
+        // 400 INVALID_EXPECTED_VERSION (no silent 0 substitute) and
+        // callers MUST send the value they see. The guard above catches
+        // the missing case before we ever reach this wire body.
+        { status: action, reviewNotes: notes || null, expectedVersion: att.contentVersion },
         accessToken,
       );
       setReports((prev) => prev.map((r) => (r.id === att.id ? { ...r, ...updated } : r)));
@@ -377,7 +404,7 @@ export default function ReportsAdmin() {
     } finally {
       setActionBusy(false);
     }
-  }, [actionBusy, reviewNotesById, accessToken, toast]);
+  }, [actionBusy, reviewNotesById, accessToken, toast, fetchReports]);
 
   return (
     <div className="dpr-page">
@@ -568,6 +595,17 @@ export default function ReportsAdmin() {
               const showReviewBar = isAdmin && (canApprove || canRevise || canReject);
               const rNotes = reviewNotesById[r.id] || '';
               const statusPalette = STATUS_COLOR[rStatus] || STATUS_COLOR.PENDING_REVIEW;
+              // [DR-019] Disable review when the row's contentVersion is
+              // unknown. The backend's atomic CAS needs the version the
+              // caller saw at click-time; inventing 0 would silently
+              // approve unseen replacement bytes. Force a fresh GET
+              // (the page refresh path below) instead of letting the
+              // user fire an action that the server is guaranteed to
+              // refuse with 400 INVALID_EXPECTED_VERSION.
+              const versionMissing = !Number.isInteger(r.contentVersion) || r.contentVersion < 0;
+              const versionTooltip = versionMissing
+                ? 'Refresh required — this report is missing a contentVersion so the review cannot be safely sent. Click anywhere on the page to refresh.'
+                : null;
               return (
                 <div
                   key={r.id}
@@ -699,6 +737,22 @@ export default function ReportsAdmin() {
                   {/* [S7 round-2] Admin-only review action bar — mirrors
                       the MyProjectReports pattern. Gate: isAdmin AND any
                       allowed-from set has the row status. */}
+                  {showReviewBar && versionMissing && (
+                    <div
+                      role="status"
+                      style={{
+                        fontSize: '0.75rem',
+                        color: '#92400e',
+                        background: '#fef3c7',
+                        border: '1px solid #fde68a',
+                        padding: '0.4rem 0.6rem',
+                        borderRadius: 4,
+                      }}
+                      title={versionTooltip}
+                    >
+                      Refresh required — review disabled until the latest contentVersion is loaded.
+                    </div>
+                  )}
                   {showReviewBar && (
                     <div
                       role="toolbar"
@@ -716,8 +770,9 @@ export default function ReportsAdmin() {
                         <button
                           type="button"
                           className="btn btn-success btn-sm"
-                          disabled={actionBusy}
+                          disabled={actionBusy || versionMissing}
                           onClick={() => runReviewAction(r, 'APPROVED')}
+                          title={versionMissing ? versionTooltip : 'Approve this report'}
                         >
                           ✓ Approve
                         </button>
@@ -745,9 +800,9 @@ export default function ReportsAdmin() {
                         <button
                           type="button"
                           className="btn btn-warning btn-sm"
-                          disabled={actionBusy || !rNotes.trim()}
+                          disabled={actionBusy || versionMissing || !rNotes.trim()}
                           onClick={() => runReviewAction(r, 'REVISION_REQUESTED')}
-                          title={!rNotes.trim() ? 'Enter a reason to enable Request revision' : 'Send back to uploader for revision'}
+                          title={versionMissing ? versionTooltip : (!rNotes.trim() ? 'Enter a reason to enable Request revision' : 'Send back to uploader for revision')}
                         >
                           ↺ Revision
                         </button>
@@ -756,9 +811,9 @@ export default function ReportsAdmin() {
                         <button
                           type="button"
                           className="btn btn-danger btn-sm"
-                          disabled={actionBusy || !rNotes.trim()}
+                          disabled={actionBusy || versionMissing || !rNotes.trim()}
                           onClick={() => runReviewAction(r, 'REJECTED')}
-                          title={!rNotes.trim() ? 'Enter a reason to enable Reject' : 'Reject this report'}
+                          title={versionMissing ? versionTooltip : (!rNotes.trim() ? 'Enter a reason to enable Reject' : 'Reject this report')}
                         >
                           ✗ Reject
                         </button>

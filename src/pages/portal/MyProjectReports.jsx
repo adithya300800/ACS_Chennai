@@ -381,6 +381,14 @@ export default function MyProjectReports() {
     const file = e.target.files?.[0];
     const att = replaceTargetRef.current;
     if (!file || !att) return;
+    // [DR-019] Same version guard as runReviewAction — the replace PATCH
+    // requires the version the caller saw at click-time so a parallel
+    // review/replace can't land on a stale row.
+    if (!Number.isInteger(att.contentVersion) || att.contentVersion < 0) {
+      loadReports();
+      toast.push('Refresh required — this report is missing a contentVersion. The list refreshed; please try again.', 'error');
+      return;
+    }
     if (file.size > MAX_REPORT_BYTES) {
       const msg = `File too large. Max ${Math.round(MAX_REPORT_BYTES / (1024 * 1024))} MB.`;
       setReplaceError(msg);
@@ -411,6 +419,11 @@ export default function MyProjectReports() {
           filename: file.name,
           contentType: file.type,
           sizeBytes: file.size,
+          // [DR-037/DR-019] Same atomic CAS contract as the review PATCH
+          // — the server bumps contentVersion on success and 409s on
+          // mismatch. The guard above catches the missing case before we
+          // reach this wire body.
+          expectedVersion: att.contentVersion,
         }, accessToken,
       );
       setReports((prev) => prev.map((r) => (r.id === att.id ? { ...r, ...updated } : r)));
@@ -437,6 +450,17 @@ export default function MyProjectReports() {
   // optimistic patch is reverted via loadReports() fallback.
   const runReviewAction = useCallback(async (att, action) => {
     if (actionBusy) return;
+    // [DR-019] Guard against an unknown contentVersion. The backend's
+    // atomic CAS requires the version the caller saw; substituting 0
+    // would silently land on schema-default rows or 400
+    // INVALID_EXPECTED_VERSION on rows the SPA hasn't refreshed yet.
+    // Force a GET so the next click has the real value, and refuse the
+    // current click.
+    if (!Number.isInteger(att.contentVersion) || att.contentVersion < 0) {
+      loadReports();
+      toast.push('Refresh required — this report is missing a contentVersion. The list refreshed; please try again.', 'error');
+      return;
+    }
     const notes = (reviewNotesById[att.id] || '').trim();
     if ((action === 'REVISION_REQUESTED' || action === 'REJECTED') && !notes) return;
     setActionBusy(true);
@@ -449,7 +473,15 @@ export default function MyProjectReports() {
     try {
       const projectKey = att.projectId || projects.find((p) => p.name === att.projectName)?.id || att.projectName;
       const updated = await api.reviewProjectAttachment(
-        projectKey, att.id, { status: action, reviewNotes: notes || null }, accessToken,
+        projectKey, att.id,
+        // [DR-037/DR-019] Echo the row's contentVersion at click-time
+        // so the server can 409 if a parallel replace already moved it.
+        // DR-019 tightened the contract: missing expectedVersion is a
+        // 400 INVALID_EXPECTED_VERSION (no silent 0 substitute) and
+        // callers MUST send the value they see. The guard above catches
+        // the missing case before we ever reach this wire body.
+        { status: action, reviewNotes: notes || null, expectedVersion: att.contentVersion },
+        accessToken,
       );
       setReports((prev) => prev.map((r) => (r.id === att.id ? { ...r, ...updated } : r)));
       setReviewNotesById((prev) => {
@@ -705,6 +737,17 @@ export default function MyProjectReports() {
               const showReviewBar = isAdmin && (canApprove || canRevise || canReject);
               const rNotes = reviewNotesById[r.id] || '';
               const statusPalette = STATUS_COLOR[rStatus] || STATUS_COLOR.PENDING_REVIEW;
+              // [DR-019] Disable review when the row's contentVersion is
+              // unknown. The backend's atomic CAS needs the version the
+              // caller saw at click-time; inventing 0 would silently
+              // approve unseen replacement bytes. Force a fresh GET
+              // (the page refresh path below) instead of letting the
+              // user fire an action that the server is guaranteed to
+              // refuse with 400 INVALID_EXPECTED_VERSION.
+              const versionMissing = !Number.isInteger(r.contentVersion) || r.contentVersion < 0;
+              const versionTooltip = versionMissing
+                ? 'Refresh required — this report is missing a contentVersion so the review cannot be safely sent. Click anywhere on the page to refresh.'
+                : null;
               return (
                 <div
                   key={r.id}
@@ -803,6 +846,23 @@ export default function MyProjectReports() {
                         || canReject)` mirrors the DR-008 InspectionDetail
                         pattern — keep this expression shape stable so the
                         source-text test pin (test 2) keeps catching drift. */}
+                    {showReviewBar && versionMissing && (
+                      <div
+                        role="status"
+                        style={{
+                          marginTop: 6,
+                          fontSize: '0.75rem',
+                          color: '#92400e',
+                          background: '#fef3c7',
+                          border: '1px solid #fde68a',
+                          padding: '0.4rem 0.6rem',
+                          borderRadius: 4,
+                        }}
+                        title={versionTooltip}
+                      >
+                        Refresh required — review disabled until the latest contentVersion is loaded.
+                      </div>
+                    )}
                     {showReviewBar && (
                       <div
                         role="toolbar"
@@ -819,8 +879,9 @@ export default function MyProjectReports() {
                           <button
                             type="button"
                             className="btn btn-success btn-sm"
-                            disabled={actionBusy}
+                            disabled={actionBusy || versionMissing}
                             onClick={() => runReviewAction(r, 'APPROVED')}
+                            title={versionMissing ? versionTooltip : 'Approve this report'}
                           >
                             ✓ Approve
                           </button>
@@ -848,9 +909,9 @@ export default function MyProjectReports() {
                           <button
                             type="button"
                             className="btn btn-warning btn-sm"
-                            disabled={actionBusy || !rNotes.trim()}
+                            disabled={actionBusy || versionMissing || !rNotes.trim()}
                             onClick={() => runReviewAction(r, 'REVISION_REQUESTED')}
-                            title={!rNotes.trim() ? 'Enter a reason to enable Request revision' : 'Send back to uploader for revision'}
+                            title={versionMissing ? versionTooltip : (!rNotes.trim() ? 'Enter a reason to enable Request revision' : 'Send back to uploader for revision')}
                           >
                             ↺ Request revision
                           </button>
@@ -859,9 +920,9 @@ export default function MyProjectReports() {
                           <button
                             type="button"
                             className="btn btn-danger btn-sm"
-                            disabled={actionBusy || !rNotes.trim()}
+                            disabled={actionBusy || versionMissing || !rNotes.trim()}
                             onClick={() => runReviewAction(r, 'REJECTED')}
-                            title={!rNotes.trim() ? 'Enter a reason to enable Reject' : 'Reject this report'}
+                            title={versionMissing ? versionTooltip : (!rNotes.trim() ? 'Enter a reason to enable Reject' : 'Reject this report')}
                           >
                             ✗ Reject
                           </button>

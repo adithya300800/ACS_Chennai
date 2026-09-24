@@ -171,6 +171,26 @@ function buildApp() {
         applyUpdateData(row, data);
         return row;
       }),
+      // [DR-019] Atomic CAS write — the review + replace PATCH paths
+      // both use updateMany with the version predicate in the WHERE
+      // clause. The mock honours the predicate so the success / no-op
+      // branches reflect what Prisma would do.
+      updateMany: jest.fn(async ({ where = {}, data } = {}) => {
+        let count = 0;
+        for (const row of attachmentRows.values()) {
+          if (where.id && row.id !== where.id) continue;
+          if (where.projectId && row.projectId !== where.projectId) continue;
+          if (where.deletedAt === null && row.deletedAt) continue;
+          if (typeof where.contentVersion === 'number'
+              && row.contentVersion !== where.contentVersion) continue;
+          if (where.status && typeof where.status === 'object'
+              && Array.isArray(where.status.in)
+              && !where.status.in.includes(row.status)) continue;
+          applyUpdateData(row, data || {});
+          count += 1;
+        }
+        return { count };
+      }),
     },
     uploadIntent: {
       findMany: jest.fn(async () => []),
@@ -275,27 +295,41 @@ describe('DR-037 — content-version optimistic concurrency on project attachmen
     expect(updateSpy).not.toHaveBeenCalled();
   });
 
-  test('3. review PATCH with NO expectedVersion is allowed (legacy callers)', async () => {
-    // Backwards-compatible: an older SPA that doesn't send expectedVersion
-    // still works — DR-037 is an ADDITIVE check, not a breaking one.
-    // The risk it adds (silent approve-of-unseen-blob) is acceptable
-    // because the SPA always captures att.contentVersion at click-time
-    // going forward.
+  test('3. review PATCH with NO expectedVersion is REJECTED (DR-019 — no silent 0 substitute)', async () => {
+    // [DR-019] Breaking change vs DR-037. The audit finding was that a
+    // caller omitting expectedVersion fell through the CAS check, and
+    // a caller substituting 0 collided with the schema default (1)
+    // so the SPA could silently approve unseen replacement bytes. The
+    // endpoint refuses a missing/non-integer payload with 400
+    // INVALID_EXPECTED_VERSION; the SPA in turn disables the action
+    // bar (no fallback "Refresh required" path) instead of inventing
+    // a version.
     const { app, prisma, attachmentRows } = buildApp();
     seedAttachment(attachmentRows, { contentVersion: 1 });
-    prisma.projectAttachment.update = jest.fn(async ({ where, data }) => {
+    const updateSpy = jest.fn(async ({ where, data }) => {
       const r = attachmentRows.get(where.id);
       applyUpdateData(r, data);
       return r;
     });
+    prisma.projectAttachment.update = updateSpy;
+    // Prisma's `updateMany` is the new write path. Pin the spy so a
+    // regression that re-introduces a pre-check + update() flow trips
+    // here at test time.
+    const updateManySpy = jest.fn(async () => ({ count: 1 }));
+    prisma.projectAttachment.updateMany = updateManySpy;
 
     const res = await request(app)
       .patch(`/api/projects/${PROJECT_ID}/attachments/${ATTACHMENT_ID}`)
       .set('Authorization', adminJwt())
       .send({ status: 'APPROVED', reviewNotes: null });
 
-    expect(res.status).toBe(200);
-    expect(res.body.contentVersion).toBe(2);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_EXPECTED_VERSION');
+    // No write attempted — neither the old `update` nor the new
+    // `updateMany` predicate should have fired.
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(updateManySpy).not.toHaveBeenCalled();
+    expect(attachmentRows.get(ATTACHMENT_ID).contentVersion).toBe(1);
   });
 
   test('4. replace PATCH with matching expectedVersion succeeds + bumps contentVersion', async () => {
@@ -416,5 +450,57 @@ describe('DR-037 — content-version optimistic concurrency on project attachmen
     // one in the replace PATCH. Pin the count to lock the contract.
     const staleHits = routeSrc.match(/STALE_REVIEW_VERSION/g) || [];
     expect(staleHits.length).toBeGreaterThanOrEqual(4); // 2 returns × 2 mentions each (error + code)
+  });
+
+  test('10. atomic CAS — parallel replace bumps contentVersion, stale review PATCH 409s (DR-019)', async () => {
+    // [DR-019] The interleaved-replacement gap: admin opens file A,
+    // starts an Approve. Owner replaces the file with file B before
+    // the Approve lands. The pre-CAS read-then-update flow would let
+    // the Approve stamp APPROVED on file B. With atomic CAS via
+    // updateMany({ where: { contentVersion: expectedVersion, ... } }),
+    // the parallel replace bumped contentVersion, the WHERE doesn't
+    // match, updateMany.count === 0, the follow-up read classifies
+    // the failure as 409 STALE_REVIEW_VERSION.
+    const { app, prisma, attachmentRows } = buildApp();
+    seedAttachment(attachmentRows, { contentVersion: 1, status: 'PENDING_REVIEW' });
+    const updateSpy = jest.fn(async ({ where, data }) => {
+      const r = attachmentRows.get(where.id);
+      applyUpdateData(r, data);
+      return r;
+    });
+    prisma.projectAttachment.update = updateSpy;
+
+    // Simulate a parallel replace: replace PATCH bumps 1 → 2.
+    const replaceRes = await request(app)
+      .patch(`/api/projects/${PROJECT_ID}/attachments/${ATTACHMENT_ID}/file`)
+      .set('Authorization', userJwt())
+      .send({
+        uploadIntentUlid: '01J0FZ0000000000000000FAKE',
+        blobPath: 'employee-1/01J0FAKE_REPLACED.pdf',
+        filename: 'weekly-w36-replaced.pdf',
+        contentType: 'application/pdf',
+        sizeBytes: 4096,
+        expectedVersion: 1, // the replace saw version 1
+      });
+    expect(replaceRes.status).toBe(200);
+    expect(replaceRes.body.contentVersion).toBe(2); // bumped 1 → 2
+    expect(attachmentRows.get(ATTACHMENT_ID).contentVersion).toBe(2);
+
+    // Admin Approve with the version the admin saw (1) — but the row
+    // is now at version 2. Atomic CAS must 409, not silently approve.
+    const reviewRes = await request(app)
+      .patch(`/api/projects/${PROJECT_ID}/attachments/${ATTACHMENT_ID}`)
+      .set('Authorization', adminJwt())
+      .send({ status: 'APPROVED', reviewNotes: null, expectedVersion: 1 });
+
+    expect(reviewRes.status).toBe(409);
+    expect(reviewRes.body.code).toBe('STALE_REVIEW_VERSION');
+    expect(reviewRes.body.currentVersion).toBe(2);
+    expect(reviewRes.body.submittedVersion).toBe(1);
+    // The row stayed in PENDING_REVIEW — the stale Approve did not
+    // land on the replaced bytes.
+    expect(attachmentRows.get(ATTACHMENT_ID).status).toBe('PENDING_REVIEW');
+    expect(attachmentRows.get(ATTACHMENT_ID).contentVersion).toBe(2);
+    expect(updateSpy).not.toHaveBeenCalled();
   });
 });

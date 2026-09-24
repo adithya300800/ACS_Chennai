@@ -902,8 +902,12 @@ router.get('/:attachmentId/read-sas', asyncHandler(async (req, res) => {
 // 200 → attachment (serialized)
 // 400 → VALIDATION_ERROR
 // 403 → NOT_ATTACHMENT_OWNER
+// 200 → attachment (serialized)
+// 400 → VALIDATION_ERROR (incl. missing/wrong-type expectedVersion)
+// 403 → NOT_ATTACHMENT_OWNER
 // 404 → ATTACHMENT_NOT_FOUND
 // 409 → INTENT_MISMATCH (intent doesn't bind to the supplied blobPath)
+//       STALE_REVIEW_VERSION (row moved between GET and PATCH)
 // 503 → DB_UNAVAILABLE
 router.patch('/:attachmentId/file', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
@@ -940,30 +944,37 @@ router.patch('/:attachmentId/file', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'sizeBytes must be 1 byte – 26214400 bytes' });
   }
 
-  // [DR-037] Same stale-version guard as the review PATCH. The replace
-  // path increments contentVersion on success — if the SPA's view is
-  // behind, we refuse the replace so the user is forced to refresh
-  // rather than overwrite a row that already changed in another tab.
-  if (expectedVersion !== undefined && expectedVersion !== null) {
-    if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
-      return res.status(400).json({
-        error: 'VALIDATION_ERROR',
-        code: 'INVALID_EXPECTED_VERSION',
-        message: 'expectedVersion must be a non-negative integer',
-      });
-    }
+  // [DR-019] expectedVersion is REQUIRED on the replace PATCH — same
+  // contract as the review endpoint. No silent default; an older tab
+  // that doesn't know the row's current contentVersion is told to
+  // refresh instead of being allowed to clobber a freshly-reviewed
+  // blob.
+  if (expectedVersion === undefined || expectedVersion === null) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      code: 'INVALID_EXPECTED_VERSION',
+      message: 'expectedVersion is required (refresh the row and try again)',
+    });
+  }
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      code: 'INVALID_EXPECTED_VERSION',
+      message: 'expectedVersion must be a non-negative integer',
+    });
   }
 
   try {
-    // Ownership pre-check before binding so a 403 doesn't run a tx.
+    // Ownership pre-check before binding so a 403 doesn't run a tx or
+    // touch the upload-intent registry. The atomic CAS below is the
+    // authoritative guard; this pre-check only exists to short-circuit
+    // 404 / 403 with a clean error envelope (no race-window semantics).
     const existing = await prisma.projectAttachment.findUnique({
       where: { id: attachmentId },
       select: {
         projectId: true,
         deletedAt: true,
         uploadedById: true,
-        // [DR-037] Read the current version for the optimistic-concurrency
-        // check below.
         contentVersion: true,
       },
     });
@@ -982,21 +993,6 @@ router.patch('/:attachmentId/file', asyncHandler(async (req, res) => {
       });
     }
 
-    // [DR-037] Stale-version conflict for replace. Same shape as the
-    // review PATCH 409 — distinguishable from INVALID_TRANSITION by
-    // error code, so the SPA can render a different message ("content
-    // changed since you opened this tab; refresh and try again").
-    if (expectedVersion !== undefined && expectedVersion !== null
-        && existing.contentVersion !== expectedVersion) {
-      return res.status(409).json({
-        error: 'STALE_REVIEW_VERSION',
-        code: 'STALE_REVIEW_VERSION',
-        message: `Row contentVersion is ${existing.contentVersion}; expected ${expectedVersion}. Refresh and retry.`,
-        currentVersion: existing.contentVersion,
-        submittedVersion: expectedVersion,
-      });
-    }
-
     // [DR-001] Bind the new intent → the new blobPath, atomically.
     // Same single-element-array adapter as POST so the helper stays
     // happy. A sweep racing the claim makes the tx roll back; the
@@ -1011,7 +1007,15 @@ router.patch('/:attachmentId/file', asyncHandler(async (req, res) => {
     });
     if (intentErr) return res.status(intentErr.status).json(intentErr.body);
 
-    const updated = await withRecordTransaction(prisma, 'projectAttachment', async (db) => {
+    // [DR-019] Atomic CAS — intent claim + blob-field rewrite happen
+    // in the same transaction, with the WHERE-clause predicate
+    // (id, projectId, deletedAt=null, contentVersion=expectedVersion)
+    // closing the read-then-update race window that the audit's
+    // "interleaved replacement gap" finding flagged. A parallel review
+    // that bumped contentVersion makes updateMany.count === 0 — the
+    // intent claim rolls back (no orphan intent), and the client gets a
+    // 409 STALE_REVIEW_VERSION.
+    const result = await withRecordTransaction(prisma, 'projectAttachment', async (db) => {
       await assertPhotoIntentsBindable({
         tx: db,
         employeeId: req.employeeId,
@@ -1019,17 +1023,16 @@ router.patch('/:attachmentId/file', asyncHandler(async (req, res) => {
         expectedContainer: 'dpr-documents',
         expectedBlobPath: blobPath,
       });
-      // Re-stamp blob fields + reset review state. The audit trail
-      // (uploadedById / uploadedAt) is preserved; status reverts to
-      // PENDING_REVIEW so the admin's earlier Approve / Reject isn't
-      // sitting over a fresh blob they haven't seen yet.
-      //
-      // [DR-037] Increment contentVersion on every replace so a
-      // reviewer holding the OLD version's stale tab gets a 409 on
-      // their next PATCH (the review endpoint compares expectedVersion
-      // against this row's now-bumped value).
-      return db.projectAttachment.update({
-        where: { id: attachmentId },
+      // [DR-037] contentVersion: { increment: 1 } — same monotonic
+      // counter the review endpoint reads on its CAS predicate, so
+      // every mutation tightens the contract symmetrically.
+      return db.projectAttachment.updateMany({
+        where: {
+          id: attachmentId,
+          projectId,
+          deletedAt: null,
+          contentVersion: expectedVersion,
+        },
         data: {
           blobPath,
           filename,
@@ -1045,7 +1048,29 @@ router.patch('/:attachmentId/file', asyncHandler(async (req, res) => {
       });
     });
 
-    res.json(serializeProjectAttachment(updated));
+    if (result.count === 1) {
+      const updated = await prisma.projectAttachment.findUnique({
+        where: { id: attachmentId },
+      });
+      return res.json(serializeProjectAttachment(updated));
+    }
+
+    // [DR-019] count === 0 — a parallel review / replace bumped the
+    // row between our pre-check and the in-tx updateMany. Refuse the
+    // replace so we never silently land new bytes on a row whose
+    // admin already approved different content. The in-tx intent claim
+    // rolled back above; no orphan intent lingers in the registry.
+    const current = await prisma.projectAttachment.findUnique({
+      where: { id: attachmentId },
+      select: { contentVersion: true },
+    });
+    return res.status(409).json({
+      error: 'STALE_REVIEW_VERSION',
+      code: 'STALE_REVIEW_VERSION',
+      message: `Row contentVersion is ${current?.contentVersion}; expected ${expectedVersion}. Refresh and retry.`,
+      currentVersion: current?.contentVersion ?? null,
+      submittedVersion: expectedVersion,
+    });
   } catch (err) {
     console.error('[project-attachments] replace-file failed', {
       employeeHash: hashIdentifier(req.employeeId),
@@ -1169,10 +1194,11 @@ router.delete('/:attachmentId', asyncHandler(async (req, res) => {
 // mutation keeps the action bar's contract honest.
 //
 // 200 → attachment (serialized)
-// 400 → VALIDATION_ERROR (bad UUID, bad status, missing notes, notes too long)
+// 400 → VALIDATION_ERROR (bad UUID, bad status, missing notes, notes too long,
+//                       missing/wrong-type expectedVersion)
 // 403 → NOT_ADMIN
 // 404 → ATTACHMENT_NOT_FOUND
-// 409 → INVALID_TRANSITION
+// 409 → INVALID_TRANSITION / STALE_REVIEW_VERSION
 // 503 → DB_UNAVAILABLE
 router.patch('/:attachmentId', requireFreshAdmin, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
@@ -1189,20 +1215,26 @@ router.patch('/:attachmentId', requireFreshAdmin, asyncHandler(async (req, res) 
   const body = req.body || {};
   const { status: nextStatus, reviewNotes: rawNotes, expectedVersion } = body;
 
-  // [DR-037] Stale-review guard. SPA captures the row's contentVersion
-  // at click-time and echoes it back as expectedVersion. If the row
-  // has been replaced or reviewed since (contentVersion bumped), we
-  // refuse the write so an admin can't Approve a blob they never saw.
-  // Validated here (before the row lookup) so a malformed payload gets
-  // a clean 400 rather than a 404-then-409 dance.
-  if (expectedVersion !== undefined && expectedVersion !== null) {
-    if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
-      return res.status(400).json({
-        error: 'VALIDATION_ERROR',
-        code: 'INVALID_EXPECTED_VERSION',
-        message: 'expectedVersion must be a non-negative integer',
-      });
-    }
+  // [DR-019] expectedVersion is REQUIRED on the review PATCH — there
+  // is no silent default. The audit finding was: a caller that omits
+  // `expectedVersion` falls back to "0", which collides with nothing
+  // (schema default is 1) but lets a stale tab approve a freshly-
+  // replaced blob. Force a fresh GET on the client (the SPA renders
+  // a "Refresh required" message and disables the buttons). Server
+  // side, missing/non-integer/negative → 400 INVALID_EXPECTED_VERSION.
+  if (expectedVersion === undefined || expectedVersion === null) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      code: 'INVALID_EXPECTED_VERSION',
+      message: 'expectedVersion is required (refresh the row and try again)',
+    });
+  }
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      code: 'INVALID_EXPECTED_VERSION',
+      message: 'expectedVersion must be a non-negative integer',
+    });
   }
 
   // Validate the requested target state. Anything outside this set is
@@ -1230,17 +1262,68 @@ router.patch('/:attachmentId', requireFreshAdmin, asyncHandler(async (req, res) 
     });
   }
 
+  // State machine — used BOTH for the atomic-predicate input below
+  // (which from-statuses are valid for this nextStatus?) AND for the
+  // follow-up read that classifies a count=0 updateMany result. A
+  // closed review (APPROVED / REJECTED) is terminal — the predicate
+  // accepts NO fromStatus for any nextStatus.
+  const ALLOWED_TRANSITIONS = {
+    PENDING_REVIEW: new Set(['APPROVED', 'REVISION_REQUESTED', 'REJECTED']),
+    REVISION_REQUESTED: new Set(['APPROVED', 'REJECTED']),
+    APPROVED: new Set(),
+    REJECTED: new Set(),
+  };
+  const validFromStatuses = Object.entries(ALLOWED_TRANSITIONS)
+    .filter(([, allowed]) => allowed.has(nextStatus))
+    .map(([from]) => from);
+  const validFromForPredicate = validFromStatuses.length > 0
+    ? validFromStatuses
+    : ['__NO_STATUS__']; // intentional: a terminal target → never matches
+
   try {
+    // [DR-019] Atomic CAS — the predicate on `updateMany` collapses
+    // the read-then-update race window. The write only succeeds if
+    //   id             = :attachmentId
+    //   projectId      = :projectId        (scope guard)
+    //   deletedAt      = null              (soft-delete guard)
+    //   contentVersion = expectedVersion   (no concurrent replace/review)
+    //   status ∈ validFromStatuses         (transition guard)
+    // all hold simultaneously. A parallel replace that bumped
+    // contentVersion makes count === 0; the follow-up read classifies
+    // the failure as 404 / STALE_REVIEW_VERSION / INVALID_TRANSITION.
+    const result = await prisma.projectAttachment.updateMany({
+      where: {
+        id: attachmentId,
+        projectId,
+        deletedAt: null,
+        contentVersion: expectedVersion,
+        status: { in: validFromForPredicate },
+      },
+      data: {
+        status: nextStatus,
+        reviewedById: req.employeeId,
+        reviewedAt: new Date(),
+        reviewNotes,
+        contentVersion: { increment: 1 },
+      },
+    });
+
+    if (result.count === 1) {
+      const updated = await prisma.projectAttachment.findUnique({
+        where: { id: attachmentId },
+      });
+      return res.json(serializeProjectAttachment(updated));
+    }
+
+    // count === 0 — every branch here is the audit's "interleaved
+    // replacement gap" closed: the predicate failed for ONE of these
+    // reasons, never silently succeeding.
     const row = await prisma.projectAttachment.findUnique({
       where: { id: attachmentId },
       select: {
-        id: true,
         projectId: true,
-        status: true,
         deletedAt: true,
-        reviewedById: true,
-        // [DR-037] Read the current version so we can compare against
-        // expectedVersion before stamping status / reviewedById / etc.
+        status: true,
         contentVersion: true,
       },
     });
@@ -1258,36 +1341,9 @@ router.patch('/:attachmentId', requireFreshAdmin, asyncHandler(async (req, res) 
         message: 'Attachment not found',
       });
     }
-
-    // State machine validation. APPROVED + REJECTED are terminal — once
-    // a review closes it stays closed unless explicitly transitioned via
-    // REVISION_REQUESTED (which is itself only reachable from a still-
-    // open state).
-    const fromStatus = row.status || 'PENDING_REVIEW';
-    const ALLOWED_TRANSITIONS = {
-      PENDING_REVIEW: new Set(['APPROVED', 'REVISION_REQUESTED', 'REJECTED']),
-      REVISION_REQUESTED: new Set(['APPROVED', 'REJECTED']),
-      APPROVED: new Set(),
-      REJECTED: new Set(),
-    };
-    if (!ALLOWED_TRANSITIONS[fromStatus]?.has(nextStatus)) {
-      return res.status(409).json({
-        error: 'INVALID_TRANSITION',
-        code: 'INVALID_TRANSITION',
-        message: `Cannot transition from ${fromStatus} to ${nextStatus}`,
-        fromStatus,
-        toStatus: nextStatus,
-      });
-    }
-
-    // [DR-037] Stale-review conflict — the row's contentVersion has
-    // moved since the SPA captured it. Most likely a parallel Replace
-    // happened (new blob, contentVersion+1); the reviewer's decision
-    // would land on bytes they haven't seen. Return 409 with both
-    // versions so the SPA can render "refresh and try again" copy
-    // instead of silently mutating the unseen blob.
-    if (expectedVersion !== undefined && expectedVersion !== null
-        && row.contentVersion !== expectedVersion) {
+    // Most likely a parallel Replace or a parallel review — the SPA
+    // must refresh, not retry with a fabricated current version.
+    if (row.contentVersion !== expectedVersion) {
       return res.status(409).json({
         error: 'STALE_REVIEW_VERSION',
         code: 'STALE_REVIEW_VERSION',
@@ -1296,27 +1352,15 @@ router.patch('/:attachmentId', requireFreshAdmin, asyncHandler(async (req, res) 
         submittedVersion: expectedVersion,
       });
     }
-
-    // Stamp reviewedById + reviewedAt in lockstep with the status
-    // change so the audit row is consistent — never one without the
-    // other. reviewedAt is intentionally always set on a real
-    // transition; the client uses its presence to render "Reviewed by"
-    // copy.
-    //
-    // [DR-037] contentVersion bumped on every successful review write
-    // so a second reviewer hitting the same row's stale tab also
-    // 409s. Monotonic — never decremented.
-    const updated = await prisma.projectAttachment.update({
-      where: { id: attachmentId },
-      data: {
-        status: nextStatus,
-        reviewedById: req.employeeId,
-        reviewedAt: new Date(),
-        reviewNotes,
-        contentVersion: { increment: 1 },
-      },
+    // Version matched but transition didn't — terminal or wrong branch.
+    const fromStatus = row.status || 'PENDING_REVIEW';
+    return res.status(409).json({
+      error: 'INVALID_TRANSITION',
+      code: 'INVALID_TRANSITION',
+      message: `Cannot transition from ${fromStatus} to ${nextStatus}`,
+      fromStatus,
+      toStatus: nextStatus,
     });
-    res.json(serializeProjectAttachment(updated));
   } catch (err) {
     console.error('[project-attachments] patch (review) failed', {
       employeeHash: hashIdentifier(req.employeeId),

@@ -271,9 +271,14 @@ describe('S7/MyReports — Project Reports page source contracts', () => {
       /onClick\s*=\s*\{\s*\(\s*\)\s*=>\s*runReviewAction\(\s*r\s*,\s*['"]REJECTED['"]\s*\)\s*\}/,
     );
     // runReviewAction must invoke api.reviewProjectAttachment with the
-    // project key + attachment id + body { status, reviewNotes }.
+    // project key + attachment id + body { status, reviewNotes,
+    // expectedVersion }. The DR-019 contract pins the atomic-CAS
+    // expectedVersion field — a future refactor that drops it lets
+    // the SPA silently approve unseen replacement bytes. Allow
+    // comments + whitespace between `att.id,` and `{` since the call
+    // is now wrapped with the DR-019 explanatory comment.
     expect(pageSrc).toMatch(
-      /api\.reviewProjectAttachment\(\s*projectKey\s*,\s*att\.id\s*,\s*\{\s*status:\s*action\s*,\s*reviewNotes/,
+      /api\.reviewProjectAttachment\(\s*projectKey\s*,\s*att\.id[\s\S]{0,800}?\{\s*status:\s*action\s*,\s*reviewNotes[\s\S]{0,400}?expectedVersion:\s*att\.contentVersion/,
     );
   });
 
@@ -282,8 +287,11 @@ describe('S7/MyReports — Project Reports page source contracts', () => {
     // for those two actions — the buttons must stay disabled until the
     // input has trimmed content. Pin the disabled expression shape so
     // a future refactor that drops the trim() check is caught here.
+    // DR-019 also threads a `versionMissing` flag into the disabled
+    // expression — allow either shape so the pin survives future
+    // additions to the action-bar gating.
     expect(pageSrc).toMatch(
-      /disabled\s*=\s*\{[^}]*actionBusy\s*\|\|\s*!rNotes\.trim\(\s*\)[^}]*\}/,
+      /disabled\s*=\s*\{[^}]*actionBusy\s*\|\|[\s\S]{0,40}?!rNotes\.trim\(\s*\)[^}]*\}/,
     );
   });
 

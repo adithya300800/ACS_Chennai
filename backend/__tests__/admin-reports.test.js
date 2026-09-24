@@ -253,7 +253,7 @@ function buildApp({ adminIsAdmin = true, userIsAdmin = false, employeeExists = t
 }
 
 // Helper to seed an attachment row with sensible defaults.
-function seed({ id, projectId, type = 'WEEKLY_REPORT', uploadedById = USER_ID, uploadedAt = new Date('2026-09-01T10:00:00Z'), deletedAt = null, filename, title, uploadedByName, uploadedByDesignation, status, reviewedById, reviewedAt, reviewNotes, reviewedByName, reviewedByDesignation, uploadIntentUlid }) {
+function seed({ id, projectId, type = 'WEEKLY_REPORT', uploadedById = USER_ID, uploadedAt = new Date('2026-09-01T10:00:00Z'), deletedAt = null, filename, title, uploadedByName, uploadedByDesignation, status, reviewedById, reviewedAt, reviewNotes, reviewedByName, reviewedByDesignation, uploadIntentUlid, contentVersion }) {
   return {
     id, projectId, type,
     title: title ?? `${type} title`,
@@ -276,6 +276,10 @@ function seed({ id, projectId, type = 'WEEKLY_REPORT', uploadedById = USER_ID, u
     // these when the route requests the join.
     reviewedByName: reviewedByName ?? null,
     reviewedByDesignation: reviewedByDesignation ?? null,
+    // [DR-019] Monotonic contentVersion so every read DTO can echo it
+    // and the SPA can pass it back as `expectedVersion` on review /
+    // replace PATCH. Defaults to 1 to match the Prisma schema default.
+    contentVersion: contentVersion ?? 1,
   };
 }
 
@@ -559,6 +563,56 @@ describe('DR-010 — Admin report DTO exposes review-state fields + reviewedBy j
     expect(statusIx).toBeGreaterThan(0);
     expect(projectIx).toBeGreaterThan(0);
     expect(statusIx).toBeLessThan(projectIx);
+  });
+});
+
+// [DR-019] — Audit finding: the admin register DTO omitted
+// `contentVersion`, so callers substituted 0 for missing version and
+// even supplied versions were checked before an ID-only write —
+// leaving an interleaved replacement gap (admin could approve a row
+// that had just been replaced from another tab). The fix:
+//   1. serializer echoes contentVersion on every row
+//   2. PATCH endpoints require expectedVersion + atomic CAS via
+//      updateMany(where: { id, projectId, deletedAt: null,
+//      contentVersion, status: { in: validFrom } })
+//   3. callers MUST send the value they see; SPA disables the action
+//      bar (no silent 0 substitute) when contentVersion is unknown.
+describe('DR-019 — Admin report DTO echoes contentVersion + atomic CAS on review/replace', () => {
+  it('18. DTO exposes contentVersion on every row (admin reports list)', async () => {
+    const { app, attachmentRows } = buildApp();
+    attachmentRows.set(ATT_A1, seed({ id: ATT_A1, projectId: PROJECT_A, contentVersion: 7 }));
+    const res = await request(app)
+      .get('/api/admin/reports')
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    const row = res.body.reports[0];
+    expect(row).toHaveProperty('contentVersion', 7);
+  });
+
+  it('19. DTO exposes contentVersion=1 (schema default) on freshly-seeded rows', async () => {
+    const { app, attachmentRows } = buildApp();
+    attachmentRows.set(ATT_A1, seed({ id: ATT_A1, projectId: PROJECT_A })); // no contentVersion override
+    const res = await request(app)
+      .get('/api/admin/reports')
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    expect(res.body.reports[0]).toHaveProperty('contentVersion', 1);
+  });
+
+  it('20. Source-text pin — adminReports serializer echoes contentVersion with [DR-019] marker', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(
+      path.resolve(__dirname, '../src/routes/adminReports.js'), 'utf8'
+    );
+    // Lock the DR-019 contract: the admin serializer must echo
+    // contentVersion on every row so the SPA can pass it back as
+    // expectedVersion on review/replace PATCH. The route-level
+    // atomic-CAS contract is covered in project-attachments-dr037 tests
+    // — this pin guards the admin DTO side specifically. Allow a wide
+    // gap between the [DR-019] comment marker and the field line so
+    // future explanatory comments don't break the pin.
+    expect(src).toMatch(/\[DR-019\][\s\S]{0,2000}contentVersion:\s*row\.contentVersion\s*\?\?\s*0/);
   });
 });
 

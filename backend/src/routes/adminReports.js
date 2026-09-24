@@ -218,6 +218,15 @@ function serializeAdminReport(row) {
       name: row.reviewedBy.name,
       designation: row.reviewedBy.designation || null,
     } : null,
+    // [DR-019] Mirror projectAttachments.serializeProjectAttachment —
+    // every read DTO MUST echo the row's monotonic contentVersion so
+    // the admin Reports page can pass it back as `expectedVersion` on
+    // the review / replace PATCH. The schema default is 1 (every row
+    // has a real value); the `?? 0` fallback only fires if the
+    // Prisma select omitted the column — which is a bug the SPA
+    // surfaces as "Refresh required" instead of silently approving
+    // unseen bytes.
+    contentVersion: row.contentVersion ?? 0,
   };
 }
 
