@@ -256,6 +256,38 @@ useLayoutEffect(() => {
     // Re-mount on token change so the ticket request picks up the new JWT
   }, [loadNotifications, connectSSE]);
 
+  // [DR-007] Reconcile on focus + visibilitychange. Workforce-class
+  // notifications (LEAVE_DECIDED, TRAINING_ASSIGNED, INSPECTION_*) do
+  // not flow through the DPR SSE channel — they are persisted via
+  // prisma.notification.create at the leave/training/inspection
+  // call-sites and only surface via the GET /list endpoint. If a user
+  // has the portal open when such a notification lands (or returns to
+  // a tab that was hidden during the emit), the SSE channel will not
+  // replay the row. Refetch on tab focus / visibility flip so the bell
+  // converges with the server state without waiting for a token
+  // refresh or a manual reload. The refetch is idempotent against the
+  // SSE listener: an existing row's `id` is checked before insertion
+  // (see the 'notification' event handler above), so re-fetching is a
+  // no-op for rows the SSE already delivered.
+  useEffect(() => {
+    if (!accessToken) return undefined;
+    const refetch = () => {
+      // document.visibilityState is the canonical signal — covers
+      // both tab-switch (focus alone) and mobile backgrounding
+      // (visibilitychange alone). Window focus fires on the desktop
+      // tab-switch path; visibilitychange fires on mobile + some
+      // desktop browser configurations. Listening to both is cheap.
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      loadNotifications();
+    };
+    document.addEventListener('visibilitychange', refetch);
+    window.addEventListener('focus', refetch);
+    return () => {
+      document.removeEventListener('visibilitychange', refetch);
+      window.removeEventListener('focus', refetch);
+    };
+  }, [accessToken, loadNotifications]);
+
   // Close dropdown on outside click. Round-21: dropdown is portalled to
   // <body>, so the bell-button wrapper alone isn't enough — also check
   // the portalled dropdown's own ref.

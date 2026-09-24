@@ -52,6 +52,12 @@ const STATUS_SKIPPED_OPT_OUT = 'SKIPPED_OPT_OUT';
 const STATUS_SKIPPED_TYPE_MUTED = 'SKIPPED_TYPE_MUTED';
 const STATUS_SKIPPED_NO_ADDRESS = 'SKIPPED_NO_ADDRESS';
 const STATUS_SKIPPED_NOT_CONFIGURED = 'SKIPPED_NOT_CONFIGURED';
+// [DR-007] Distinguishes "preference read failed" from "user opted out"
+// in the EmailLog audit trail. The admin-attendance digest DEFERs when
+// the prefs service is degraded rather than silently opting the admin
+// in (see internal-admin-attendance.js). Schema-level: EmailLog.status
+// is a free-form String so no migration is required.
+const STATUS_DEFERRED_PREFS_UNAVAILABLE = 'DEFERRED_PREFS_UNAVAILABLE';
 const STATUS_QUEUED = 'QUEUED';
 
 function isCritical(type) {
@@ -569,6 +575,7 @@ module.exports = {
   STATUS_SKIPPED_TYPE_MUTED,
   STATUS_SKIPPED_NO_ADDRESS,
   STATUS_SKIPPED_NOT_CONFIGURED,
+  STATUS_DEFERRED_PREFS_UNAVAILABLE,
   STATUS_QUEUED,
   shouldSkipSend,
   setPrisma,

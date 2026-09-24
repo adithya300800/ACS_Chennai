@@ -74,6 +74,14 @@ const { hashIdentifier } = require('../lib/pii');
 // code=fanout.failed rows so the operator can see the outage instead
 // of wondering why the admin got nothing.
 const safeAsync = require('../lib/safeAsync');
+// [DR-007] Canonical gate — honours BOTH emailEnabled AND digestEnabled.
+// The inline check below used to look only at emailEnabled and skipped
+// the digestEnabled toggle entirely, so an admin with daily digests
+// turned off in NotificationPreferences still got the attendance digest.
+// shouldSkipSend is the same helper notify.js fans out for the immediate
+// + admin-immediate + digest paths; routing the admin-attendance digest
+// through it keeps the contract uniform.
+const { shouldSkipSend, STATUS_DEFERRED_PREFS_UNAVAILABLE } = require('../lib/notify');
 const { getIstDateString, getIstDateLabel, istMidnightUtcFromDateString, parseDateOnlyToUtc } = require('../lib/dateOnly');
 
 function getPrisma(req) { return req.app.get('prisma'); }
@@ -304,21 +312,42 @@ router.post('/run', requireInternalToken, asyncHandler(async (req, res) => {
       // Per-admin prefs gate. Admins who flipped their master switch or
       // explicitly muted this type stay silent; we still audit-log.
       //
-      // Round-40 #3: wrap in safeAsync so a transient DB outage produces
-      // a log row instead of being silently swallowed. fallback: null
-      // preserves the existing behaviour — `prefs` is null and the
-      // downstream "master switch off" branch is skipped.
-      const prefs = await safeAsync(
+      // [DR-007] Wrap in safeAsync so a transient DB outage produces
+      // a log row instead of being silently swallowed. The sentinel
+      // wrapper shape ({ ok, value }) lets us distinguish a *missing*
+      // prefs row (shouldSkipSend's permissive default applies — send)
+      // from a *failed* read (defer rather than opt-in). The previous
+      // fallback: null pattern collapsed both cases, silently opting
+      // the admin in whenever the preference service was degraded.
+      const prefsResult = await safeAsync(
         'attendance.adminPrefs',
-        () => prisma.notificationPreference.findUnique({ where: { employeeId: admin.id } }),
-        { fallback: null },
+        async () => ({
+          ok: true,
+          value: await prisma.notificationPreference.findUnique({ where: { employeeId: admin.id } }),
+        }),
+        { fallback: { ok: false, value: null } },
       );
+      const prefs = prefsResult.value;
+      const prefsReadFailed = !prefsResult.ok;
 
       let terminalStatus;
       let emailLogId = null;
       let errorMessage = null;
 
-      if (prefs && prefs.emailEnabled === false) {
+      // [DR-007] Canonical gate from notify.js — honours BOTH
+      // emailEnabled (master kill switch) AND digestEnabled (the
+      // previous inline branch only checked emailEnabled and ignored
+      // digestEnabled entirely, so an admin with daily digests turned
+      // off in NotificationPreferences still received the attendance
+      // digest). shouldSkipSend treats a *missing* prefs row as fully
+      // opt-in (matches the documented permissive default). The
+      // admin-attendance digest is more conservative: if the prefs
+      // read failed AND we have no in-memory record, defer rather than
+      // silently fire.
+      const verdict = shouldSkipSend(prefs, 'ADMIN_ATTENDANCE_DAILY', 'ADMIN_DIGEST');
+
+      if (verdict.skip) {
+        // User-level opt-out (email off OR digest off) or per-type mute.
         const logRow = await prisma.emailLog.create({
           data: {
             employeeId: admin.id,
@@ -326,65 +355,73 @@ router.post('/run', requireInternalToken, asyncHandler(async (req, res) => {
             recipientEmail: admin.email || '',
             subject: rendered.subject,
             channel: 'ADMIN_DIGEST',
-            status: 'SKIPPED_OPT_OUT',
+            status: verdict.status,
+            errorMessage: verdict.errorMessage || null,
           },
         });
         emailLogId = logRow.id;
-        terminalStatus = 'SKIPPED_OPT_OUT';
+        terminalStatus = verdict.status;
+        skipped += 1;
+      } else if (prefsReadFailed) {
+        // [DR-007] Preference service degraded. The canonical gate
+        // would say "send" (matches the null-row permissive default),
+        // but the admin digest is conservative — defer rather than
+        // silently opt the admin in. The DEFERRED_PREFS_UNAVAILABLE
+        // EmailLog row lets the operator see the outage in the audit
+        // trail AND lets a future retry catch up (the AdminDigestRun
+        // row is claimed up-front and now stamps DEFERRED, so the
+        // terminal update reflects the deferral).
+        const logRow = await prisma.emailLog.create({
+          data: {
+            employeeId: admin.id,
+            notificationId: null,
+            recipientEmail: admin.email || '',
+            subject: rendered.subject,
+            channel: 'ADMIN_DIGEST',
+            status: STATUS_DEFERRED_PREFS_UNAVAILABLE,
+            errorMessage: 'preference service unavailable',
+          },
+        });
+        emailLogId = logRow.id;
+        terminalStatus = STATUS_DEFERRED_PREFS_UNAVAILABLE;
+        errorMessage = 'preference service unavailable';
+        skipped += 1;
+      } else if (!admin.email) {
+        const logRow = await prisma.emailLog.create({
+          data: {
+            employeeId: admin.id,
+            notificationId: null,
+            recipientEmail: '',
+            subject: rendered.subject,
+            channel: 'ADMIN_DIGEST',
+            status: 'SKIPPED_NO_ADDRESS',
+          },
+        });
+        emailLogId = logRow.id;
+        terminalStatus = 'SKIPPED_NO_ADDRESS';
         skipped += 1;
       } else {
-        const typeMutes = (prefs && prefs.typeMutes && typeof prefs.typeMutes === 'object') ? prefs.typeMutes : {};
-        if (typeMutes.ADMIN_ATTENDANCE_DAILY === true) {
-          const logRow = await prisma.emailLog.create({
-            data: {
-              employeeId: admin.id,
-              notificationId: null,
-              recipientEmail: admin.email || '',
-              subject: rendered.subject,
-              channel: 'ADMIN_DIGEST',
-              status: 'SKIPPED_TYPE_MUTED',
-            },
-          });
-          emailLogId = logRow.id;
-          terminalStatus = 'SKIPPED_TYPE_MUTED';
-          skipped += 1;
-        } else if (!admin.email) {
-          const logRow = await prisma.emailLog.create({
-            data: {
-              employeeId: admin.id,
-              notificationId: null,
-              recipientEmail: '',
-              subject: rendered.subject,
-              channel: 'ADMIN_DIGEST',
-              status: 'SKIPPED_NO_ADDRESS',
-            },
-          });
-          emailLogId = logRow.id;
-          terminalStatus = 'SKIPPED_NO_ADDRESS';
-          skipped += 1;
+        const result = await sendEmail({ to: admin.email, subject: rendered.subject, html: rendered.html });
+        const logRow = await prisma.emailLog.create({
+          data: {
+            employeeId: admin.id,
+            notificationId: null,
+            recipientEmail: admin.email,
+            subject: rendered.subject,
+            channel: 'ADMIN_DIGEST',
+            status: result.ok ? 'SENT' : 'FAILED',
+            providerMessageId: result.messageId || null,
+            errorMessage: result.ok ? null : (result.error || `HTTP_${result.statusCode}`),
+          },
+        });
+        emailLogId = logRow.id;
+        if (result.ok) {
+          terminalStatus = 'SENT';
+          sent += 1;
         } else {
-          const result = await sendEmail({ to: admin.email, subject: rendered.subject, html: rendered.html });
-          const logRow = await prisma.emailLog.create({
-            data: {
-              employeeId: admin.id,
-              notificationId: null,
-              recipientEmail: admin.email,
-              subject: rendered.subject,
-              channel: 'ADMIN_DIGEST',
-              status: result.ok ? 'SENT' : 'FAILED',
-              providerMessageId: result.messageId || null,
-              errorMessage: result.ok ? null : (result.error || `HTTP_${result.statusCode}`),
-            },
-          });
-          emailLogId = logRow.id;
-          if (result.ok) {
-            terminalStatus = 'SENT';
-            sent += 1;
-          } else {
-            terminalStatus = 'FAILED';
-            errorMessage = result.error || `HTTP_${result.statusCode}`;
-            failed += 1;
-          }
+          terminalStatus = 'FAILED';
+          errorMessage = result.error || `HTTP_${result.statusCode}`;
+          failed += 1;
         }
       }
 
