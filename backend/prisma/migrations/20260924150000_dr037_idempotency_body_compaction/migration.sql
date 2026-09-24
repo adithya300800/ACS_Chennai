@@ -63,7 +63,7 @@
 --     to the no-reservation branch, and proceeds as fresh — which is
 --     the audit's "retry after identity window" semantics.
 --
-─ Backward compatibility ─────────────────────────────────────────────────────
+-- Backward compatibility:
 --
 -- The column is additive + nullable; every existing row gets
 -- `body_compacted_at = NULL` on the ALTER, meaning "body live". No
@@ -71,7 +71,6 @@
 -- so the deploy is safe regardless of migration order.
 --
 -- A re-run against a partially-applied DB is a no-op (`IF NOT EXISTS`).
--- ─────────────────────────────────────────────────────────────────────────────
 
 ALTER TABLE "request_dedupe"
   ADD COLUMN IF NOT EXISTS "body_compacted_at" TIMESTAMP(3);

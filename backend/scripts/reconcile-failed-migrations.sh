@@ -46,6 +46,15 @@
 #       commit aef38d4 because Prisma's migrator re-applies the
 #       rolled-back original before reaching a sibling).
 #
+#   - 20260924150000_dr037_idempotency_body_compaction
+#       DR-037 2026-09-24. The migration's giant ASCII-art header
+#       contained a bare "─ Backward compatibility ─" line WITHOUT
+#       the `--` prefix; Postgres parsed it as SQL and threw 42601
+#       "syntax error at or near '─'". Edit removed the decorative
+#       box-drawing characters and replaced with plain `--` comment
+#       lines. The DDL itself (ALTER TABLE + CREATE INDEX) is
+#       unchanged.
+#
 # Idempotency:
 #   - If the migration is in errored state: rc=0, row is cleared.
 #   - If the migration is in applied state: rc=non-zero, swallowed.
@@ -58,6 +67,7 @@ KNOWN_BAD="
 20260908150000_dr031_leave_constraint_correct_bound
 20260912070000_s7_project_attachment_review
 20260924100000_dr025_correction_cancelled
+20260924150000_dr037_idempotency_body_compaction
 "
 
 echo "[reconcile-failed-migrations] one-shot ledger resolve for known errored rows…"
