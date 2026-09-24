@@ -13,6 +13,7 @@ import { getBusinessToday, useBusinessDateKey } from '../../lib/businessDate.js'
 import { formatShortDate, formatDateTime } from '../../lib/format.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import BackButton from '../../components/BackButton.jsx';
+import RecordStatusBadge from '../../components/RecordStatusBadge.jsx';
 
 // Round-24: admin course detail page. The dashboard used to be the only way
 // to see a course — a one-line card with title + provider + category. This
@@ -283,7 +284,11 @@ export default function TrainingCourseDetail() {
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
             <h1 className="training-page-title">{course.title}</h1>
-            {isArchived && <span className="training-pill training-pill-archived">Archived</span>}
+            {/* §8.12 (Fresh24): share the canonical record-state badge so
+                the "Archived" copy + colour matches the other modules.
+                Previously this rendered a local training-pill-archived
+                element with bespoke styling. */}
+            {isArchived && <RecordStatusBadge state="archived" />}
           </div>
           <p className="training-page-sub">
             {TRAINING_PROVIDER_LABELS[course.provider] || 'External'}
@@ -367,7 +372,10 @@ export default function TrainingCourseDetail() {
               </>
             )}
             <dt style={{ fontWeight: 600, color: 'var(--steel)' }}>Status:</dt>
-            <dd style={{ margin: 0 }}>{isArchived ? 'Archived (no new assignments)' : 'Active'}</dd>
+            <dd style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <RecordStatusBadge state={isArchived ? 'archived' : null} />
+              <span>{isArchived ? 'No new assignments' : 'Active'}</span>
+            </dd>
           </dl>
         </div>
       </section>

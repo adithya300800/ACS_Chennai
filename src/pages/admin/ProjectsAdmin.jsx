@@ -4,6 +4,7 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatShortDate } from '../../lib/format.js';
+import RecordStatusBadge from '../../components/RecordStatusBadge.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 // N17 (Project-level dashboard with KPI tiles): admin project registry.
@@ -561,14 +562,12 @@ function RegisteredRow({ project, onRequestDelete, onGoToDashboard }) {
             </span>
           ) : null}
           {!project.isActive ? (
-            <span style={{
-              fontSize: '0.7rem', fontWeight: 600,
-              color: 'var(--steel, #64748b)',
-              background: 'rgba(100,116,139,0.10)',
-              padding: '1px 6px', borderRadius: 4,
-            }}>
-              Inactive
-            </span>
+            // §8.12 (Fresh24): share the canonical record-state badge so
+            // the "Archived" pill matches Training / BillingCertifications
+            // / DrawingsBrowse. The previous inline pill used a bespoke
+            // background — kept the badge mounted under the project code
+            // chip so the row layout stays the same.
+            <RecordStatusBadge state="archived" />
           ) : null}
         </div>
         <div style={{ fontSize: '0.78rem', color: 'var(--steel, #64748b)', marginTop: '0.2rem' }}>

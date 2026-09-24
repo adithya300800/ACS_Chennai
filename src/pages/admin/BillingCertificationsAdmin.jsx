@@ -41,6 +41,7 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import Modal from '../../components/Modal.jsx';
+import RecordStatusBadge from '../../components/RecordStatusBadge.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import {
   formatShortDate,
@@ -63,10 +64,17 @@ const DEFAULT_LIMIT = 50;
 
 // Status badge styles — 3-state pill colour mapping. Mirrors the DPR /
 // Inspection tone vocabulary so admins can scan the card grid by hue.
+// §8.12 (Fresh24): ARCHIVED entry added so the detail modal renders
+// the canonical archived palette + label alongside the live status pill
+// when a soft-deleted row is opened. The visual mapping is delegated
+// to RecordStatusBadge (rendered elsewhere) but the palette stays
+// here so any caller that still hand-rolls an inline pill gets the
+// same colour.
 const STATUS_BADGE_STYLES = {
   DRAFT:     { background: '#f1f5f9', color: '#475569' }, // slate
   CERTIFIED: { background: '#dcfce7', color: '#166534' }, // green
   DISPUTED:  { background: '#fee2e2', color: '#b91c1c' }, // red
+  ARCHIVED:  { background: '#f1f5f9', color: '#334155' }, // slate-700 — matches record-status-pill-archived
 };
 
 // Field length caps — must stay in sync with backend FIELD_MAX.
@@ -1064,6 +1072,10 @@ export default function BillingCertificationsAdmin() {
                 >
                   {BILLING_CERTIFICATION_STATUS_LABELS[detailCert.status]?.label || detailCert.status}
                 </span>
+                {/* §8.12 (Fresh24): archived rows surface the canonical
+                    record-state badge beside the live status pill so the
+                    admin reads "Archived" + "Disputed" without confusion. */}
+                {detailCert.isArchived && <RecordStatusBadge state="archived" />}
                 <span style={{ color: 'var(--steel)', fontSize: '0.85rem' }}>
                   {detailCert.project?.name}{detailCert.project?.code ? ` (${detailCert.project.code})` : ''}
                 </span>
@@ -1267,8 +1279,12 @@ export default function BillingCertificationsAdmin() {
               padding: '1.5rem', boxShadow: '0 20px 60px rgba(15,23,42,0.3)',
             }}
           >
-            <h2 id="archive-bc-title" style={{ margin: '0 0 0.5rem', color: 'var(--navy)' }}>
-              Archive certification?
+            <h2 id="archive-bc-title" style={{ margin: '0 0 0.5rem', color: 'var(--navy)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <span>Archive certification?</span>
+              {/* §8.12 (Fresh24): show the canonical record-state badge so
+                  the admin sees the exact label that will apply after the
+                  soft-delete completes. */}
+              <RecordStatusBadge state="archived" />
             </h2>
             <p id="archive-bc-desc" style={{ margin: '0 0 1rem', fontSize: '0.9rem', color: 'var(--steel)' }}>
               <strong>Bill {confirmArchive.billNumber}</strong>

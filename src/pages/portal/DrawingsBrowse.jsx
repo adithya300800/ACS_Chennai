@@ -70,6 +70,7 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import StatusBadge from '../../components/StatusBadge.jsx';
+import RecordStatusBadge from '../../components/RecordStatusBadge.jsx';
 import DrawingFormModal from '../../components/DrawingFormModal.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { formatShortDate } from '../../lib/format.js';
@@ -123,6 +124,11 @@ export default function DrawingsBrowse() {
   const [newProjectName, setNewProjectName] = useState('');
   const [resolveBusy, setResolveBusy] = useState(false);
   const [resolveError, setResolveError] = useState('');
+  // §8.12 (Fresh24): track the most recent inactive project so we can
+  // render the shared RecordStatusBadge alongside the inline error
+  // message. Reset on success / new pick so the banner doesn't linger
+  // after the engineer moves on.
+  const [inactiveProjectName, setInactiveProjectName] = useState('');
 
   const [drawings, setDrawings] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -229,6 +235,7 @@ export default function DrawingsBrowse() {
     setCreateMode(false);
     setNewProjectName('');
     setResolveError('');
+    setInactiveProjectName('');
   }, [searchParams, setSearchParams]);
 
   // ── Create a new project from the inline form ────────────────────────
@@ -268,8 +275,10 @@ export default function DrawingsBrowse() {
       const code = err?.code;
       if (code === 'PROJECT_INACTIVE') {
         setResolveError(`"${name}" is archived. Ask an admin to reactivate it.`);
+        setInactiveProjectName(name);
       } else {
         setResolveError(err?.message || `Couldn't find or create "${name}".`);
+        setInactiveProjectName('');
       }
     } finally {
       setResolveBusy(false);
@@ -395,6 +404,7 @@ export default function DrawingsBrowse() {
                   setCreateMode(true);
                   setNewProjectName('');
                   setResolveError('');
+                  setInactiveProjectName('');
                 } else if (val.startsWith('__disc__:')) {
                   // Picked a discovered name — flip into create-mode
                   // with the name pre-filled so the engineer can
@@ -403,6 +413,7 @@ export default function DrawingsBrowse() {
                   setCreateMode(true);
                   setNewProjectName(name);
                   setResolveError('');
+                  setInactiveProjectName('');
                 } else {
                   handleSelectProject(val);
                 }
@@ -440,8 +451,16 @@ export default function DrawingsBrowse() {
               </div>
             )}
             {resolveError && (
-              <div role="alert" style={{ fontSize: '0.85rem', color: 'var(--danger, #c0392b)', marginTop: '0.25rem' }}>
-                {resolveError}
+              <div
+                role="alert"
+                style={{ fontSize: '0.85rem', color: 'var(--danger, #c0392b)', marginTop: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}
+              >
+                {/* §8.12 (Fresh24): share the canonical archive badge so
+                    the error row reads the same as the archive pills in
+                    Training / Projects / Billing. Hidden when the
+                    message isn't an archive response. */}
+                {inactiveProjectName && <RecordStatusBadge state="archived" />}
+                <span>{resolveError}</span>
               </div>
             )}
           </div>
