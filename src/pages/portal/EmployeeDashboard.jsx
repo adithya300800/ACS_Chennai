@@ -357,14 +357,42 @@ export default function EmployeeDashboard() {
             <p className="dashboard-card-empty">Nothing due in the next week.</p>
           ) : (
             <ul className="dashboard-card-list">
-              {overdueTraining.slice(0, 2).map((e) => (
-                <li key={e.id} className="dashboard-card-list-row overdue">
+              {overdueTraining.slice(0, 2).map((e, idx) => {
+                // §8.1 — The first overdue row is the user's most
+                // actionable item. Wrap it in a Link so a single
+                // tap navigates straight to the course player
+                // (/portal/training/:id, where :id is the enrollment
+                // id). Subsequent rows stay as static <li>s so we
+                // don't dilute the affordance — only the most
+                // pressing item gets the direct-link treatment.
+                const row = (
                   <span className="dashboard-card-list-text">{e.course?.title || 'Untitled course'}</span>
+                );
+                const meta = (
                   <span className="dashboard-card-list-meta">
                     Overdue · {e.dueDate ? formatDateShort(e.dueDate) : ''}
                   </span>
-                </li>
-              ))}
+                );
+                return (
+                  <li key={e.id} className="dashboard-card-list-row overdue">
+                    {idx === 0 ? (
+                      <Link
+                        to={`/portal/training/${e.id}`}
+                        className="dashboard-card-list-link"
+                        aria-label={`Resume overdue course: ${e.course?.title || 'Untitled course'}`}
+                      >
+                        {row}
+                        {meta}
+                      </Link>
+                    ) : (
+                      <>
+                        {row}
+                        {meta}
+                      </>
+                    )}
+                  </li>
+                );
+              })}
               {dueSoonTraining.slice(0, 3 - overdueTraining.length).map((e) => (
                 <li key={e.id} className="dashboard-card-list-row">
                   <span className="dashboard-card-list-text">{e.course?.title || 'Untitled course'}</span>

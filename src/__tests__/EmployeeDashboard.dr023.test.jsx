@@ -129,6 +129,65 @@ describe('DR-023 — EmployeeDashboard real-mount coverage', () => {
   });
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+// §8.1 — Training-tile deep-link. The actionable overdue row on the
+// employee dashboard should deep-link straight to /portal/training/:id
+// (the course player) so a single tap resumes the most pressing course.
+// Static `<li>` rows are preserved for the secondary overdue + due-soon
+// items so the affordance stays focused on the most actionable one.
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('§8.1 — EmployeeDashboard training deep-link', () => {
+  test('6. actionable overdue tile links to /portal/training/<enrollmentId>', async () => {
+    // Mount-time data: one overdue enrollment (actionable, must deep-link)
+    // + one secondary overdue + one due-soon. Only the FIRST overdue row
+    // gets the direct link — the audit acceptance was "single tap to the
+    // most actionable overdue item", not "deep-link every row".
+    api.getMyTraining.mockResolvedValueOnce({
+      enrollments: [
+        {
+          id: 'enr-actionable',
+          dueDate: '2026-09-01T00:00:00Z', // past → overdue
+          course: { id: 'course-1', title: 'Fall Protection 101' },
+        },
+        {
+          id: 'enr-secondary',
+          dueDate: '2026-09-05T00:00:00Z', // past → overdue but not actionable
+          course: { id: 'course-2', title: 'Confined Space' },
+        },
+        {
+          id: 'enr-due-soon',
+          dueDate: '2099-01-01T00:00:00Z', // future → due-soon
+          course: { id: 'course-3', title: 'First Aid Recert' },
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/portal/dashboard']}>
+        <EmployeeDashboardProbe />
+      </MemoryRouter>
+    );
+
+    // The actionable overdue row is identified by its aria-label which
+    // is unique to the deep-linked row. Other rows don't carry one.
+    const actionable = await screen.findByLabelText(/resume overdue course: fall protection 101/i);
+    expect(actionable).toBeInTheDocument();
+    // The deep-link target must be /portal/training/<enrollmentId>.
+    expect(actionable.getAttribute('href')).toMatch(/\/portal\/training\/enr-actionable$/);
+  });
+
+  test('7. source-text pin: the actionable overdue row wraps in <Link to=/portal/training/...>', () => {
+    // Guard against a regression that drops the deep-link affordance
+    // — the regex pins BOTH the Link wrapper shape and the dynamic
+    // enrollment-id interpolation so a future "rewrap as <a>" refactor
+    // that hard-codes the URL would also trip this pin.
+    expect(dashSrc).toMatch(
+      /<Link[^>]*to=\{`\/portal\/training\/\$\{e\.id\}`\}/
+    );
+  });
+});
+
 // Probe harness: renders EmployeeDashboard inside a MemoryRouter that
 // captures every navigation into the DOM so the assertion above can
 // read the resulting pathname/search without needing history/.
