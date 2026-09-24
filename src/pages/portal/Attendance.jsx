@@ -23,6 +23,16 @@ export default function Attendance() {
   // never fired.
   const [fetchStatus, setFetchStatus] = useState('loading');
   const [monthRecords, setMonthRecords] = useState([]);
+  // DR-008 (Fresh24 audit 2026-09-24): track the month fetch status
+  // separately from `monthRecords` so a failed read can render an error
+  // + Retry instead of an unmarked calendar that looks identical to a
+  // "no records this month" success. The previous catch-and-zero
+  // (`catch { setMonthRecords([]) }`) was the headline bug class —
+  // today would render as a clean empty cell, indistinguishable from
+  // a confirmed "not checked in today" success. `null` = not yet
+  // fetched, `'loading'` = in-flight, `'error'` = fetch failed,
+  // `'success'` = fetched (possibly empty).
+  const [monthStatus, setMonthStatus] = useState(null);
   // S3-12 (round-27 audit): default to the IST month so a user west of
   // UTC whose browser-local clock has rolled into the next month before
   // the IST business day does not see last month selected while their
@@ -123,11 +133,19 @@ export default function Attendance() {
 
   // Fetch month records
   const fetchMonth = useCallback(async () => {
+    setMonthStatus('loading');
     try {
       const data = await api.get(`/attendance?month=${currentMonth}`, accessToken);
       setMonthRecords(data || []);
+      setMonthStatus('success');
     } catch {
-      setMonthRecords([]);
+      // DR-008: do NOT reset `monthRecords` to [] on error. The previous
+      // implementation collapsed a fetch failure to a clean empty
+      // calendar — which meant today's cell rendered as "no record
+      // today", exactly the failure-as-zero pattern the audit flagged.
+      // The render branch below now swaps the grid for an error + Retry
+      // when monthStatus === 'error'.
+      setMonthStatus('error');
     }
   }, [accessToken, currentMonth]);
 
@@ -389,7 +407,47 @@ export default function Attendance() {
           </div>
         )}
 
-        {!hasOpenSession ? (
+        {/* DR-008: gate the manual "Mark Attendance" button on a known
+            successful read. The auto-shortcut (see useEffect below
+            anchored on `?action=check-in`) already refused to fire while
+            `fetchStatus !== 'success'`; the manual button previously did
+            not, so a user could tap it on top of unknown state (e.g.
+            while the GET was still loading or had just failed). Showing
+            the button on unknown state is misleading — we don't actually
+            know today is unmarked. While loading or after an error we
+            render a Retry button instead. */}
+        {fetchStatus === 'error' ? (
+          <div className="attendance-action">
+            <button
+              type="button"
+              className="attendance-btn attendance-btn-checkin"
+              onClick={fetchToday}
+              disabled={fetchStatus === 'loading'}
+            >
+              {fetchStatus === 'loading' ? (
+                <>
+                  <span className="spinner"></span>
+                  Retrying…
+                </>
+              ) : (
+                <>Retry loading today's record</>
+              )}
+            </button>
+            <p className="attendance-action-hint">Could not confirm whether attendance is already marked today.</p>
+          </div>
+        ) : fetchStatus === 'loading' ? (
+          <div className="attendance-action">
+            <button
+              className="attendance-btn attendance-btn-checkin"
+              disabled
+              aria-busy="true"
+            >
+              <span className="spinner"></span>
+              Checking today's attendance…
+            </button>
+            <p className="attendance-action-hint">GPS location will be captured automatically</p>
+          </div>
+        ) : !hasOpenSession ? (
           <div className="attendance-action">
             <button
               className="attendance-btn attendance-btn-checkin"
@@ -487,6 +545,27 @@ export default function Attendance() {
           </button>
         </div>
 
+        {/* DR-008: when the month fetch failed, do NOT render the grid
+            (today's cell would otherwise render as "unmarked", conflated
+            with a confirmed blank day). Surface the failure and let the
+            user retry. Loading state is rendered as a skeleton-like hint
+            so the cell layout doesn't reflow in a way that hides today's
+            real status during a brief re-fetch. */}
+        {monthStatus === 'error' ? (
+          <div className="attendance-calendar-error" role="alert">
+            <p style={{ margin: '0 0 0.75rem', color: 'var(--steel)' }}>
+              Couldn't load attendance for this month. Days below may show as unmarked even if you did check in.
+            </p>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={fetchMonth}
+              disabled={monthStatus === 'loading'}
+            >
+              {monthStatus === 'loading' ? 'Retrying…' : 'Retry'}
+            </button>
+          </div>
+        ) : (
         <div className="attendance-cal-grid">
           {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
             <div key={d} className="attendance-cal-day-header">{d}</div>
@@ -510,6 +589,7 @@ export default function Attendance() {
             );
           })}
         </div>
+        )}
 
         <div className="attendance-cal-legend">
           <span className="legend"><span className="legend-dot" style={{background:'rgba(22,163,74,0.15)'}}></span> Present</span>

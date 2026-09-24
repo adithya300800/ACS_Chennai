@@ -108,6 +108,13 @@ export default function TrainingCourseDetail() {
 
   const [course, setCourse] = useState(null);
   const [enrollments, setEnrollments] = useState([]);
+  // DR-008 (Fresh24 audit 2026-09-24): track the enrollment fetch's
+  // status separately from its data so a failed read can render
+  // "Couldn't load enrollments — Retry" instead of the previous
+  // "No enrollments yet." copy that conflated empty with failed.
+  // `null` = not yet fetched, `'loading'` = in-flight, `'error'` =
+  // fetch failed, `'success'` = fetched (possibly empty).
+  const [enrollmentsStatus, setEnrollmentsStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [actionPending, setActionPending] = useState(false);
@@ -138,13 +145,20 @@ export default function TrainingCourseDetail() {
   }, [id, accessToken]);
 
   const fetchEnrollments = useCallback(async () => {
+    setEnrollmentsStatus('loading');
     try {
       const data = await api.getAllTrainingEnrollments({ courseId: id }, accessToken);
       setEnrollments(data.enrollments || []);
+      setEnrollmentsStatus('success');
     } catch (err) {
-      // Don't blow up the page if enrollment fetch fails — course card still
-      // renders. Stats will show 0/0/0/0.
+      // Don't blow up the page if enrollment fetch fails — course card
+      // still renders. But DO surface the failure distinctly from "no
+      // enrollments yet" so the admin can tell an outage apart from an
+      // empty course. The previous code swallowed the error to a
+      // console.error and left the state at its previous value, so a
+      // transient outage looked like "0 enrollments".
       console.error('[training/course-detail] enrollments fetch failed', err?.message);
+      setEnrollmentsStatus('error');
     }
   }, [id, accessToken]);
 
@@ -155,6 +169,11 @@ export default function TrainingCourseDetail() {
   }, [employee?.isAdmin, fetchCourse, fetchEnrollments]);
 
   // Bucketed stats — mirrors the dashboard's `counts` memo so behavior matches.
+  //
+  // DR-008: when `enrollmentsStatus === 'error'` the stats reflect
+  // unknown — not zero. The render branch below swaps the tile numbers
+  // for "—" so an admin never reads a failed fetch as "0 enrolled /
+  // 0 completed / 0 overdue".
   const counts = useMemo(() => {
     const c = { ENROLLED: enrollments.length, COMPLETED: 0, IN_PROGRESS: 0, OVERDUE: 0 };
     enrollments.forEach((e) => {
@@ -164,6 +183,7 @@ export default function TrainingCourseDetail() {
     });
     return c;
   }, [enrollments, businessDateKey]);
+  const countsUnknown = enrollmentsStatus === 'error';
 
   const recentEnrollments = useMemo(
     () => enrollments.slice(0, RECENT_ENROLLMENTS_LIMIT),
@@ -304,22 +324,24 @@ export default function TrainingCourseDetail() {
         </button>
       </div>
 
-      {/* Stats tiles — mirror dashboard's training-stats so visuals match. */}
+      {/* Stats tiles — mirror dashboard's training-stats so visuals match.
+          DR-008: when the enrollment fetch failed, swap each number for
+          "—" so a downed endpoint reads as "unknown" rather than "0". */}
       <div className="training-stats training-stats-admin" aria-label="Enrollment stats for this course">
         <div className="training-stat">
-          <div className="training-stat-num">{counts.ENROLLED}</div>
+          <div className="training-stat-num">{countsUnknown ? '—' : counts.ENROLLED}</div>
           <div className="training-stat-label">Enrolled</div>
         </div>
         <div className="training-stat">
-          <div className="training-stat-num">{counts.IN_PROGRESS}</div>
+          <div className="training-stat-num">{countsUnknown ? '—' : counts.IN_PROGRESS}</div>
           <div className="training-stat-label">In progress</div>
         </div>
         <div className="training-stat">
-          <div className="training-stat-num">{counts.COMPLETED}</div>
+          <div className="training-stat-num">{countsUnknown ? '—' : counts.COMPLETED}</div>
           <div className="training-stat-label">Completed</div>
         </div>
-        <div className={`training-stat ${counts.OVERDUE > 0 ? 'training-stat-warn' : ''}`}>
-          <div className="training-stat-num">{counts.OVERDUE}</div>
+        <div className={`training-stat ${!countsUnknown && counts.OVERDUE > 0 ? 'training-stat-warn' : ''}`}>
+          <div className="training-stat-num">{countsUnknown ? '—' : counts.OVERDUE}</div>
           <div className="training-stat-label">Overdue</div>
         </div>
       </div>
@@ -364,7 +386,29 @@ export default function TrainingCourseDetail() {
           )}
         </div>
         {enrollments.length === 0 ? (
-          <div className="training-list-state">No enrollments yet.</div>
+          // DR-008: distinguish "fetch failed" from "no enrollments yet".
+          // The previous code rendered this same "No enrollments yet." copy
+          // whether the API returned [] or threw — a confused message when
+          // an outage hit /api/training/enrollments. Retry reuses the
+          // existing fetchEnrollments callback; the inline error arm
+          // mirrors the dashboard's `widgetStatus === 'error'` pattern.
+          enrollmentsStatus === 'error' ? (
+            <div className="training-list-state" role="alert">
+              <span style={{ display: 'inline-block', marginRight: '0.75rem' }}>
+                Couldn't load recent enrollments.
+              </span>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={fetchEnrollments}
+                disabled={enrollmentsStatus === 'loading'}
+              >
+                {enrollmentsStatus === 'loading' ? 'Retrying…' : 'Retry'}
+              </button>
+            </div>
+          ) : (
+            <div className="training-list-state">No enrollments yet.</div>
+          )
         ) : (
           <ul className="training-list training-list-enrollments">
             {recentEnrollments.map((e) => (
