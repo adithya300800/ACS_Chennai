@@ -661,15 +661,23 @@ router.get('/:boqItemId/executions', asyncHandler(async (req, res) => {
   }
 
   try {
-    const rows = await prisma.boqExecution.findMany({
-      where: { boqItemId: item.id },
-      orderBy: [{ executedAt: 'desc' }, { createdAt: 'desc' }],
-      include: {
-        recordedBy: { select: { id: true, name: true, email: true } },
-      },
-      take: 200,
-    });
-    res.json({ items: rows });
+    // [DR-009] Run the row cap and the true count in parallel so the UI
+    // can show "showing first 200 of <total>" instead of treating the
+    // bounded batch as the full ledger. additive — existing `items`
+    // contract unchanged.
+    const where = { boqItemId: item.id };
+    const [rows, total] = await Promise.all([
+      prisma.boqExecution.findMany({
+        where,
+        orderBy: [{ executedAt: 'desc' }, { createdAt: 'desc' }],
+        include: {
+          recordedBy: { select: { id: true, name: true, email: true } },
+        },
+        take: 200,
+      }),
+      prisma.boqExecution.count({ where }),
+    ]);
+    res.json({ items: rows, total });
   } catch (err) {
     console.error('BOQ execution list error', {
       employeeHash: req.employeeId ? require('../lib/pii').hashIdentifier(req.employeeId) : undefined,

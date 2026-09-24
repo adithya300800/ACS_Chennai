@@ -239,12 +239,20 @@ function isLeaveOverlapConstraintError(err) {
 // Employee's own leave requests. Newest first.
 router.get('/my', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
-  const rows = await prisma.leaveRequest.findMany({
-    where: { employeeId: req.employeeId },
-    orderBy: [{ startDate: 'desc' }, { createdAt: 'desc' }],
-    take: 100,
-  });
-  res.json({ requests: rows.map(serializeLeave) });
+  // [DR-009] Row cap (100) does not expose the true count. Run count in
+  // parallel so the UI can render "showing first 100 of <total>" instead
+  // of treating the bounded batch as the full history. additive — the
+  // existing `requests` array contract stays intact.
+  const where = { employeeId: req.employeeId };
+  const [rows, total] = await Promise.all([
+    prisma.leaveRequest.findMany({
+      where,
+      orderBy: [{ startDate: 'desc' }, { createdAt: 'desc' }],
+      take: 100,
+    }),
+    prisma.leaveRequest.count({ where }),
+  ]);
+  res.json({ requests: rows.map(serializeLeave), total });
 }));
 
 // ─── GET /api/leave ─────────────────────────────────────────────────────────
@@ -307,17 +315,24 @@ router.get('/', asyncHandler(async (req, res) => {
     if (toDate) where.startDate = { lte: toDate };
   }
 
-  const rows = await prisma.leaveRequest.findMany({
-    where,
-    include: {
-      employee: { select: { id: true, name: true, email: true, department: true } },
-      reviewedBy: { select: { id: true, name: true, email: true } },
-    },
-    orderBy: [{ status: 'asc' }, { startDate: 'desc' }],
-    take: 500,
-  });
+  // [DR-009] Row cap (500) does not expose the true count. Run count in
+  // parallel so the UI can render "showing first 500 of <total>" instead
+  // of treating the bounded batch as the full queue. additive — the
+  // existing `requests` array contract stays intact.
+  const [rows, total] = await Promise.all([
+    prisma.leaveRequest.findMany({
+      where,
+      include: {
+        employee: { select: { id: true, name: true, email: true, department: true } },
+        reviewedBy: { select: { id: true, name: true, email: true } },
+      },
+      orderBy: [{ status: 'asc' }, { startDate: 'desc' }],
+      take: 500,
+    }),
+    prisma.leaveRequest.count({ where }),
+  ]);
 
-  res.json({ requests: rows.map(serializeLeave) });
+  res.json({ requests: rows.map(serializeLeave), total });
 }));
 
 // ─── GET /api/leave/:id ─────────────────────────────────────────────────────

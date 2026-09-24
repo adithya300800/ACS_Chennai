@@ -45,13 +45,21 @@ router.get('/employees', requireAuth, requireFreshAdmin, async (req, res) => {
         }
       : undefined;
 
-    const rows = await prisma.employee.findMany({
-      where,
-      select: { id: true, name: true, email: true },
-      orderBy: [{ name: 'asc' }, { email: 'asc' }],
-      take: limit,
-    });
-    res.json({ employees: rows });
+    // [DR-009] Cap at `limit` (max 500) does not expose the true match
+    // count. Run count in parallel so the picker can show "showing first
+    // N of <total>" and the admin bulk-assign path knows whether the
+    // directory search undermatched. additive — the existing `employees`
+    // array contract stays intact.
+    const [rows, total] = await Promise.all([
+      prisma.employee.findMany({
+        where,
+        select: { id: true, name: true, email: true },
+        orderBy: [{ name: 'asc' }, { email: 'asc' }],
+        take: limit,
+      }),
+      prisma.employee.count({ where }),
+    ]);
+    res.json({ employees: rows, total });
   } catch (err) {
     console.error('[admin/employees] lookup failed', {
       prismaCode: err.code,

@@ -727,9 +727,41 @@ router.get('/:id', asyncHandler(async (req, res) => {
       }),
     ]);
 
+    // [DR-009] The legacy implementation set `referencedByCount` from
+    // the capped array length — so a drawing with 142 DPR references
+    // was reported as "50 references". Run real counts alongside the
+    // findMany so the stamp label is honest. We deliberately do NOT
+    // expose a separate `referencedByDprsCount` / `referencedByInspectionsCount`
+    // (avoids renaming the existing wire field callers depend on); the
+    // `referencedByLimited` flag tells the stamp UI when the array is a
+    // sample rather than the full set, so it can render "50 of <total>"
+    // instead of the partial set as exact.
+    const [referencedByDprsCount, referencedByInspectionsCount] = await Promise.all([
+      prisma.dPR.count({ where: { drawingId: id } })
+        .catch((err) => {
+          console.warn('Drawing → DPR count failed', { drawingId: id, prismaCode: err.code });
+          return null;
+        }),
+      prisma.inspectionRecord.count({ where: { drawingId: id } })
+        .catch((err) => {
+          console.warn('Drawing → inspection count failed', { drawingId: id, prismaCode: err.code });
+          return null;
+        }),
+    ]);
+
+    // Count fallback: if either count query fails, surface the array
+    // length (the previous behaviour) so the label is at least bounded
+    // by what we successfully read. The `null` branch would otherwise
+    // render "null references" in the UI.
+    const totalDprCount = referencedByDprsCount ?? referencedByDprs.length;
+    const totalInspCount = referencedByInspectionsCount ?? referencedByInspections.length;
+
     res.json({
       ...serializeDrawing(row),
-      referencedByCount: referencedByDprs.length + referencedByInspections.length,
+      referencedByCount: totalDprCount + totalInspCount,
+      referencedByLimited: referencedByDprsCount == null || referencedByInspectionsCount == null
+        ? null
+        : (referencedByDprsCount + referencedByInspectionsCount) > (referencedByDprs.length + referencedByInspections.length),
       referencedBy: {
         dprs: referencedByDprs.map((d) => ({
           id: d.id,
