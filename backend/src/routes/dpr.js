@@ -7,7 +7,7 @@ const router = express.Router();
 // dpr.js verbatim. See lib/idempotency.js for the contract and TTL.
 const { tryReplay: tryIdempotentReplay, recordSuccess: recordIdempotentSuccess } = require('../lib/idempotency');
 const { requireAuth, requireFreshAdmin, requireAdmin } = require('../middleware/auth');
-const { generateReadSASUrl, verifyBlobExists, isAbsent, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
+const { generateReadSASUrl, verifyBlobExists, CONTENT_TYPE_EXT } = require('../lib/blobStorage');
 const { mapPrismaError, parseStrictISODate, parseISODateTime, toDateOnly } = require('../lib/errors');
 // Round-27: shared IST date helpers. The `month` query shortcut on the list
 // endpoint uses `getMonthRangeUtc` to expand `?month=YYYY-MM` into a
@@ -50,6 +50,10 @@ const {
   bindPhotoIntentsTx,
   photoBindingLostResponse,
 } = require('../lib/uploadIntentBinding');
+// [DR-018] Dual-reader for photo blobs — tries the canonical intent
+// path first, then the legacy `${submitterId}/${ulid}.${ext}`
+// derivation. See lib/photoBlobLookup.js for the full rationale.
+const { resolvePhotoBlobAddress } = require('../lib/photoBlobLookup');
 // DR-027: parseStrictISODate only validates calendar shape, so a well-formed
 // future date used to persist. rejectIfFutureReportDate is the authority.
 const { rejectIfFutureReportDate } = require('../lib/reportDate');
@@ -1030,35 +1034,22 @@ router.get('/', asyncHandler(async (req, res) => {
       if (!d.photos || d.photos.length === 0) return d;
       const photosWithUrls = await Promise.all(d.photos.map(async (p) => {
         try {
-          const ext = CONTENT_TYPE_EXT[p.contentType];
-          const blobName = ext
-            ? `${d.submittedById}/${p.ulid}.${ext}`
-            : `${d.submittedById}/${p.ulid}`;
-          try {
-            const props = await verifyBlobExists(p.container, blobName);
-            // [DR-007] Only `outcome: 'absent'` (404) → null readUrl.
-            // Permission/timeout/5xx land in `outcome: 'unknown'` and
-            // fall through to minting a fresh SAS URL.
-            if (isAbsent(props)) {
-              // Object was deleted / never landed — skip the SAS mint so
-              // the browser never opens a URL R2 can't serve.
-              return { ...p, readUrl: null };
-            }
-            if (props.outcome === 'unknown') {
-              console.warn('[dpr] verifyBlobExists unknown, minting SAS anyway', {
-                ulid: p.ulid,
-                reason: props.reason,
-              });
-            }
-          } catch (err) {
-            // Defensive — should not happen under DR-007. Kept so a
-            // future SDK regression doesn't break the listing.
-            console.warn('[dpr] verifyBlobExists threw, minting SAS anyway', {
-              ulid: p.ulid,
-              errMessage: err?.message?.split('\n')[0],
-            });
+          // [DR-018] Dual-reader — try the canonical intent path first,
+          // then the legacy derivation. The canonical lookup is what
+          // makes admin-repaired photos readable: their bytes were
+          // uploaded under the admin's prefix, not under
+          // `d.submittedById`. Falls back gracefully to the legacy
+          // `${submitterId}/${ulid}.${ext}` shape for any photo that
+          // doesn't have a CONFIRMED intent row (pre-migration uploads).
+          const resolved = await resolvePhotoBlobAddress({ prisma, photo: p, dpr: d });
+          if (!resolved.blobName) {
+            // Both candidates were `absent` (404). Genuine BLOB_GONE.
+            return { ...p, readUrl: null };
           }
-          const { sasUrl } = await generateReadSASUrl(p.container, blobName);
+          if (resolved.source === 'canonical') {
+            // No `unknown` warning here — canonical-hit is the happy path.
+          }
+          const { sasUrl } = await generateReadSASUrl(p.container, resolved.blobName);
           return { ...p, readUrl: sasUrl };
         } catch (e) {
           // Don't fail the whole list if one URL fails — the placeholder
@@ -1339,39 +1330,28 @@ router.get('/:id', async (req, res) => {
     // inspection.js#:id GET). On `exists: false` we return readUrl: null
     // so PhotoThumb renders its placeholder instead of the browser
     // opening a presigned URL that R2 will answer with NoSuchKey XML.
+    //
+    // [DR-018] Dual-reader — `resolvePhotoBlobAddress` tries the canonical
+    // intent path first (the actual blobPath the upload landed under),
+    // then the legacy `${submitterId}/${ulid}.${ext}` derivation. This
+    // is the detail-page counterpart to the list endpoint's fix and is
+    // what makes admin-repaired photos readable from the employee
+    // detail modal after a list re-fetch. Returns null readUrl only
+    // when both candidates are `absent` (genuine BLOB_GONE).
     const dprOwnerId = dpr.submittedById;
     const photosWithUrls = await Promise.all(dpr.photos.map(async p => {
-      const ext = CONTENT_TYPE_EXT[p.contentType];
-      const employeeId = (p.dpr && p.dpr.submittedById) || dprOwnerId;
-      const blobName = ext
-        ? `${employeeId}/${p.ulid}.${ext}`
-        : `${employeeId}/${p.ulid}`;
-      try {
-        const props = await verifyBlobExists(p.container, blobName);
-        // [DR-007] Only `outcome: 'absent'` (404) → null readUrl.
-        // Permission/timeout/5xx land in `outcome: 'unknown'` and
-        // fall through to minting a fresh SAS URL.
-        if (isAbsent(props)) {
-          const { dpr: _dprJoin, ...photoForClient } = p;
-          return { ...photoForClient, readUrl: null };
-        }
-        if (props.outcome === 'unknown') {
-          console.warn('[dpr] verifyBlobExists unknown, minting SAS anyway', {
-            ulid: p.ulid,
-            reason: props.reason,
-          });
-        }
-      } catch (err) {
-        // Defensive — should not happen under DR-007. Kept so a
-        // future SDK regression doesn't break the listing.
-        console.warn('[dpr] verifyBlobExists threw, minting SAS anyway', {
-          ulid: p.ulid,
-          errMessage: err?.message?.split('\n')[0],
-        });
-      }
-      const { sasUrl } = await generateReadSASUrl(p.container, blobName);
-      // Strip the helper join before sending to the client
+      const photoForResolver = { ...p, dpr: undefined };
+      // The Prisma include may have joined `p.dpr.submittedById` onto each
+      // photo row; pass it via the resolver's `dpr` param so the legacy
+      // branch can mirror the previous fallback to `p.dpr.submittedById`.
+      const dprForResolver = (p.dpr && { submittedById: p.dpr.submittedById }) || { submittedById: dprOwnerId };
+      const resolved = await resolvePhotoBlobAddress({ prisma, photo: photoForResolver, dpr: dprForResolver });
       const { dpr: _dprJoin, ...photoForClient } = p;
+      if (!resolved.blobName) {
+        // Both candidates were `absent` (404). Genuine BLOB_GONE.
+        return { ...photoForClient, readUrl: null };
+      }
+      const { sasUrl } = await generateReadSASUrl(p.container, resolved.blobName);
       return { ...photoForClient, readUrl: sasUrl };
     }));
 
@@ -3167,30 +3147,36 @@ router.patch('/:id/photos/:photoId', asyncHandler(async (req, res) => {
     //      durable mechanism for cleaning up stale bytes — it knows the
     //      true DB↔R2 mapping and never deletes a still-bound blob.
     //
-    // Mint a fresh read URL using the DPR's submittedById prefix.
+    // [DR-018] Mint a fresh read URL using the dual-reader. The canonical
+    // path is the `blobPath` stamped on the upload intent by /sas-url —
+    // authoritative for "where did the bytes actually land?", and the
+    // only correct answer when an admin (or any employee other than the
+    // original submitter) replaced the photo: their /sas-url mint lives
+    // under their own prefix, not under `dpr.submittedById`. The legacy
+    // derivation is the historical `${submitterId}/${ulid}.${ext}` shape;
+    // falling back to it preserves readability for photos uploaded before
+    // the intent lookup was wired and for any reader that has not been
+    // migrated yet. Only `outcome: 'absent'` on BOTH candidates lands
+    // null readUrl — a genuine "the bytes are gone" signal.
     let readUrl = null;
     try {
-      const newExt = CONTENT_TYPE_EXT[contentType];
-      const newBlobName = newExt
-        ? `${dpr.submittedById}/${updated.ulid}.${newExt}`
-        : `${dpr.submittedById}/${updated.ulid}`;
-      const props = await verifyBlobExists(photo.container, newBlobName);
-      // [DR-007] Only mint a SAS URL for an outcome of `present`. For
-      // `absent` (404) we surface null readUrl so the SPA knows the
-      // replacement didn't land; for `unknown` (timeout / 403 / 5xx)
-      // we also leave readUrl null rather than hand out a URL that may
-      // never resolve — the client triggers a retry on next mount.
-      if (props.outcome === 'present') {
-        const { sasUrl } = await generateReadSASUrl(photo.container, newBlobName);
+      const resolved = await resolvePhotoBlobAddress({
+        prisma,
+        photo: { ulid: updated.ulid, container: photo.container, contentType },
+        dpr,
+      });
+      if (resolved.blobName) {
+        const { sasUrl } = await generateReadSASUrl(photo.container, resolved.blobName);
         readUrl = sasUrl;
-      } else if (props.outcome === 'unknown') {
-        console.warn('[dpr] replace photo: verifyBlobExists unknown; returning photo without readUrl', {
+      } else {
+        console.warn('[dpr] replace photo: blob not found at canonical or legacy path; returning photo without readUrl', {
           photoId,
-          reason: props.reason,
+          ulid: updated.ulid,
+          container: photo.container,
         });
       }
     } catch (err) {
-      console.warn('[dpr] replace photo: verifyBlobExists/ReadSAS threw; returning photo without readUrl', {
+      console.warn('[dpr] replace photo: resolvePhotoBlobAddress/ReadSAS threw; returning photo without readUrl', {
         photoId,
         errMessage: err?.message?.split('\n')[0],
       });

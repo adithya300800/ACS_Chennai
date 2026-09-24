@@ -251,7 +251,12 @@ export default function DprList() {
   function canReplacePhoto(photo) {
     if (!photo || !photo.id) return false;
     if (isAdmin) return true;
-    return expandedDpr && expandedDpr.submittedById && expandedDpr.submittedById === expandedDpr._selfEmployeeId;
+    // [DR-018] Use the real authenticated employee identity instead of
+    // the never-populated `expandedDpr._selfEmployeeId` field. The
+    // previous check compared against undefined, which made the
+    // non-admin repair path silently unreachable. The auth context
+    // is the authoritative source — the server enforces the same gate.
+    return expandedDpr && expandedDpr.submittedById && expandedDpr.submittedById === (employee?.id || null);
   }
 
   function startReplacePhoto(photo) {
@@ -298,7 +303,11 @@ export default function DprList() {
         file.name, file.type, photo.container || 'dpr-photos', accessToken,
       );
       await uploadBlob(sasUrl, file, { contentType: file.type });
-      await api.confirmDprUpload(
+      // [DR-018] Use the canonical confirmUpload helper — the previous
+      // `api.confirmDprUpload` did not exist and threw at runtime,
+      // which made the whole repair flow fail before the bytes ever
+      // bound to the photo row.
+      await api.confirmUpload(
         ulid, photo.container || 'dpr-photos', file.name, file.type, file.size, accessToken,
       );
       const updated = await api.replaceDprPhoto(
@@ -306,11 +315,35 @@ export default function DprList() {
         { uploadIntentUlid: ulid, blobPath, filename: file.name, contentType: file.type, sizeBytes: file.size },
         accessToken,
       );
+      // [DR-018] Caller-side retry on canonical-lookup miss. The PATCH
+      // response may carry readUrl: null when both the canonical and
+      // legacy HEADs returned 404 at PATCH time (transient R2 state).
+      // A list re-fetch runs the dual-reader again and re-mints the
+      // URL if the bytes are now visible — and even if it doesn't, we
+      // still surface the freshly-bound ulid so the row shows "Replace"
+      // rather than "Replace failed".
+      let finalPhoto = updated;
+      if (!finalPhoto || !finalPhoto.readUrl) {
+        try {
+          const fresh = await api.getDpr(expandedDpr.id, accessToken);
+          const freshPhoto = Array.isArray(fresh?.photos)
+            ? fresh.photos.find((p) => p.id === photo.id)
+            : null;
+          if (freshPhoto && freshPhoto.readUrl) {
+            finalPhoto = { ...finalPhoto, ...freshPhoto };
+          }
+        } catch (refreshErr) {
+          // Non-fatal — fall through to whatever the PATCH gave us. The
+          // BLOB_GONE placeholder in PhotoThumb will render until the
+          // user navigates away and back.
+          console.warn('[DprList] post-repair refresh failed', refreshErr);
+        }
+      }
       // Optimistic patch — drop the updated photo (with fresh readUrl)
       // into the photos array in place.
       setExpandedDpr((prev) => {
         if (!prev || !Array.isArray(prev.photos)) return prev;
-        const nextPhotos = prev.photos.map((p) => (p.id === photo.id ? { ...p, ...updated } : p));
+        const nextPhotos = prev.photos.map((p) => (p.id === photo.id ? { ...p, ...finalPhoto } : p));
         return { ...prev, photos: nextPhotos };
       });
       toast.push('Photo replaced.', 'success');

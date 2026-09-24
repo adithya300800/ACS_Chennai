@@ -90,7 +90,7 @@ function PhotoThumb({ photo }) {
 }
 
 function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
-  const { accessToken, isAdmin } = useAuth();
+  const { accessToken, employee, isAdmin } = useAuth();
   const toast = useToast();
   const [dpr, setDpr] = useState(dprSummary);
   const [loading, setLoading] = useState(true);
@@ -122,8 +122,11 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
   const canReplacePhoto = (photo) => {
     if (!photo || !photo.id) return false;
     // Optimistic gate: admin always, else the DPR's submitter only.
+    // [DR-018] Use the real authenticated employee identity instead of
+    // the never-populated `dpr._selfEmployeeId` field. Auth context is
+    // the authoritative source — the server enforces the same gate.
     if (isAdmin) return true;
-    return dpr && dpr.submittedById && dpr.submittedById === (dpr._selfEmployeeId || null);
+    return dpr && dpr.submittedById && dpr.submittedById === (employee?.id || null);
   };
 
   function startReplacePhoto(photo) {
@@ -173,7 +176,11 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
       // 2. PUT the new bytes straight to R2.
       await uploadBlob(sasUrl, file, { contentType: file.type });
       // 3. Confirm the upload — flips intent to CONFIRMED.
-      await api.confirmDprUpload(
+      // [DR-018] Use the canonical confirmUpload helper — the previous
+      // `api.confirmDprUpload` did not exist and threw at runtime,
+      // which made the whole repair flow fail before the bytes ever
+      // bound to the photo row.
+      await api.confirmUpload(
         ulid, photo.container || 'dpr-photos', file.name, file.type, file.size, accessToken,
       );
       // 4. Re-bind the existing photo row to the new intent + bytes.
@@ -182,11 +189,33 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
         { uploadIntentUlid: ulid, blobPath, filename: file.name, contentType: file.type, sizeBytes: file.size },
         accessToken,
       );
-      // 5. Optimistic patch — server returned the updated row with a
+      // 5. [DR-018] Caller-side retry on canonical-lookup miss. The
+      // PATCH response may carry readUrl: null when both the canonical
+      // and legacy HEADs returned 404 at PATCH time (transient R2
+      // state). A detail re-fetch runs the dual-reader again and
+      // re-mints the URL if the bytes are now visible.
+      let finalPhoto = updated;
+      if (!finalPhoto || !finalPhoto.readUrl) {
+        try {
+          const fresh = await api.getDpr(dprSummary.id, accessToken);
+          const freshPhoto = Array.isArray(fresh?.photos)
+            ? fresh.photos.find((p) => p.id === photo.id)
+            : null;
+          if (freshPhoto && freshPhoto.readUrl) {
+            finalPhoto = { ...finalPhoto, ...freshPhoto };
+          }
+        } catch (refreshErr) {
+          // Non-fatal — fall through to whatever the PATCH gave us. The
+          // BLOB_GONE placeholder in PhotoThumb will render until the
+          // user navigates away and back.
+          console.warn('[DprAll] post-repair refresh failed', refreshErr);
+        }
+      }
+      // 6. Optimistic patch — server returned the updated row with a
       // freshly-minted readUrl; drop it into the photos array in-place.
       setDpr((prev) => {
         if (!prev || !Array.isArray(prev.photos)) return prev;
-        const nextPhotos = prev.photos.map((p) => (p.id === photo.id ? { ...p, ...updated } : p));
+        const nextPhotos = prev.photos.map((p) => (p.id === photo.id ? { ...p, ...finalPhoto } : p));
         return { ...prev, photos: nextPhotos };
       });
       toast.push('Photo replaced.', 'success');
