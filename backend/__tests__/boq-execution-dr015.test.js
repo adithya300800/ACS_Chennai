@@ -203,6 +203,16 @@ function buildApp() {
         if (!where || !where.id) return null;
         return executionStore.get(where.id) || null;
       }),
+      // [Fresh24 DR-009] additive count() so the { items, total } envelope
+      // contract from c7d5e01 has a working mock. Counts executionStore rows
+      // honouring the same `where.boqItemId` filter the handler uses.
+      count: jest.fn(async ({ where = {} } = {}) => {
+        let rows = [...executionStore.values()];
+        if (where.boqItemId !== undefined) {
+          rows = rows.filter((r) => r.boqItemId === where.boqItemId);
+        }
+        return rows.length;
+      }),
       delete: jest.fn(async ({ where }) => {
         const row = executionStore.get(where.id);
         if (!row) {
