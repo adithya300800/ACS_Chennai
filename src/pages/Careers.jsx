@@ -1,6 +1,107 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
+import Modal from '../components/Modal.jsx';
+
+// DR-044: when the Careers apply overlay opens we want keyboard /
+// screen-reader users to land inside the form, not on the corner X
+// button. Modal.jsx's default autofocus picks the FIRST focusable in
+// DOM order (the close button), so we hand it a ref to the first
+// input via `initialFocusRef`. The ref is also exposed as
+// `firstFieldRef` so the audit's test can resolve the same node.
+function ApplyModal({ job, onClose }) {
+  const firstFieldRef = React.useRef(null);
+  const [form, setForm] = useState({ name: '', email: '', phone: '', linkedin: '', message: '' });
+  const [sent, setSent] = useState(false);
+
+  const handleChange = (e) => setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    const subject = encodeURIComponent(`Job Application — ${job.title} at ACS Chennai`);
+    const body = encodeURIComponent(
+      `Name: ${form.name}\nEmail: ${form.email}\nPhone: ${form.phone}\nLinkedIn: ${form.linkedin}\n\nApplying for: ${job.title}\n\nCover note:\n${form.message}`
+    );
+    window.location.href = `mailto:careers@acschennai.com?subject=${subject}&body=${body}`;
+    setSent(true);
+  };
+
+  return (
+    <Modal
+      open={true}
+      onClose={onClose}
+      ariaLabelledBy="careers-apply-heading"
+      initialFocusRef={firstFieldRef}
+      maxWidth={560}
+    >
+      <div style={{ position: 'relative' }}>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close application form"
+          style={{
+            position: 'absolute', top: '-0.25rem', right: 0,
+            background: 'none', border: 'none', cursor: 'pointer',
+            color: 'var(--steel)', fontSize: '1.2rem', lineHeight: 1,
+            padding: '0.25rem'
+          }}
+        >
+          <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+
+        <h3
+          id="careers-apply-heading"
+          style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", fontWeight: '700', fontSize: '1.1rem', color: 'var(--navy)', marginBottom: '0.25rem' }}
+        >
+          Apply for {job.title}
+        </h3>
+        <p style={{ fontSize: '0.85rem', color: 'var(--steel)', marginBottom: '1.4rem' }}>{job.location} · {job.type}</p>
+
+        {sent ? (
+          <div className="form-success">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+              <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
+              Email client opened
+            </div>
+            <p style={{ fontSize: '0.87rem', fontWeight: '400' }}>Please send the email to complete your application. You can also email us directly at <a href="mailto:careers@acschennai.com">careers@acschennai.com</a>.</p>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+            <div className="form-row">
+              <div className="form-group">
+                <label htmlFor="app-name">Full Name *</label>
+                <input ref={firstFieldRef} id="app-name" name="name" type="text" className="form-input" placeholder="Priya Sharma" value={form.name} onChange={handleChange} required />
+              </div>
+              <div className="form-group">
+                <label htmlFor="app-email">Email *</label>
+                <input id="app-email" name="email" type="email" className="form-input" placeholder="priya@company.com" value={form.email} onChange={handleChange} required />
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label htmlFor="app-phone">Phone</label>
+                <input id="app-phone" name="phone" type="tel" className="form-input" placeholder="+91 98xxx xxxxx" value={form.phone} onChange={handleChange} />
+              </div>
+              <div className="form-group">
+                <label htmlFor="app-linkedin">LinkedIn URL</label>
+                <input id="app-linkedin" name="linkedin" type="url" className="form-input" placeholder="https://linkedin.com/in/yourprofile" value={form.linkedin} onChange={handleChange} />
+              </div>
+            </div>
+            <div className="form-group">
+              <label htmlFor="app-message">Cover Note *</label>
+              <textarea id="app-message" name="message" className="form-input" rows="4"
+                placeholder="Tell us about your relevant experience, what draws you to this role, and any specific projects you've worked on..."
+                value={form.message} onChange={handleChange} required style={{ resize: 'vertical', minHeight: '90px' }} />
+            </div>
+            <button type="submit" className="btn btn-primary" style={{ justifyContent: 'center', padding: '0.8rem' }}>
+              Send Application
+            </button>
+          </form>
+        )}
+      </div>
+    </Modal>
+  );
+}
 
 const JOBS = [
   {
@@ -57,91 +158,10 @@ const BENEFITS = [
   },
 ];
 
-function ApplyModal({ job, onClose }) {
-  const [form, setForm] = useState({ name: '', email: '', phone: '', linkedin: '', message: '' });
-  const [sent, setSent] = useState(false);
-
-  const handleChange = (e) => setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
-
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    const subject = encodeURIComponent(`Job Application — ${job.title} at ACS Chennai`);
-    const body = encodeURIComponent(
-      `Name: ${form.name}\nEmail: ${form.email}\nPhone: ${form.phone}\nLinkedIn: ${form.linkedin}\n\nApplying for: ${job.title}\n\nCover note:\n${form.message}`
-    );
-    window.location.href = `mailto:careers@acschennai.com?subject=${subject}&body=${body}`;
-    setSent(true);
-  };
-
-  return (
-    <div style={{
-      position: 'fixed', inset: 0, zIndex: 200,
-      background: 'rgba(11,25,41,0.6)', backdropFilter: 'blur(4px)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem'
-    }} onClick={onClose}>
-      <div style={{
-        background: 'var(--white)', borderRadius: 'var(--radius-lg)',
-        padding: '2rem', maxWidth: '560px', width: '100%',
-        boxShadow: 'var(--shadow-xl)', position: 'relative'
-      }} onClick={(e) => e.stopPropagation()}>
-        <button onClick={onClose} style={{
-          position: 'absolute', top: '1rem', right: '1rem',
-          background: 'none', border: 'none', cursor: 'pointer',
-          color: 'var(--steel)', fontSize: '1.2rem', lineHeight: 1
-        }}>
-          <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
-        </button>
-
-        <h3 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif", fontWeight: '700', fontSize: '1.1rem', color: 'var(--navy)', marginBottom: '0.25rem' }}>
-          Apply for {job.title}
-        </h3>
-        <p style={{ fontSize: '0.85rem', color: 'var(--steel)', marginBottom: '1.4rem' }}>{job.location} · {job.type}</p>
-
-        {sent ? (
-          <div className="form-success">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-              <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
-              Email client opened
-            </div>
-            <p style={{ fontSize: '0.87rem', fontWeight: '400' }}>Please send the email to complete your application. You can also email us directly at <a href="mailto:careers@acschennai.com">careers@acschennai.com</a>.</p>
-          </div>
-        ) : (
-          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="app-name">Full Name *</label>
-                <input id="app-name" name="name" type="text" className="form-input" placeholder="Priya Sharma" value={form.name} onChange={handleChange} required />
-              </div>
-              <div className="form-group">
-                <label htmlFor="app-email">Email *</label>
-                <input id="app-email" name="email" type="email" className="form-input" placeholder="priya@company.com" value={form.email} onChange={handleChange} required />
-              </div>
-            </div>
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="app-phone">Phone</label>
-                <input id="app-phone" name="phone" type="tel" className="form-input" placeholder="+91 98xxx xxxxx" value={form.phone} onChange={handleChange} />
-              </div>
-              <div className="form-group">
-                <label htmlFor="app-linkedin">LinkedIn URL</label>
-                <input id="app-linkedin" name="linkedin" type="url" className="form-input" placeholder="https://linkedin.com/in/yourprofile" value={form.linkedin} onChange={handleChange} />
-              </div>
-            </div>
-            <div className="form-group">
-              <label htmlFor="app-message">Cover Note *</label>
-              <textarea id="app-message" name="message" className="form-input" rows="4"
-                placeholder="Tell us about your relevant experience, what draws you to this role, and any specific projects you've worked on..."
-                value={form.message} onChange={handleChange} required style={{ resize: 'vertical', minHeight: '90px' }} />
-            </div>
-            <button type="submit" className="btn btn-primary" style={{ justifyContent: 'center', padding: '0.8rem' }}>
-              Send Application
-            </button>
-          </form>
-        )}
-      </div>
-    </div>
-  );
-}
+// [DR-044] ApplyModal is defined ABOVE the JOBS array (lines 12-104)
+// so it can be reused. The legacy inline implementation that used to
+// live here was deleted in DR-044 — its only callers now reach the
+// shared definition above.
 
 export default function Careers() {
   useDocumentTitle(
