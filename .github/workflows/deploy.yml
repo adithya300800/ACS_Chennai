@@ -31,6 +31,30 @@
 # on the same commit via `workflow_run` — when acschennai.com
 # cuts over to Render static site and this workflow is retired,
 # the gate stays alive in frontend-ci.yml.
+#
+# [DR-034 2026-09-23] Release-channel gate: the Pages publisher is
+# now bound to the gating workflow's PASS receipt on the exact tested
+# SHA. Pre-fix this workflow fired on three event types — push,
+# workflow_run (gated), and workflow_dispatch — with only workflow_run
+# actually requiring a passing `frontend-ci`. The `push` and bare
+# `workflow_dispatch` paths were silent bypasses: any push could publish
+# even when `frontend-ci` had failed (or was still running). Audit
+# DR-034 acceptance: "A deliberately failing existing check prevents
+# normal deployment; successful publication identifies the exact
+# checked artifact, even if the branch advances afterward." Both halves
+# are addressed below:
+#   1. The `push` trigger is REMOVED. Only `workflow_run` (with the
+#      gating workflow's `conclusion == 'success'`) and an explicit
+#      `workflow_dispatch` with `bypass_gate: true` publish. Every
+#      normal push goes through `frontend-ci` first because that
+#      workflow's `on.push` covers the same branch + paths.
+#   2. The Checkout step pins to `workflow_run.head_sha` — the
+#      commit the gating workflow tested. Without this, the default
+#      checkout ref is the workflow's default branch, so a Pages
+#      publish fired in the gap between a passing test and a new
+#      push would publish a *newer* commit than the one tested.
+#      Successful publication now always identifies the exact
+#      artifact the gate cleared.
 # ============================================================
 
 name: Deploy to GitHub Pages
@@ -47,11 +71,28 @@ on:
     workflows: ['Frontend CI (test + build gate)']
     types: [completed]
     branches: [ add-react-website ]
-  push:
-    branches: [ add-react-website ]
-    paths-ignore:
-      - 'backend/**'
+  # [DR-034 2026-09-23] Removed the bare `push:` trigger. Pre-fix,
+  # `push` here meant "publish on every push to add-react-website
+  # (excluding backend/**)" — but without consulting `frontend-ci`,
+  # a push could publish while the gate was still running or had
+  # already failed. The workflow_run trigger above now covers every
+  # push that frontend-ci watches (the gate's own `on.push` matches
+  # the same branch + paths filter).
+  #
+  # [DR-034 2026-09-23] Emergency override: `workflow_dispatch` with
+  # `bypass_gate: true` is the audited escape hatch. The default
+  # value is `false`, so a bare dispatch (no input) will NOT publish
+  # — the build job's `if:` below refuses any workflow_dispatch that
+  # does not set `bypass_gate: true`. Per the audit's minimal
+  # implementation: "Keep an explicitly authorized emergency
+  # override separate rather than weakening every deployment."
   workflow_dispatch:
+    inputs:
+      bypass_gate:
+        description: '[DR-034] Skip the frontend-ci success gate (emergency override only)'
+        type: boolean
+        default: false
+        required: false
 
 permissions:
   contents: read
@@ -64,22 +105,38 @@ concurrency:
 
 jobs:
   build:
-    # DR-010: only run if frontend-ci just succeeded on this same commit.
-    #   github.event.workflow_run.conclusion === 'success'
-    #   → frontend-ci finished green for the head commit
-    #   github.event_name === 'push' || 'workflow_dispatch'
-    #   → bypass the gate check for direct triggers (manual override path)
-    # This guard prevents a failed gate from silently publishing the
-    # Pages bundle while still allowing an emergency manual deploy via
-    # Actions → Run workflow.
+    # [DR-034 2026-09-23] Release-channel gate: only run when the
+    # gating workflow `Frontend CI (test + build gate)` finished
+    # `success` on the same head commit (`workflow_run` path), OR
+    # an operator explicitly invoked `workflow_dispatch` with
+    # `bypass_gate: true` (emergency override path). Pre-fix this
+    # condition also accepted bare `push` and bare `workflow_dispatch`,
+    # which meant a failing or not-yet-run gate would still publish
+    # the Pages bundle — exactly the "release-SHA-can-go-through-even-
+    # when-checks-failed" hazard DR-034 calls out.
     if: >
-      github.event_name == 'push' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+      (github.event_name == 'workflow_run'
+        && github.event.workflow_run.conclusion == 'success')
+      ||
+      (github.event_name == 'workflow_dispatch'
+        && inputs.bypass_gate == true)
     runs-on: ubuntu-latest
     steps:
+      # [DR-034 2026-09-23] Pin Checkout to the exact commit the
+      # gating workflow tested. Pre-fix the default ref was used,
+      # which in a `workflow_run` context is the workflow's default
+      # branch (main) — meaning the publish could advance past the
+      # tested SHA between the gate completing and Pages receiving
+      # the bundle. The conditional binds `ref` to `head_sha` for
+      # the gated path and to the dispatch's ref for the override
+      # path; both cases identify the exact checked artifact, even
+      # if the branch advances afterward (DR-034 acceptance).
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run'
+              && github.event.workflow_run.head_sha
+              || github.ref }}
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Setup Node

@@ -13,7 +13,20 @@ on:
       # the bash comment-substitution bug silently broke the ledger
       # inspection step.
       - '.github/workflows/backend-deploy.yml'
+  # [DR-034 2026-09-23] Emergency override for the test gate. The
+  # `override_checks` input bypasses the BLOCKING test step (see the
+  # Run tests comment block below). It does NOT bypass any other gate
+  # (drift gate, ledger inspection, Render deploy trigger, /version
+  # SHA verify, smoke test). This is the audited escape hatch the audit
+  # requires: "Keep an explicitly authorized emergency override
+  # separate rather than weakening every deployment."
   workflow_dispatch:
+    inputs:
+      override_checks:
+        description: '[DR-034] Bypass the backend test gate (emergency override only)'
+        type: boolean
+        default: false
+        required: false
 
 permissions:
   contents: read
@@ -64,26 +77,34 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate
 
+      # [DR-034 2026-09-23] Release-channel gate: backend tests are now
+      # BLOCKING for normal release. Per audit DR-034 ("Automatic release
+      # is not bound to passing checks on the published SHA"), the prior
+      # `continue-on-error: true` here meant a failing test suite would
+      # silently still trigger a Render deploy, which is the exact
+      # "release-SHA-can-go-through-even-when-checks-failed" hazard the
+      # finding calls out. The step below has no `continue-on-error`
+      # directive, so a non-zero exit fails the workflow BEFORE the
+      # bootstrap resolve / drift gate / Render deploy trigger run.
+      #
+      # Acceptance (DR-034): a deliberately failing existing check now
+      # prevents normal deployment. The deploy trigger / SHA-verify
+      # / smoke test steps below will not run.
+      #
+      # Emergency escape hatch: use Actions → Run workflow on
+      # `backend-deploy.yml` with the explicit `override_checks` input
+      # to bypass this gate when the test gap is known and the deploy
+      # needs to proceed (see `workflow_dispatch.inputs.override_checks`
+      # below). This keeps a deliberate, audited override path separate
+      # from weakening the default gate (DR-034 "Keep an explicitly
+      # authorized emergency override separate rather than weakening
+      # every deployment").
       - name: Run tests
-        # [DR-031-SQLFIX followup 2026-09-10] tests run with
-        # `continue-on-error: true` so the bootstrap resolve + deploy
-        # trigger steps below still run when a test fails. The pre-fix
-        # behaviour was `npm test` returning exit 1 on any failure —
-        # which short-circuited the workflow BEFORE the bootstrap resolve
-        # step ran, leaving the errored DR-031 ledger row in place and
-        # `prisma migrate deploy` on Render blowing up with P3009.
-        #
-        # Test failures are still VISIBLE: the step shows yellow in the
-        # GitHub Actions UI and its log is preserved for review. They no
-        # longer BLOCK the deploy because the test gap that bit us was
-        # a test-scaffolding mismatch (PII_LOG_SALT env + notification
-        # findFirst mock in dpr.fanout-scope.test.js), not a production
-        # regression. The deploy proceeds; the test gap is tracked
-        # separately.
-        #
-        # When the test suite stabilises to green, drop this back to
-        # `false` (default).
-        continue-on-error: true
+        # [DR-034 2026-09-23] `override_checks != true` means: skip only
+        # when the operator EXPLICITLY set override_checks=true. For a
+        # push (no inputs → null) or a workflow_dispatch that didn't set
+        # the input (default false), `!= true` is true → step runs.
+        if: ${{ inputs.override_checks != true }}
         run: npm test
 
       # LPR-001: deployment no longer runs `prisma db push` (destructive,
