@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
 import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
 
@@ -15,22 +15,62 @@ export default function Contact() {
     projectType: '',
     message: '',
   });
-  const [status, setStatus] = useState('idle'); // 'idle' | 'loading' | 'success' | 'error'
+  // 'idle' | 'loading' | 'success' | 'error'.
+  // 'error' is rendered ABOVE the form (inline alert) instead of replacing
+  // it — see audit DR-039. The form keeps the user's last-entered values
+  // so they can correct and retry without retyping.
+  const [status, setStatus] = useState('idle');
+  // [DR-039] Structured error message so the UI can show the actual API
+  // failure reason (e.g. a 503 EMAIL_PROVIDER_REJECTED from DR-038) instead
+  // of a generic "please try again" string. Initialised empty so the
+  // alert region only renders when there is something to announce.
+  const [errorMessage, setErrorMessage] = useState('');
+  // Ref to the error summary so we can move keyboard focus to it the moment
+  // it appears. Screen-reader users hear it via aria-live; sighted keyboard
+  // users land on the affordance rather than on the still-disabled submit
+  // button. Skip the focus on the very first render (no alert yet) via
+  // the `shouldFocusAlert` flag toggled when status flips to 'error'.
+  const errorSummaryRef = useRef(null);
+  const shouldFocusAlertRef = useRef(false);
 
   const handleChange = (e) => {
     setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
   };
 
+  // [DR-039] When status becomes 'error', focus the alert summary so the
+  // failure surfaces prominently. runs only when the focus flag is set
+  // (toggled by the submit handler), so the very first render does not
+  // yank focus to an empty <p>.
+  useEffect(() => {
+    if (status === 'error' && shouldFocusAlertRef.current) {
+      shouldFocusAlertRef.current = false;
+      errorSummaryRef.current?.focus();
+    }
+  }, [status]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setStatus('loading');
+    setErrorMessage('');
 
     try {
       await api.post('/contact', form);
       setStatus('success');
+      // Keep the form values populated only on the success path — the
+      // success branch unmounts the form (handled below), so clearing is
+      // cosmetic. The error path intentionally leaves the React state
+      // untouched so the user does not have to retype.
       setForm({ name: '', company: '', email: '', phone: '', projectType: '', message: '' });
     } catch (err) {
       console.error('Contact error:', err);
+      // Surface the API error message verbatim so DR-038-style 502s
+      // (EMAIL_PROVIDER_REJECTED) are user-actionable. Fall back to a
+      // generic copy if the error has no message property.
+      const msg =
+        (err && (err.message || err.error)) ||
+        "Couldn't send your message. Please check your connection and try again.";
+      setErrorMessage(msg);
+      shouldFocusAlertRef.current = true;
       setStatus('error');
     }
   };
@@ -135,20 +175,40 @@ export default function Contact() {
               </p>
 
               {status === 'success' ? (
-                <div className="form-success">
+                <div className="form-success" role="status">
                   <div className="contact-success-header">
                     <svg width="18" height="18" fill="none" stroke="#16A34A" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
                     Enquiry sent successfully!
                   </div>
                   <p className="contact-success-body">We've received your message and will get back to you within 24 hours on business days.</p>
                 </div>
-              ) : status === 'error' ? (
-                <div className="contact-form-error">
-                  <p className="contact-form-error-title">Failed to send message.</p>
-                  <p className="contact-form-error-body">Please try again or reach us directly via phone or WhatsApp.</p>
-                </div>
               ) : (
-                <form onSubmit={handleSubmit} className="contact-inquiry-form">
+                <>
+                  {/* [DR-039] Inline error summary above the form.
+                      Kept in the tree even when status !== 'error' so the
+                      alert region is mounted predictably (focus ref targets
+                      a stable node) — but only rendered visually when
+                      there is an error to report, via the conditional
+                      wrapper. role="alert" + aria-live="polite" so screen
+                      readers announce the failure as soon as status flips
+                      to 'error'; tabIndex={-1} + focus call in the effect
+                      above move keyboard focus here too. */}
+                  {status === 'error' && (
+                    <div
+                      ref={errorSummaryRef}
+                      className="contact-form-error"
+                      role="alert"
+                      aria-live="polite"
+                      tabIndex={-1}
+                    >
+                      <p className="contact-form-error-title">Failed to send message.</p>
+                      <p className="contact-form-error-body">
+                        {errorMessage || 'Please check your connection and try again.'}{' '}
+                        You can edit the details below and press <strong>Send Enquiry</strong> to retry.
+                      </p>
+                    </div>
+                  )}
+                  <form onSubmit={handleSubmit} className="contact-inquiry-form">
                   <div className="form-row">
                     <div className="form-group">
                       <label htmlFor="name">Full Name *</label>
@@ -247,6 +307,7 @@ export default function Contact() {
                     )}
                   </button>
                 </form>
+                </>
               )}
             </div>
 
