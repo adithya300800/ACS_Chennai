@@ -35,7 +35,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
-import { formatShortDate, formatBytes } from '../../lib/format.js';
+import { formatShortDate, formatBytes, formatTimeOnly } from '../../lib/format.js';
 import {
   MAX_REPORT_BYTES,
   ACCEPTED_REPORT_TYPES,
@@ -844,6 +844,30 @@ export default function MyProjectReports() {
                   <div className="mpr-card__content" style={{ minWidth: 0 }}>
                     <div style={{ fontWeight: 500, color: 'var(--navy)', overflowWrap: 'anywhere' }}>
                       {r.title || r.filename}
+                    </div>
+                    {/* §8.8 — Saved-row filename • time. After the
+                        confirming → idle transition the user needs a
+                        quick "what did I just upload + when" affordance
+                        without re-reading the project/uploader/date meta
+                        line below. Small monospace so a long filename
+                        doesn't wrap onto a third visual line and so the
+                        timestamp reads as a fixed-width marker rather
+                        than as prose. formatTimeOnly enforces the IST
+                        time-zone (DR-029) so the wall-clock matches the
+                        site's date header, not the browser local TZ. */}
+                    <div
+                      style={{
+                        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                        fontSize: '0.72rem',
+                        color: 'var(--steel)',
+                        marginTop: 2,
+                        overflowWrap: 'anywhere',
+                      }}
+                      data-testid="mpr-saved-row-meta"
+                    >
+                      {r.filename || '—'}
+                      {' • '}
+                      {formatTimeOnly(r.uploadedAt || r.createdAt) || '—'}
                     </div>
                     <div style={{ fontSize: '0.8rem', color: 'var(--steel)' }}>
                       {r.projectName}

@@ -529,4 +529,60 @@ describe('S7/MyReports — Project Reports page source contracts', () => {
       /failedProjects\.map\(\s*\(\s*f\s*\)\s*=>\s*\([\s\S]*?\{f\.projectName\}[\s\S]*?\{f\.error\}/
     );
   });
+
+  // ─── §8.8 (2026-09-24) — Saved-row filename • time affordance ─────
+  // After the upload pipeline confirms a successful upload
+  // (confirming → idle), the freshly-saved row used to fall back to
+  // the title-or-filename primary line with no time marker — the user
+  // had to read the project/uploader/date meta line to learn when
+  // they uploaded. The audit's §8.8 acceptance: show `filename •
+  // time` as a small monospace line on the saved row so the user can
+  // see at a glance which file they uploaded and when, without
+  // visually mixing with the prose meta line.
+
+  test('38. page imports formatTimeOnly from src/lib/format.js (R-S5 central time helper)', () => {
+    // DR-029: formatTimeOnly enforces the Asia/Kolkata time-zone so
+    // the wall-clock matches the IST header, not the browser's local
+    // TZ. Pin the import so a future inline `new Date(...).toLocaleTimeString`
+    // re-introduction doesn't silently regress the TZ.
+    expect(pageSrc).toMatch(
+      /import\s*\{[^}]*formatTimeOnly[^}]*\}\s*from\s*['"]\.\.\/\.\.\/lib\/format\.js['"]/
+    );
+  });
+
+  test('39. saved-row rendering uses the original filename string', () => {
+    // The audit's §8.8 acceptance: the saved row must surface the
+    // original filename (not the title — users often leave the title
+    // blank and rely on the filename as the canonical label). Pin
+    // that `r.filename` is rendered inside the report-card body so a
+    // future refactor that hides it behind the title doesn't silently
+    // regress the affordance.
+    // Walk forward from the card-content div so we don't accidentally
+    // match the upload form's filename input (which also references
+    // `uploadFile.name`).
+    const cardContentIdx = pageSrc.indexOf('mpr-card__content');
+    expect(cardContentIdx).toBeGreaterThan(-1);
+    const cardBody = pageSrc.slice(cardContentIdx, cardContentIdx + 3000);
+    // The saved-row block renders `{r.filename || '—'}` directly.
+    expect(cardBody).toMatch(/\{r\.filename(\s*\|\|\s*['"]—['"])?\s*\}/);
+    // The filename must sit inside the small-monospace block (the
+    // audit acceptance copy is `filename • time` rendered in mono),
+    // NOT inside the prose-styled meta line. Pin the testid anchor
+    // so a future split into two distinct elements doesn't drop the
+    // data-testid binding the assertion relies on.
+    expect(cardBody).toMatch(/data-testid=['"]mpr-saved-row-meta['"]/);
+    // The filename and time are joined by a literal bullet separator.
+    expect(cardBody).toMatch(/['"]\s*•\s*['"]/);
+  });
+
+  test('40. saved-row uses formatTimeOnly on uploadedAt || createdAt', () => {
+    // The time marker is the second half of the §8.8 `filename •
+    // time` copy. Pin that the formatted time helper is the
+    // R-S5 central formatTimeOnly (already pinned in test 38) AND
+    // that it gets the row's uploadedAt || createdAt fallback so a
+    // legacy row without uploadedAt still shows a time.
+    expect(pageSrc).toMatch(
+      /formatTimeOnly\(\s*r\.uploadedAt\s*\|\|\s*r\.createdAt\s*\)/
+    );
+  });
 });
