@@ -1383,6 +1383,58 @@ function DetailRow({ label, value }) {
   );
 }
 
+// [DR-024] Create payload — full identity shape. Mirrors the backend
+// POST /api/billing-certifications contract. Includes project,
+// contractor, bill number and bill date — the four immutable audit
+// keys the server stamps at create time.
+function buildCreatePayload(form, attachment) {
+  return {
+    projectId: form.projectId,
+    contractorName: form.contractorName.trim(),
+    billNumber: form.billNumber.trim(),
+    billDate: form.billDate,
+    invoiceNo: form.invoiceNo ? form.invoiceNo.trim() : null,
+    poContractRef: form.poContractRef ? form.poContractRef.trim() : null,
+    claimedAmount: parseFloat(form.claimedAmount) || 0,
+    deductedAmount: form.deductedAmount === '' ? 0 : (parseFloat(form.deductedAmount) || 0),
+    certifiedAmount: parseFloat(form.certifiedAmount) || 0,
+    // [DR-028] Don't coerce zero to null — `parseFloat('0') || null`
+    // would record absence instead of zero. Blank input → null;
+    // numeric input (including legitimate 0) → the parsed number.
+    // The backend's `parseAmount` rejects NaN with 400
+    // INVALID_CLAIMED so a typed-in garbage string still bounces.
+    gstAmount: form.gstAmount === '' ? null : parseFloat(form.gstAmount),
+    poValue: form.poValue === '' ? null : parseFloat(form.poValue),
+    balanceValue: form.balanceValue === '' ? null : parseFloat(form.balanceValue),
+    remarks: form.remarks ? form.remarks.trim() : null,
+    ...(attachment || {}),
+  };
+}
+
+// [DR-024] Edit payload — mutable fields only. The backend PATCH
+// explicitly forbids projectId / contractorName / billNumber / billDate
+// (the bill identity); sending any of them returns 400 UNKNOWN_FIELDS.
+// Notes / amounts / dispute reason / optional new attachment /
+// optional expectedVersion pin (DR-015) are the only fields the route
+// accepts — that's exactly what this builder produces.
+function buildEditPayload(form, expectedVersion, attachment) {
+  return {
+    invoiceNo: form.invoiceNo ? form.invoiceNo.trim() : null,
+    poContractRef: form.poContractRef ? form.poContractRef.trim() : null,
+    claimedAmount: parseFloat(form.claimedAmount) || 0,
+    deductedAmount: form.deductedAmount === '' ? 0 : (parseFloat(form.deductedAmount) || 0),
+    certifiedAmount: parseFloat(form.certifiedAmount) || 0,
+    gstAmount: form.gstAmount === '' ? null : parseFloat(form.gstAmount),
+    poValue: form.poValue === '' ? null : parseFloat(form.poValue),
+    balanceValue: form.balanceValue === '' ? null : parseFloat(form.balanceValue),
+    remarks: form.remarks ? form.remarks.trim() : null,
+    // [DR-015] version pin on PATCH so a stale tab cannot overwrite
+    // a concurrent write on the same DRAFT.
+    ...(expectedVersion != null ? { expectedVersion } : {}),
+    ...(attachment || {}),
+  };
+}
+
 // ─── Create / edit form modal ────────────────────────────────────────────
 // Mirrors components/DrawingFormModal.jsx — same 4-step upload pipeline
 // (mint SAS, PUT bytes, confirm-upload, POST row) but with the `billing/`
@@ -1509,30 +1561,18 @@ function CertificationFormModal({
         };
       }
       setUploadPhase('');
-      const payload = {
-        projectId: form.projectId,
-        contractorName: form.contractorName.trim(),
-        billNumber: form.billNumber.trim(),
-        billDate: form.billDate,
-        invoiceNo: form.invoiceNo ? form.invoiceNo.trim() : null,
-        poContractRef: form.poContractRef ? form.poContractRef.trim() : null,
-        claimedAmount: parseFloat(form.claimedAmount) || 0,
-        deductedAmount: form.deductedAmount === '' ? 0 : (parseFloat(form.deductedAmount) || 0),
-        certifiedAmount: parseFloat(form.certifiedAmount) || 0,
-        // [DR-028] Don't coerce zero to null — `parseFloat('0') || null`
-        // would record absence instead of zero. Blank input → null;
-        // numeric input (including legitimate 0) → the parsed number.
-        // The backend's `parseAmount` rejects NaN with 400
-        // INVALID_CLAIMED so a typed-in garbage string still bounces.
-        gstAmount: form.gstAmount === '' ? null : parseFloat(form.gstAmount),
-        poValue: form.poValue === '' ? null : parseFloat(form.poValue),
-        balanceValue: form.balanceValue === '' ? null : parseFloat(form.balanceValue),
-        remarks: form.remarks ? form.remarks.trim() : null,
-        // [DR-015] version pin on PATCH so a stale tab cannot overwrite
-        // a concurrent write on the same DRAFT.
-        ...(mode === 'edit' && expectedVersion != null ? { expectedVersion } : {}),
-        ...(attachment || {}),
-      };
+      // [DR-024] Split the create/edit payload builders. PATCH forbids
+      // the four immutable identity keys (projectId, contractorName,
+      // billNumber, billDate) — even if the form disabled their inputs
+      // the shared serializer was echoing them back into the body and
+      // tripping the route's UNKNOWN_FIELDS guard on remarks-only
+      // edits. `buildEditPayload` sends ONLY mutable fields + an
+      // optional new attachment + an optional `expectedVersion` pin,
+      // which is exactly what the server's allowlist accepts. The
+      // backend allowlist is unchanged (this fix stays client-side).
+      const payload = mode === 'edit'
+        ? buildEditPayload(form, expectedVersion, attachment)
+        : buildCreatePayload(form, attachment);
       // [DR-017] Mint one Idempotency-Key per submit intent. The api.js
       // NETWORK_ERROR retry path re-sends the same payload — without the
       // key, the retry would record the COP twice (the audit's primary
@@ -1562,7 +1602,17 @@ function CertificationFormModal({
   return (
     <Modal open onClose={onClose} ariaLabel={mode === 'edit' ? 'Edit certification' : 'Add certification'} maxWidth={720} dismissable={!submitting}>
       <h2 style={{ margin: '0 0 1rem', color: 'var(--navy)' }}>
-        {mode === 'edit' ? `Edit correction DRAFT — Bill ${initialCert?.billNumber || ''}` : 'Add billing certification'}
+        {/* [DR-024] Distinguish a base DRAFT edit from a correction
+            DRAFT edit. The previous title always said "Edit correction
+            DRAFT" even when the row was an original DRAFT with no
+            parent — mislabelling the record and confusing the admin.
+            A correction DRAFT has `parentCertificationId` set; a base
+            DRAFT does not. Same form, same PATCH; just a clearer title. */}
+        {mode === 'edit'
+          ? (initialCert?.parentCertificationId
+              ? `Edit correction DRAFT — Bill ${initialCert.billNumber || ''}`
+              : `Edit draft — Bill ${initialCert?.billNumber || ''}`)
+          : 'Add billing certification'}
       </h2>
       <form onSubmit={handleSubmit}>
         <div className="form-row">

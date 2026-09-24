@@ -68,12 +68,21 @@ describe('DR-016 — COP correction DRAFT is editable / navigable / reversible (
   });
 
   test('3. Edit-mode payload pins expectedVersion so a stale tab cannot overwrite a concurrent write on the same DRAFT', () => {
-    // The wire shape mirrors DR-015: `expectedVersion` is included
-    // in the PATCH body when in edit mode and the displayed version
-    // is non-null. Backend PATCH reads this field and stamps it on
-    // the conditional WHERE (see backend/src/routes/billingCertifications.js).
+    // The wire shape mirrors DR-015: `expectedVersion` is included in
+    // the PATCH body when in edit mode and the displayed version is
+    // non-null. Backend PATCH reads this field and stamps it on the
+    // conditional WHERE (see backend/src/routes/billingCertifications.js).
+    // [DR-024] The create/edit split moved the conditional into the
+    // dedicated buildEditPayload helper — the edit payload builder
+    // must still spread `expectedVersion` when non-null, otherwise a
+    // stale tab can silently overwrite a concurrent write on the
+    // same DRAFT. We pin the builder's expectedVersion spread AND
+    // the submit handler's edit-branch that calls into it.
     expect(pageSrc).toMatch(
-      /mode\s*===\s*['"]edit['"][\s\S]*?expectedVersion\s*!=\s*null\s*\?\s*\{\s*expectedVersion\s*\}\s*:\s*\{\}/,
+      /function\s+buildEditPayload\s*\([\s\S]*?expectedVersion\s*!=\s*null\s*\?\s*\{\s*expectedVersion\s*\}\s*:\s*\{\}/,
+    );
+    expect(pageSrc).toMatch(
+      /mode\s*===\s*['"]edit['"][\s\S]*?buildEditPayload\(\s*form\s*,\s*expectedVersion\s*,\s*attachment\s*\)/,
     );
   });
 
@@ -158,12 +167,15 @@ describe('DR-016 — COP correction DRAFT is editable / navigable / reversible (
 
   test('10. Edit modal title + submit button label flip to "Edit correction" / "Save correction"', () => {
     // Title and submit label both reflect edit mode so the admin
-    // does not mistake the PATCH flow for a new POST. The em-dash
-    // in the title is matched via its literal code-point — JS regex
-    // /-u/ handles Unicode em-dash directly.
-    expect(pageSrc).toMatch(
-      /Edit correction DRAFT[^\n]+\{initialCert\?\.billNumber/,
-    );
+    // does not mistake the PATCH flow for a new POST. [DR-024] The
+    // title now distinguishes a correction DRAFT (parent set) from
+    // a base DRAFT (no parent) — the original audit mislabelled a
+    // base DRAFT as "Edit correction DRAFT". We pin both title
+    // branches and the submit-button label so the regression
+    // cannot drift back.
+    expect(pageSrc).toMatch(/Edit correction DRAFT\s*[—-]/);
+    expect(pageSrc).toMatch(/Edit draft\s*[—-]/);
+    expect(pageSrc).toMatch(/parentCertificationId/);
     expect(pageSrc).toMatch(/Save correction/);
   });
 
