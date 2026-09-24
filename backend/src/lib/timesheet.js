@@ -15,7 +15,10 @@
 // First check-in is taken from the earliest session of the day. The
 // export intentionally omits lastCheckOut / workedHours / sessionCount —
 // the field workforce only uses check-in. Open sessions (no checkOut)
-// are flagged via the Remarks column.
+// are flagged via the Remarks column as "Present since HH:MM" so admins
+// can verify intent (the employee is on-site) without implying the
+// employee forgot a check-out, because the presence-only model
+// (DR-024) makes a null checkOut the expected state.
 
 'use strict';
 
@@ -221,7 +224,13 @@ function buildTimesheetRows({ employees, attendanceRows, leaveRequests, month, t
         const sorted = [...atd.sessions].sort((a, b) =>
           new Date(a.checkIn).getTime() - new Date(b.checkIn).getTime());
         firstCheckIn = formatTimeStr(sorted[0].checkIn);
-        if (!sorted[sorted.length - 1].checkOut) remarks = 'Open session';
+        if (!sorted[sorted.length - 1].checkOut) {
+          // Presence-only model (DR-024): a null checkOut is the expected
+          // state, NOT a forgotten check-out. The remark surfaces the first
+          // check-in time so admins can verify the employee's intent
+          // (they're on-site) without implying they missed a check-out.
+          remarks = `Present since ${formatTimeStr(sorted[sorted.length - 1].checkIn)}`;
+        }
       } else if (atd && atd.status && atd.status !== 'Present') {
         remarks = atd.notes || '';
       }
