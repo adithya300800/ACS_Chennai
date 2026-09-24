@@ -289,6 +289,96 @@ async function claimRefreshToken(prisma, rowId) {
 }
 
 /**
+ * DR-002 — atomic spend + successor persistence + durable rotation receipt.
+ *
+ * The pre-DR-002 /refresh handler spent the old row, then separately
+ * looked up the employee, inserted the successor, and published the
+ * in-memory replay entry. A failure at any step between spend and
+ * successor left the token consumed with no usable replacement, and a
+ * concurrent legitimate loser arriving in the brief spend-but-not-yet-
+ * published window was indistinguishable from theft.
+ *
+ * This helper closes both holes. The transaction commits three writes
+ * atomically:
+ *
+ *   1. refresh_token.updateMany CAS — spend the old row (the same CAS
+ *      as claimRefreshToken; only succeeds if revokedAt is still null).
+ *   2. refresh_token.create — publish the successor, chained via
+ *      rotatedFromId so the rotation chain stays walkable.
+ *   3. rotation_receipt.create — durable (spans process restart) replay
+ *      channel: stores the access + refresh token pair keyed by the
+ *      spent row id. A loser that finds the spent row with no live
+ *      in-memory replay entry reads this and gets the same pair back,
+ *      instead of being treated as theft.
+ *
+ * If anything in the transaction fails (including the CAS losing a race)
+ * Prisma rolls back ALL three writes — no partial state, no spent-but-
+ * unsuperseded token.
+ *
+ * @returns Promise<{ successor: object }> on success.
+ * @throws  Error('RACE_LOST') if the CAS loses (caller should re-fetch
+ *          the row and re-enter the loser path; nothing was committed).
+ * @throws  any other DB error (caller surfaces as 503).
+ */
+async function rotateRefreshTokenAtomic(prisma, { row, tokens, employeeId }) {
+  const now = new Date();
+  const expiresAt = refreshTokenExpiry();
+  return prisma.$transaction(async (tx) => {
+    const claimed = await tx.refreshToken.updateMany({
+      where: { id: row.id, revokedAt: null },
+      data: { revokedAt: now, lastUsedAt: now },
+    });
+    if (claimed.count !== 1) {
+      // Throw a string-tagged error so the caller's `instanceof` check is
+      // robust to Prisma wrapping or re-throwing.
+      throw new Error('RACE_LOST');
+    }
+    const successor = await tx.refreshToken.create({
+      data: {
+        employeeId,
+        tokenHash: hashRefreshToken(tokens.refreshToken),
+        rotatedFromId: row.id,
+        expiresAt,
+      },
+    });
+    await tx.rotationReceipt.create({
+      data: {
+        spentRowId: row.id,
+        successorRowId: successor.id,
+        employeeId,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        expiresAt,
+      },
+    });
+    return { successor };
+  });
+}
+
+/**
+ * DR-002 — bounded recovery for a lost post-commit rotation response.
+ *
+ * If a /refresh response is lost (network blip, client crash before the
+ * bytes land) and the client retries with the same now-spent refresh
+ * token, this is the durable channel that lets the loser receive the
+ * winner's token pair instead of being killed as a thief. Returns null
+ * if no receipt exists (genuine theft / unrelated revocation).
+ *
+ * The receipt's TTL matches the successor refresh_token row's TTL, so
+ * we also gate on `expiresAt > now` — an expired receipt means the
+ * successor is also dead and the client must re-authenticate.
+ */
+async function findRotationReceiptBySpentRowId(prisma, spentRowId) {
+  if (!spentRowId) return null;
+  const receipt = await prisma.rotationReceipt.findUnique({
+    where: { spentRowId },
+  });
+  if (!receipt) return null;
+  if (receipt.expiresAt.getTime() <= Date.now()) return null;
+  return receipt;
+}
+
+/**
  * Kill every live refresh token for an employee. Used by logout-without-token
  * and — critically — as the response to detected token reuse.
  */
@@ -369,17 +459,28 @@ function clearRotationReplay() {
 
 /**
  * Delete rows that can no longer deny anything (`expiresAt` in the past).
- * Both tables are indexed on `expiresAt` for exactly this scan.
+ * Both tables are indexed on `expiresAt` for exactly this scan. The
+ * rotation_receipt table is swept alongside the successor refresh_token
+ * row whose TTL it mirrors — a live receipt with a dead successor would
+ * hand back a useless pair.
  *
  * Called opportunistically from the logout path rather than on a timer, so
  * there is no interval to leak across test runs or graceful shutdown.
  */
 async function pruneExpired(prisma, { now = new Date() } = {}) {
-  const [revoked, refresh] = await Promise.all([
+  const [revoked, refresh, receipts] = await Promise.all([
     prisma.revokedToken.deleteMany({ where: { expiresAt: { lt: now } } }),
     prisma.refreshToken.deleteMany({ where: { expiresAt: { lt: now } } }),
+    // DR-002: a receipt outlives its successor only if pruneExpired on
+    // refresh_token ran first; deleting by the same horizon here keeps
+    // them in lockstep.
+    prisma.rotationReceipt.deleteMany({ where: { expiresAt: { lt: now } } }).catch(() => ({ count: 0 })),
   ]);
-  return { revokedTokens: revoked.count, refreshTokens: refresh.count };
+  return {
+    revokedTokens: revoked.count,
+    refreshTokens: refresh.count,
+    rotationReceipts: receipts.count,
+  };
 }
 
 module.exports = {
@@ -396,6 +497,8 @@ module.exports = {
   recordRefreshToken,
   findRefreshTokenRow,
   claimRefreshToken,
+  rotateRefreshTokenAtomic,
+  findRotationReceiptBySpentRowId,
   revokeAllRefreshTokensForEmployee,
   revokeRefreshTokenByValue,
   refreshTokenExpiry,

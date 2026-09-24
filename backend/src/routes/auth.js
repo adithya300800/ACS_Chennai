@@ -10,6 +10,8 @@ const {
   recordRefreshToken,
   findRefreshTokenRow,
   claimRefreshToken,
+  rotateRefreshTokenAtomic,
+  findRotationReceiptBySpentRowId,
   revokeAccessToken,
   revokeAllRefreshTokensForEmployee,
   revokeRefreshTokenByValue,
@@ -611,19 +613,32 @@ router.post('/refresh', async (req, res) => {
       return res.status(401).json({ error: 'Refresh token expired', code: 'REFRESH_EXPIRED' });
     }
 
-    // Atomically spend the row. Losing this compare-and-swap means somebody
-    // else already used this exact token.
-    const won = await claimRefreshToken(prisma, row.id);
-
-    if (!won) {
-      // Benign case first: two tabs of the same browser share one refresh
-      // token and raced. The winner's tokens are cached for a few seconds, so
-      // hand the loser the same pair instead of nuking a healthy session.
+    // ─── Loser path ──────────────────────────────────────────────────────
+    // DR-002: the row is already revoked. Three sub-cases:
+    //
+    //   (a) Concurrent sibling tab — in-memory replay entry is hot.
+    //   (b) Lost-response retry / process restart — durable rotation_receipt
+    //       row exists, keyed by spent_row_id, holding the winner's pair.
+    //   (c) Genuine theft — no replay, no receipt. Revoke all sessions.
+    //
+    // Pre-DR-002 the (b) case fell through to (c) and killed every live
+    // session for the employee on every post-restart refresh attempt.
+    if (row.revokedAt) {
       const replay = takeRotationReplay(row.id);
       if (replay) {
         return res.json(replay);
       }
-
+      const receipt = await findRotationReceiptBySpentRowId(prisma, row.id);
+      if (receipt) {
+        // The receipt's TTL gates this: a receipt whose successor row has
+        // already been pruned means the pair is dead and the client must
+        // re-authenticate. findRotationReceiptBySpentRowId already returns
+        // null in that case.
+        return res.json({
+          accessToken: receipt.accessToken,
+          refreshToken: receipt.refreshToken,
+        });
+      }
       // No replay entry → this is a genuine replay of a long-spent token.
       // Treat as theft: revoke every live refresh token for the employee so
       // the attacker's chain dies along with the victim's.
@@ -640,8 +655,11 @@ router.post('/refresh', async (req, res) => {
       });
     }
 
+    // ─── Winner path ──────────────────────────────────────────────────────
     // The employee must still exist (and we need their CURRENT isAdmin, not
-    // the value baked into the token they logged in with).
+    // the value baked into the token they logged in with). This read is
+    // OUTSIDE the transaction: if it fails we want the original row left
+    // live, not partially spent.
     const employee = await prisma.employee.findUnique({
       where: { id: row.employeeId || decoded.employeeId },
       select: { id: true, email: true, isAdmin: true },
@@ -649,11 +667,45 @@ router.post('/refresh', async (req, res) => {
     if (!employee) return res.status(401).json({ error: 'Employee not found' });
 
     const tokens = signTokens(employee);
-    await recordRefreshToken(prisma, {
-      employeeId: employee.id,
-      token: tokens.refreshToken,
-      rotatedFromId: row.id,
-    });
+
+    // DR-002: spend + successor + durable receipt in ONE transaction. If
+    // the CAS loses the race the whole transaction rolls back; we then
+    // re-enter the loser path above (the winner's receipt is already
+    // committed and recoverable).
+    try {
+      await rotateRefreshTokenAtomic(prisma, {
+        row,
+        tokens,
+        employeeId: employee.id,
+      });
+    } catch (err) {
+      if (err && err.message === 'RACE_LOST') {
+        // Re-fetch the row — it now reflects the winner's spend. We must
+        // walk the loser path the same way a brand-new request would, so
+        // a sibling-tab retry gets the winner's pair back instead of
+        // being killed as a thief.
+        const raced = await findRefreshTokenRow(prisma, refreshToken);
+        if (raced && raced.revokedAt) {
+          const replay = takeRotationReplay(raced.id);
+          if (replay) return res.json(replay);
+          const receipt = await findRotationReceiptBySpentRowId(prisma, raced.id);
+          if (receipt) {
+            return res.json({
+              accessToken: receipt.accessToken,
+              refreshToken: receipt.refreshToken,
+            });
+          }
+        }
+        // No successor committed (we lost the race without anything being
+        // written). The most likely explanation is a fast third tab that
+        // also lost — extremely rare. Treat as reuse.
+        return res.status(401).json({
+          error: 'Refresh token already used — all sessions have been signed out',
+          code: 'REFRESH_REUSED',
+        });
+      }
+      throw err;
+    }
 
     const payload = { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken };
     rememberRotation(row.id, payload);
