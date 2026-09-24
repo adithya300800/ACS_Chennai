@@ -1076,9 +1076,22 @@ router.post('/resolve', asyncHandler(async (req, res) => {
     // preview minus `dryRun: true` — keeps the response surface
     // symmetric so the picker can show the same UI in preview and
     // commit states.
+    //
+    // [DR-016] `allocationPending: true` on the create-branch ONLY. The
+    // endpoint does NOT auto-assign the creator to the new project —
+    // roster membership remains an admin-only gesture per the chosen
+    // policy ("creation requests administrator allocation"). Because the
+    // My Projects list scopes to `?scope=assigned`, which requires an
+    // active ProjectAssignment row (S7/ISRO-LEAK fix), the new project
+    // would otherwise silently vanish from the creator's My Projects
+    // view on reload. The flag tells the frontend to surface a clear
+    // "pending administrator allocation" message. The existing branch
+    // (project already exists, no new row created) intentionally omits
+    // the flag — there is no new allocation to wait on.
     return res.status(201).json({
       ...serializeProject(result.created),
       isRegistered: true,
+      allocationPending: true,
       linkedCounts: result.counts,
       linkedTotal: result.counts.dpr + result.counts.inspection + result.counts.boq,
     });

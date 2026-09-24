@@ -147,7 +147,15 @@ export default function Projects() {
           <p className="dpr-page-sub" style={{ color: 'var(--steel)', margin: 0, fontSize: '0.9rem' }}>
             Every project you're associated with. Projects are created automatically
             when you file a DPR or inspection, and admins can register new ones in
-            the project registry.
+            the project registry. {' '}
+            {/* [DR-016] A project you create is not auto-assigned to you;
+                explain the pending-allocation state so the list doesn't
+                appear to silently drop your just-created project. */}
+            <span style={{ display: 'block', marginTop: '0.25rem' }}>
+              Newly-created projects appear here only after an administrator allocates
+              you to them — until then, keep working through the form that created the
+              project (DPR / Inspection / Drawings) where it remains selected.
+            </span>
           </p>
           <p className="dpr-page-sub" style={{ color: 'var(--steel)', margin: '0.4rem 0 0', fontSize: '0.78rem' }}>
             Tip: click any project card to expand its Overview, BOQ, DPRs,

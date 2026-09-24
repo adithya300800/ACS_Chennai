@@ -780,6 +780,16 @@ export default function DprSubmit() {
         p.name === match.name ? { ...p, id: uuid, isRegistered: true } : p
       )));
       setForm((f) => ({ ...f, projectId: uuid }));
+      // [DR-016] Newly-created projects are not auto-assigned to the
+      // creator. Surface a clear "pending administrator allocation"
+      // message so the employee understands why the project will not
+      // appear in My Projects until an admin allocates them to it.
+      if (resolved?.allocationPending === true) {
+        toast.push(
+          `Project "${match.name}" created. It's pending administrator allocation — you'll see it in My Projects once assigned.`,
+          'info',
+        );
+      }
     } catch (err) {
       console.warn('Project resolve failed', { message: err?.message?.split('\n')[0] });
       toast.push('Could not register project name; submit will retry', 'warning');
@@ -817,6 +827,16 @@ export default function DprSubmit() {
       }));
       setCreateMode(false);
       setNewProjectName('');
+      // [DR-016] Newly-created projects are not auto-assigned to the
+      // creator. Surface a clear "pending administrator allocation"
+      // message so the employee understands why the project will not
+      // appear in My Projects until an admin allocates them to it.
+      if (proj?.allocationPending === true) {
+        toast.push(
+          `Project "${name}" created. It's pending administrator allocation — you'll see it in My Projects once assigned.`,
+          'info',
+        );
+      }
     } catch (err) {
       const code = err?.code;
       if (code === 'PROJECT_INACTIVE') {

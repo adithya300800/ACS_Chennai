@@ -254,6 +254,16 @@ export default function DrawingsBrowse() {
       setCreateMode(false);
       setNewProjectName('');
       handleSelectProject(proj.id);
+      // [DR-016] Newly-created projects are not auto-assigned to the
+      // creator. Surface a clear "pending administrator allocation"
+      // message so the employee understands why the project will not
+      // appear in My Projects until an admin allocates them to it.
+      if (proj?.allocationPending === true) {
+        toast.push(
+          `Project "${name}" created. It's pending administrator allocation — you'll see it in My Projects once assigned.`,
+          'info',
+        );
+      }
     } catch (err) {
       const code = err?.code;
       if (code === 'PROJECT_INACTIVE') {
