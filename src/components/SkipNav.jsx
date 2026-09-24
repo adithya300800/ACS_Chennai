@@ -9,6 +9,15 @@ import React from 'react';
 // SOL-P1#9: clicking the link explicitly focuses the target so the
 // keyboard user's tab order resumes from inside the main landmark
 // rather than from the next focusable element after the link itself.
+//
+// DR-040: an earlier revision also wrote the literal `#main-content`
+// hash back onto the history stack so the URL would "match the focus".
+// Under HashRouter the fragment IS the route, so that change made the
+// router fall through to the portal `*` → NotFound, and a reload right
+// after clicking landed on 404. The fix is to keep the URL untouched
+// and rely on programmatic focus on the <main> landmark (tabIndex={-1}).
+// The href remains so screen readers still announce the destination
+// and middle-click / cmd-click open it as a link.
 
 export default function SkipNav() {
   const handleClick = (e) => {
@@ -16,11 +25,6 @@ export default function SkipNav() {
     if (!target) return;
     e.preventDefault();
     target.focus();
-    // Keep the URL hash in sync so the back button / assistive tech
-    // can find the destination.
-    if (typeof window !== 'undefined' && window.history?.replaceState) {
-      window.history.replaceState(null, '', '#main-content');
-    }
   };
   return (
     <a href="#main-content" className="skip-nav-link" onClick={handleClick}>

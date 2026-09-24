@@ -23,7 +23,26 @@ export default function Header() {
           First focusable element on the page — keyboard users (Tab on load)
           can jump past the nav straight to <main id="main-content">.
           Visually hidden until focused, then becomes visible + outlines. */}
-      <a href="#main-content" className="skip-nav-link">
+      <a
+        href="#main-content"
+        className="skip-nav-link"
+        onClick={(e) => {
+          // DR-040: a bare `href="#main-content"` would change the
+          // HashRouter fragment (so the router would match `main-content`
+          // and fall through to the public `*` → NotFound), and reloading
+          // the page would hit the same 404. preventDefault keeps the URL
+          // and history untouched; programmatic focus on the <main>
+          // landmark (which already carries tabIndex={-1}) restores the
+          // WCAG 2.4.1 "bypass blocks" intent for keyboard users. The
+          // href stays in the DOM so screen readers still announce the
+          // destination and middle-click / cmd-click open it as a link.
+          const main = document.getElementById('main-content');
+          if (main) {
+            e.preventDefault();
+            main.focus();
+          }
+        }}
+      >
         Skip to main content
       </a>
       <div className="container">
