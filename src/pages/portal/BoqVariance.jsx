@@ -99,20 +99,27 @@ export default function BoqVariance() {
     }
   });
 
-  // Aggregate totals. Surfaces "of N items, N are over contract" at
-  // the top of the report — the billing engineer's headline number.
+  // DR-029 (Fresh24 audit, 2026-09-24): physical totals must NOT be summed
+  // across rows regardless of unit. 10 sqm + 5 kg is not "15" — it's two
+  // per-unit subtotals that cannot be combined. Currency (contractAmount /
+  // executedAmount) is unitless and remains a flat sum.
   const totals = items.reduce(
     (acc, it) => {
-      acc.contractQty += Number(it.contractQty) || 0;
-      acc.executedQty += Number(it.executedQty) || 0;
+      const contractQty = Number(it.contractQty) || 0;
+      const executedQty = Number(it.executedQty) || 0;
+      const unit = (it.unit || 'units').trim() || 'units';
+      acc.contractByUnit[unit] = (acc.contractByUnit[unit] || 0) + contractQty;
+      acc.executedByUnit[unit] = (acc.executedByUnit[unit] || 0) + executedQty;
       acc.contractAmount += Number(it.contractAmount) || 0;
       acc.executedAmount += Number(it.executedAmount) || 0;
       if (it.varianceQty < 0) acc.overruns += 1;
       else if (it.varianceQty > 0) acc.ahead += 1;
       return acc;
     },
-    { contractQty: 0, executedQty: 0, contractAmount: 0, executedAmount: 0, overruns: 0, ahead: 0 },
+    { contractByUnit: {}, executedByUnit: {}, contractAmount: 0, executedAmount: 0, overruns: 0, ahead: 0 },
   );
+  const qtyUnits = Object.keys(totals.contractByUnit).sort();
+  const formatQty = (n) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
   return (
     <div className="dpr-page">
@@ -230,13 +237,38 @@ export default function BoqVariance() {
               <div style={{ fontSize: '0.75rem', color: 'var(--steel)' }}>vs. executed {formatInr(totals.executedAmount)}</div>
             </div>
             <div className="dpr-card" style={{ padding: '0.875rem 1rem' }}>
-              <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase' }}>Contract qty (sum)</div>
-              <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--navy)' }}>
-                {totals.contractQty.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-              </div>
-              <div style={{ fontSize: '0.75rem', color: 'var(--steel)' }}>
-                Executed: {totals.executedQty.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-              </div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--steel)', textTransform: 'uppercase' }}>Contract qty</div>
+              {qtyUnits.length === 0 ? (
+                <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--steel)' }}>—</div>
+              ) : qtyUnits.length === 1 ? (
+                <>
+                  <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--navy)' }}>
+                    {formatQty(totals.contractByUnit[qtyUnits[0]])}
+                    <span style={{ fontSize: '0.85rem', fontWeight: 500, color: 'var(--steel)', marginLeft: '0.25rem' }}>
+                      {qtyUnits[0]}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--steel)' }}>
+                    Executed: {formatQty(totals.executedByUnit[qtyUnits[0]])} {qtyUnits[0]}
+                  </div>
+                </>
+              ) : (
+                <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                  {qtyUnits.map((u) => (
+                    <li key={u} style={{ marginBottom: '0.2rem' }}>
+                      <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--navy)' }}>
+                        {formatQty(totals.contractByUnit[u])}
+                        <span style={{ fontSize: '0.8rem', fontWeight: 500, color: 'var(--steel)', marginLeft: '0.25rem' }}>
+                          {u}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '0.7rem', color: 'var(--steel)' }}>
+                        Executed: {formatQty(totals.executedByUnit[u])} {u}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </div>
 
