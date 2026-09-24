@@ -106,15 +106,21 @@ describe('SOL DR-010 — release publication guarantees', () => {
     expect(DEPLOY).toMatch(/branches:\s*\[\s*add-react-website\s*\]/);
   });
 
-  test('D2. deploy.yml build job skips on frontend-ci failure (or runs on push/dispatch)', () => {
-    // The job-level `if:` must (a) allow direct push / manual dispatch
-    // through without the gate check, AND (b) skip when frontend-ci
-    // ran and concluded non-success.
+  test('D2. deploy.yml build job runs only when frontend-ci succeeded (or dispatch bypasses)', () => {
+    // The job-level `if:` must (a) allow the workflow_run path through
+    // ONLY when frontend-ci ran and concluded `success` on the same
+    // head commit, AND (b) allow an explicit operator override via
+    // `workflow_dispatch` with `bypass_gate: true`. A bare `push`
+    // trigger does NOT publish — DR-034 removed it because it was the
+    // exact "release-SHA-can-go-through-even-when-checks-failed" hazard.
     const buildJob = DEPLOY.match(/jobs:\s*\n\s*build:\s*\n[\s\S]*?runs-on:/);
     expect(buildJob).not.toBeNull();
-    expect(buildJob[0]).toMatch(/github\.event_name\s*==\s*['"]push['"]/);
-    expect(buildJob[0]).toMatch(/github\.event_name\s*==\s*['"]workflow_dispatch['"]/);
+    expect(buildJob[0]).toMatch(/github\.event_name\s*==\s*['"]workflow_run['"]/);
     expect(buildJob[0]).toMatch(/github\.event\.workflow_run\.conclusion\s*==\s*['"]success['"]/);
+    expect(buildJob[0]).toMatch(/github\.event_name\s*==\s*['"]workflow_dispatch['"]/);
+    expect(buildJob[0]).toMatch(/bypass_gate\s*==\s*true/);
+    // Negative: bare push must NOT be in the build job's condition.
+    expect(buildJob[0]).not.toMatch(/github\.event_name\s*==\s*['"]push['"]/);
   });
 
   test('D3. deploy.yml no longer inlines the test step', () => {
