@@ -61,7 +61,11 @@ export default function UserMenu() {
   // The order MUST match the JSX render order below — the index drives
   // the active descendant.
   const menuItems = [
-    { type: 'link', to: '/contact', label: 'Help & Support' },
+    // §8.10: retargeted from /contact (the public-side form) to the new
+    // /portal/support employee help page. Signed-in employees want the
+    // login / attendance / leave / training FAQ map, not the public
+    // "Send a Project Brief" form.
+    { type: 'link', to: '/portal/support', label: 'Help & Support' },
     { type: 'link', to: '/portal/dashboard', label: 'Dashboard' },
     { type: 'link', to: '/portal/notifications/preferences', label: 'Notification preferences' },
     { type: 'button', label: 'Logout' },
@@ -269,7 +273,7 @@ export default function UserMenu() {
               are tabIndex={-1} so Tab leaves the menu after one stop. */}
           <Link
             id="user-menu-item-0"
-            to="/contact"
+            to="/portal/support"
             className="user-menu-item"
             role="menuitem"
             tabIndex={activeIndex === 0 ? 0 : -1}

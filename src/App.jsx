@@ -120,6 +120,14 @@ const MyProjectReports = React.lazy(() => import('./pages/portal/MyProjectReport
 // actions. Mirrors DprList / InspectionList's "My …" naming pattern.
 const DrawingsBrowse = React.lazy(() => import('./pages/portal/DrawingsBrowse.jsx'));
 const DrawingBrowseDetail = React.lazy(() => import('./pages/portal/DrawingBrowseDetail.jsx'));
+// §8.10 (Fresh24 Wave 4, 2026-09-24) — Employee "Help & Support" page.
+// Single, low-noise landing for the most common "where do I get help?"
+// questions (login, attendance correction, leave/training ownership,
+// everything-else → /contact form). Static, no backend calls, no new
+// endpoints; lives inside the protected /portal/* tree so a signed-in
+// employee can reach it from the new sidebar entry or the UserMenu
+// "Help & Support" link.
+const EmployeeSupport = React.lazy(() => import('./pages/portal/EmployeeSupport.jsx'));
 
 function App() {
   const location = useLocation();
@@ -283,6 +291,13 @@ function App() {
               switches + 11 per-type toggles + admin SMTP wire-check. Lives
               outside the admin tree so non-admins can manage their own. */}
           <Route path="notifications/preferences" element={<NotificationPreferences />} />
+          {/* §8.10: Employee "Help & Support" page — static, four-section
+              landing for the most common "where do I get help?" questions.
+              Sits between the personal preferences surface and the role-
+              branch landing so the route resolves before the empty-path
+              `RoleBranchLanding` below. No literal-vs-param ordering
+              concerns here since the path takes no `:id` segment. */}
+          <Route path="support" element={<EmployeeSupport />} />
           {/* P0/A-02: landing branches on role. Employees → Dashboard; admins → Admin Overview.
               SOL-P2#17: removed /portal/assets stub (and ComingSoon component) —
               the item was advertised as "coming soon" but had no roadmap date.

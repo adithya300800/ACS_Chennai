@@ -255,6 +255,16 @@ const BILLING_ICON = (
     <path d="M9 7h6M9 11h6M9 15h4" />
   </svg>
 );
+// §8.10: Help-circle icon for the employee "Help & Support" page —
+// "?" glyph inside a circle, visually distinct from the calendar /
+// attendance / document icons used by the other My Work entries.
+const HELP_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <circle cx="12" cy="12" r="10" />
+    <path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3" />
+    <line x1="12" y1="17" x2="12.01" y2="17" />
+  </svg>
+);
 
 const navGroups = [
   {
@@ -264,6 +274,13 @@ const navGroups = [
       { to: '/portal/attendance', label: 'My Attendance', icon: ATTENDANCE_ICON },
       { to: '/portal/leave', label: 'My Leave', icon: CALENDAR_ICON },
       { to: '/portal/training', label: 'My Training', icon: BOOK_ICON },
+      // §8.10: Help & Support link at the end of the personal section
+      // so daily-flow items keep their original positions. The page is
+      // a static four-section reference (login / attendance / leave+training /
+      // contact-form) — discoverable via the UserMenu dropdown too, but
+      // a sidebar entry lets a new employee reach it without having to
+      // know the dropdown exists.
+      { to: '/portal/support', label: 'Help & Support', icon: HELP_ICON },
     ],
   },
   {

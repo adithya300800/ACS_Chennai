@@ -208,3 +208,50 @@ describe('DR-045 — UserMenu roving tabindex stays synchronized with DOM focus'
     expect(getActiveDescendant()).toBe('user-menu-item-3');
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// §8.10 (Fresh24 Wave 4, 2026-09-24) — Help & Support menu item retargets
+// to the new /portal/support employee page, not the public /contact form.
+//
+// Pre-§8.10 the UserMenu's first item was the public "Send a Project Brief"
+// form (to=/contact). Signed-in employees want the login / attendance /
+// leave / training FAQ map instead, so the link target moved to
+// /portal/support. This test pins the new target so a future refactor that
+// silently flips it back (or to a wrong hash) trips the test before the
+// regression ships.
+//
+// Asserts BOTH the menuItems array AND the rendered <Link href> so a change
+// in either side of the contract is caught.
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('§8.10 — UserMenu "Help & Support" link target', () => {
+  test('8. menuItems entry for Help & Support points to /portal/support (not /contact)', () => {
+    // Source-text pin — covers the menuItems array literal so a
+    // refactor that drops the new target but leaves the rendered href
+    // (or vice-versa) still trips at least one assertion below.
+    expect(userMenuSrc).toMatch(/to:\s*['"]\/portal\/support['"][\s\S]{0,200}?label:\s*['"]Help & Support['"]/);
+    // And the previous public-form target must NOT survive in the
+    // menuItems array. (The /contact route still exists for the public
+    // site footer; just not as the dropdown target.)
+    const menuItemsBlock = userMenuSrc.match(
+      /const\s+menuItems\s*=\s*\[[\s\S]*?\]/,
+    );
+    expect(menuItemsBlock).not.toBeNull();
+    expect(menuItemsBlock[0]).not.toMatch(/to:\s*['"]\/contact['"][\s\S]*?Help & Support/);
+  });
+
+  test('9. rendered <Link id="user-menu-item-0"> href is /portal/support', () => {
+    // Mount-time pin — ensures the JSX href matches the menuItems
+    // entry above. The menu only mounts after openMenu() fires
+    // (the dropdown is portalled to document.body), so the item
+    // element is null until the click handler runs.
+    renderMenu();
+    openMenu();
+    const helpItem = document.getElementById('user-menu-item-0');
+    expect(helpItem).not.toBeNull();
+    expect(helpItem.getAttribute('href')).toBe('/portal/support');
+    // And the rendered label is still "Help & Support" — not silently
+    // relabelled to something generic.
+    expect(helpItem.textContent).toMatch(/Help & Support/);
+  });
+});
