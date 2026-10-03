@@ -33,6 +33,18 @@ jobs:
   assert-workflows-on-default:
     runs-on: ubuntu-latest
     steps:
+      # [Fix 2026-10-03] Checkout the repo so `gh` can resolve which
+      # repository we're in. `gh` v2.x uses git-context discovery as
+      # its primary repo-resolution method; without a `.git` dir in
+      # the workspace, `gh repo view` aborts with
+      # "failed to run git: fatal: not a git repository" and exits 1.
+      # Pre-fix this job had no checkout step and was failing on every
+      # push since 2026-09-24 (visible in the Actions history).
+      # The `contents: read` permission below is enough — the checkout
+      # uses the workflow's GITHUB_TOKEN, not a PAT.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Resolve the actual default branch
         id: resolve
         env:
