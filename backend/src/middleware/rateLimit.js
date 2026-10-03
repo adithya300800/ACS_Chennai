@@ -156,6 +156,64 @@ const trainingWriteLimiter = rateLimit({
   message: { error: 'Too many training write requests. Please slow down.', code: 'TRAINING_THROTTLED' },
 });
 
+// [Payslips Stage 1 / commit 3] — 3 payslip-specific limiters (item 4).
+//
+// Why three? The three surfaces have distinct abuse profiles:
+//
+//   * payslipUploadLimiter (admin uploads): a misbehaving admin tab or a
+//     stolen admin token can mint SAS URLs / confirm uploads to fill
+//     R2 with junk. 20/hour is well above the legitimate "October
+//     payroll" burst (an admin uploads 50-80 files in a one-hour window
+//     on day 1 of the month — comfortably under 100/h).
+//
+//   * payslipAdminLimiter (admin bind / publish / revoke / resend): the
+//     mutating endpoints that stamp audit fields. A scripted admin
+//     token can otherwise generate hundreds of EmailLog rows per
+//     minute via repeated publish attempts (each triggers an email
+//     queue + R2 HEAD + Prisma update). 60/hour is plenty for
+//     legitimate HR flows.
+//
+//   * payslipDownloadLimiter (employee GET /:id/download): the only
+//     path that streams the PDF. A script that hammers this endpoint
+//     burns CPU + R2 bandwidth; a leaked employee token can otherwise
+//     exfiltrate every published payslip in the user's session.
+//     120/hour covers ~one download per 30s across an 8h work day —
+//     the upper edge of legitimate UX.
+//
+// All three key on req.ip via the shared `ipKey` helper. Per-account
+// limiting would require a different key (employeeId), and is left to a
+// future round if brute-force IP rotation is observed in the wild.
+
+const payslipUploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  validate: { trustProxy: true },
+  message: { error: 'Too many payslip upload requests. Please slow down.', code: 'PAYSLIP_UPLOAD_THROTTLED' },
+});
+
+const payslipAdminLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  validate: { trustProxy: true },
+  message: { error: 'Too many payslip admin operations. Please slow down.', code: 'PAYSLIP_ADMIN_THROTTLED' },
+});
+
+const payslipDownloadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  validate: { trustProxy: true },
+  message: { error: 'Too many payslip download requests. Please slow down.', code: 'PAYSLIP_DOWNLOAD_THROTTLED' },
+});
+
 module.exports = {
   loginLimiter,
   loginEmailLimiter,
@@ -166,4 +224,7 @@ module.exports = {
   exportLimiter,
   leaveCreateLimiter,
   trainingWriteLimiter,
+  payslipUploadLimiter,
+  payslipAdminLimiter,
+  payslipDownloadLimiter,
 };

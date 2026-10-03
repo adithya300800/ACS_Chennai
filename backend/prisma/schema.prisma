@@ -1994,6 +1994,19 @@ model Payslip {
   // removes). See plan §C.3 state machine.
   deletedAt DateTime? @map("deleted_at")
 
+  // [commit 3] Email-status audit. Publish flow queues the recipient
+  // email via setImmediate after the publishedAt transaction commits; the
+  // dispatch status (sent / failed / skipped) is stamped on the same row
+  // so admin audit can answer "did this recipient ever get the email"
+  // without spelunking EmailLog. See migration
+  // 20261002010004_payslip_email_status + lib/payslip.js sendPayslipEmail.
+  // 'PENDING' is the initial state after publish; 'SENT' / 'FAILED' are
+  // terminal. Skipped values mirror EmailLog's vocabulary so admin
+  // surfaces can render the same way.
+  emailStatus        String    @default("PENDING") @map("email_status")
+  emailSentAt        DateTime? @map("email_sent_at")
+  emailFailedReason  String?   @map("email_failed_reason") @db.VarChar(500)
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
