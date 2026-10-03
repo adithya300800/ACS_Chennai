@@ -265,6 +265,17 @@ const HELP_ICON = (
     <line x1="12" y1="17" x2="12.01" y2="17" />
   </svg>
 );
+// [Payslips Stage 1 / commit 6 — frontend] payslip icon — envelope
+// glyph echoing "delivered to employee inbox". Distinct from
+// BILLING_ICON (receipt-with-rupee for the COP register) and REPORT_ICON
+// (paperclip for project reports) so the three sidebar entries stay
+// scannable when admin payslips sits next to billing certifications.
+const PAYSLIP_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <polyline points="3 7 12 13 21 7" />
+  </svg>
+);
 
 const navGroups = [
   {
@@ -326,6 +337,12 @@ const navGroups = [
       // /portal/admin/billing-certifications (Records group). Same
       // BILLING_ICON so the two entries feel like siblings.
       { to: '/portal/certifications', label: 'My Certifications', icon: BILLING_ICON },
+      // [Payslips Stage 1] Employee-facing payslip inbox — read-only list
+      // of published payslips (plus revoked / failed) with a one-click
+      // download that streams the PDF through the backend. Sits at the
+      // bottom of My Reports so it doesn't push existing entries around.
+      // Admin cross-org coverage stays under Records as "Payslips".
+      { to: '/portal/payslips', label: 'My Payslips', icon: PAYSLIP_ICON },
     ],
   },
   ...(employee?.isAdmin ? [
@@ -378,6 +395,11 @@ const navGroups = [
         // employees don't see this surface. Mirrors the other Records
         // registry entries (cards + filters + cursor pagination).
         { to: '/portal/admin/billing-certifications', label: 'Billing Certifications', icon: BILLING_ICON },
+        // [Payslips Stage 1] Admin coverage + upload + publish + replace +
+        // revoke. Mirrors the BillingCertificationsAdmin entry shape (cards
+        // + filters + cursor pagination) but lives under Records because
+        // the page cross-cuts every employee (no project scope).
+        { to: '/portal/admin/payslips', label: 'Payslips', icon: PAYSLIP_ICON },
       ],
     },
     {

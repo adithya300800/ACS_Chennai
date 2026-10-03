@@ -1247,4 +1247,75 @@ export const api = {
     api.delete(`/billing-certifications/${id}`, token),
   getBillingCertificationReadSas: (id, token) =>
     api.get(`/billing-certifications/${id}/read-sas`, token),
+
+  // [Payslips Stage 1 / commit 6 — frontend] payslip register.
+  //
+  // Two admin sub-routers (`/api/admin/payslips/upload` for SAS +
+  // confirm-upload; `/api/admin/payslips` for bind/publish/revoke/
+  // resend/coverage) and one portal sub-router (`/api/portal/payslips`
+  // for the employee list + PDF download) — all under
+  // `requireFreshAdmin` / `requireAuth` + the three payslip rate
+  // limiters (40/h upload, 60/h admin, 120/h download keyed on the
+  // authenticated employee id). Every mutating POST includes an
+  // `Idempotency-Key` minted with `crypto.randomUUID()` so a network
+  // retry can't double-stamp `publishedAt` / `revokedAt` /
+  // `emailStatus`.
+  //
+  // The PDF download is NOT a presigned R2 URL — the backend streams
+  // the bytes through itself at `/api/portal/payslips/:id/download`
+  // (Content-Disposition: attachment; filename="Payslip-YYYY-MM.pdf").
+  // Use `api.downloadPayslip(id, token)` which goes through the
+  // shared `api.download` helper so the 401-refresh + filename-parse
+  // path is identical to the timesheet export.
+  //
+  // The `pathPrefix: 'payslips'` body field on the SAS / confirm
+  // upload is the security contract the server enforces — the bind
+  // step asserts the resulting blobPath starts with `payslips/`
+  // before creating the `Payslip` row, so the same wrapper shape
+  // mirrors BillingCert's `pathPrefix: 'billing'` (DR-016). Frontend
+  // must send `payslips/<filename>` in the filename on BOTH the
+  // sas-url and confirm-upload calls or the server 400s on
+  // `INVALID_BLOB_PATH` at bind time.
+  getPayslipSasUrl: (filename, contentType, token) =>
+    api.post('/admin/payslips/upload/sas-url', {
+      filename: `payslips/${filename}`,
+      contentType,
+      container: 'dpr-documents',
+      pathPrefix: 'payslips',
+    }, token),
+  confirmPayslipUpload: (ulid, filename, contentType, sizeBytes, token) =>
+    api.post('/admin/payslips/upload/confirm-upload', {
+      ulid,
+      container: 'dpr-documents',
+      filename: `payslips/${filename}`,
+      contentType,
+      sizeBytes,
+      pathPrefix: 'payslips',
+    }, token),
+  bindPayslip: (payload, token, idempotencyKey) =>
+    api.post('/admin/payslips/bind', payload, token, idempotencyKey),
+  publishPayslips: (payslipIds, token, idempotencyKey) =>
+    api.post('/admin/payslips/publish', { payslipIds }, token, idempotencyKey),
+  revokePayslip: (id, payload, token, idempotencyKey) =>
+    api.post(`/admin/payslips/${id}/revoke`, payload || {}, token, idempotencyKey),
+  resendPayslipEmail: (id, token) =>
+    api.post(`/admin/payslips/${id}/resend-email`, {}, token),
+  resendStuckPayslipEmails: (token) =>
+    api.post('/admin/payslips/resend-stuck', {}, token),
+  getAdminPayslips: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/admin/payslips${qs ? '?' + qs : ''}`, token);
+  },
+  getPayslipCoverage: (year, month, token) =>
+    api.get(`/admin/payslips/coverage?year=${year}&month=${month}`, token),
+  getMyPayslips: (params = {}, token) => {
+    const qs = new URLSearchParams(params).toString();
+    return api.get(`/portal/payslips${qs ? '?' + qs : ''}`, token);
+  },
+  // Returns { blob, filename, contentType }. The backend always emits
+  // `Content-Disposition: attachment; filename="Payslip-YYYY-MM.pdf"`
+  // for ?download=1 — the helper's existing filename-parse code
+  // (api.download at api.js:378-496) returns that name verbatim.
+  downloadPayslip: (id, token) =>
+    api.download(`/portal/payslips/${id}/download?download=1`, token),
 };

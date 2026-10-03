@@ -128,6 +128,20 @@ const DrawingBrowseDetail = React.lazy(() => import('./pages/portal/DrawingBrows
 // employee can reach it from the new sidebar entry or the UserMenu
 // "Help & Support" link.
 const EmployeeSupport = React.lazy(() => import('./pages/portal/EmployeeSupport.jsx'));
+// [Payslips Stage 1 / commit 6 — frontend] payslip surfaces.
+//   - MyPayslips         → /portal/payslips              (employee list + download)
+//   - AdminPayslips      → /portal/admin/payslips         (admin coverage + upload +
+//                                                            publish + replace + revoke +
+//                                                            "N emails pending/failed"
+//                                                            indicator with Resend)
+// Both pages reuse the standard /portal/* tree; the admin route is
+// gated by ProtectedRoute requireAdmin so non-admins get bounced to
+// the employee dashboard on direct navigation. Backend routes are
+// /api/admin/payslips* + /api/portal/payslips* (see
+// backend/src/routes/payslip.js for the IDOR-guarded download + the
+// requireFreshAdmin gate on every admin write).
+const MyPayslips = React.lazy(() => import('./pages/portal/MyPayslips.jsx'));
+const AdminPayslips = React.lazy(() => import('./pages/admin/AdminPayslips.jsx'));
 
 function App() {
   const location = useLocation();
@@ -298,6 +312,26 @@ function App() {
               `RoleBranchLanding` below. No literal-vs-param ordering
               concerns here since the path takes no `:id` segment. */}
           <Route path="support" element={<EmployeeSupport />} />
+          {/* [Payslips Stage 1] Employee payslip inbox — read-only list of
+              published / revoked / failed payslips with one-click download
+              that streams the PDF through the backend. Backend route is
+              /api/portal/payslips (requireAuth + IDOR guard). No admin
+              gate at the route level. */}
+          <Route path="payslips" element={<MyPayslips />} />
+          {/* [Payslips Stage 1] Admin payslip register — coverage view +
+              upload + publish + replace + revoke + the "N emails pending
+              or failed" indicator with Resend button. Admin-gated at the
+              route level (matches the backend requireFreshAdmin gate on
+              every mutation). Sits next to /admin/billing-certifications
+              so the Records-group payslip entry has a real target. */}
+          <Route
+            path="admin/payslips"
+            element={
+              <ProtectedRoute requireAdmin>
+                <AdminPayslips />
+              </ProtectedRoute>
+            }
+          />
           {/* P0/A-02: landing branches on role. Employees → Dashboard; admins → Admin Overview.
               SOL-P2#17: removed /portal/assets stub (and ComingSoon component) —
               the item was advertised as "coming soon" but had no roadmap date.
