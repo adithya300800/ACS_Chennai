@@ -134,6 +134,12 @@ function buildPrisma({ intents = [], dprPhotos = [], inspectionPhotos = [] } = {
     billingCertification: {
       findMany: jest.fn(async () => []),
     },
+    // Payslip Stage 1 / commit 2 — sweep now protects payslip bytes.
+    // Legacy DR-018 fixtures don't seed payslip rows; the empty default
+    // keeps the dry-run contract intact.
+    payslip: {
+      findMany: jest.fn(async () => []),
+    },
     _intents: intents,
     _updateManyCalls: updateManyCalls,
   };

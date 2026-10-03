@@ -397,6 +397,18 @@ mountUploadRoutes(router, {
   // Drawing uploads and Project Report attachments stay
   // unprefixed — they don't send `pathPrefix` and their backend
   // readers do not expect a leading segment.
+  //
+  // [Payslip Stage 1 / commit 2] `payslips` is DELIBERATELY NOT in
+  // this allowlist. The future admin payslip mount (commit 3)
+  // mounts its OWN upload route with
+  //   allowedPathPrefixesPerContainer: { 'dpr-documents': ['payslips'] }
+  // and a requireFreshAdmin gate so only an admin session can mint
+  // `payslips/<employeeId>/<ulid>.pdf` SAS URLs. Listing `payslips`
+  // here would let any employee (DPR route is not admin-gated)
+  // mint a `payslips/` SAS, polluting the admin namespace with
+  // employee-issued upload intents. The prefix split is the
+  // security boundary — see __tests__/payslip-upload-intent-prefix.test.js
+  // for the regression test that pins this separation.
   allowedPathPrefixesPerContainer: {
     'dpr-documents': ['billing'],
   },

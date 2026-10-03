@@ -110,6 +110,20 @@ model Employee {
   // preserves the audit trail when the assigning admin is removed.
   projectAssignments         ProjectAssignment[]     @relation("ProjectAssignmentEmployee")
   projectAssignmentsAssigned ProjectAssignment[]     @relation("ProjectAssignmentAssigner")
+  // [Payslip Stage 1 / commit 2] back-relations for the Payslip model.
+  // Four named relations because the employee appears in four roles on
+  // the join: the employee the payslip is FOR (employeeId, Restrict so a
+  // hard-delete of an employee is a business operation, not a silent
+  // cascade — mirrors BoqItem.createdById's contract); the admin who
+  // UPLOADED it (uploadedById, Restrict — same reasoning); and the admin
+  // who PUBLISHED it or REVOKED it (publishedById, revokedById — SetNull,
+  // audit trail must not cascade when the acting admin is removed; mirrors
+  // VariationOrder.approvedById's contract).
+  payslips                   Payslip[]               @relation("EmployeePayslips")
+  payslipsUploaded           Payslip[]               @relation("PayslipUploader")
+  payslipsPublished          Payslip[]               @relation("PayslipPublisher")
+  payslipsRevoked            Payslip[]               @relation("PayslipRevoker")
+  payslipsPurged             Payslip[]               @relation("PayslipPurger")
 
   @@map("employees")
 }
@@ -1787,29 +1801,29 @@ model RequestDedupe {
   // Namespaced key: `${route}:${employeeId}:${rawKey}`. Capped at 255
   // in lib/idempotency.js so the PK index stays bounded even with a
   // malicious megabyte header.
-  key          String    @id @map("key")
+  key             String    @id @map("key")
   // sha256(canonicalJsonStringify(body)) — same contract as
   // lib/idempotency.js canonicalJsonStringify. The security pin:
   // same key + different body MUST return 409 IDEMPOTENCY_MISMATCH.
-  payloadHash  String    @map("payload_hash")
+  payloadHash     String    @map("payload_hash")
   // PENDING | COMPLETED | FAILED — CHECK constraint at the DB level.
-  state        String    @map("state")
+  state           String    @map("state")
   // Cached response shape so a same-key replay returns the original
   // row's serialized body without re-reading the business table.
-  resultStatus Int?      @map("result_status")
-  resultBody   Json?     @map("result_body")
+  resultStatus    Int?      @map("result_status")
+  resultBody      Json?     @map("result_body")
   // Best-effort reference back to the row the handler committed.
   // NOT a FK on purpose: the dedupe row must outlive a hard-delete
   // (the audit's "ONE logical record" guarantee means a deleted COP
   // must still reject same-key retries).
-  recordKind   String?   @map("record_kind")
-  recordId     String?   @map("record_id")
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
+  recordKind      String?   @map("record_kind")
+  recordId        String?   @map("record_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
   // Janitor target — populated when COMPLETED; admin query can DELETE
   // WHERE expires_at < now() to bound the table. PENDING slots are
   // GC'd separately by the state_created_at index.
-  expiresAt    DateTime? @map("expires_at")
+  expiresAt       DateTime? @map("expires_at")
   // [DR-037] Fresh24 audit (2026-09-24) — separate identity retention
   // from response-body retention. NULL = body is live (the normal state
   // after complete()). Non-NULL = body was compacted by the
@@ -1896,4 +1910,108 @@ model AppLog {
   @@index([createdAt])
   @@index([requestId])
   @@map("app_log")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Payslips Stage 1 — commit 2 (DB schema + raw-SQL partial unique + RLS)
+//
+// Single new table. No columns added to existing models except four
+// back-relations on `Employee` (see the `Employee` model above). The
+// partial unique index `(employee_id, year, month) WHERE deleted_at IS NULL`
+// is added by the migration `20261002010001_payslip_partial_unique` because
+// Prisma cannot model partial uniques; that migration is the authoritative
+// source of truth and contains its own drift-detection block that mirrors
+// `no_overlap_leave` from DR-031.
+//
+// The salary figures live ONLY in the PDF (the upload). The row has no
+// `netPay`, `grossPay`, `tax`, `basic`, `hra`, `deductions`, `earnings`,
+// `bankAccount`, `pan`, `uan`, or any other numeric salary field. The
+// request validator (zod, shipped in commit 3) rejects unknown fields —
+// not just omits them — so a future schema-drift bug cannot leak payroll
+// figures into this row.
+//
+// RLS is added by `20261002010002_payslip_rls` (mirrors the canonical
+// pattern at `20260910000000_rls_lockdown_s1`). The deny policies close
+// the PostgREST auto-exposure of this table (Supabase auto-exposes every
+// public-schema table to anyone holding the anon key); the backend's
+// Prisma traffic is unaffected because the `postgres` role has
+// `rolbypassrls = TRUE` (verified 2026-09-09 per `rls_lockdown_s1`).
+// ─────────────────────────────────────────────────────────────────────────────
+model Payslip {
+  // Majority of existing models (Employee, UploadIntent, NotificationPreference,
+  // LeaveRequest, …) declare `@id @default(uuid())` WITHOUT `@db.Uuid`, so
+  // the underlying Postgres column is `text`. Payslip follows the majority
+  // — the v1 R2 key path is built from `ulid`, not `id`, so an opaque PK
+  // is sufficient.
+  id               String @id @default(uuid())
+  employeeId       String @map("employee_id")
+  // year: 2000-2100 (CHECK constraint added in the create-table migration)
+  year             Int
+  // month: 1-12 (CHECK constraint added in the create-table migration)
+  month            Int
+  // ulid is the R2 key suffix AND a defensive cross-system identifier.
+  // Server-generated (Crockford base32). Unique across all payslips.
+  ulid             String @unique
+  // Back-link to the UploadIntent row that vouched for this payslip's
+  // blob. Stamped at create-time inside the same transaction as the
+  // binding claim (see lib/uploadIntentBinding.js in commit 3). Unique
+  // because two intents cannot both succeed for the same ulid, and the
+  // sweep at internal-upload-sweep.js iterates upload_intent rows by
+  // (container, blobPath) — this column gives the reverse-lookup key.
+  uploadIntentUlid String @unique @map("upload_intent_ulid")
+  // Locked to "application/pdf" by verifyBlobMagicBytes in commit 3.
+  contentType      String @map("content_type")
+  // Server-verified ETag at confirm-time. Compared at publish-time (commit 3)
+  // to refuse a blob that has been swapped under the same ulid.
+  etag             String @db.Text
+  // Server-verified byte length at confirm-time.
+  sizeBytes        BigInt @map("size_bytes")
+  // R2 key path: payslips/{year}/{month}/{employeeId}/{ulid}.pdf
+  blobPath         String @map("blob_path") @db.VarChar(1024)
+
+  // ── Payroll-grade audit (lives on the row, NOT in AppLog) ──────────────
+  // AppLog retention is 30 days and the team is logging less; payroll-grade
+  // "who uploaded / published / revoked what" must survive independently.
+  // All server-stamped, never client-supplied. Nullable = not yet actioned.
+  uploadedById  String    @map("uploaded_by_id")
+  publishedById String?   @map("published_by_id")
+  publishedAt   DateTime? @map("published_at")
+  revokedById   String?   @map("revoked_by_id")
+  revokedAt     DateTime? @map("revoked_at")
+  revokedReason String?   @map("revoked_reason") @db.VarChar(500)
+  // Purge audit (tombstone, not hard-delete). The misdelivery script
+  // (commit 8) deletes the R2 blob but keeps this row, stamping these
+  // three columns. v1 only sets these via the operator-driven script;
+  // a future hard-delete cron (out of v1 scope) would also use them.
+  // SetNull on the FK so removing the acting admin doesn't cascade the
+  // audit trail away.
+  purgedById    String?   @map("purged_by_id")
+  purgedAt      DateTime? @map("purged_at")
+  purgedReason  String?   @map("purged_reason") @db.VarChar(500)
+
+  // Soft-delete marker. v1 sets this on Revoke and on Purge (both flows
+  // tombstone the row; the R2 blob is the only thing the purge script
+  // removes). See plan §C.3 state machine.
+  deletedAt DateTime? @map("deleted_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  employee    Employee  @relation("EmployeePayslips", fields: [employeeId], references: [id], onDelete: Restrict)
+  uploadedBy  Employee  @relation("PayslipUploader", fields: [uploadedById], references: [id], onDelete: Restrict)
+  publishedBy Employee? @relation("PayslipPublisher", fields: [publishedById], references: [id], onDelete: SetNull)
+  revokedBy   Employee? @relation("PayslipRevoker", fields: [revokedById], references: [id], onDelete: SetNull)
+  purgedBy    Employee? @relation("PayslipPurger", fields: [purgedById], references: [id], onDelete: SetNull)
+
+  // Hot reads (only the two v1 hot paths):
+  //   "(employee_id, year DESC, month DESC)" → GET /api/payslips/my
+  //     Index Scan Backward; sort elided. Sub-millisecond at ~3 000 rows.
+  //   "(year, month, deleted_at)"            → GET /api/admin/payslips/coverage
+  //     Bitmap Index Scan. Drives the admin "who's missing for {year, month}" view.
+  // No index on uploadedById / publishedAt — no v1 query references them.
+  // A future audit-log surface (plan §C.1 "Out of scope") can add them
+  // in a separate migration when the query arrives.
+  @@index([employeeId, year(sort: Desc), month(sort: Desc)])
+  @@index([year, month, deletedAt])
+  @@map("payslip")
 }

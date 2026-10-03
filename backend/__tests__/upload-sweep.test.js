@@ -130,6 +130,12 @@ function buildPrisma(seedRows = []) {
     billingCertification: {
       findMany: jest.fn(async () => []),
     },
+    // Payslip Stage 1 / commit 2 — sweep now protects payslip bytes via
+    // the partial-unique + RLS table. Legacy tests don't seed payslip
+    // rows, so the empty default keeps the dry-run contract intact.
+    payslip: {
+      findMany: jest.fn(async () => []),
+    },
     _intents: intents,
     _updateManyCalls: updateManyCalls,
   };
