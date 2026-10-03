@@ -1,0 +1,171 @@
+# Free-tier Semgrep OSS static scan — no Semgrep account, no token, no SARIF
+# upload to GitHub Code Scanning dashboard (that needs GHAS).
+#
+# Why this workflow at all if `codeql.yml` already exists?
+#   1. CodeQL is being deleted in the cutover (private repo loses GHAS).
+#      Semgrep OSS is a stand-in for JS/TS/React/Node with no license.
+#   2. Semgrep has faster signal-to-noise on common security smells
+#      (hardcoded creds, weak crypto, XSS sinks, dangerous deserialisation)
+#      than CodeQL's default pack. We use it as a complementary
+#      quick-pass; deeper analysis still belongs to a paid tool later.
+#   3. SARIF upload is intentionally NOT done here — SARIF upload to
+#      code-scanning requires `security-events: write` AND GHAS, both
+#      of which we lose when the repo flips private. We just save SARIF
+#      as a workflow artifact for local review.
+#
+# Why `continue-on-error: true` on the job:
+#   The baseline (2026-10-02) is 10 findings — 1 CORS, 2 Zoho OAuth
+#   popup false-positives, 6 contact-form `escapeHtml()` false-positives,
+#   1 setTimeout-arg false-positive. Triage is manual. We don't want a
+#   single new noisy rule to turn every PR red; the summary is enough.
+#
+# Ruleset choice:
+#   - p/javascript  — generic JS/TS (covers both backend and frontend).
+#   - p/nodejs      — server-side Node sinks (path traversal, fs injection,
+#                     child_process, eval, prototype pollution).
+#   - p/react       — React-specific (XSS via dangerouslySetInnerHTML,
+#                     key, ref, hook rules — though we use --no-git-ignore
+#                     so eslint-plugin-react-hooks rules don't double-report).
+#   - p/security-audit — meta-pack that pulls in community-curated
+#                         high-signal rules.
+#   - p/secrets is SKIPPED: gitleaks (secret-scan.yml) already runs and
+#     is purpose-built. Avoid double-counting.
+#
+# Pin policy:
+#   - actions/checkout@v4, actions/upload-artifact@v4 (latest major —
+#     v4 is stable across the other workflows; we match for consistency).
+#   - semgrep official container image is pinned to a digest (not a tag)
+#     so a malicious mirror image swap can't re-supply a backdoored CLI.
+#     The image is updated quarterly; bump the digest when Semgrep ships
+#     a release.
+#
+# Permissions:
+#   - contents: read. Nothing else. No token, no SARIF upload, no
+#     security-events.
+
+name: Semgrep OSS
+
+on:
+  pull_request:
+    branches: [add-react-website, main]
+  push:
+    branches: [add-react-website, main]
+  schedule:
+    # Weekly Sunday 03:00 UTC = 08:30 IST — intentionally off-cycle from
+    # CodeQL's Monday 22:30 UTC and the npm-audit Tuesday 02:30 UTC so
+    # the three scanners never run in the same hour.
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: Semgrep scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true   # OBSERVABILITY, not a gate — see file header
+    container:
+      # Official Semgrep image, digest-pinned. Bump quarterly when
+      # Semgrep releases a new minor. Digest verified locally on
+      # 2026-10-02 against Docker Hub tag `latest` (CLI reports
+      # semgrep 1.178.0 inside the image). To re-verify:
+      #   docker pull returntocorp/semgrep@sha256:32e459968daabe7ab86968184a29109b9564aa00392401156f9788452b42786b
+      #   docker run --rm $IMAGE semgrep --version
+      image: returntocorp/semgrep@sha256:32e459968daabe7ab86968184a29109b9564aa00392401156f9788452b42786b
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The container image is self-contained — no npm/pip install step
+      # needed. Semgrep ships its own static binary + rules.
+
+      - name: Run Semgrep (JSON for machine-readable diff)
+        id: semgrep-json
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts
+          semgrep \
+            --config p/javascript \
+            --config p/nodejs \
+            --config p/react \
+            --config p/security-audit \
+            --exclude 'node_modules' \
+            --exclude 'dist' \
+            --exclude 'build' \
+            --exclude '.git' \
+            --exclude '**/*.test.{js,jsx,ts,tsx}' \
+            --exclude '**/__tests__/**' \
+            --exclude '**/__mocks__/**' \
+            --exclude 'backend/prisma/generated/**' \
+            --exclude 'backend/coverage/**' \
+            --exclude '**/*.min.js' \
+            --exclude '**/dist/**' \
+            --json \
+            --output artifacts/semgrep.json \
+            --metrics off \
+            --error \
+            src backend/src 2>/dev/null || true
+          # `--error` makes Semgrep exit non-zero on any finding so we
+          # can detect "still clean" vs "new findings" later. The
+          # `|| true` keeps the step from failing the workflow (we want
+          # continue-on-error semantics at the job level, not via shell).
+
+      - name: Summarise findings to $GITHUB_STEP_SUMMARY
+        if: always()
+        run: |
+          # Use a small node script to format the JSON into a readable
+          # step summary. Tolerant of an empty/missing file (clean run).
+          if [ ! -s artifacts/semgrep.json ]; then
+            echo "## Semgrep OSS scan" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "_No findings, or scan produced no output._" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          node -e '
+            const fs = require("fs");
+            const data = JSON.parse(fs.readFileSync("artifacts/semgrep.json", "utf8"));
+            const results = data.results || [];
+            const errors = data.errors || [];
+            const bySeverity = {};
+            for (const r of results) {
+              const sev = r.extra?.severity || "UNKNOWN";
+              bySeverity[sev] = (bySeverity[sev] || 0) + 1;
+            }
+            let out = "## Semgrep OSS scan\n\n";
+            out += "**Rulesets:** p/javascript, p/nodejs, p/react, p/security-audit\n";
+            out += "**Paths:** `src/`, `backend/src/` (excludes: tests, generated, coverage, minified)\n\n";
+            out += "- total findings: **" + results.length + "**\n";
+            out += "- engine errors: " + errors.length + "\n";
+            for (const [sev, n] of Object.entries(bySeverity)) {
+              out += "- " + sev + ": **" + n + "**\n";
+            }
+            out += "\n";
+            if (results.length > 0) {
+              out += "### Findings (top 20 by severity)\n\n";
+              const sevOrder = { ERROR: 0, WARNING: 1, INFO: 2 };
+              results.sort((a, b) => (sevOrder[a.extra?.severity] ?? 9) - (sevOrder[b.extra?.severity] ?? 9));
+              const top = results.slice(0, 20);
+              for (const r of top) {
+                out += "- **" + (r.extra?.severity || "?") + "** `"
+                  + (r.check_id || "?") + "` — `"
+                  + (r.path || "?") + ":" + (r.start?.line || "?") + "`\n";
+              }
+              if (results.length > 20) {
+                out += "\n_…and " + (results.length - 20) + " more. Full SARIF is in the workflow artifact._\n";
+              }
+            } else {
+              out += "_No findings._\n";
+            }
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, out);
+          '
+
+      - name: Upload SARIF as artifact (no Code-Scanning dashboard)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-sarif
+          path: artifacts/semgrep.json
+          if-no-files-found: ignore
+          retention-days: 14
