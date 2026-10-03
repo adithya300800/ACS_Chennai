@@ -50,6 +50,24 @@ jest.mock('../lib/businessDate.js', () => ({
   getBusinessToday: () => '2026-09-15',
 }));
 
+// getCurrentIstMonth seeds the calendar's initial month on mount.
+// The previous test didn't mock it, so the calendar rendered the
+// real "current month" (whatever the wall-clock returns when CI
+// runs) while getBusinessToday was frozen to 2026-09-15. The two
+// drifted apart: the day-15 cell of the real current month had no
+// record (the record is for 2026-09-15) and no `today` flag (the
+// cell's dateStr ≠ '2026-09-15'), so the click target was an empty
+// unmarked cell. Pin getCurrentIstMonth to '2026-09' so the calendar
+// shows September 2026, the day-15 cell has both hasRecord=true AND
+// isToday=true, and the seeded record drives the modal-open click.
+jest.mock('../lib/format.js', () => {
+  const actual = jest.requireActual('../lib/format.js');
+  return {
+    ...actual,
+    getCurrentIstMonth: () => '2026-09',
+  };
+});
+
 beforeEach(() => {
   // /attendance/today returns null when no check-in has happened yet.
   // /attendance?month=... returns the list of records that drives the

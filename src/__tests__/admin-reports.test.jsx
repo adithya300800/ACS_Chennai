@@ -13,7 +13,9 @@
 //   1. api.js exports getAdminReports pointing at /admin/reports
 //   2. ReportsAdmin.jsx consumes the 3 expected api helpers
 //      (getAdminReports, getProjectAttachmentReadSas, deleteProjectAttachment)
-//   3. ReportsAdmin.jsx imports PROJECT_REPORT_TYPES + PROJECT_REPORT_TYPE_LABELS
+//   3. ReportsAdmin.jsx imports PROJECT_REPORT_TYPE_LABELS +
+//      UNIFIED_TAXONOMY (R44 retired PROJECT_REPORT_TYPES in favour
+//      of UNIFIED_TAXONOMY = 5 cadence + 8 categories).
 //   4. ReportsAdmin.jsx renders the filter row scaffold + the card grid
 //   5. PortalLayout sidebar contains { to: '/portal/admin/reports', label: 'Project Reports' }
 //   6. PortalLayout declares the REPORT_ICON SVG constant
@@ -53,9 +55,19 @@ describe('R36 — Admin Project Reports: ReportsAdmin page wiring', () => {
     expect(pageSrc).toMatch(/api\.listAdminEmployees\(/);
   });
 
-  test('3. ReportsAdmin.jsx imports PROJECT_REPORT_TYPES + PROJECT_REPORT_TYPE_LABELS', () => {
-    expect(pageSrc).toMatch(/import[\s\S]*?PROJECT_REPORT_TYPES[\s\S]*?from\s+['"]\.\.\/\.\.\/lib\/constants\.js['"]/);
+  test('3. ReportsAdmin.jsx imports PROJECT_REPORT_TYPE_LABELS + UNIFIED_TAXONOMY (R44 flat-taxonomy)', () => {
+    // [R44-flat-taxonomy] PROJECT_REPORT_TYPES (the 5 cadence-only
+    // array) was retired in favour of UNIFIED_TAXONOMY (13 entries =
+    // 5 cadence + 8 categories). PROJECT_REPORT_TYPE_LABELS is still
+    // imported because the per-card badge label still uses it. Pin
+    // the imports that still matter and pin the absence of the
+    // retired symbol so a future refactor that re-introduces it
+    // fails this test (parity with MyProjectReports.test.jsx:6).
+    expect(pageSrc).toMatch(/import\s*\{[^}]*PROJECT_REPORT_TYPE_LABELS[^}]*\}\s*from\s+['"]\.\.\/\.\.\/lib\/constants\.js['"]/);
+    expect(pageSrc).toMatch(/import\s*\{[^}]*UNIFIED_TAXONOMY[^}]*\}\s*from\s+['"]\.\.\/\.\.\/lib\/constants\.js['"]/);
     expect(pageSrc).toMatch(/PROJECT_REPORT_TYPE_LABELS/);
+    // PROJECT_REPORT_TYPES (without _LABELS) is retired.
+    expect(pageSrc).not.toMatch(/import\s*\{[^}]*PROJECT_REPORT_TYPES[,}]/);
   });
 
   test('4. ReportsAdmin.jsx renders the filter row + card grid scaffold', () => {
@@ -66,8 +78,14 @@ describe('R36 — Admin Project Reports: ReportsAdmin page wiring', () => {
     // Date inputs
     expect(pageSrc).toMatch(/htmlFor="reports-from"[\s\S]*?type="date"/);
     expect(pageSrc).toMatch(/htmlFor="reports-to"[\s\S]*?type="date"/);
-    // Type chips — buttons with aria-pressed
-    expect(pageSrc).toMatch(/aria-pressed=\{active\}[\s\S]*?toggleType\(t\)/);
+    // [R44-flat-taxonomy] Type chips moved from inline buttons with
+    // `aria-pressed` + a local toggleType() helper to the shared
+    // <FilterChip> component iterating UNIFIED_TAXONOMY. Pin the new
+    // shape so a future refactor that reverts to inline buttons
+    // (which lost the active-state styling under the redesign) is
+    // caught here.
+    expect(pageSrc).toMatch(/UNIFIED_TAXONOMY\.map\(/);
+    expect(pageSrc).toMatch(/<FilterChip\b/);
     // Card grid (auto-fill, minmax 300px)
     expect(pageSrc).toMatch(/repeat\(auto-fill,\s*minmax\(min\(100%,\s*300px\),\s*1fr\)\)/);
     // Load more cursor pagination

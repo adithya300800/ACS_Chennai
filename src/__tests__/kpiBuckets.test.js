@@ -279,11 +279,23 @@ describe('kpiBuckets.pendingReviewSparkline', () => {
   test('counts SUBMITTED + UNDER_REVIEW rows by day (caller pre-filters)', () => {
     // The function is pure over its input — the caller is responsible
     // for filtering to SUBMITTED + UNDER_REVIEW. Pin that contract.
+    //
+    // Seed dates are computed relative to "today" so the rows always
+    // fall inside the rolling 14-day window that
+    // `pendingReviewSparkline` uses. The previous version pinned
+    // 2026-09-08/09/10 explicitly, which silently aged out of the
+    // window once the test date crossed into October — the production
+    // function is correct, the test fixtures were stale.
+    const toDay = (offsetDays) => {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() + offsetDays);
+      return d.toISOString().slice(0, 10);
+    };
     const rows = [
-      { id: 1, status: 'SUBMITTED', reportDate: '2026-09-08' },
-      { id: 2, status: 'UNDER_REVIEW', reportDate: '2026-09-09' },
-      { id: 3, status: 'APPROVED', reportDate: '2026-09-09' }, // ignored by filter, not by fn
-      { id: 4, status: 'REJECTED', reportDate: '2026-09-10' },
+      { id: 1, status: 'SUBMITTED',   reportDate: toDay(-2) },
+      { id: 2, status: 'UNDER_REVIEW', reportDate: toDay(-1) },
+      { id: 3, status: 'APPROVED',    reportDate: toDay(-1) }, // ignored by filter, not by fn
+      { id: 4, status: 'REJECTED',    reportDate: toDay(0) },
     ];
     // The dashboard filters before calling; the test mirrors that
     // pre-filter so the function's behaviour is the one we ship.

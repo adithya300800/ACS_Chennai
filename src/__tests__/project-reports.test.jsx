@@ -34,6 +34,9 @@
 
 import { readFileSync } from 'fs';
 import { resolve as resolvePath } from 'path';
+import React from 'react';
+import { render, waitFor, screen, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 
 const apiPath = resolvePath(__dirname, '../lib/api.js');
 const constantsPath = resolvePath(__dirname, '../lib/constants.js');
@@ -127,23 +130,84 @@ describe('R35 — Project Reports: ProjectExpandedPanel wiring', () => {
       /<ReportSection[\s\S]*?isRegistered=\{isRegistered\}[\s\S]*?projectKey=\{projectKey\}[\s\S]*?accessToken=\{accessToken\}[\s\S]*?onUploaded/,
     );
   });
+});
 
-  test('8. ProjectExpandedPanel issues api.getProjectAttachments(projectKey) on mount, registered-only', () => {
-    expect(panelSrc).toMatch(/api\.getProjectAttachments\(projectKey,\s*\{[^}]*limit:\s*50[^}]*\},\s*accessToken\)/);
-    // Discovered (unregistered) rows get an empty list (no FK available).
-    // The branch + the load effect's `if (isRegistered)` guard together
-    // prove the contract.
-    expect(panelSrc).toMatch(/setReports\(\{\s*status:\s*'loading'[\s\S]*?api\.getProjectAttachments/);
-    expect(panelSrc).toMatch(/isRegistered[\s\S]*?api\.getProjectAttachments/);
+// [Behavior tests] Mock setup at file scope so jest's hoisting
+// can lift the jest.mock calls to before any require().
+jest.mock('../contexts/AuthContext.jsx', () => ({
+  useAuth: () => ({
+    accessToken: 'test-token',
+    employee: { id: 'emp-1', isAdmin: true, name: 'Test' },
+  }),
+}));
+
+jest.mock('../contexts/ToastContext.jsx', () => ({
+  useToast: () => ({ push: jest.fn(), dismiss: jest.fn() }),
+}));
+
+const mockGetProjectAttachments = jest.fn().mockResolvedValue({ attachments: [], nextCursor: null });
+
+jest.mock('../lib/api.js', () => ({
+  api: {
+    getProjectAttachments: mockGetProjectAttachments,
+    getProjects: jest.fn().mockResolvedValue([]),
+    getBoqItems: jest.fn().mockResolvedValue([]),
+    getDprs: jest.fn().mockResolvedValue([]),
+    getInspections: jest.fn().mockResolvedValue([]),
+    getDrawings: jest.fn().mockResolvedValue([]),
+    getProjectParties: jest.fn().mockResolvedValue({}),
+  },
+}));
+
+beforeEach(() => {
+  mockGetProjectAttachments.mockClear();
+});
+
+describe('R35 — Project Reports: ProjectExpandedPanel wiring', () => {
+  test('8. ProjectExpandedPanel issues api.getProjectAttachments(projectKey) on mount with limit 50 in the params (behavior)', () => {
+    // [Behavior test] The original source-text pin locked the literal
+    // `{limit: 50}` param shape. R44 added filterType/filterCategory
+    // params between the mount and the call, so the params object is
+    // now built into a variable (`initialParams`) before the call.
+    // Mount the panel and assert the wire shape directly: the call
+    // is made with the projectKey, a params object containing
+    // `limit: 50`, and the accessToken.
+    // Imports (React, render, waitFor, MemoryRouter) are at file top
+    // because require()-inside-test triggers @testing-library/react's
+    // auto-`afterEach(cleanup)` registration mid-test, which jest
+    // rejects with "Hooks cannot be defined inside tests".
+    const ProjectExpandedPanel = require('../pages/portal/ProjectExpandedPanel.jsx').default;
+    render(
+      React.createElement(
+        MemoryRouter,
+        null,
+        React.createElement(ProjectExpandedPanel, {
+          project: { id: 'proj-1', name: 'Test Project', isRegistered: true },
+          accessToken: 'test-token',
+          onClose: () => {},
+          onOpenProjectDetail: () => {},
+        }),
+      ),
+    );
+    return waitFor(() => {
+      expect(mockGetProjectAttachments.mock.calls.length).toBeGreaterThan(0);
+      const [projectKey, params] = mockGetProjectAttachments.mock.calls[0];
+      expect(projectKey).toBe('proj-1');
+      expect(params.limit).toBe(50);
+    });
   });
 
-  test('9. ProjectExpandedPanel reruns the fetch when reportsRefreshKey bumps', () => {
-    // Same shape as the drawings refresh effect: skip the initial mount
-    // (key === 0), re-fetch when the user-triggered key bumps.
-    expect(panelSrc).toMatch(/reportsRefreshKey\s*===\s*0/);
-    expect(panelSrc).toMatch(
-      /api\.getProjectAttachments\(projectKey,\s*\{[^}]*limit:\s*50[^}]*\},\s*accessToken\)[\s\S]*?setReports\(\{\s*status:\s*'ready'/,
-    );
+  test('9. ProjectExpandedPanel reruns the fetch when reportsRefreshKey bumps (source-text + behavior guard)', () => {
+    // The refresh effect skips the initial mount (key === 0). To
+    // exercise the refresh path we'd need to seed a row + click
+    // Delete (which bumps reportsRefreshKey via the onDeleted
+    // callback). That's covered by the 25/dpr test for the upload
+    // path; here we pin the source-text guard so a future
+    // refactor can't accidentally run the refresh on mount.
+    expect(panelSrc).toMatch(/reportsRefreshKey\s*===\s*0\s*\)\s*return/);
+    // The refresh effect must also call getProjectAttachments with
+    // the same wire shape (projectKey + accessToken + params).
+    expect(panelSrc).toMatch(/api\.getProjectAttachments\(\s*projectKey,\s*refreshParams,\s*accessToken/);
   });
 });
 
@@ -177,18 +241,58 @@ describe('R35 — Project Reports: ReportSection component', () => {
     expect(panelSrc).toMatch(/ACCEPTED_REPORT_TYPES\.includes\(\s*file\.type\s*\)/);
   });
 
-  test('13. R35.1: discovered (unregistered) projects do NOT show the "register first" gate', () => {
-    // Round-35.1 removed the `if (!isRegistered)` early-return from
-    // ReportSection — the upload form now renders for both registered
-    // and discovered projects. The backend auto-creates the Project
-    // row on the first POST (R35.1 server side). Pin the absence of
-    // the now-deleted copy so a future refactor can't silently
-    // re-introduce the gating.
-    expect(panelSrc).not.toMatch(/Register this project first to start uploading reports\./);
-    // The render form must reach the JSX without an `isRegistered`
-    // guard short-circuiting it. We assert by looking for the upload
-    // form's `<select>` element on the report type, which is
-    // unconditional in the current implementation.
-    expect(panelSrc).toMatch(/value=\{uploadType\}/);
+  test('13. R35.1: discovered (unregistered) projects do NOT show the "register first" gate inside the Reports section (behavior)', () => {
+    // [Behavior test] The original source-text pin looked for the
+    // absence of "Register this project first to start uploading
+    // reports." copy and the presence of `value={uploadType}` on
+    // a `<select>`. R44 replaced the `<select>` with a FilterChip
+    // row driven by UNIFIED_TAXONOMY, so `value={uploadType}` no
+    // longer matches. Mount the panel with an UNregistered project
+    // and assert the upload form (filter chip row) is still
+    // present in the Reports section — the gate is gone, the form
+    // is unconditional.
+    //
+    // Scope: the assertion is SCOPED to the Reports section
+    // (`data-testid="projects-section-reports"`). The Drawings
+    // section still legitimately shows a "Register this project
+    // first to start tracking drawing revisions." gate for
+    // unregistered projects — that's intentional and is NOT what
+    // R35.1 removed. Without scoping, the test would fail on the
+    // Drawings copy and conflate two unrelated gates.
+    //
+    // Imports (React, render, waitFor, screen, MemoryRouter) live
+    // at file top because require()-inside-test triggers
+    // @testing-library/react's auto-`afterEach(cleanup)` registration
+    // mid-test, which jest rejects with "Hooks cannot be defined
+    // inside tests".
+    const ProjectExpandedPanel = require('../pages/portal/ProjectExpandedPanel.jsx').default;
+    render(
+      React.createElement(
+        MemoryRouter,
+        null,
+        React.createElement(ProjectExpandedPanel, {
+          // Discovered project: no id, only a name. isRegistered
+          // resolves to false but the upload form in the Reports
+          // section must still mount.
+          project: { name: 'Discovered Project' },
+          accessToken: 'test-token',
+          onClose: () => {},
+          onOpenProjectDetail: () => {},
+        }),
+      ),
+    );
+    return waitFor(() => {
+      const reportsSection = screen.getByTestId('projects-section-reports');
+      // The "register this project first" gate must not appear in
+      // the Reports section (R35.1 removed it for upload forms).
+      // The Drawings section's gate (different copy) is intentional
+      // and out of scope here.
+      expect(within(reportsSection).queryByText(/register this project first/i)).toBeNull();
+      // The filter chip row must render regardless of isRegistered
+      // — the gate is gone (R35.1). Use the underlying DOM element
+      // for the class-name probe; within() wraps queryByText et al.
+      // but does not expose raw querySelector.
+      expect(reportsSection.querySelector('.filter-chip-row')).not.toBeNull();
+    });
   });
 });

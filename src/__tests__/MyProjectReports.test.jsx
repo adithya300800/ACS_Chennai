@@ -93,11 +93,19 @@ describe('S7/MyReports — Project Reports page source contracts', () => {
     );
   });
 
-  test('6. page imports MAX_REPORT_BYTES / ACCEPTED_REPORT_TYPES / PROJECT_REPORT_TYPES / PROJECT_REPORT_TYPE_LABELS from constants', () => {
+  test('6. page imports MAX_REPORT_BYTES / ACCEPTED_REPORT_TYPES / PROJECT_REPORT_TYPE_LABELS from constants (and no longer pins PROJECT_REPORT_TYPES — R44 switched to UNIFIED_TAXONOMY)', () => {
+    // [R44-flat-taxonomy] The legacy PROJECT_REPORT_TYPES (5 cadence
+    // values) was retired in favour of UNIFIED_TAXONOMY (13 entries
+    // = 5 cadence + 8 categories). The page now imports the new
+    // taxonomy but keeps the size + MIME guards. Pin the imports
+    // that still matter (size + label map) and the new taxonomy
+    // import; PROJECT_REPORT_TYPES is intentionally gone.
     expect(pageSrc).toMatch(/import\s*\{[^}]*MAX_REPORT_BYTES[^}]*\}\s*from\s*['"]\.\.\/\.\.\/lib\/constants\.js['"]/);
     expect(pageSrc).toMatch(/import\s*\{[^}]*ACCEPTED_REPORT_TYPES[^}]*\}\s*from\s*['"]\.\.\/\.\.\/lib\/constants\.js['"]/);
-    expect(pageSrc).toMatch(/import\s*\{[^}]*PROJECT_REPORT_TYPES[^}]*\}\s*from\s*['"]\.\.\/\.\.\/lib\/constants\.js['"]/);
     expect(pageSrc).toMatch(/import\s*\{[^}]*PROJECT_REPORT_TYPE_LABELS[^}]*\}\s*from\s*['"]\.\.\/\.\.\/lib\/constants\.js['"]/);
+    expect(pageSrc).toMatch(/import\s*\{[^}]*UNIFIED_TAXONOMY[^}]*\}\s*from\s*['"]\.\.\/\.\.\/lib\/constants\.js['"]/);
+    // PROJECT_REPORT_TYPES (without _LABELS) is retired.
+    expect(pageSrc).not.toMatch(/import\s*\{[^}]*PROJECT_REPORT_TYPES[,}]/);
   });
 
   test('7. page imports api from src/lib/api.js (no new HTTP wrapper)', () => {
@@ -195,15 +203,17 @@ describe('S7/MyReports — Project Reports page source contracts', () => {
     expect(pageSrc).toMatch(/api\.getProjectAttachmentReadSas\(/);
   });
 
-  test('16. type chip filter renders one chip per PROJECT_REPORT_TYPES entry (no synthetic SAFETY type)', () => {
-    // The backend enum is the source of truth for available types. If a
-    // future refactor synthesises a "SAFETY" chip from outside the enum
-    // (e.g. PROJECT_REPORT_TYPES.concat(['SAFETY_REPORT'])) the upload
-    // would silently fail with a 400 because the server doesn't know
-    // the new value. Pin the iteration source so this is caught at
-    // review time.
-    expect(pageSrc).toMatch(/PROJECT_REPORT_TYPES\.map\(/);
+  test('16. type chip filter iterates UNIFIED_TAXONOMY (no synthetic SAFETY type, no retired PROJECT_REPORT_TYPES)', () => {
+    // [R44-flat-taxonomy] The chip iteration source moved from
+    // PROJECT_REPORT_TYPES (5 cadence-only) to UNIFIED_TAXONOMY (13
+    // entries = 5 cadence + 8 categories). The behaviour we ship is
+    // still "render one chip per enum entry, no synthetic types".
+    // Pin the iteration source so a future refactor that synthesises
+    // a chip from outside the enum (e.g. UNIFIED_TAXONOMY.concat(['SAFETY_REPORT']))
+    // — or that reverts to PROJECT_REPORT_TYPES — fails this pin.
+    expect(pageSrc).toMatch(/UNIFIED_TAXONOMY\.map\(/);
     expect(pageSrc).not.toMatch(/SAFETY_REPORT/);
+    expect(pageSrc).not.toMatch(/PROJECT_REPORT_TYPES\.map\(/);
   });
 
   test('17. delete is gated to admin OR row owner (isAdmin || uploadedById === employee.id)', () => {
