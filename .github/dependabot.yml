@@ -9,9 +9,23 @@
 # updates the cooldown is shorter because the cost of staying on a known-
 # vulnerable version is higher than the cost of a churn PR.
 #
-# Directories: the portal frontend + backend are separate npm workspaces
-# (no workspaces field — both have their own package.json) so we need an
-# `ecosystem: npm` block per directory.
+# Directories: the portal frontend (root package.json) + backend
+# (backend/package.json) are separate npm workspaces — Dependabot needs
+# one `ecosystem: npm` block per directory. The frontend lives at the
+# repo root (./package.json), not under /frontend/, so directory: "/".
+#
+# ──[PR] Major-version bumps are IGNORED across all ecosystems.───────────
+# Why: jumping majors is a breaking-change review task, not a Dependabot
+# job. Enabling major bumps here would generate PRs that fail the existing
+# CI gate (any new major typically needs manual code changes), creating
+# churn and noise. Operators who want majors can either:
+#   (a) Edit this file and remove the `ignore: [version-update:semver-major]`
+#       block per ecosystem, or
+#   (b) Use the GitHub UI: Dependabot → "Allow" → toggle per-package
+#       major-version auto-merge.
+# Major-version SECURITY advisories still arrive as Dependabot security
+# alerts regardless of this ignore (security PRs are a separate channel).
+# --------------------------------------------------------------------------
 
 version: 2
 
@@ -27,6 +41,10 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Asia/Kolkata"
+    # Cap concurrent Dependabot PRs at 5 per ecosystem. Lower than the
+    # Dependabot default of 10 because the CI gate is shared with human
+    # branches and we don't want Dependabot to flood the queue.
+    open-pull-requests-limit: 5
     # Default 3-day cooldown is fine for normal updates; security releases
     # will arrive with a Dependabot security alert which Dependabot opens
     # immediately regardless of this setting.
@@ -41,10 +59,17 @@ updates:
           - "patch"
       security:
         applies-to: security-updates
+    # Major-version bumps ignored — see file header for rationale.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # ─── Frontend (Node) ──────────────────────────────────────────────────────
+  # The frontend package.json lives at the repo ROOT, so directory is "/".
+  # (Pre-fix this block said directory: "/frontend" which pointed at a
+  # non-existent path and silently no-op'd.)
   - package-ecosystem: "npm"
-    directory: "/frontend"
+    directory: "/"
     labels:
       - "dependencies"
       - "frontend"
@@ -53,6 +78,7 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
     cooldown:
       default-days: 3
     groups:
@@ -63,6 +89,10 @@ updates:
           - "patch"
       security:
         applies-to: security-updates
+    # Major-version bumps ignored — see file header for rationale.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   # ─── GitHub Actions ───────────────────────────────────────────────────────
   # The portal deploys via .github/workflows/*.yml; Dependabot can update
@@ -77,6 +107,7 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
     cooldown:
       default-days: 3
     groups:
@@ -85,3 +116,7 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # Major-version bumps ignored — see file header for rationale.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
