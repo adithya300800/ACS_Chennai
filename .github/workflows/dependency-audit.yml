@@ -1,0 +1,189 @@
+# Free-tier dependency audit — runs `npm audit` against both the root
+# (frontend) and /backend package trees, on every PR + push + weekly.
+#
+# Why not just Dependabot security alerts?
+#   Dependabot security alerts surface in the Security tab and as PRs,
+#   but they're passive — nobody is forced to look at the cumulative
+#   state. This workflow makes the audit visible in CI on every PR
+#   (summary in $GITHUB_STEP_SUMMARY) so reviewers see the current
+#   high/critical count without leaving the PR.
+#
+# Why `continue-on-error: true` on every job:
+#   This workflow is OBSERVABILITY, not a gate. We don't want a single
+#   transitive advisory to block merges — that's what Dependabot's
+#   auto-PR is for. The current baseline (2026-10-02) is:
+#     root:  3 high (react-router family — transitive, fixable)
+#     backend: 2 high (brace-expansion transitive + nodemailer direct,
+#              fix is BREAKING)
+#   Operators fix via Dependabot PRs at their own cadence. Until then,
+#   this surfaces "still 3 high" on every PR so nobody forgets.
+#
+# Pin policy:
+#   - actions/checkout, actions/setup-node → major-version tag
+#     (current LTS = v4). Pinned to @v4 because that's what the
+#     other workflows (frontend-ci, backend-deploy, secret-scan) use
+#     and a coordinated bump is cheaper than staggered ones.
+#
+# Permissions:
+#   - contents: read (needed for checkout). Nothing else.
+#   - No write permissions, no GitHub Advanced Security, no SARIF
+#     upload (that needs GHAS — see docs/HOSTING_CUTOVER.md for the
+#     private-repo flip).
+
+name: Dependency Audit (npm audit)
+
+on:
+  pull_request:
+    branches: [add-react-website, main]
+  push:
+    branches: [add-react-website, main]
+  schedule:
+    # Weekly Tuesday 02:30 UTC = 08:00 IST — sits between the
+    # training-overdue sweep (00:30 UTC) and the DB backup (02:30 UTC)
+    # in the unrelated GitHub Actions cron map. Off-peak for the portal.
+    # Avoids :00 / :30 on the dot per the round-4 cron guidance.
+    - cron: "37 2 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ─── Frontend (root package.json) ──────────────────────────────────────
+  audit-root:
+    name: npm audit (root / frontend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"   # match frontend-ci.yml
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci --omit=dev --ignore-scripts
+
+      - name: Run npm audit (high+critical, omit dev)
+        id: audit
+        continue-on-error: true   # OBSERVABILITY, not a gate — see file header
+        run: |
+          set -o pipefail
+          JSON=$(npm audit --omit=dev --audit-level=high --json 2>/dev/null || echo '{"vulnerabilities":{},"metadata":{"vulnerabilities":{"high":0,"critical":0,"moderate":0,"low":0,"total":0}}}')
+          # Parse + summarise for $GITHUB_STEP_SUMMARY.
+          SUMMARY=$(echo "$JSON" | node -e '
+              let s = "";
+              process.stdin.on("data", d => s += d).on("end", () => {
+                try {
+                  const data = JSON.parse(s);
+                  const m = data.metadata?.vulnerabilities || {};
+                  const counts = {
+                    critical: m.critical || 0,
+                    high: m.high || 0,
+                    moderate: m.moderate || 0,
+                    low: m.low || 0,
+                  };
+                  const total = m.total || 0;
+                  let out = "## npm audit (root / frontend)\n\n";
+                  out += "- critical: **" + counts.critical + "**\n";
+                  out += "- high: **" + counts.high + "**\n";
+                  out += "- moderate: " + counts.moderate + "\n";
+                  out += "- low: " + counts.low + "\n";
+                  out += "- total: " + total + "\n\n";
+                  if (counts.critical > 0 || counts.high > 0) {
+                    out += "### High / critical findings\n\n";
+                    const vulns = data.vulnerabilities || {};
+                    Object.entries(vulns).forEach(([name, v]) => {
+                      if (v.severity !== "high" && v.severity !== "critical") return;
+                      const fix = v.fixAvailable
+                        ? (v.fixAvailable.isSemVerMajor ? "fix available (BREAKING)" : "fix available")
+                        : "no fix";
+                      const via = (v.via || []).filter(x => typeof x === "string").join(", ") || "(see advisories)";
+                      out += "- **" + v.severity + "** `" + name + "` " + v.range + " — " + fix + " — via " + via + "\n";
+                    });
+                  } else {
+                    out += "_No high or critical findings._\n";
+                  }
+                  process.stdout.write(out);
+                } catch (e) {
+                  process.stdout.write("## npm audit (root / frontend)\n\nFailed to parse audit JSON: " + e.message + "\n");
+                }
+              });
+            ')
+          echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          # Echo to job log so the workflow run view also shows it.
+          echo "$SUMMARY"
+
+  # ─── Backend (backend/package.json) ─────────────────────────────────────
+  audit-backend:
+    name: npm audit (backend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"   # match frontend-ci.yml (backend engines says >=22 but CI is 20)
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci --omit=dev --ignore-scripts
+
+      - name: Run npm audit (high+critical, omit dev)
+        id: audit
+        continue-on-error: true   # OBSERVABILITY, not a gate — see file header
+        working-directory: backend
+        run: |
+          set -o pipefail
+          JSON=$(npm audit --omit=dev --audit-level=high --json 2>/dev/null || echo '{"vulnerabilities":{},"metadata":{"vulnerabilities":{"high":0,"critical":0,"moderate":0,"low":0,"total":0}}}')
+          SUMMARY=$(echo "$JSON" | node -e '
+              let s = "";
+              process.stdin.on("data", d => s += d).on("end", () => {
+                try {
+                  const data = JSON.parse(s);
+                  const m = data.metadata?.vulnerabilities || {};
+                  const counts = {
+                    critical: m.critical || 0,
+                    high: m.high || 0,
+                    moderate: m.moderate || 0,
+                    low: m.low || 0,
+                  };
+                  const total = m.total || 0;
+                  let out = "## npm audit (backend)\n\n";
+                  out += "- critical: **" + counts.critical + "**\n";
+                  out += "- high: **" + counts.high + "**\n";
+                  out += "- moderate: " + counts.moderate + "\n";
+                  out += "- low: " + counts.low + "\n";
+                  out += "- total: " + total + "\n\n";
+                  if (counts.critical > 0 || counts.high > 0) {
+                    out += "### High / critical findings\n\n";
+                    const vulns = data.vulnerabilities || {};
+                    Object.entries(vulns).forEach(([name, v]) => {
+                      if (v.severity !== "high" && v.severity !== "critical") return;
+                      const fix = v.fixAvailable
+                        ? (v.fixAvailable.isSemVerMajor ? "fix available (BREAKING)" : "fix available")
+                        : "no fix";
+                      const via = (v.via || []).filter(x => typeof x === "string").join(", ") || "(see advisories)";
+                      out += "- **" + v.severity + "** `" + name + "` " + v.range + " — " + fix + " — via " + via + "\n";
+                    });
+                  } else {
+                    out += "_No high or critical findings._\n";
+                  }
+                  process.stdout.write(out);
+                } catch (e) {
+                  process.stdout.write("## npm audit (backend)\n\nFailed to parse audit JSON: " + e.message + "\n");
+                }
+              });
+            ')
+          echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          echo "$SUMMARY"
