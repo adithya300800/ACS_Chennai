@@ -91,8 +91,20 @@ jobs:
           # keep it stable so historical findings stay grouped.
           category: "/language:${{ matrix.language }}"
 
-      - name: Upload results to GitHub code-scanning dashboard
-        if: always()
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: ${{ github.workspace }}/codeql-results/${{ matrix.language }}.sarif
+      # [Fix 2026-10-03] Removed the explicit `upload-sarif` step.
+      # In codeql-action v3, analyze wrote the SARIF to
+      # `${GITHUB_WORKSPACE}/codeql-results/<language>.sarif` and a
+      # separate `upload-sarif` step pushed it to the dashboard. v4
+      # changed this: the `analyze` step itself uploads the SARIF
+      # directly to GitHub code-scanning when the workflow has
+      # `security-events: write` (which we do, see top of file), and
+      # the SARIF is no longer written to `codeql-results/` — it goes
+      # to `../results` relative to the checkout. Leaving the v3-style
+      # upload step in place caused the job to fail with
+      # "Path does not exist: .../codeql-results/javascript-typescript.sarif"
+      # because the v4 analyze step doesn't write there.
+      # The explicit upload step was redundant AND mis-pointed; v4
+      # analyze is now the single source of truth for SARIF output.
+      # Re-introduce a separate upload step only if v4 stops uploading
+      # by default (e.g. for a custom-output setup with
+      # `output: sarif-only` in analyze).
