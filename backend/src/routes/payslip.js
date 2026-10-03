@@ -48,8 +48,10 @@ const {
   publishPayslip,
   revokePayslip,
   sendPayslipEmail,
+  resendStuckPendingPayslips,
   EMAIL_STATUS,
   PAYSLIP_BLOB_PREFIX,
+  PAYSLIP_MAX_BYTES,
 } = require('../lib/payslip');
 const {
   payslipUploadLimiter,
@@ -103,11 +105,14 @@ mountUploadRoutes(adminUploadRouter, {
   allowedTypesPerContainer: {
     'dpr-documents': ['application/pdf'],
   },
-  // v1 cap is 5 MB. A payslip PDF is 1-2 pages of text + numbers, well
-  // under 1 MB. The cap matches the download route's MAX_DOWNLOAD_BYTES
-  // invariant so a row can never reach a size that download refuses.
+  // Single shared cap (see lib/payslip.js PAYSLIP_MAX_BYTES).
+  // A payslip PDF is 1-2 pages of text + numbers, well under 1 MB; 2 MB
+  // is a generous ceiling that matches the download route's
+  // MAX_DOWNLOAD_BYTES invariant so a row can never reach a size that
+  // download refuses. Lowered from 5 MB in the fixup commit per the
+  // pre-AppSec-review requirement that upload ≤ download cap.
   maxSizeBytesPerContainer: {
-    'dpr-documents': 5 * 1024 * 1024,
+    'dpr-documents': PAYSLIP_MAX_BYTES,
   },
   // Owns the `payslips/` prefix EXCLUSIVELY. The DPR mount at
   // routes/dpr.js does not list `payslips` — that split is pinned by
@@ -374,6 +379,58 @@ adminRouter.post('/:id/resend-email', asyncHandler(async (req, res) => {
   }
 }));
 
+// POST /api/admin/payslips/resend-stuck
+//
+// Manual recovery for rows stuck in emailStatus='PENDING' for longer
+// than PAYSLIP_PENDING_STUCK_AGE_MS (5 minutes — likely a process
+// crash mid-drain or a Resend transient 5xx). The user explicitly
+// required this to be an ADMIN-TRIGGERED ENDPOINT — NOT a scheduled
+// job. The Prisma filter inside resendStuckPendingPayslips requires:
+//
+//   emailStatus   = 'PENDING'
+//   publishedAt  IS NOT NULL
+//   deletedAt    IS NULL
+//   purgedAt     IS NULL
+//   updatedAt    <  (now - PAYSLIP_PENDING_STUCK_AGE_MS)
+//
+// so drafts (publishedAt IS NULL), revoked (deletedAt IS NOT NULL),
+// and purged (purgedAt IS NOT NULL) rows are NEVER emailed by this
+// sweep. The fixup commit also dropped the schema's `@default("PENDING")`
+// so freshly-created rows have emailStatus=NULL and cannot match the
+// sweep at all.
+//
+// The helper returns { scanned, sent, failed } — we surface those to the
+// admin so the UI can show "X retried, Y still failing". Returns 200 with
+// the breakdown even when scanned=0 (the admin may have hit the endpoint
+// by mistake).
+adminRouter.post('/resend-stuck', asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  try {
+    const result = await resendStuckPendingPayslips(prisma);
+    console.log('[payslip] resend-stuck admin triggered', {
+      adminHash: hashIdentifier(req.employeeId),
+      scanned: result.scanned,
+      sent: result.sent,
+      failed: result.failed,
+    });
+    res.json({
+      ok: true,
+      scanned: result.scanned,
+      sent: result.sent,
+      failed: result.failed,
+    });
+  } catch (err) {
+    console.error('[payslip] resend-stuck error', {
+      adminHash: hashIdentifier(req.employeeId),
+      prismaCode: err && err.code,
+      message: err && err.message ? err.message.split('\n')[0] : 'unknown',
+    });
+    const mapped = mapPrismaError(err);
+    if (mapped) return res.status(mapped.status).json({ error: mapped.message, code: mapped.code });
+    res.status(500).json({ error: 'Failed to resend stuck pending payslips', code: 'PAYSLIP_RESEND_STUCK_FAILED' });
+  }
+}));
+
 // GET /api/admin/payslips — admin's cross-org coverage list. ?year&month
 // filter, default to the latest (year, month) seen in the table so the
 // admin dashboard loads the most recent coverage view by default.
@@ -597,12 +654,13 @@ portalRouter.get('/:id/download', asyncHandler(async (req, res) => {
   // container from the URL or body.
   const CONTAINER = 'dpr-documents';
   // v1 hard cap on buffered download. Anything larger is rejected so
-  // a misdelivery or future drift can't OOM the server. The cap
-  // matches the typical single-payslip PDF (a payslip is 1-2 pages
-  // with text + numbers, well under 1 MB). Mirrored by the upload
-  // mount's `maxSizeBytesPerContainer: { 'dpr-documents': 5 * 1024 *
-  // 1024 }` so the row can never reach a size that download refuses.
-  const MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024;
+  // a misdelivery or future drift can't OOM the server. The cap is
+  // pulled from lib/payslip.js PAYSLIP_MAX_BYTES — single source of
+  // truth shared with the upload mount. A payslip is 1-2 pages with
+  // text + numbers, well under 1 MB. Mirrored by the upload mount's
+  // `maxSizeBytesPerContainer: { 'dpr-documents': PAYSLIP_MAX_BYTES }`
+  // so the row can never reach a size that download refuses.
+  const MAX_DOWNLOAD_BYTES = PAYSLIP_MAX_BYTES;
   try {
     const client = getS3Client();
     if (!client) {
@@ -629,7 +687,7 @@ portalRouter.get('/:id/download', asyncHandler(async (req, res) => {
       // than a generic 500. The R2 object stays — the size drift
       // is a server-side invariant, not a missing blob.
       return res.status(413).json({
-        error: 'Payslip exceeds the 5 MB download cap',
+        error: `Payslip exceeds the ${PAYSLIP_MAX_BYTES} byte cap`,
         code: 'PAYSLIP_TOO_LARGE',
       });
     }

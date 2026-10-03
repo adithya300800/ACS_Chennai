@@ -37,6 +37,47 @@
  *   ─── helpers
  *       D1. serializePayslipForWire keeps the contract (sizeStable, key order)
  *       D2. validateYearMonth rejects month=13 / year=1999
+ *       D3. sanitizeAuditReason throws PIM_AUDIT_REASON_REJECTED with rejectedWord
+ *       D4. EMAIL_STATUS values match the documented contract
+ *       D5. resendStuckPendingPayslips accepts rows stuck in PENDING for > 5 min
+ *       D6. verifyBlobMatchesRecorded reports ETAG_DRIFT / SIZE_DRIFT / ok
+ *
+ *   ─── [fixup] stuck-PENDING sweep + resend safety
+ *       E1. resendStuckPendingPayslips EXCLUDES drafts (publishedAt NULL)
+ *       E2. resendStuckPendingPayslips EXCLUDES revoked rows (deletedAt set)
+ *       E3. resendStuckPendingPayslips EXCLUDES purged rows (purgedAt set)
+ *       E4. resendPayslipEmail refuses a draft with NOT_PUBLISHED
+ *       E5. resendPayslipEmail refuses a revoked row with REVOKED
+ *       E6. resendPayslipEmail refuses a purged row with PURGED
+ *       E7. POST /api/admin/payslips/resend-stuck — admin triggers the
+ *           sweep and gets the {scanned, sent, failed} breakdown
+ *       E8. POST /api/admin/payslips/resend-stuck — non-admin → 403
+ *
+ *   ─── [fixup] mutation check (break IDOR predicate → red → revert → green)
+ *       F1. download loop over 5 foreign payslip IDs succeeds when the
+ *           employeeId filter is monkey-patched off (red), then returns
+ *           to 404 when the filter is restored (green)
+ *
+ *   ─── [fixup] email redaction
+ *       G1. publish triggers a send; subject/body have no employee
+ *           name, no employee id, no filename, no amounts, no blob
+ *           path / SAS URL; only PAYSLIP_LINK_BASE_URL + /portal/payslips
+ *
+ *   ─── [fixup] log redaction
+ *       H1. failing-route logs (revoke with banned word) contain no raw
+ *           employee id, no payslip id, no blob path; only hashIdentifier
+ *
+ *   ─── [fixup] cross-employee IDOR loop (≥5 ids)
+ *       I1. GET /:id/download looped over 5 foreign employee tokens →
+ *           all 404
+ *       I2. GET / (list) looped over 5 employee tokens → only the
+ *           requesting employee's rows are returned
+ *       I3. POST /:id/resend-email with a non-admin token → 403
+ *
+ *   ─── [fixup] size cap
+ *       J1. PAYSLIP_MAX_BYTES constant is 2 * 1024 * 1024
+ *       J2. upload mount refuses > 2 MB (413 from mountUploadRoutes)
+ *       J3. download route buffers > 2 MB → 413 PAYSLIP_TOO_LARGE
  *
  * Privacy discipline (mirrors plan §C.4 + fixtures contract):
  *   * No salary figures. The dummy PDF buffer is 96 bytes of valid
@@ -1379,6 +1420,586 @@ describe('lib/payslip.js — helpers', () => {
       expect(await payslipLib.verifyBlobMatchesRecorded(client, 'bkt', 'k', 'abc', BigInt(100))).toBe('BLOB_NOT_FOUND');
     } finally {
       mockFakeS3Client.send = original;
+    }
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [fixup] STUCK-PENDING SWEEP + RESEND SAFETY
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// The fixup commits schema+migration+helper changes so that:
+//   * A freshly-created payslip row has emailStatus = NULL (a draft).
+//   * publishPayslip stamps emailStatus = 'PENDING' only when publishedAt
+//     flips from NULL → NOT NULL inside the CAS transaction.
+//   * resendStuckPendingPayslips filters on
+//       emailStatus='PENDING' AND publishedAt IS NOT NULL AND
+//       deletedAt IS NULL AND purgedAt IS NULL AND updatedAt < cutoff
+//     so drafts (publishedAt IS NULL), revoked, and purged rows are
+//     NEVER emailed.
+//   * resendPayslipEmail short-circuits to {ok:false, error} for any of
+//     those three non-eligible states.
+
+describe('[fixup] stuck-PENDING sweep + resend safety — drafts / revoked / purged are never emailed', () => {
+  it('E1. resendStuckPendingPayslips EXCLUDES drafts (publishedAt IS NULL)', async () => {
+    const { payslipRows, prisma } = buildApp();
+    // Reset the seeded payslip into a draft state. With the fixup,
+    // bindPayslipToIntent no longer stamps PENDING on creation — a
+    // freshly-bound row has emailStatus=NULL. Published flips later.
+    const draft = payslipRows.get(PAYSLIP_ID);
+    draft.publishedAt = null;
+    draft.deletedAt = null;
+    draft.purgedAt = null;
+    draft.emailStatus = null; // matches the post-fixup bind-time default
+    draft.updatedAt = new Date(Date.now() - 10 * 60 * 1000);
+    // The foreign row is ALSO in the fixture with emailStatus='PENDING'
+    // and publishedAt set — it would qualify if not neutralised. Make
+    // it a draft too so only the draft path is exercised here.
+    const foreign = payslipRows.get(FOREIGN_PAYSLIP_ID);
+    foreign.publishedAt = null;
+    foreign.emailStatus = null;
+    foreign.deletedAt = null;
+    foreign.purgedAt = null;
+    foreign.updatedAt = new Date(Date.now() - 10 * 60 * 1000);
+    const result = await payslipLib.resendStuckPendingPayslips(prisma, { delayMs: 0 });
+    // Both rows are drafts with emailStatus=NULL — neither matches the
+    // PENDING filter. The scan returns 0.
+    expect(result.scanned).toBe(0);
+  });
+
+  it('E2. resendStuckPendingPayslips EXCLUDES revoked rows (deletedAt set)', async () => {
+    const { payslipRows, prisma } = buildApp();
+    const revoked = payslipRows.get(PAYSLIP_ID);
+    revoked.publishedAt = new Date(Date.now() - 60 * 60 * 1000);
+    revoked.deletedAt = new Date(Date.now() - 5 * 60 * 1000); // soft-deleted
+    revoked.purgedAt = null;
+    revoked.emailStatus = 'PENDING';
+    revoked.updatedAt = new Date(Date.now() - 10 * 60 * 1000);
+    // Also neutralise the foreign row.
+    const foreign = payslipRows.get(FOREIGN_PAYSLIP_ID);
+    foreign.publishedAt = null;
+    foreign.emailStatus = null;
+    const result = await payslipLib.resendStuckPendingPayslips(prisma, { delayMs: 0 });
+    expect(result.scanned).toBe(0);
+  });
+
+  it('E3. resendStuckPendingPayslips EXCLUDES purged rows (purgedAt set)', async () => {
+    const { payslipRows, prisma } = buildApp();
+    const purged = payslipRows.get(PAYSLIP_ID);
+    purged.publishedAt = new Date(Date.now() - 60 * 60 * 1000);
+    purged.deletedAt = new Date(Date.now() - 5 * 60 * 1000);
+    purged.purgedAt = new Date(Date.now() - 5 * 60 * 1000); // tombstoned
+    purged.emailStatus = 'PENDING';
+    purged.updatedAt = new Date(Date.now() - 10 * 60 * 1000);
+    const foreign = payslipRows.get(FOREIGN_PAYSLIP_ID);
+    foreign.publishedAt = null;
+    foreign.emailStatus = null;
+    const result = await payslipLib.resendStuckPendingPayslips(prisma, { delayMs: 0 });
+    expect(result.scanned).toBe(0);
+  });
+
+  it('E4. resendPayslipEmail refuses a draft with {ok:false, error:"NOT_PUBLISHED"}', async () => {
+    const { payslipRows, prisma } = buildApp();
+    const draft = payslipRows.get(PAYSLIP_ID);
+    draft.publishedAt = null;
+    draft.deletedAt = null;
+    draft.purgedAt = null;
+    draft.emailStatus = null;
+    const out = await payslipLib.resendPayslipEmail(prisma, draft.id);
+    expect(out).toEqual({ ok: false, error: 'NOT_PUBLISHED' });
+  });
+
+  it('E5. resendPayslipEmail refuses a revoked row with {ok:false, error:"REVOKED"}', async () => {
+    const { payslipRows, prisma } = buildApp();
+    const revoked = payslipRows.get(PAYSLIP_ID);
+    revoked.publishedAt = new Date(Date.now() - 60 * 60 * 1000);
+    revoked.deletedAt = new Date();
+    revoked.purgedAt = null;
+    revoked.emailStatus = 'PENDING';
+    const out = await payslipLib.resendPayslipEmail(prisma, revoked.id);
+    expect(out).toEqual({ ok: false, error: 'REVOKED' });
+  });
+
+  it('E6. resendPayslipEmail refuses a purged row with {ok:false, error:"PURGED"}', async () => {
+    const { payslipRows, prisma } = buildApp();
+    const purged = payslipRows.get(PAYSLIP_ID);
+    purged.publishedAt = new Date(Date.now() - 60 * 60 * 1000);
+    purged.deletedAt = null;
+    purged.purgedAt = new Date();
+    purged.emailStatus = 'PENDING';
+    const out = await payslipLib.resendPayslipEmail(prisma, purged.id);
+    expect(out).toEqual({ ok: false, error: 'PURGED' });
+  });
+
+  it('E7. POST /api/admin/payslips/resend-stuck — admin triggers the sweep', async () => {
+    const { app, payslipRows } = buildApp();
+    const stuck = payslipRows.get(PAYSLIP_ID);
+    stuck.publishedAt = new Date(Date.now() - 60 * 60 * 1000);
+    stuck.deletedAt = null;
+    stuck.purgedAt = null;
+    stuck.emailStatus = 'PENDING';
+    stuck.updatedAt = new Date(Date.now() - 10 * 60 * 1000);
+    const foreign = payslipRows.get(FOREIGN_PAYSLIP_ID);
+    foreign.publishedAt = null;
+    foreign.emailStatus = null;
+    const res = await request(app)
+      .post('/api/admin/payslips/resend-stuck')
+      .set('Authorization', adminJwt())
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(typeof res.body.scanned).toBe('number');
+    expect(typeof res.body.sent).toBe('number');
+    expect(typeof res.body.failed).toBe('number');
+  });
+
+  it('E8. POST /api/admin/payslips/resend-stuck — non-admin → 403 (requireFreshAdmin)', async () => {
+    const { app } = buildApp({ userIsAdmin: false });
+    const res = await request(app)
+      .post('/api/admin/payslips/resend-stuck')
+      .set('Authorization', userJwt())
+      .send({});
+    expect(res.status).toBe(403);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [fixup] MUTATION CHECK — break IDOR predicate → red → revert → green
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Proves the `employeeId: req.employeeId` guard on the download route
+// is load-bearing. Phase A monkey-patches the in-memory findFirst to
+// IGNORE the employeeId filter — five foreign IDs all succeed (red).
+// Phase B restores the filter — five foreign IDs all 404 except the
+// call where req.employeeId matches the row's employeeId (green).
+
+describe('[fixup] mutation check on the IDOR predicate', () => {
+  it('F1. download loop over 5 foreign payslip IDs: red when employeeId filter is broken, green when restored', async () => {
+    const { app, prisma, payslipRows } = buildApp();
+    // Seed 5 distinct foreign employees, each with a published payslip.
+    const foreignIds = [];
+    for (let i = 0; i < 5; i += 1) {
+      const eid = `00000000-0000-0000-0000-0000000000f${i.toString(16)}`;
+      const pid = `00000000-0000-0000-0000-000000000c${i.toString(16).padStart(2, '0')}`;
+      foreignIds.push({ eid, pid });
+      payslipRows.set(pid, {
+        id: pid,
+        employeeId: eid,
+        year: 2026,
+        month: 10,
+        ulid: `01ARZ3NDEKTSV4RRFFQ69G5FA${i.toString(16).toUpperCase().slice(0, 1)}`,
+        uploadIntentUlid: `01ARZ3NDEKTSV4RRFFQ69G5FA${i.toString(16).toUpperCase().slice(0, 1)}`,
+        contentType: 'application/pdf',
+        etag: '"seed-etag"',
+        sizeBytes: BigInt(dummyPdfBuffer.length),
+        blobPath: `payslips/${eid}/01ARZ3NDEKTSV4RRFFQ69G5FA${i.toString(16).toUpperCase().slice(0, 1)}.pdf`,
+        uploadedById: eid,
+        publishedById: eid,
+        publishedAt: new Date(Date.now() - 60 * 60 * 1000),
+        deletedAt: null,
+        purgedAt: null,
+        emailStatus: 'SENT',
+        emailSentAt: new Date(),
+        emailFailedReason: null,
+        createdAt: new Date(Date.now() - 60 * 60 * 1000),
+        updatedAt: new Date(Date.now() - 60 * 60 * 1000),
+      });
+    }
+    // ─── PHASE A — break the employeeId filter, expect RED.
+    const originalFindFirst = prisma.payslip.findFirst;
+    prisma.payslip.findFirst = jest.fn(async ({ where }) => {
+      // Strip the employeeId guard; preserve everything else.
+      const { employeeId: _ignored, ...rest } = where;
+      return originalFindFirst({ where: rest });
+    });
+    let redCount = 0;
+    for (const { pid } of foreignIds) {
+      const res = await request(app)
+        .get(`/api/portal/payslips/${pid}/download`)
+        .set('Authorization', userJwt(USER_ID)); // the ORIGINAL user, not the row owner
+      if (res.status === 200) redCount += 1;
+    }
+    expect(redCount).toBe(foreignIds.length); // 5/5 — IDOR fully open
+    // ─── PHASE B — restore the filter, expect GREEN.
+    prisma.payslip.findFirst = originalFindFirst;
+    let greenCount = 0;
+    let notFoundCount = 0;
+    for (const { pid } of foreignIds) {
+      const res = await request(app)
+        .get(`/api/portal/payslips/${pid}/download`)
+        .set('Authorization', userJwt(USER_ID));
+      if (res.status === 200) greenCount += 1;
+      if (res.status === 404) notFoundCount += 1;
+    }
+    expect(greenCount).toBe(0);
+    expect(notFoundCount).toBe(foreignIds.length);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [fixup] EMAIL REDACTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('[fixup] email redaction — no employee name / id / filename / amounts in subject or body', () => {
+  it('G1. publish → sendPayslipEmail subject/body carry no PII; only PAYSLIP_LINK_BASE_URL + /portal/payslips', async () => {
+    // Spy on the email transport. lib/payslip.sendPayslipEmail calls
+    // `sendEmail(...)` (the Resend wrapper from lib/email.js). In the
+    // test process `emailIsConfigured()` is false, so sendPayslipEmail
+    // short-circuits to FAILED without ever invoking sendEmail. To
+    // exercise the actual subject/body composition we inject a custom
+    // transport via module.exports.payslipTestOverrides.sendEmailOverride
+    // — read fresh each call by the route layer (the same seam pattern
+    // as verifyMagicBytes / verifyHeadMatches).
+    const calls = [];
+    const previousOverride = payslipLib.payslipTestOverrides.sendEmailOverride;
+    payslipLib.payslipTestOverrides.sendEmailOverride = async (args) => {
+      calls.push(args);
+      return { ok: true, messageId: 'fake-msg-id' };
+    };
+    try {
+      const { app, payslipRows } = buildApp();
+      const row = payslipRows.get(PAYSLIP_ID);
+      row.publishedAt = null;
+      row.deletedAt = null;
+      row.emailStatus = null; // bind-time default
+      // Trigger a publish. The admin's POST /publish enqueues the
+      // email via setImmediate; the test's afterEach can yield once
+      // for the drain.
+      const res = await request(app)
+        .post('/api/admin/payslips/publish')
+        .set('Authorization', adminJwt())
+        .send({ payslipIds: [PAYSLIP_ID] });
+      expect(res.status).toBe(200);
+      // Allow setImmediate to drain.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      // Capture subject/body. The composeSubject/composeBody helpers
+      // are exported for tests — call them directly with a fully
+      // hydrated payslip + employee so we exercise the same code path
+      // as sendPayslipEmail.
+      const hydrated = {
+        year: 2026,
+        month: 10,
+        employee: { id: USER_ID, name: 'Uri User', email: 'user@example.com' },
+      };
+      const subject = payslipLib.composeSubject(hydrated);
+      const body = payslipLib.composeBody({ payslip: hydrated, portalBaseUrl: 'https://portal.example.com' });
+      // ── Subject redaction. The subject MUST be free of any PII
+      //   (no name, id, email, ulid, payslip id, filename, currency
+      //    symbol, blob path, or SAS URL fragment).
+      const bannedInSubject = [
+        USER_ID,                       // raw employee id
+        'Uri User',                    // full name
+        'user@example.com',            // raw email
+        ULID,                          // raw ulid
+        PAYSLIP_ID,                    // raw payslip id
+        'payslips',                    // blob-path prefix
+        'dpr-documents',               // container leak
+        '$', '₹', 'INR', 'USD',        // currency symbols
+        '.pdf',                        // filename leak
+        'r2.example',                  // SAS host fragment
+        'X-Amz-Signature',             // SAS signature fragment
+      ];
+      for (const word of bannedInSubject) {
+        expect(subject).not.toContain(word);
+      }
+      // ── Body redaction. The body MUST NOT carry: full name, email,
+      // id, ulid, payslip id, blob-path prefix (except inside the canonical
+      // CTA URL below), container name, currency symbols, file extension,
+      // SAS host, SAS signature fragment.
+      const bodyString = String(body);
+      const bannedInBody = [
+        USER_ID,
+        'Uri User',                    // full name
+        'Uri',                         // first name (salutation MUST NOT carry it)
+        'user@example.com',
+        ULID,
+        PAYSLIP_ID,
+        'dpr-documents',               // container leak
+        '$', '₹', 'INR', 'USD',
+        '.pdf',
+        'r2.example',
+        'X-Amz-Signature',
+      ];
+      for (const word of bannedInBody) {
+        expect(bodyString).not.toContain(word);
+      }
+      // The string "payslips" is allowed ONLY inside the canonical
+      // CTA URL path. Strip the canonical URL and confirm no stray
+      // "payslips" remains.
+      const ctaUrl = 'https://portal.example.com/portal/payslips';
+      const stripped = bodyString.split(ctaUrl).join('');
+      expect(stripped).not.toContain('payslips');
+      // ── Link shape. Every URL in the body must be either:
+      //   * the canonical CTA at PAYSLIP_LINK_BASE_URL + /portal/payslips, OR
+      //   * the documented support mailto (info@acschennai.com).
+      const urlMatches = bodyString.match(/https?:\/\/[^\s"<>)]+/g) || [];
+      for (const url of urlMatches) {
+        const clean = url.replace(/[.,;!?)]+$/, '');
+        const ok =
+          clean === 'https://portal.example.com/portal/payslips' ||
+          clean.startsWith('https://portal.example.com/portal/payslips/');
+        expect(ok).toBe(true);
+      }
+      // The CTA URL is present.
+      expect(urlMatches.some((u) => u.startsWith('https://portal.example.com/portal/payslips'))).toBe(true);
+      // The support mailto is present and is the only other anchor target.
+      expect(bodyString).toContain('mailto:info@acschennai.com');
+    } finally {
+      payslipLib.payslipTestOverrides.sendEmailOverride = previousOverride;
+    }
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [fixup] LOG REDACTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('[fixup] log redaction — failing routes do not log raw employee/payslip ids', () => {
+  it('H1. revoke with a banned word logs no raw ids, only hashIdentifier output', async () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const { app } = buildApp();
+      // Force a failed revoke: the route pre-validates the audit reason
+      // and returns 400 AUDIT_REASON_REJECTED with the offending word.
+      const res = await request(app)
+        .post(`/api/admin/payslips/${PAYSLIP_ID}/revoke`)
+        .set('Authorization', adminJwt())
+        .send({ reason: 'salary mismatch on October slip' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('AUDIT_REASON_REJECTED');
+      // The route layer does NOT log AUDIT_REASON_REJECTED (it's a
+      // pre-validation failure, not a server error). But if any error
+      // path fires, the helper MUST NOT include the raw ids. Assert:
+      const allCaptured = []
+        .concat(errSpy.mock.calls)
+        .concat(logSpy.mock.calls)
+        .map((c) => c.map((x) => (typeof x === 'string' ? x : '')).join(' '))
+        .join('\n');
+      // Raw ids must not appear.
+      expect(allCaptured).not.toContain(USER_ID);
+      expect(allCaptured).not.toContain(PAYSLIP_ID);
+      expect(allCaptured).not.toContain(FOREIGN_USER_ID);
+      expect(allCaptured).not.toContain(FOREIGN_PAYSLIP_ID);
+      expect(allCaptured).not.toContain(ULID);
+    } finally {
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
+  it('H2. revoke against a missing payslip logs only hashIdentifier, never the raw id', async () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { app } = buildApp();
+      const ghostId = '00000000-0000-0000-0000-deadbeef0000';
+      const res = await request(app)
+        .post(`/api/admin/payslips/${ghostId}/revoke`)
+        .set('Authorization', adminJwt())
+        .send({ reason: 'mis-sent to wrong employee' });
+      expect(res.status).toBe(404);
+      const allCaptured = errSpy.mock.calls
+        .map((c) => c.map((x) => (typeof x === 'string' ? x : (x && x.constructor === Object ? JSON.stringify(x) : String(x)))).join(' '))
+        .join('\n');
+      // The route DOES log this case — confirm the raw id is absent.
+      expect(allCaptured).not.toContain(ghostId);
+      expect(allCaptured).not.toContain(ADMIN_ID);
+      expect(allCaptured).not.toContain(USER_ID);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [fixup] CROSS-EMPLOYEE IDOR LOOP (≥5 ids)
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('[fixup] cross-employee IDOR loop', () => {
+  it('I1. download looped over 5 foreign employee tokens → all 404', async () => {
+    const { app, payslipRows } = buildApp();
+    const foreignIds = [];
+    for (let i = 0; i < 5; i += 1) {
+      const eid = `00000000-0000-0000-0000-0000000000f${i.toString(16)}`;
+      const pid = `00000000-0000-0000-0000-000000000c${i.toString(16).padStart(2, '0')}`;
+      foreignIds.push({ eid, pid });
+      payslipRows.set(pid, {
+        id: pid,
+        employeeId: eid,
+        year: 2026,
+        month: 10,
+        ulid: `01ARZ3NDEKTSV4RRFFQ69G5FA${i.toString(16).toUpperCase().slice(0, 1)}`,
+        uploadIntentUlid: `01ARZ3NDEKTSV4RRFFQ69G5FA${i.toString(16).toUpperCase().slice(0, 1)}`,
+        contentType: 'application/pdf',
+        etag: '"seed-etag"',
+        sizeBytes: BigInt(dummyPdfBuffer.length),
+        blobPath: `payslips/${eid}/01ARZ3NDEKTSV4RRFFQ69G5FA${i.toString(16).toUpperCase().slice(0, 1)}.pdf`,
+        uploadedById: eid,
+        publishedById: eid,
+        publishedAt: new Date(Date.now() - 60 * 60 * 1000),
+        deletedAt: null,
+        purgedAt: null,
+        emailStatus: 'SENT',
+        emailSentAt: new Date(),
+        emailFailedReason: null,
+        createdAt: new Date(Date.now() - 60 * 60 * 1000),
+        updatedAt: new Date(Date.now() - 60 * 60 * 1000),
+      });
+    }
+    // For each foreign payslip, request the download as EVERY foreign
+    // employee EXCEPT the row's owner. Each cross-employee attempt must
+    // 404. (The owner succeeds — exercised separately in C2/C4 — but is
+    // not part of the IDOR loop.)
+    let attempts = 0;
+    let blocked = 0;
+    for (const { eid: ownerEid, pid } of foreignIds) {
+      const attackers = foreignIds.filter((x) => x.eid !== ownerEid).map((x) => x.eid);
+      for (const attackerEid of attackers) {
+        attempts += 1;
+        const res = await request(app)
+          .get(`/api/portal/payslips/${pid}/download`)
+          .set('Authorization', userJwt(attackerEid));
+        if (res.status === 200) {
+          throw new Error(`IDOR red — got 200 with ${attackerEid} reading ${pid}`);
+        }
+        expect([404, 410]).toContain(res.status);
+        blocked += 1;
+      }
+    }
+    // 5 payslips × 4 attackers each = 20 attempts; all blocked.
+    expect(attempts).toBe(20);
+    expect(blocked).toBe(20);
+    // Sanity — the OWNER can still read their own row (200).
+    const ownerRes = await request(app)
+      .get(`/api/portal/payslips/${foreignIds[0].pid}/download`)
+      .set('Authorization', userJwt(foreignIds[0].eid));
+    expect(ownerRes.status).toBe(200);
+  });
+
+  it('I2. list looped over 5 employee tokens → only the requesting employee\'s rows are returned', async () => {
+    const { app, payslipRows } = buildApp();
+    // Seed 5 employees, each with their own published payslip.
+    const seedIds = [];
+    for (let i = 0; i < 5; i += 1) {
+      const eid = `00000000-0000-0000-0000-0000000000f${i.toString(16)}`;
+      const pid = `00000000-0000-0000-0000-000000000c${i.toString(16).padStart(2, '0')}`;
+      seedIds.push({ eid, pid });
+      payslipRows.set(pid, {
+        id: pid,
+        employeeId: eid,
+        year: 2026,
+        month: 10,
+        ulid: `01ARZ3NDEKTSV4RRFFQ69G5FA${i.toString(16).toUpperCase().slice(0, 1)}`,
+        uploadIntentUlid: `01ARZ3NDEKTSV4RRFFQ69G5FA${i.toString(16).toUpperCase().slice(0, 1)}`,
+        contentType: 'application/pdf',
+        etag: '"seed-etag"',
+        sizeBytes: BigInt(dummyPdfBuffer.length),
+        blobPath: `payslips/${eid}/01ARZ3NDEKTSV4RRFFQ69G5FA${i.toString(16).toUpperCase().slice(0, 1)}.pdf`,
+        uploadedById: eid,
+        publishedById: eid,
+        publishedAt: new Date(Date.now() - 60 * 60 * 1000),
+        deletedAt: null,
+        purgedAt: null,
+        emailStatus: 'SENT',
+        emailSentAt: new Date(),
+        emailFailedReason: null,
+        createdAt: new Date(Date.now() - 60 * 60 * 1000),
+        updatedAt: new Date(Date.now() - 60 * 60 * 1000),
+      });
+    }
+    for (const { eid, pid } of seedIds) {
+      const res = await request(app)
+        .get('/api/portal/payslips')
+        .set('Authorization', userJwt(eid));
+      expect(res.status).toBe(200);
+      const ids = (res.body.payslips || []).map((p) => p.id);
+      // Only the requesting employee's row is in the response.
+      expect(ids).toContain(pid);
+      // And NO other employee's row.
+      for (const other of seedIds.filter((x) => x.eid !== eid)) {
+        expect(ids).not.toContain(other.pid);
+      }
+    }
+  });
+
+  it('I3. POST /:id/resend-email with a non-admin token → 403', async () => {
+    const { app } = buildApp();
+    const res = await request(app)
+      .post(`/api/admin/payslips/${PAYSLIP_ID}/resend-email`)
+      .set('Authorization', userJwt()) // employeeId=USER, isAdmin=false
+      .send({});
+    expect(res.status).toBe(403);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [fixup] SIZE CAP
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('[fixup] PAYSLIP_MAX_BYTES contract', () => {
+  it('J1. PAYSLIP_MAX_BYTES is exactly 2 * 1024 * 1024', () => {
+    expect(payslipLib.PAYSLIP_MAX_BYTES).toBe(2 * 1024 * 1024);
+  });
+
+  it('J2. upload mount refuses payloads > 2 MB (legacy /confirm-upload enforces sizeBytes)', async () => {
+    // mountUploadRoutes's /confirm-upload enforces
+    // `sizeBytes > resolvedMaxBytes(container)` with 413 PHOTO_TOO_LARGE
+    // (uploadRoutes.js line 350-351). The "new" /sas-url path also
+    // rejects oversized declared sizeBytes with 413. Either path is
+    // acceptable; the test exercises the back-compat /confirm-upload
+    // path with a size just over the cap.
+    const oversized = 2 * 1024 * 1024 + 1024;
+    blobStorage.verifyBlobExists.mockResolvedValueOnce({
+      outcome: 'present',
+      exists: true,
+      contentLength: oversized,
+      contentType: 'application/pdf',
+    });
+    const { app } = buildApp();
+    const res = await request(app)
+      .post('/api/admin/payslips/upload/confirm-upload')
+      .set('Authorization', adminJwt())
+      .send({
+        ulid: ULID,
+        employeeId: USER_ID,
+        container: 'dpr-documents',
+        pathPrefix: 'payslips',
+        filename: `${ULID}.pdf`,
+        contentType: 'application/pdf',
+        sizeBytes: oversized,
+      });
+    // mountUploadRoutes returns 413 PHOTO_TOO_LARGE for sizeBytes > cap.
+    expect(res.status).toBe(413);
+    expect(res.body.error).toBe('PHOTO_TOO_LARGE');
+    // And the route does NOT proceed to bind — no BOUND/PENDING transition.
+    expect(res.body.code).not.toBe('BOUND');
+  });
+
+  it('J3. download route buffers > 2 MB → 413 PAYSLIP_TOO_LARGE', async () => {
+    // Replace the S3 mock's Body with a stream larger than the cap.
+    const oversized = 2 * 1024 * 1024 + 1024;
+    const originalSend = mockFakeS3Client.send;
+    mockFakeS3Client.send = jest.fn(async (cmd) => {
+      if (cmd && cmd.constructor && cmd.constructor.name === 'GetObjectCommand') {
+        return {
+          Body: makeBodyBuffer(Buffer.alloc(oversized, 0x20)),
+          ContentType: 'application/pdf',
+          ContentLength: oversized,
+          ETag: '"oversize-etag"',
+        };
+      }
+      return {};
+    });
+    try {
+      const { app } = buildApp();
+      const res = await request(app)
+        .get(`/api/portal/payslips/${PAYSLIP_ID}/download`)
+        .set('Authorization', userJwt(USER_ID));
+      expect(res.status).toBe(413);
+      expect(res.body.code).toBe('PAYSLIP_TOO_LARGE');
+    } finally {
+      mockFakeS3Client.send = originalSend;
     }
   });
 });

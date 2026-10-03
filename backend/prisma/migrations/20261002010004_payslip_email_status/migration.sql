@@ -1,5 +1,8 @@
 -- ─────────────────────────────────────────────────────────────────────────────
--- [Payslips Stage 1 / commit 3] Add email-status audit columns to payslip
+-- [Payslips Stage 1 / commit 3, fixup] Add email-status audit columns to
+-- payslip. (Fixup applied 2026-10-03 BEFORE this migration ran anywhere —
+-- the original DEFAULT 'PENDING' + NOT NULL contract was rejected at the
+-- pre-AppSec review: drafts must stay NULL until publish.)
 -- ─────────────────────────────────────────────────────────────────────────────
 --
 -- Commit 2 added upload/revoke/purge audit but no email-status tracking. The
@@ -11,12 +14,26 @@
 -- "did this recipient ever get the email" question is unanswerable from
 -- audit alone — every retry is blind.
 --
--- Three additive nullable columns:
---   email_status         text       'PENDING' (default) | 'SENT' | 'FAILED'
+-- Three additive columns:
+--   email_status         text NULL  'PENDING' (set at publish stamp)
+--                                   | 'SENT' | 'FAILED'
 --                                   | 'SKIPPED_OPT_OUT' | 'SKIPPED_NO_ADDRESS'
 --                                   | 'SKIPPED_TYPE_MUTED'
+--                                   | NULL = not yet published (a draft)
 --   email_sent_at        timestamp  stamp on successful send
 --   email_failed_reason  varchar(500) last error message on FAILED
+--
+-- Why nullable with no default:
+--   * A row created via bindPayslipToIntent (the upload bind step) is a
+--     draft. Stamping 'PENDING' on creation lies about state — it conflates
+--     "never published" with "published but email in flight". Drafts must
+--     be NULL until the publish transaction stamps them.
+--   * The stuck-PENDING helper (resendStuckPendingPayslips) and any retry
+--     helper (resendPayslipEmail) MUST exclude drafts and revoked rows.
+--     Their Prisma filter requires `emailStatus = 'PENDING' AND
+--     publishedAt IS NOT NULL AND deletedAt IS NULL AND purgedAt IS NULL`.
+--     A draft row with `emailStatus = 'PENDING'` would otherwise be
+--     emailed. With the NULL default the filter cannot match drafts.
 --
 -- Why a free-form String and not an enum:
 --   * Matches the convention EmailLog.status already uses (round-25) so the
@@ -50,8 +67,10 @@ BEGIN
     SELECT 1 FROM information_schema.columns
     WHERE table_schema = 'public' AND table_name = 'payslip' AND column_name = 'email_status'
   ) THEN
+    -- Default NULL (no DEFAULT) + nullable: a freshly-created row stays
+    -- NULL until publish or resend sets it to 'PENDING'.
     ALTER TABLE public.payslip
-      ADD COLUMN email_status text NOT NULL DEFAULT 'PENDING';
+      ADD COLUMN email_status text NULL;
   END IF;
 
   IF NOT EXISTS (

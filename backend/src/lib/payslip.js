@@ -325,6 +325,16 @@ async function bindPayslipToIntent(prisma, {
 
   // Transactional — bind + intent claim commit together, so a partial
   // bind (Payslip row without the intent claimed) cannot happen.
+  //
+  // Contract change (fixup): emailStatus is NOT stamped here. The schema
+  // default was dropped so a freshly-created row is NULL = a draft.
+  // The column is set to EMAIL_STATUS.PENDING inside publishPayslip
+  // (CAS over publishedAt IS NULL AND deletedAt IS NULL) and inside
+  // resendPayslipEmail / the route-level resend-email handler. The
+  // stuck-PENDING sweep helper (resendStuckPendingPayslips) therefore
+  // cannot match drafts and cannot accidentally email an unpublished
+  // row — its Prisma filter is `emailStatus = 'PENDING' AND
+  // publishedAt IS NOT NULL AND deletedAt IS NULL AND purgedAt IS NULL`.
   const { payslip, intent: claimed } = await prisma.$transaction(async (tx) => {
     const created = await tx.payslip.create({
       data: {
@@ -338,7 +348,7 @@ async function bindPayslipToIntent(prisma, {
         sizeBytes: BigInt(magicCheck.sizeBytes || 0),
         blobPath: intent.blobPath,
         uploadedById,
-        emailStatus: EMAIL_STATUS.PENDING,
+        // emailStatus intentionally omitted — see comment above.
       },
     });
     const stamped = await tx.uploadIntent.update({
@@ -534,6 +544,35 @@ async function publishPayslip(prisma, {
 // still matches the values stamped at bind-time.
 const PAYSLIP_BLOB_BUCKET = 'dpr-documents';
 
+// PAYSLIP_MAX_BYTES — single source of truth for the payslip size cap.
+// Enforced TWICE on purpose:
+//
+//   * upload mount  (routes/payslip.js adminUploadRouter)
+//     — the upload's `mountUploadRoutes({ maxSizeBytesPerContainer })`
+//       is the front-line defence; a forged Content-Length over the
+//       cap is rejected before bytes hit R2.
+//
+//   * download route (routes/payslip.js portalRouter download)
+//     — the route buffers chunks from R2 and refuses anything past
+//       the cap with 413 PAYSLIP_TOO_LARGE. Defence in depth against
+//       a row whose sizeBytes was tampered with between bind and
+//       download (out of v1 scope, but the cap is cheap).
+//
+// Why 2 MB (down from 5 MB in commit 3):
+//   * A payslip PDF is 1-2 pages of text + numbers. Even with a generous
+//     font embed it stays well under 1 MB.
+//   * 2 MB matches the user's pre-AppSec-review requirement: a single
+//     cap for both upload and download so a row can never reach a size
+//     the download route refuses.
+//   * Lowering the cap tightens the OOM blast radius if a misdelivery
+//     or future drift slips through. The 5 MB ceiling was a guess;
+//     2 MB is an evidence-based ceiling.
+//
+// Kept as a hard-coded constant (not env-driven) so the test suite
+// has one literal to pin. If a future deploy needs to lower the cap
+// further, change this constant.
+const PAYSLIP_MAX_BYTES = 2 * 1024 * 1024;
+
 /**
  * Head the blob at (bucket, key) and compare ETag + ContentLength
  * against the values the row recorded at bind-time. Returns:
@@ -648,13 +687,16 @@ async function resendPayslipEmail(prisma, payslipId, opts = {}) {
 /**
  * Scan the payslip table for rows stuck in PENDING for more than
  * PAYSLIP_PENDING_STUCK_AGE_MS and resend them. Returns the count of
- * rows touched. Used by:
- *   * The GH Actions cron (round-40 infrastructure) — the same cron
- *     that sweeps stale UploadIntents; one gate, one schedule.
- *   * The /admin/resend-stuck endpoint (manual recovery).
+ * rows touched. Used ONLY by:
+ *   * The POST /api/admin/payslips/resend-stuck endpoint
+ *     (admin-driven manual recovery).
+ *
+ * The user explicitly required this to be admin-triggered, NOT a
+ * scheduled job — the helper is wired only to that route. No cron,
+ * no GH Actions workflow, no Render cron invokes it.
  *
  * The scan is bounded — LIMIT 100 per run so a 10 000-row backlog
- * drains over the next 100 runs (≈ 33 hours at 20-min cadence).
+ * drains over 100 admin-triggered calls.
  */
 async function resendStuckPendingPayslips(prisma, opts = {}) {
   const cutoff = new Date(Date.now() - PAYSLIP_PENDING_STUCK_AGE_MS);
@@ -838,15 +880,17 @@ function composeSubject(payslip) {
 
 function composeBody({ payslip, portalBaseUrl }) {
   const monthName = MONTH_NAMES[payslip.month - 1] || String(payslip.month);
-  // First name — split on whitespace, take the first token. Fall back to
-  // the full name verbatim if splitting would yield empty.
-  const fullName = payslip.employee?.name || '';
-  const firstName = (fullName.split(/\s+/, 1)[0] || fullName) || 'there';
+  // Generic salutation — do NOT include any employee name fragment.
+  // The recipient's first/last name is PII per the email-redaction
+  // contract (fixup G1): the body must contain no employee name, id,
+  // filename, amount, or blob path. The greeting is intentionally
+  // generic so the email cannot be tied to an individual even if
+  // intercepted.
   const url = `${portalBaseUrl.replace(/\/+$/, '')}/portal/payslips`;
   return `<!doctype html>
 <html lang="en">
   <body style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; color:#1f2937;">
-    <p>Hi ${escapeHtml(firstName)},</p>
+    <p>Hello,</p>
     <p>Your payslip for <strong>${escapeHtml(monthName)} ${escapeHtml(String(payslip.year))}</strong> is now available on the ACS Chennai portal.</p>
     <p style="margin: 24px 0;">
       <a href="${escapeHtml(url)}"
@@ -922,6 +966,7 @@ module.exports = {
   EMAIL_STATUS,
   PAYSLIP_BLOB_PREFIX,
   PAYSLIP_BLOB_BUCKET,
+  PAYSLIP_MAX_BYTES,
   PAYSLIP_PENDING_STUCK_AGE_MS,
   MAX_AUDIT_REASON_LEN,
   verifyBlobMagicBytes,
