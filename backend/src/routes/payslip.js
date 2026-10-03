@@ -256,6 +256,14 @@ adminRouter.post('/publish', asyncHandler(async (req, res) => {
   const result = await publishPayslip(prisma, {
     payslipIds,
     publishedById: req.employeeId,
+    // Test seam: in NODE_ENV=test, allow the test to swap the
+    // background email drain for a no-op or capture helper. Production
+    // never consults the stash (NODE_ENV is set to 'production' on
+    // Render). Read fresh on every request so a test can change
+    // behavior between cases without rebuilding the app.
+    ...(process.env.NODE_ENV === 'test' && require('../lib/payslip').payslipTestOverrides?.electronicallyDeliver
+      ? { electronicallyDeliver: require('../lib/payslip').payslipTestOverrides.electronicallyDeliver }
+      : {}),
   });
   res.status(200).json({
     published: result.published,

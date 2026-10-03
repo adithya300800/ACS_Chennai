@@ -841,7 +841,12 @@ async function sendPayslipEmail(prisma, payslipId, opts = {}) {
   const subject = composeSubject(payslip);
   const html = composeBody({
     payslip,
-    portalBaseUrl: opts.portalBaseUrl || process.env.PORTAL_BASE_URL || 'https://acschennai.com',
+    // The portal is a HashRouter SPA. The path-after-hash is
+    // `/portal/payslips`; the URL the email's CTA button uses must
+    // include the `#` so the browser treats it as a hash-route and the
+    // SPA router takes over. Falling back to the SPA host (per
+    // acs-render-host-map memory note), not the marketing origin.
+    portalBaseUrl: opts.portalBaseUrl || process.env.PAYSLIP_LINK_BASE_URL || process.env.PORTAL_BASE_URL || 'https://acs-portal-spa.onrender.com',
   });
   const sender = typeof opts.sendEmailOverride === 'function'
     ? opts.sendEmailOverride
@@ -886,7 +891,11 @@ function composeBody({ payslip, portalBaseUrl }) {
   // filename, amount, or blob path. The greeting is intentionally
   // generic so the email cannot be tied to an individual even if
   // intercepted.
-  const url = `${portalBaseUrl.replace(/\/+$/, '')}/portal/payslips`;
+  // HashRouter URL — the `#` MUST precede `/portal/payslips` so the
+  // browser treats it as a hash-route and the SPA router takes over.
+  // A plain `/portal/payslips` would 404 against the SPA host (which
+  // serves the index.html only for the bare path).
+  const url = `${portalBaseUrl.replace(/\/+$/, '')}/#/portal/payslips`;
   return `<!doctype html>
 <html lang="en">
   <body style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; color:#1f2937;">
@@ -989,5 +998,6 @@ module.exports = {
   payslipTestOverrides: {
     verifyMagicBytes: null,
     verifyHeadMatches: null,
+    electronicallyDeliver: null,
   },
 };

@@ -235,7 +235,17 @@ const payslipDownloadLimiter = rateLimit({
   max: 120,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: ipKey,
+  // Key on the authenticated employee id (set by `requireAuth` which
+  // runs BEFORE this limiter on every portal route). IP-keying would
+  // share the bucket across all employees on a corporate NAT — a
+  // single downloader on a shared network could starve a coworker of
+  // their 120/h budget. The admin limiters (payslipAdminLimiter,
+  // payslipUploadLimiter) keep IP-keying because they're behind
+  // requireFreshAdmin and the operators are not a NAT'd user pool.
+  // Falls back to ipKey if the limiter is ever mounted on a route
+  // without requireAuth (the mount order is enforced at the route
+  // layer — this is the safety net for a future re-arrangement).
+  keyGenerator: (req) => (req && req.employeeId ? `emp:${req.employeeId}` : ipKey(req)),
   validate: { trustProxy: true },
   message: { error: 'Too many payslip download requests. Please slow down.', code: 'PAYSLIP_DOWNLOAD_THROTTLED' },
 });

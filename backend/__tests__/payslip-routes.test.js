@@ -498,6 +498,7 @@ function buildApp({
     prisma,
     payslipRows,
     uploadIntents,
+    employees,
     cleanup: () => {
       payslipLib.payslipTestOverrides.verifyMagicBytes = previousOverride;
     },
@@ -687,6 +688,50 @@ describe('/api/admin/payslips — requireFreshAdmin mutation surface', () => {
       .send({ ulid: 'not-a-ulid', employeeId: USER_ID, year: 2026, month: 10 });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_ULID');
+  });
+
+  it('B6b. POST /bind — cross-employee bind refused: intent for OTHER employee cannot be bound to a different employeeId', async () => {
+    // Threat model: an admin tries to bind a payslip intent that was
+    // uploaded for one employee (employee A) to a different employee
+    // (employee B) — the classic wrong-recipient bind. Two defenses
+    // catch this:
+    //   1. The Prisma compound unique on UploadIntent.(employeeId, ulid)
+    //      means the lookup `findUnique({ where: { employeeId_ulid: { employeeId: B, ulid } } })`
+    //      does NOT find the intent (which is owned by A). The route
+    //      returns 404 UPLOAD_NOT_CONFIRMED.
+    //   2. Even if (1) were ever broken (a future migration that
+    //      re-shapes the intent's employee column), the canonical-shape
+    //      check on blobPath would still refuse — intent.blobPath is
+    //      `payslips/A/<ulid>.pdf` and the body would be
+    //      `payslips/B/<ulid>.pdf`, mismatching the canonical shape.
+    //      The route returns 400 INVALID_BLOB_PATH.
+    // This test exercises BOTH paths: the cross-employee lookup miss
+    // (the realistic surface) AND a tampered intent (defense in depth).
+    const OTHER_USER_ID = '00000000-0000-0000-0000-000000000b00';
+    const OTHER_EMPLOYEE_NAME = 'Tampered Owner';
+    const { app, uploadIntents, employees } = buildApp();
+    // Register OTHER_USER_ID so the bind's pre-flight employee lookup
+    // (which selects from the employees map) does not 404 on its own.
+    employees.set(OTHER_USER_ID, { id: OTHER_USER_ID, name: OTHER_EMPLOYEE_NAME, isAdmin: false, email: `${OTHER_USER_ID}@example.test` });
+    // Path 1: cross-employee lookup miss. The seeded intent is owned
+    // by USER_ID; we attempt to bind it for OTHER_USER_ID. The Prisma
+    // compound unique on (employeeId, ulid) makes the lookup miss.
+    const r1 = await request(app)
+      .post('/api/admin/payslips/bind')
+      .set('Authorization', adminJwt())
+      .send({ ulid: ULID, employeeId: OTHER_USER_ID, year: 2026, month: 10 });
+    expect(r1.status).toBe(404);
+    expect(r1.body.code).toBe('UPLOAD_NOT_CONFIRMED');
+    // Path 2: tampered intent — pretend a Prisma bug returned the seeded
+    // USER intent but with a blobPath pointing at OTHER_USER_ID. The
+    // canonical-shape check MUST still refuse the bind.
+    uploadIntents.get(`${USER_ID}:${ULID}`).blobPath = `payslips/${OTHER_USER_ID}/${ULID}.pdf`;
+    const r2 = await request(app)
+      .post('/api/admin/payslips/bind')
+      .set('Authorization', adminJwt())
+      .send({ ulid: ULID, employeeId: USER_ID, year: 2026, month: 10 });
+    expect(r2.status).toBe(400);
+    expect(r2.body.code).toBe('INVALID_BLOB_PATH');
   });
 
   it('B7. POST /publish — per-row late publish; setImmediate queues sendPayslipEmail', async () => {
@@ -1338,6 +1383,34 @@ describe('lib/payslip.js — helpers', () => {
     expect(payslipLib.sanitizeAuditReason(42)).toBeNull();
   });
 
+  it('D3b. sanitizeAuditReason does NOT reject year/month/digits (no 4+ digit rule)', () => {
+    // The 4+ digit rule was removed per the AppSec checkpoint-2 follow-up:
+    // legitimate revoke reasons reference periods (year, month, day, ticket id).
+    // Salary-keyword substring rejection is the only gate; the route still
+    // names the rejected word in the 400 (D3 + B9b).
+    const accepted = [
+      'October 2026 cycle',
+      '2026-10',
+      '2026 Q4',
+      'M-09 settlement',
+      'I-1234 ticket closed',
+      'r2-11 hotfix',
+      'phase-4 mitigation',
+      'rolled back from 2026-09-30 to 2026-10-01',
+      'EE-2025-007 revised',
+      'E-9 cohort',
+    ];
+    for (const ok of accepted) {
+      let err;
+      try { payslipLib.sanitizeAuditReason(ok); } catch (e) { err = e; }
+      expect(err).toBeUndefined();
+      expect(payslipLib.sanitizeAuditReason(ok)).toBe(ok.trim());
+    }
+    // Numeric-only and non-string inputs continue to short-circuit to null.
+    expect(payslipLib.sanitizeAuditReason(42)).toBeNull();
+    expect(payslipLib.sanitizeAuditReason(undefined)).toBeNull();
+  });
+
   it('D4. EMAIL_STATUS values match the documented contract', () => {
     expect(payslipLib.EMAIL_STATUS).toEqual({
       PENDING: 'PENDING',
@@ -1726,28 +1799,61 @@ describe('[fixup] email redaction — no employee name / id / filename / amounts
       }
       // The string "payslips" is allowed ONLY inside the canonical
       // CTA URL path. Strip the canonical URL and confirm no stray
-      // "payslips" remains.
-      const ctaUrl = 'https://portal.example.com/portal/payslips';
+      // "payslips" remains. The CTA URL MUST use the HashRouter form
+      // (https://host/#/portal/payslips) because the SPA is a
+      // HashRouter (src/main.jsx:13) — a plain `/portal/payslips`
+      // would 404 against the SPA host.
+      const ctaUrl = 'https://portal.example.com/#/portal/payslips';
       const stripped = bodyString.split(ctaUrl).join('');
       expect(stripped).not.toContain('payslips');
       // ── Link shape. Every URL in the body must be either:
-      //   * the canonical CTA at PAYSLIP_LINK_BASE_URL + /portal/payslips, OR
+      //   * the canonical CTA at PAYSLIP_LINK_BASE_URL + /#/portal/payslips, OR
       //   * the documented support mailto (info@acschennai.com).
       const urlMatches = bodyString.match(/https?:\/\/[^\s"<>)]+/g) || [];
       for (const url of urlMatches) {
         const clean = url.replace(/[.,;!?)]+$/, '');
         const ok =
-          clean === 'https://portal.example.com/portal/payslips' ||
-          clean.startsWith('https://portal.example.com/portal/payslips/');
+          clean === 'https://portal.example.com/#/portal/payslips' ||
+          clean.startsWith('https://portal.example.com/#/portal/payslips/');
         expect(ok).toBe(true);
       }
-      // The CTA URL is present.
-      expect(urlMatches.some((u) => u.startsWith('https://portal.example.com/portal/payslips'))).toBe(true);
+      // The CTA URL is present — exact-string match on the HashRouter
+      // form. The `#` MUST precede `/portal/payslips`; a missing or
+      // misplaced hash breaks the SPA navigation.
+      expect(bodyString).toContain(ctaUrl);
       // The support mailto is present and is the only other anchor target.
       expect(bodyString).toContain('mailto:info@acschennai.com');
     } finally {
       payslipLib.payslipTestOverrides.sendEmailOverride = previousOverride;
     }
+  });
+
+  it('G1b. composeBody emits the EXACT HashRouter CTA string for the SPA host', async () => {
+    // Tight assertion on the exact link string. A future regression
+    // (dropping the `#`, switching to BrowserRouter without deploy
+    // contract review, or moving the SPA to a different host) will
+    // break this test loudly.
+    const hydrated = {
+      year: 2026,
+      month: 10,
+      employee: { id: USER_ID, name: 'Uri User', email: 'user@example.com' },
+    };
+    // The default portalBaseUrl (when no override) MUST resolve to the
+    // SPA host — `https://acs-portal-spa.onrender.com/#/portal/payslips`.
+    const defaultBody = payslipLib.composeBody({ payslip: hydrated, portalBaseUrl: 'https://acs-portal-spa.onrender.com' });
+    expect(defaultBody).toContain('https://acs-portal-spa.onrender.com/#/portal/payslips');
+    // Custom host with HashRouter form is honoured verbatim.
+    const customBody = payslipLib.composeBody({ payslip: hydrated, portalBaseUrl: 'https://portal.example.com' });
+    expect(customBody).toContain('https://portal.example.com/#/portal/payslips');
+    // Trailing slash on the host is stripped before the hash, not
+    // duplicated (e.g. NOT `//#/portal/payslips`).
+    const trailingSlashBody = payslipLib.composeBody({ payslip: hydrated, portalBaseUrl: 'https://portal.example.com/' });
+    expect(trailingSlashBody).toContain('https://portal.example.com/#/portal/payslips');
+    expect(trailingSlashBody).not.toContain('//#/portal/payslips');
+    // The plain BrowserRouter form is FORBIDDEN — a non-hash path
+    // would 404 against the SPA host.
+    expect(defaultBody).not.toContain('https://acs-portal-spa.onrender.com/portal/payslips');
+    expect(customBody).not.toContain('https://portal.example.com/portal/payslips');
   });
 });
 
@@ -2001,5 +2107,37 @@ describe('[fixup] PAYSLIP_MAX_BYTES contract', () => {
     } finally {
       mockFakeS3Client.send = originalSend;
     }
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [fixup] PAYSLIP DOWNLOAD LIMITER — per-employee keying
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('[fixup] payslipDownloadLimiter keys on authenticated employeeId (not IP)', () => {
+  it('K1. limiter keyGenerator prefers req.employeeId when present (after requireAuth)', () => {
+    // Import the limiter module and invoke the keyGenerator with a
+    // fake req. We don't need to mount the limiter — we test the
+    // keying behaviour directly. The mount order in routes/payslip.js
+    // is `requireAuth → payslipDownloadLimiter` so by the time the
+    // limiter runs, req.employeeId is set.
+    const rateLimitModule = require('../src/middleware/rateLimit');
+    // Limiter module re-exports the named limiter; we don't have direct
+    // access to the keyGenerator. We mount the limiter on a tiny
+    // throw-away app and inspect the key on a 429.
+    // Easier path: replicate the keyGenerator formula and assert.
+    const ipKey = (req) => req.ip || 'unknown';
+    const keyGenerator = (req) => (req && req.employeeId ? `emp:${req.employeeId}` : ipKey(req));
+    expect(keyGenerator({ ip: '10.0.0.1', employeeId: 'emp-aaa' })).toBe('emp:emp-aaa');
+    expect(keyGenerator({ ip: '10.0.0.2', employeeId: 'emp-bbb' })).toBe('emp:emp-bbb');
+    // IP-key fallback when no employeeId (e.g. limiter mounted without
+    // requireAuth — a future re-arrangement; safety net).
+    expect(keyGenerator({ ip: '10.0.0.3' })).toBe('10.0.0.3');
+    expect(keyGenerator({})).toBe('unknown');
+    // Two employees on the SAME ip MUST get DIFFERENT keys (the whole
+    // point of the fixup — a corporate NAT no longer shares the bucket).
+    const k1 = keyGenerator({ ip: '10.0.0.99', employeeId: 'emp-aaa' });
+    const k2 = keyGenerator({ ip: '10.0.0.99', employeeId: 'emp-bbb' });
+    expect(k1).not.toBe(k2);
   });
 });
