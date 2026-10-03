@@ -47,11 +47,6 @@ jobs:
             # Both the backend (Node + Express + Prisma) and the frontend
             # (Vite + React) live in this repo. CodeQL's JS/TS extractor
             # covers both, so a single matrix entry is enough.
-            paths:
-              - backend/src
-              - frontend/src
-              - backend/__tests__
-              - frontend/__tests__
 
     steps:
       - name: Checkout repository
@@ -61,18 +56,36 @@ jobs:
           # to scan quickly but deep enough for cross-file dataflow.
           fetch-depth: 0
 
+      # [Fix 2026-10-02] Removed the `paths: ${{ matrix.paths }}` line.
+      # Pre-fix this passed a YAML sequence to github/codeql-action/init,
+      # which does NOT accept a `paths:` input (verified against v4
+      # init/action.yml — the full inputs list is tools / languages /
+      # build-mode / config-file / db-location / config / queries /
+      # packs / source-root / ram / threads / etc. — no `paths`).
+      # GitHub's action runner rejected the key with:
+      #   "The template is not valid. .github/workflows/codeql.yml
+      #    (Line: 72, Col: 18): A sequence was not expected"
+      #
+      # Path scoping, if reintroduced, must go through a CodeQL config
+      # file passed via the `config-file:` input — the config file
+      # itself contains a `paths:` / `paths-ignore:` block. We don't
+      # need scoping today: the JS/TS extractor covers both backend and
+      # frontend in one pass, and the small amount of noise from
+      # docs/ + workflows/ is acceptable.
+      #
+      # Also bumped @v3 → @v4 across all three action references —
+      # v3 is on the deprecation track (December 2026).
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           # queries: security-and-quality runs the default security pack
           # plus the lint pack (security-extended is heavier; revisit if
           # signal-to-noise becomes a problem in weekly runs).
           queries: security-and-quality
-          paths: ${{ matrix.paths }}
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           # category is the SARIF category surfaced in the Security tab;
           # keep it stable so historical findings stay grouped.
@@ -80,6 +93,6 @@ jobs:
 
       - name: Upload results to GitHub code-scanning dashboard
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ${{ github.workspace }}/codeql-results/${{ matrix.language }}.sarif
