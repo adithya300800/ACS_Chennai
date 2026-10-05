@@ -1503,6 +1503,77 @@ describe('/api/portal/payslips — employee-facing reads', () => {
     expect(res.status).toBe(404);
   });
 
+  it('C2-indistinguishable-404. GET /:id/download — identical status + body for nonexistent id, foreign-published, and own-draft', async () => {
+    // Threat model: an attacker who has guessed or scraped a payslip id
+    // (e.g. via the list endpoint's nextCursor link, a leaked audit log,
+    // or a brute-force ulid sweep) MUST NOT be able to distinguish:
+    //   (a) "this id does not exist"
+    //   (b) "this id exists but belongs to another employee"
+    //   (c) "this id is yours but is in DRAFT (not yet published)"
+    // …from a genuine happy-path response. A different status code
+    // (200 vs 404) or a different body shape (different `code`,
+    // different `message`) leaks which of the four states the row is
+    // in, letting the attacker enumerate valid payslip ids across the
+    // employee population.
+    //
+    // Contract: all three "negative" cases return IDENTICAL status,
+    // code, and message. The download route's four-guard predicate
+    // (employeeId = session AND publishedAt IS NOT NULL AND deletedAt
+    // IS NULL AND purgedAt IS NULL) collapses to a single 404 NOT_FOUND
+    // for any input that fails the predicate, regardless of which
+    // guard failed. This test pins that contract.
+    const { app, payslipRows } = buildApp();
+
+    // Case (a) — nonexistent id. The default seed has no row with
+    // this id; the findFirst returns null and the route 404s.
+    const NONEXISTENT_ID = '99999999-9999-9999-9999-999999999999';
+    const resA = await request(app)
+      .get(`/api/portal/payslips/${NONEXISTENT_ID}/download`)
+      .set('Authorization', userJwt());
+
+    // Case (b) — foreign employee's published payslip. The seeded
+    // FOREIGN_PAYSLIP_ID is a published row owned by FOREIGN_USER_ID;
+    // userJwt() is for USER_ID, so the employeeId predicate fails.
+    const foreign = payslipRows.get(FOREIGN_PAYSLIP_ID);
+    foreign.deletedAt = null;
+    foreign.purgedAt = null;
+    foreign.publishedAt = new Date('2026-10-15T00:00:00.000Z');
+    const resB = await request(app)
+      .get(`/api/portal/payslips/${FOREIGN_PAYSLIP_ID}/download`)
+      .set('Authorization', userJwt());
+
+    // Case (c) — caller's own draft. The seeded PAYSLIP_ID is owned
+    // by USER_ID but publishedAt is null (DRAFT state). The
+    // publishedAt guard fails.
+    const own = payslipRows.get(PAYSLIP_ID);
+    own.deletedAt = null;
+    own.purgedAt = null;
+    own.publishedAt = null;
+    const resC = await request(app)
+      .get(`/api/portal/payslips/${PAYSLIP_ID}/download`)
+      .set('Authorization', userJwt());
+
+    // All three return 404.
+    expect(resA.status).toBe(404);
+    expect(resB.status).toBe(404);
+    expect(resC.status).toBe(404);
+    // All three carry the same error code.
+    expect(resA.body.code).toBe('NOT_FOUND');
+    expect(resB.body.code).toBe('NOT_FOUND');
+    expect(resC.body.code).toBe('NOT_FOUND');
+    // All three carry the same message (or no message at all — the
+    // route currently omits the message key for the 404 path; the
+    // important contract is that what is THERE is identical).
+    expect(resA.body.message).toBe(resB.body.message);
+    expect(resB.body.message).toBe(resC.body.message);
+    // No row-specific PII leaks through the body. We assert the body
+    // shapes are deeply equal so a future refactor that adds a
+    // row-specific field (e.g. a different message for draft vs
+    // foreign) fails this test.
+    expect(resA.body).toEqual(resB.body);
+    expect(resB.body).toEqual(resC.body);
+  });
+
   it('C2-own-published. GET /:id/download — 200 for own published payslip (positive control)', async () => {
     // Positive control — the predicate should NOT 404 a row that
     // satisfies ALL of (own, published, not-deleted, not-purged).
