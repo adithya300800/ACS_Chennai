@@ -3,11 +3,11 @@
 // Read-only inbox of the employee's own payslips, sourced from
 // GET /api/portal/payslips (requireAuth + IDOR guard WHERE employeeId =
 // req.employeeId AND deletedAt IS NULL — backend/routes/payslip.js:556-590).
-// The page surfaces three columns per row: month/year label,
-// emailStatus pill, and a Download button that goes through
-// api.downloadPayslip(id, token) → api.download() → blob → objectURL →
-// <a download> trigger (the exportUrlRef pattern from src/pages/portal/
-// Admin.jsx:38-50, 98-125 — revoke on unmount + revoke before re-use).
+// The page surfaces two columns per row: month/year label and a
+// Download button that goes through api.downloadPayslip(id, token) →
+// api.download() → blob → objectURL → <a download> trigger (the
+// exportUrlRef pattern from src/pages/portal/Admin.jsx:38-50, 98-125 —
+// revoke on unmount + revoke before re-use).
 //
 // Why a custom download flow and not a plain <a href>? Two reasons:
 //
@@ -33,6 +33,18 @@
 // who needs an older payslip asks HR — there is no "scrolling back
 // through 6 years" UX in v1.
 //
+// EMAIL STATUS IS NOT SHOWN HERE. The plan §B.2.1 puts the
+// `emailStatus` (SENT / PENDING / FAILED / SKIPPED_*) pill on the
+// admin's coverage view (src/pages/admin/AdminPayslips.jsx) only.
+// An employee who sees "FAILED" on their own row cannot act on it
+// (they cannot re-trigger the email; only an admin can) and a
+// "PENDING" pill is a noisy "wait a few minutes" that just causes
+// "did I get paid?" tickets. The plan deliberately keeps the
+// employee view focused on the only thing the employee can act on:
+// download the PDF. The header copy used to explain the "Sending…"
+// state — that copy is gone too because there is no longer a state
+// to explain.
+//
 // No console.log calls anywhere (DR-018 family). No hashIdentifier
 // use — PII hashing is a backend concern (lib/log.js calls redact()
 // on every log context). The page reads payslip.id / payslip.year /
@@ -52,9 +64,6 @@ import {
   formatBytes,
   formatMonthLabel,
 } from '../../lib/format.js';
-import {
-  PAYSLIP_EMAIL_STATUS_LABELS,
-} from '../../lib/constants.js';
 
 const DEFAULT_LIMIT = 50;
 
@@ -180,8 +189,7 @@ export default function MyPayslips() {
         <p style={{ margin: 0, color: 'var(--steel)', fontSize: '0.85rem' }}>
           Your published payslips. Tap <strong>Download</strong> to fetch the
           PDF. If a payslip doesn't show up, check your email — admins publish
-          monthly and a delayed send can leave a row in <em>Sending…</em> for a
-          few minutes.
+          monthly and a delayed send can leave the row late by a few minutes.
         </p>
       </header>
 
@@ -223,18 +231,6 @@ export default function MyPayslips() {
             }}
           >
             {payslips.map((p) => {
-              const emailCfg = p.emailStatus
-                ? PAYSLIP_EMAIL_STATUS_LABELS[p.emailStatus]
-                : null;
-              const emailTone = emailCfg ? emailCfg.tone : null;
-              const emailBg = emailTone === 'success' ? '#dcfce7'
-                : emailTone === 'danger' ? '#fee2e2'
-                : emailTone === 'muted' ? '#f1f5f9'
-                : null;
-              const emailColor = emailTone === 'success' ? '#166534'
-                : emailTone === 'danger' ? '#b91c1c'
-                : emailTone === 'muted' ? '#475569'
-                : null;
               return (
                 <div
                   key={p.id}
@@ -265,17 +261,6 @@ export default function MyPayslips() {
                       <span>Not yet published</span>
                     )}
                     <span>{formatBytes(p.sizeBytes)} · PDF</span>
-                    {emailCfg && (
-                      <span style={{
-                        display: 'inline-block', alignSelf: 'flex-start',
-                        fontSize: '0.65rem', fontWeight: 700,
-                        background: emailBg, color: emailColor,
-                        padding: '2px 8px', borderRadius: 999,
-                        textTransform: 'uppercase', letterSpacing: '0.04em',
-                      }}>
-                        Email: {emailCfg.label}
-                      </span>
-                    )}
                   </div>
 
                   <div style={{ display: 'flex', gap: '0.4rem', justifyContent: 'flex-end', marginTop: '0.25rem' }}>

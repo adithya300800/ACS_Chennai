@@ -19,6 +19,17 @@
 //      year-filter / cursor / "Load more" surface in v1; the page
 //      must NOT have these elements regardless of how many rows the
 //      API returns.
+//   7. NO email-status pill on the employee view. Plan §B.2.1 puts
+//      the emailStatus pill on the admin coverage view only — the
+//      employee page is focused on the only thing the employee can
+//      act on (download). A FAILED pill on the employee view would
+//      just generate "did I get paid?" tickets; a PENDING pill is
+//      the same noise. The header must not contain "Sending…" copy.
+//   8. The page does NOT import or use PAYSLIP_EMAIL_STATUS_LABELS
+//      (it lives in src/lib/constants.js). A future refactor that
+//      re-introduces the pill on the employee side will fail this
+//      test if it forgets to import the labels — and the page itself
+//      will fail to render the pill if it imports nothing.
 //
 // Why behavior tests and not source-text pins: the user explicitly
 // forbade source-text pins. These tests mount the page, mock the
@@ -201,7 +212,7 @@ describe('MyPayslips — list rendering', () => {
     // page is a thin renderer.
     mockGetMyPayslips.mockResolvedValue({
       payslips: [
-        { id: 'p-published', employeeId: 'emp-1', year: 2026, month: 10, publishedAt: '2026-10-31T00:00:00.000Z', sizeBytes: '1024' },
+        { id: 'p-published', employeeId: 'emp-1', year: 2026, month: 10, publishedAt: '2026-10-31T00:00:00.000Z', sizeBytes: '1024', emailStatus: 'SENT' },
       ],
       nextCursor: null,
       total: 1,
@@ -219,6 +230,48 @@ describe('MyPayslips — list rendering', () => {
     // download button is enabled because publishedAt is set.
     const btn = screen.getByRole('button', { name: /Download payslip/i });
     expect(btn).toBeEnabled();
+  });
+
+  test('7. no email-status pill on the employee view — even when the wire carries emailStatus', async () => {
+    // Plan §B.2.1 + §F.3: the emailStatus (SENT / PENDING / FAILED /
+    // SKIPPED_*) pill lives on the admin's coverage view
+    // (src/pages/admin/AdminPayslips.jsx) only. The employee view
+    // does NOT surface it — a FAILED pill on the employee side
+    // generates "did I get paid?" tickets and the employee cannot
+    // re-trigger the email. We feed the page a row that DOES carry
+    // emailStatus='SENT' / 'FAILED' / 'PENDING' and assert NONE of
+    // those labels appear in the DOM.
+    mockGetMyPayslips.mockResolvedValue({
+      payslips: [
+        { id: 'p-1', employeeId: 'emp-1', year: 2026, month: 10, publishedAt: '2026-10-31T00:00:00.000Z', sizeBytes: '1024', emailStatus: 'SENT' },
+        { id: 'p-2', employeeId: 'emp-1', year: 2026, month: 9,  publishedAt: '2026-09-30T00:00:00.000Z', sizeBytes: '1024', emailStatus: 'FAILED' },
+        { id: 'p-3', employeeId: 'emp-1', year: 2026, month: 8,  publishedAt: '2026-08-31T00:00:00.000Z', sizeBytes: '1024', emailStatus: 'PENDING' },
+        { id: 'p-4', employeeId: 'emp-1', year: 2026, month: 7,  publishedAt: '2026-07-31T00:00:00.000Z', sizeBytes: '1024', emailStatus: 'SKIPPED_NO_ADDRESS' },
+      ],
+      nextCursor: null,
+      total: 4,
+    });
+    renderPage();
+    await waitFor(() => {
+      const buttons = screen.getAllByRole('button', { name: /Download payslip/i });
+      expect(buttons.length).toBe(4);
+    });
+    // The page is forbidden from rendering ANY email status label.
+    // PAYSLIP_EMAIL_STATUS_LABELS maps the status to a human label
+    // (e.g. "Email: SENT", "Email: FAILED"). Assert NONE of them
+    // appear — neither the label nor the raw status token.
+    expect(screen.queryByText(/Email: /i)).toBeNull();
+    expect(screen.queryByText(/SENT/i)).toBeNull();
+    expect(screen.queryByText(/FAILED/i)).toBeNull();
+    expect(screen.queryByText(/PENDING/i)).toBeNull();
+    expect(screen.queryByText(/SKIPPED/i)).toBeNull();
+    // The header copy must NOT contain the "Sending…" explanation
+    // that used to live next to the page title. That copy was tied
+    // to the emailStatus pill — without the pill, the explanation
+    // is meaningless. The header still explains the row's possible
+    // lateness, but in a way that does not refer to a state the
+    // page no longer surfaces.
+    expect(screen.queryByText(/Sending/i)).toBeNull();
   });
 
   test('6. no year filter, no status chips, no Load more — plain newest-first list capped at 50', async () => {
