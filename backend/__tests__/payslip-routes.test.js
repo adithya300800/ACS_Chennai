@@ -734,6 +734,93 @@ describe('/api/admin/payslips — requireFreshAdmin mutation surface', () => {
     expect(r2.body.code).toBe('INVALID_BLOB_PATH');
   });
 
+  it('B6c. POST /bind then POST /publish with the SAME Idempotency-Key — publish is NOT short-circuited', async () => {
+    // Threat model: if a future backend change adds an Idempotency-Key
+    // cache that keys on the raw header alone (no route prefix), a
+    // bind+publish flow that reuses the same key would replay the
+    // bind's 201 response on publish, leaving the row stuck in DRAFT
+    // and the employee never receiving the payslip. The current
+    // backend does NOT consult Idempotency-Key on these routes (it is
+    // idempotent at the DB level via the partial-unique index on bind
+    // and the publishedAt CAS on publish), but the frontend already
+    // mints SEPARATE keys per endpoint call as a defensive
+    // contract (AdminPayslips.jsx, commit 7). This test pins the
+    // backend behavior: even if the same key is sent on both calls,
+    // publish must still execute and transition the row to PUBLISHED.
+    //
+    // Companion test: the frontend contract is enforced by reading
+    // AdminPayslips.jsx — the bind uses `bindKey`, the publish uses
+    // `publishKey`, both minted from `crypto.randomUUID()`.
+    const { app, prisma, payslipRows } = buildApp();
+    const SHARED_KEY = '00000000-0000-0000-0000-deadbeef0001';
+
+    // Step 1 — bind. Sends Idempotency-Key.
+    // The default mock `payslip.create` produces a `pay-XXXX` id which
+    // would fail the publish route's UUID/ULID shape check — so we
+    // override the mock to produce a UUID for this test only. The bind
+    // helper still creates the row in the mock store and stamps the
+    // same etag/size/head data, so the publish head-recheck matches.
+    const REAL_UUID = '11111111-2222-3333-4444-555555555555';
+    prisma.payslip.create.mockImplementationOnce(async ({ data }) => {
+      const row = { id: REAL_UUID, ...data };
+      payslipRows.set(row.id, row);
+      return row;
+    });
+
+    const bindRes = await request(app)
+      .post('/api/admin/payslips/bind')
+      .set('Authorization', adminJwt())
+      .set('Idempotency-Key', SHARED_KEY)
+      .send({ ulid: ULID, employeeId: USER_ID, year: 2026, month: 10 });
+    expect(bindRes.status).toBe(201);
+    const newRowId = bindRes.body.id;
+    expect(newRowId).toBe(REAL_UUID);
+    // The row exists in DRAFT state — publishedAt is null (or unset,
+    // since the bind helper omits it), emailStatus is unset.
+    const draftRow = payslipRows.get(newRowId);
+    expect(draftRow.publishedAt).toBeFalsy();
+    // The publish route's head-recheck compares the row's stamped
+    // etag/sizeBytes against the current blob's ETag/ContentLength.
+    // The default mock stamps `mock-etag` at bind-time but the
+    // HeadObject mock returns `"seed-etag"` — force them to match so
+    // the publish head-recheck passes and the row transitions. Also
+    // force publishedAt/deletedAt to null (the mock updateMany at
+    // payslip-routes.test.js:460-473 only matches when those fields
+    // are strictly null, not undefined).
+    draftRow.etag = '"seed-etag"';
+    draftRow.sizeBytes = BigInt(dummyPdfBuffer.length);
+    draftRow.publishedAt = null;
+    draftRow.deletedAt = null;
+    draftRow.purgedAt = null;
+
+    // Step 2 — publish with the SAME Idempotency-Key. The publish
+    // route must NOT short-circuit to a replay of the bind's 201.
+    // Suppress the per-row setImmediate delivery so the test can
+    // observe the publishedAt transition cleanly.
+    const realSetImmediate = global.setImmediate;
+    global.setImmediate = () => {};
+    let pubRes;
+    try {
+      pubRes = await request(app)
+        .post('/api/admin/payslips/publish')
+        .set('Authorization', adminJwt())
+        .set('Idempotency-Key', SHARED_KEY)
+        .send({ payslipIds: [newRowId] });
+    } finally {
+      global.setImmediate = realSetImmediate;
+    }
+    expect(pubRes.status).toBe(200);
+    expect(pubRes.body.published).toEqual([{ id: newRowId }]);
+    expect(pubRes.body.failed).toEqual([]);
+
+    // The row must have transitioned — short-circuit would have left
+    // publishedAt null. This is the load-bearing assertion.
+    const publishedRow = payslipRows.get(newRowId);
+    expect(publishedRow.publishedAt).not.toBeNull();
+    expect(publishedRow.publishedById).toBe(ADMIN_ID);
+    expect(publishedRow.emailStatus).toBe('PENDING');
+  });
+
   it('B7. POST /publish — per-row late publish; setImmediate queues sendPayslipEmail', async () => {
     const { app, payslipRows } = buildApp();
     // Seed a published-eligible row.
@@ -1074,6 +1161,107 @@ describe('/api/portal/payslips — employee-facing reads', () => {
     expect(res.body.payslips[0].employeeId).toBe(USER_ID);
   });
 
+  it('C1-list-guards. GET / — DRAFT, REVOKED, and PURGED rows of the SAME employee are excluded (four-guard list predicate)', async () => {
+    // The portal list endpoint (backend/src/routes/payslip.js employee
+    // sub-router) enforces the SAME four-guard predicate that the
+    // download route uses. This test seeds three rows for USER_ID
+    // (draft, revoked, purged) alongside the default published row
+    // and asserts that the list response contains ONLY the published
+    // row. Closes the P0 finding 2026-10-04 "employee inbox showed
+    // draft rows because the list route did not pin publishedAt".
+    const { app, payslipRows } = buildApp();
+
+    // Make sure the default published row is in the active state.
+    const published = payslipRows.get(PAYSLIP_ID);
+    published.publishedAt = new Date('2026-10-02T00:00:00.000Z');
+    published.deletedAt = null;
+    published.purgedAt = null;
+
+    // Seed a draft for the SAME employee — admin-side, not yet published.
+    const draftId = 'pay-draft-same-user';
+    payslipRows.set(draftId, {
+      ...published,
+      id: draftId,
+      year: 2026,
+      month: 9,
+      publishedAt: null,
+      emailStatus: null,
+      blobPath: `payslips/${USER_ID}/draft.pdf`,
+    });
+
+    // Seed a revoked row for the same employee.
+    const revokedId = 'pay-revoked-same-user';
+    payslipRows.set(revokedId, {
+      ...published,
+      id: revokedId,
+      year: 2026,
+      month: 8,
+      deletedAt: new Date('2026-09-15T00:00:00.000Z'),
+      blobPath: `payslips/${USER_ID}/revoked.pdf`,
+    });
+
+    // Seed a purged row for the same employee.
+    const purgedId = 'pay-purged-same-user';
+    payslipRows.set(purgedId, {
+      ...published,
+      id: purgedId,
+      year: 2026,
+      month: 7,
+      purgedAt: new Date('2026-09-20T00:00:00.000Z'),
+      blobPath: `payslips/${USER_ID}/purged.pdf`,
+    });
+
+    const res = await request(app)
+      .get('/api/portal/payslips')
+      .set('Authorization', userJwt());
+    expect(res.status).toBe(200);
+    const ids = res.body.payslips.map((p) => p.id);
+    expect(ids).toContain(PAYSLIP_ID);
+    expect(ids).not.toContain(draftId);
+    expect(ids).not.toContain(revokedId);
+    expect(ids).not.toContain(purgedId);
+    // Every returned row must satisfy the four-guard predicate on the
+    // server-side as well — not just the count, but the property.
+    // (purgedAt is NOT on the wire — the serializer strips it because
+    //  it's a sweep-internal field — so we only check the three
+    //  guards the wire actually carries.)
+    for (const row of res.body.payslips) {
+      expect(row.deletedAt).toBeNull();
+      expect(row.publishedAt).not.toBeNull();
+      expect(row.employeeId).toBe(USER_ID);
+    }
+  });
+
+  it('C1-list-no-status-param. GET / — accepts no status query and ignores status strings (defensive)', async () => {
+    // The previous version of the route read `?status=unpublished`
+    // and returned draft rows. The contract was tightened in this
+    // round — the list endpoint must NOT honour any status filter and
+    // must always return only the published row. This is the
+    // regression test for the P0 fix.
+    const { app, payslipRows } = buildApp();
+    const row = payslipRows.get(PAYSLIP_ID);
+    row.publishedAt = new Date('2026-10-02T00:00:00.000Z');
+    row.deletedAt = null;
+    row.purgedAt = null;
+
+    // Try every status value the old route accepted.
+    for (const statusValue of ['published', 'unpublished', '', 'DRAFT', 'REVOKED']) {
+      const url = statusValue
+        ? `/api/portal/payslips?status=${encodeURIComponent(statusValue)}`
+        : '/api/portal/payslips';
+      const res = await request(app).get(url).set('Authorization', userJwt());
+      expect(res.status).toBe(200);
+      const ids = res.body.payslips.map((p) => p.id);
+      // No value of `status` may reveal a draft or an empty result
+      // for an employee who has a published row.
+      expect(ids).toContain(PAYSLIP_ID);
+      for (const r of res.body.payslips) {
+        expect(r.publishedAt).not.toBeNull();
+        expect(r.deletedAt).toBeNull();
+      }
+    }
+  });
+
   it('C2. GET /:id/download — IDOR 404 for foreign payslip (predicate pinned to req.employeeId)', async () => {
     const { app } = buildApp();
     const res = await request(app)
@@ -1112,6 +1300,14 @@ describe('/api/portal/payslips — employee-facing reads', () => {
     expect(res.body).toBeInstanceOf(Buffer);
     expect(res.body.length).toBe(dummyPdfBuffer.length);
     expect(res.body.slice(0, 5).toString('ascii')).toBe('%PDF-');
+    // [plan §G.4] Frame-blocking + nosniff on the highest-PII stream.
+    //   X-Frame-Options: DENY (legacy header) and CSP frame-ancestors
+    //   'none' (modern header) both block <frame>/<iframe> embedding.
+    //   X-Content-Type-Options: nosniff prevents the browser from
+    //   re-interpreting the PDF body as a script/HTML on a sniff error.
+    expect(res.headers['x-frame-options']).toBe('DENY');
+    expect(res.headers['content-security-policy']).toBe("frame-ancestors 'none'");
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
   });
 
   it('C5. GET /:id/download — 410 GONE when the blob is missing in R2', async () => {

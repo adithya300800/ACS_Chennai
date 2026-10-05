@@ -551,18 +551,25 @@ const portalRouter = express.Router();
 portalRouter.use(requireAuth);
 portalRouter.use(payslipDownloadLimiter);
 
-// GET /api/portal/payslips — the employee sees ONLY their own payslips.
-// Rows where deletedAt IS NOT NULL are filtered out (revoked).
+// GET /api/portal/payslips — the employee sees ONLY their own published
+// payslips. Four-guard predicate matches the download route: published +
+// not-revoked + not-purged + employeeId = session. Drafts are
+// admin-only (see /api/admin/payslips). The previous version of this
+// route accepted ?status=published and ?status=unpublished query
+// strings, which leaked drafts to the employee on the default
+// no-filter call (P0 finding 2026-10-04: "employee inbox should not
+// show draft rows"); the query option is removed in this round. The
+// only narrowing filter an employee can apply is by year.
 portalRouter.get('/', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
-  const { year, status, take = '24', cursor } = req.query;
+  const { year, take = '24', cursor } = req.query;
   const takeN = Math.min(parseInt(take) || 24, 100);
   const where = {
     employeeId: req.employeeId,
+    publishedAt: { not: null },
     deletedAt: null,
+    purgedAt: null,
     ...(year ? { year: Number(year) } : {}),
-    ...(status === 'published' ? { publishedAt: { not: null } } : {}),
-    ...(status === 'unpublished' ? { publishedAt: null } : {}),
   };
   try {
     const rows = await prisma.payslip.findMany({
@@ -714,6 +721,21 @@ portalRouter.get('/:id/download', asyncHandler(async (req, res) => {
       : `inline; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(`ACS Chennai ${monthName} ${row.year}`)}.pdf`;
     res.setHeader('Content-Disposition', disposition);
     res.setHeader('Cache-Control', 'private, no-store');
+    // [plan §G.4] Payslip is the highest-PII document in the portal —
+    //   X-Frame-Options: DENY + Content-Security-Policy: frame-ancestors
+    //   'none' block any <frame>/<iframe> embedding (so a third-party
+    //   site can't render the PDF with the user's session cookie and
+    //   exfiltrate the bytes). X-Content-Type-Options: nosniff prevents
+    //   the browser from re-interpreting the PDF body as a script/HTML
+    //   on a sniffing error. These three headers are set ONLY on the
+    //   PDF stream; the JSON error path inherits the global helmet
+    //   defaults (which already include frame-ancestors 'none' and
+    //   nosniff, but helmet's X-Frame-Options default is SAMEORIGIN,
+    //   not DENY — a stream is the only path where that distinction
+    //   matters because the stream body is not a JSON document).
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.status(200).end(body);
   } catch (err) {
     const status = err && err.$metadata && err.$metadata.httpStatusCode;
