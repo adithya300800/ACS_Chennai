@@ -647,8 +647,8 @@ describe('/api/admin/payslips — requireFreshAdmin mutation surface', () => {
     expect(res.body.code).toBe('UPLOAD_NOT_CONFIRMED');
   });
 
-  it('B4. POST /bind — 422 when blob is not a PDF (magic-byte check)', async () => {
-    const { app } = buildApp({ magicBytesOutcome: 'not-pdf' });
+  it('B4. POST /bind — 422 when blob is not a PDF (magic-byte check); NO payslip row is created', async () => {
+    const { app, prisma } = buildApp({ magicBytesOutcome: 'not-pdf' });
     const res = await request(app)
       .post('/api/admin/payslips/bind')
       .set('Authorization', adminJwt())
@@ -656,6 +656,12 @@ describe('/api/admin/payslips — requireFreshAdmin mutation surface', () => {
     expect(res.status).toBe(422);
     expect(res.body.code).toBe('NOT_PDF');
     expect(res.body.magicReason).toBe('NOT_PDF');
+    // The bind transaction is held back by the magic-byte check — a
+    // non-PDF blob must not produce a payslip row AND must not claim
+    // the upload intent. Either side-effect would leak a draft row
+    // or leave the intent stuck in CONFIRMED after a failed bind.
+    expect(prisma.payslip.create).not.toHaveBeenCalled();
+    expect(prisma.uploadIntent.update).not.toHaveBeenCalled();
   });
 
   it('B5. POST /bind — 409 PAYSLIP_DUPLICATE when (emp, year, month) collision', async () => {
