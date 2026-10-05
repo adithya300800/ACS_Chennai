@@ -112,6 +112,18 @@ jobs:
           # `|| true` keeps the step from failing the workflow (we want
           # continue-on-error semantics at the job level, not via shell).
 
+      # [payslip-prod-bugs 2026-10-04] The summary step below uses
+      # `node -e '...'` to format the JSON findings. The
+      # `returntocorp/semgrep` container image is alpine-based
+      # (verified by apt-get ENOENT) — no `node` on PATH and no
+      # apt-get either. `actions/setup-node@v4` is a no-op inside
+      # container jobs (it installs into the GH runner, not the
+      # container), so install nodejs via apk into the container
+      # instead.
+      - name: Install Node.js (for summary step)
+        run: |
+          apk add --no-cache nodejs
+
       - name: Summarise findings to $GITHUB_STEP_SUMMARY
         if: always()
         run: |

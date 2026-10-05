@@ -494,7 +494,11 @@ adminRouter.get('/coverage', asyncHandler(async (req, res) => {
   try {
     const [employees, payslips] = await Promise.all([
       prisma.employee.findMany({
-        where: { isActive: true },
+        // No `isActive` filter: the Employee model has no such column
+        // (only BoqItem and TrainingAssignment do). Removing the
+        // filter keeps the query in sync with the schema. The
+        // codebase convention (adminEmployees.js, attendance.js) is
+        // to list employees without an active/inactive predicate.
         select: { id: true, name: true, email: true },
         orderBy: { name: 'asc' },
       }),

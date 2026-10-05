@@ -188,11 +188,16 @@ describe('[integration smoke] payslip lifecycle against Docker throwaway Postgre
     });
 
     // Pre-seed an UploadIntent in CONFIRMED status so /bind succeeds.
-    // The blob path matches the payslip admin upload mount's prefix rule.
-    await prisma.uploadIntent.deleteMany({ where: { employeeId: OWNER_ID } });
+    // mountUploadRoutes keys intents by the UPLOADER's employeeId (here
+    // ADMIN_ID, the admin running the request) — the bind helper
+    // looks it up by `uploadedById` and verifies the recipient's id
+    // is the path segment in blobPath. So: `employeeId: ADMIN_ID`,
+    // `blobPath: payslips/OWNER_ID/ULID.pdf` — the recipient segment
+    // stays OWNER_ID; the lookup key is the uploader.
+    await prisma.uploadIntent.deleteMany({ where: { employeeId: { in: [ADMIN_ID, OWNER_ID] } } });
     await prisma.uploadIntent.create({
       data: {
-        employeeId: OWNER_ID,
+        employeeId: ADMIN_ID,
         ulid: uploadIntentUlid,
         container: 'dpr-documents',
         blobPath: `payslips/${OWNER_ID}/${uploadIntentUlid}.pdf`,
@@ -312,5 +317,172 @@ describe('[integration smoke] payslip lifecycle against Docker throwaway Postgre
     expect(finalRow).not.toBeNull();
     expect(finalRow.deletedAt).not.toBeNull();
     expect(finalRow.purgedAt).not.toBeNull();
+  }, 30000);
+
+  // ────────────────────────────────────────────────────────────────────
+  // Bug-A regression: admin binds a payslip for a DIFFERENT employee.
+  // The intent is keyed by the uploader's employeeId (ADMIN_ID), the
+  // recipient is OWNER_ID. The fix to bindPayslipToIntent looks up
+  // the intent by uploadedById and verifies the recipient's id is the
+  // path segment in blobPath. This test pins the contract end-to-end.
+  // ────────────────────────────────────────────────────────────────────
+  it('A. admin binds a payslip for a different employee (cross-employee upload) succeeds', async () => {
+    if (!canConnect) {
+      throw new Error(`[integration smoke] cannot reach throwaway DB at ${THROW_AWAY_URL.replace(/:[^:@]+@/, ':***@')} — ${connectError ? (connectError.code || connectError.message) : 'connect check failed before tests ran'}`);
+    }
+    // Re-seed ADMIN + OWNER + a fresh intent keyed by the uploader.
+    await prisma.employee.upsert({
+      where: { id: ADMIN_ID },
+      update: { isAdmin: true, email: `${ADMIN_ID}@smoke.test`, name: 'Smoke Admin' },
+      create: { id: ADMIN_ID, email: `${ADMIN_ID}@smoke.test`, name: 'Smoke Admin', isAdmin: true },
+    });
+    await prisma.employee.upsert({
+      where: { id: OWNER_ID },
+      update: { email: `${OWNER_ID}@smoke.test`, name: 'Smoke Owner' },
+      create: { id: OWNER_ID, email: `${OWNER_ID}@smoke.test`, name: 'Smoke Owner' },
+    });
+    // Use a fresh ULID so this test does not collide with the lifecycle test.
+    const crossUlid = '01ARZ3NDEKTSV4RRFFQ69G5FAA';
+    await prisma.uploadIntent.deleteMany({ where: { employeeId: ADMIN_ID, ulid: crossUlid } });
+    await prisma.uploadIntent.create({
+      data: {
+        employeeId: ADMIN_ID,        // uploader
+        ulid: crossUlid,
+        container: 'dpr-documents',
+        blobPath: `payslips/${OWNER_ID}/${crossUlid}.pdf`, // recipient is OWNER_ID
+        contentType: 'application/pdf',
+        status: 'CONFIRMED',
+        confirmedAt: new Date(),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      },
+    });
+    // Bind as ADMIN, recipient = OWNER.
+    const res = await request(app)
+      .post('/api/admin/payslips/bind')
+      .set('Authorization', jwtFor(ADMIN_ID, true))
+      .send({ ulid: crossUlid, employeeId: OWNER_ID, year: 2026, month: 9 });
+    expect(res.status).toBe(201);
+    expect(res.body.employeeId).toBe(OWNER_ID);
+    // Cleanup: remove the new payslip so the lifecycle test isn't polluted.
+    const newId = res.body.id;
+    const newRow = await prisma.payslip.findUnique({ where: { id: newId } });
+    expect(newRow.uploadedById).toBe(ADMIN_ID);
+    expect(newRow.employeeId).toBe(OWNER_ID);
+    await prisma.payslip.delete({ where: { id: newId } });
+    await prisma.uploadIntent.deleteMany({ where: { employeeId: ADMIN_ID, ulid: crossUlid } });
+  }, 30000);
+
+  // ────────────────────────────────────────────────────────────────────
+  // /bind is mounted on the admin router (requireFreshAdmin). A
+  // non-admin caller must be rejected with 403 + ADMIN_REQUIRED before
+  // bindPayslipToIntent runs.
+  // ────────────────────────────────────────────────────────────────────
+  it('B. non-admin cannot bind (requireFreshAdmin returns 403 ADMIN_REQUIRED)', async () => {
+    if (!canConnect) {
+      throw new Error(`[integration smoke] cannot reach throwaway DB — ${connectError ? (connectError.code || connectError.message) : 'connect check failed'}`);
+    }
+    const res = await request(app)
+      .post('/api/admin/payslips/bind')
+      .set('Authorization', jwtFor(OWNER_ID, false))
+      .send({ ulid: '01ARZ3NDEKTSV4RRFFQ69G5FA1', employeeId: OWNER_ID, year: 2026, month: 11 });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('ADMIN_REQUIRED');
+  }, 30000);
+
+  // ────────────────────────────────────────────────────────────────────
+  // Path/body employee mismatch: seed an intent whose blobPath points
+  // to ATTACKER_ID, then try to bind with body.employeeId = OWNER_ID.
+  // bindPayslipToIntent must reject with 400 INVALID_BLOB_PATH.
+  // ────────────────────────────────────────────────────────────────────
+  it('C. path/body employee mismatch is rejected (400 INVALID_BLOB_PATH)', async () => {
+    if (!canConnect) {
+      throw new Error(`[integration smoke] cannot reach throwaway DB — ${connectError ? (connectError.code || connectError.message) : 'connect check failed'}`);
+    }
+    const mismatchUlid = '01ARZ3NDEKTSV4RRFFQ69G5FAB';
+    // Seed ADMIN + ATTACKER + the mismatched intent.
+    await prisma.employee.upsert({
+      where: { id: ADMIN_ID },
+      update: { isAdmin: true, email: `${ADMIN_ID}@smoke.test`, name: 'Smoke Admin' },
+      create: { id: ADMIN_ID, email: `${ADMIN_ID}@smoke.test`, name: 'Smoke Admin', isAdmin: true },
+    });
+    await prisma.employee.upsert({
+      where: { id: ATTACKER_ID },
+      update: { email: `${ATTACKER_ID}@smoke.test`, name: 'Smoke Attacker' },
+      create: { id: ATTACKER_ID, email: `${ATTACKER_ID}@smoke.test`, name: 'Smoke Attacker' },
+    });
+    await prisma.employee.upsert({
+      where: { id: OWNER_ID },
+      update: { email: `${OWNER_ID}@smoke.test`, name: 'Smoke Owner' },
+      create: { id: OWNER_ID, email: `${OWNER_ID}@smoke.test`, name: 'Smoke Owner' },
+    });
+    await prisma.uploadIntent.deleteMany({ where: { employeeId: ADMIN_ID, ulid: mismatchUlid } });
+    await prisma.uploadIntent.create({
+      data: {
+        employeeId: ADMIN_ID,
+        ulid: mismatchUlid,
+        container: 'dpr-documents',
+        blobPath: `payslips/${ATTACKER_ID}/${mismatchUlid}.pdf`, // recipient in path = ATTACKER
+        contentType: 'application/pdf',
+        status: 'CONFIRMED',
+        confirmedAt: new Date(),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      },
+    });
+    // Caller is admin; body.employeeId = OWNER (mismatch with blobPath).
+    const res = await request(app)
+      .post('/api/admin/payslips/bind')
+      .set('Authorization', jwtFor(ADMIN_ID, true))
+      .send({ ulid: mismatchUlid, employeeId: OWNER_ID, year: 2026, month: 11 });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_BLOB_PATH');
+    // No payslip row should have been created.
+    const stray = await prisma.payslip.findFirst({ where: { ulid: mismatchUlid } });
+    expect(stray).toBeNull();
+    // Cleanup the mismatched intent.
+    await prisma.uploadIntent.deleteMany({ where: { employeeId: ADMIN_ID, ulid: mismatchUlid } });
+  }, 30000);
+
+  // ────────────────────────────────────────────────────────────────────
+  // Bug-B regression: GET /api/admin/payslips/coverage must NOT use
+  // the nonexistent Employee.isActive column. The Prisma query in the
+  // route is now `findMany` with no where filter; this test pins that
+  // the endpoint returns 200 with the expected counts against REAL
+  // Postgres (not the in-memory mock).
+  // ────────────────────────────────────────────────────────────────────
+  it('D. coverage returns 200 with correct counts (no Employee.isActive filter)', async () => {
+    if (!canConnect) {
+      throw new Error(`[integration smoke] cannot reach throwaway DB — ${connectError ? (connectError.code || connectError.message) : 'connect check failed'}`);
+    }
+    // Use the year/month from the lifecycle test's published row. Coverage
+    // counts PUBLISHED + not-revoked rows per (year, month) for every
+    // employee in the table — so we expect totalEmployees >= 1 and
+    // coveredCount >= 0. The schema/contract is: response includes
+    // `totalEmployees`, `coveredCount`, `missingCount`, and a `coverage`
+    // array whose length equals `totalEmployees`.
+    const res = await request(app)
+      .get('/api/admin/payslips/coverage?year=2026&month=10')
+      .set('Authorization', jwtFor(ADMIN_ID, true));
+    expect(res.status).toBe(200);
+    expect(res.body.year).toBe(2026);
+    expect(res.body.month).toBe(10);
+    expect(typeof res.body.totalEmployees).toBe('number');
+    expect(typeof res.body.coveredCount).toBe('number');
+    expect(typeof res.body.missingCount).toBe('number');
+    expect(res.body.missingCount).toBe(res.body.totalEmployees - res.body.coveredCount);
+    expect(Array.isArray(res.body.coverage)).toBe(true);
+    expect(res.body.coverage.length).toBe(res.body.totalEmployees);
+    // The lifecycle test's row was deleted (afterAll or the final step),
+    // but other tests in this DB may have left rows. Assert each row's
+    // shape (employeeId/name/email/payslip|{id,published,emailStatus,...}).
+    for (const row of res.body.coverage) {
+      expect(row).toHaveProperty('employeeId');
+      expect(row).toHaveProperty('employeeName');
+      expect(row).toHaveProperty('employeeEmail');
+      if (row.payslip) {
+        expect(row.payslip).toHaveProperty('id');
+        expect(row.payslip).toHaveProperty('published');
+        expect(row.payslip).toHaveProperty('emailStatus');
+      }
+    }
   }, 30000);
 });
