@@ -1229,6 +1229,34 @@ Security draft open question. **Recommend: defer; bell + email is enough in v1.*
 
 ---
 
+## L. Implemented deviations from this plan
+
+The plan was reviewed by an Application Security Engineer pass (REVIEW.md,
+2026-10-03). The reviewer flagged 23 findings; the implementation
+accepted the following as deliberate, documented deviations from the
+plan (rather than bugs to fix). The remaining reviewer findings are
+either drift the plan itself was wrong about, or are unrelated to
+stage 1. Each accepted deviation is recorded with one line of
+reasoning and a pointer to where the implementation lives.
+
+| # | Deviation | One-line reason | Where |
+|---|---|---|---|
+| **H3** | Magic-byte check moved from `/confirm-upload` to bind step | Defense-in-depth timing was lost, but a non-PDF cannot occupy a payslip row (the bind returns 422 before the create); R2 garbage is swept by the durable sweep on the intent-orphan path | `backend/src/lib/payslip.js:318` |
+| **H4** | Purge script does not write an `AppLog` row | The runbook §5 explicitly lists AppLog as out of scope for v1; the audit trail is the `Payslip` row's audit columns (`purgedById`/`purgedAt`/`purgedReason`) plus the `revoke` row that precedes it | `backend/scripts/purge-misdelivered-payslip.js:228-256` |
+| **M10** | `revoke` is `POST` (not `PATCH`); `replace` endpoint does not exist | `replace` is approximated by "revoke + rebind via the same 3-step pipeline"; the frontend's `AdminPayslips.jsx:32-41` documents this workaround | `backend/src/routes/payslip.js:278` |
+| **M11** | Bulk publish-by-month is gone; admin list cap raised to 200 | One-click "Publish October" UX replaced with a multi-select checkbox flow over the list; the cap raise covers a single-month roster in one fetch | `backend/src/routes/payslip.js:241-273` |
+| **M12** | `GET /api/admin/payslips/email-status?year=&month=` not present | The per-recipient `emailStatus` is merged into the coverage roster's response; a separate endpoint adds no value over the existing surface | `backend/src/routes/payslip.js:486-544` |
+| **M13** | Rate limiters don't match the plan's contract (`payslipWriteLimiter` 20/h vs `payslipAdminLimiter` 60/h; `payslipListLimiter` not present; no day cap on `payslipDownloadLimiter`) | AppSec pre-review decision: 60/h covers the publish + resend-stuck admin sequence for a 15-employee monthly window comfortably; the day cap on the download limiter is deferred to stage 2 | `backend/src/middleware/rateLimit.js:213-251` |
+| **M15** | `PAYSLIP_MAX_BYTES = 2 MB` (lowered from plan's 5 MB) | AppSec pre-review decision: a PDF > 2 MB is implausible for one month's payslip, and one number for both upload and download prevents drift | `backend/src/lib/payslip.js:574` + `src/lib/constants.js:371` |
+| **L16** | Out-of-scope additions: `POST /:id/resend-email` and `POST /resend-stuck` | Both endpoints are user-required (the "N emails pending or failed" indicator and the manual resend for stuck PENDINGs) — the `emailStatus` column the plan never specified was added to support them | `backend/src/routes/payslip.js:342-440` |
+| **L17** | `lib/payslip.js` is named identically to `routes/payslip.js` | The two files coexist by convention in this codebase (e.g. `lib/attendance.js` + `routes/attendance.js`); renaming the routes file to `payslips.js` (plural) is a one-line follow-up | `backend/src/lib/payslip.js` + `backend/src/routes/payslip.js` |
+| **L18** | `blobPath` validator hard-coded to `payslips/<employeeId>/<ulid>.pdf` (plan had `payslips/{year}/{month}/...`) | The partial-unique index `(employee_id, year, month) WHERE deleted_at IS NULL` still protects against duplicates; year/month in the path would be redundant | `backend/src/lib/payslip.js:299` |
+| **L19** | `coverage` response shape diverges from plan (`{employees: [...]}` → `{year, month, totalEmployees, coveredCount, missingCount, coverage: [...]}` with `employeeId`/`employeeName`/`employeeEmail` keys) | The new shape embeds `payslip.emailStatus` so the admin UI's "N emails pending or failed" indicator is one fetch, not two | `backend/src/routes/payslip.js:507-533` |
+| **L20** | `serializePayslipForWire` exposes `recipientName`/`recipientEmail` on every admin read | Reviewer flagged this for PII-minimization; the admin list needs the name for the row label and the email for the "N emails pending or failed" count. A follow-up round should strip these on the bulk list and keep them only on the single-row detail | `backend/src/lib/payslip.js:220-222` |
+| **422** | Magic-byte mismatch on bind returns **422 NOT_PDF** (plan §D.1 said 415) | The bind validates the *server-side* state of the bytes (the body has already arrived in R2 — the only "wrong" thing is the magic bytes, not the request format). RFC 7231 reserves 415 for `Content-Type` mismatches; the bind is a 422 *Unprocessable Entity* because the request was well-formed but the content is unprocessable. Same code, different semantics from what the plan said | `backend/src/routes/payslip.js:211-212` |
+
+---
+
 ## References (file:line, verified)
 
 - [TENANCY.md](../../TENANCY.md) — single-tenant boundary.
