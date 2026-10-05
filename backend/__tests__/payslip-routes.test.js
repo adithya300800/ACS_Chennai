@@ -827,6 +827,91 @@ describe('/api/admin/payslips — requireFreshAdmin mutation surface', () => {
     expect(publishedRow.emailStatus).toBe('PENDING');
   });
 
+  it('B6d. POST /bind — retried bind (same ulid, same employee/year/month) does NOT create a second row', async () => {
+    // Threat model: a flaky 4G connection causes the admin client to
+    // retry the bind call after the first one already committed.
+    // The retry must not create a duplicate payslip row — the
+    // backend's contract is: the FIRST call's payslipId is the
+    // authoritative one, the retry is a no-op that surfaces as a
+    // 409 PAYSLIP_DUPLICATE the frontend can ignore.
+    //
+    // This is the test for the design choice documented in
+    // docs/plans/PAYSLIPS_PLAN.md §"Implemented deviations" — the
+    // bind endpoint does NOT consult Idempotency-Key (boq.js's
+    // pattern); the partial-unique index on
+    // (employee_id, year, month) WHERE deleted_at IS NULL is the
+    // load-bearing idempotency guard. The frontend treats the 409
+    // as success on a retried-same-intent call.
+    //
+    // The mock does not enforce the partial-unique index (the
+    // buildApp's default-seed creates a row for the same
+    // (USER_ID, 2026, 10) slot the B-block bind tests use, so a
+    // global partial-unique mock would break the B1 happy path).
+    // We force the second call's create to throw P2002 — the same
+    // error code Prisma raises when the partial-unique fires in
+    // production. The route maps P2002 to 409 PAYSLIP_DUPLICATE;
+    // the assertion is that the row count grew by EXACTLY 1, not 2.
+    const { app, prisma, payslipRows, uploadIntents } = buildApp();
+    const beforeCount = payslipRows.size;
+
+    // Step 1 — first bind. Creates a row and claims the intent.
+    const r1 = await request(app)
+      .post('/api/admin/payslips/bind')
+      .set('Authorization', adminJwt())
+      .send({ ulid: ULID, employeeId: USER_ID, year: 2026, month: 10 });
+    expect(r1.status).toBe(201);
+    const firstId = r1.body.id;
+    expect(payslipRows.get(firstId)).toBeDefined();
+    // Exactly one row was added by the first bind.
+    expect(payslipRows.size).toBe(beforeCount + 1);
+
+    // Step 2 — retried bind (same body, simulating a flaky-connection
+    // retry). The route's flow on the second call:
+    //   1. ULID/employee/year/month validation passes.
+    //   2. The UploadIntent is still CONFIRMED + the boundAt field
+    //      is now set, but the route does not gate on boundAt (the
+    //      intent lookup just checks status=CONFIRMED + blobPath).
+    //   3. Magic-bytes check passes.
+    //   4. tx.payslip.create fires → the partial-unique index on
+    //      (employee_id, year, month) WHERE deleted_at IS NULL
+    //      raises P2002 in production → the route returns
+    //      409 PAYSLIP_DUPLICATE.
+    // We force the second call's create to throw P2002 — that's
+    // exactly what Prisma does at the SQL boundary in production.
+    prisma.payslip.create.mockRejectedValueOnce(
+      Object.assign(new Error('Unique constraint failed on the fields: (`employeeId`,`year`,`month`)'), {
+        code: 'P2002',
+        meta: { target: ['employeeId', 'year', 'month'] },
+      }),
+    );
+    const r2 = await request(app)
+      .post('/api/admin/payslips/bind')
+      .set('Authorization', adminJwt())
+      .send({ ulid: ULID, employeeId: USER_ID, year: 2026, month: 10 });
+    expect(r2.status).toBe(409);
+    expect(r2.body.code).toBe('PAYSLIP_DUPLICATE');
+
+    // Load-bearing assertion: the retry did NOT create a second row.
+    // The row count is unchanged from after the first bind — the
+    // 409 path is a clean no-op on the data store.
+    expect(payslipRows.size).toBe(beforeCount + 1);
+    const allRows = Array.from(payslipRows.values());
+    const sameKeyRows = allRows.filter(
+      (r) => r.employeeId === USER_ID && r.year === 2026 && r.month === 10
+    );
+    // The first bind created exactly one new row in this slot.
+    expect(sameKeyRows.length).toBeGreaterThanOrEqual(1);
+    // The retried bind did NOT create another row — there is at most
+    // one new row beyond the default seed for (USER_ID, 2026, 10).
+    // (The default seed adds 1; the first bind adds 1; total 2.)
+    expect(sameKeyRows.length).toBe(2);
+
+    // The intent is still claimed by the first bind (not double-claimed).
+    const intent = uploadIntents.get(`${USER_ID}:${ULID}`);
+    expect(intent.boundType).toBe('payslip');
+    expect(intent.boundAt).toBeInstanceOf(Date);
+  });
+
   it('B7. POST /publish — per-row late publish; setImmediate queues sendPayslipEmail', async () => {
     const { app, payslipRows } = buildApp();
     // Seed a published-eligible row.
