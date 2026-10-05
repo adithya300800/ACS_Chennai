@@ -122,19 +122,29 @@ jobs:
       - name: Install postgresql-client (for psql)
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
-      # [payslip-prod-bugs 2026-10-04] Apply the migration history to
-      # the throwaway DB so public.payslip exists with RLS enabled.
-      # The RLS end-state test in payslip-partial-unique-drift probes
-      # pg_class/pg_policy on public.payslip; the integration-smoke
-      # test seeds real rows. Skipping this means the throws-away DB
-      # is empty and both suites fail on the first relation lookup.
-      # The schema state is throwaway-only — Render's prod schema is
-      # not touched by this step.
-      - name: Apply migrations to throwaway DB
+      # [payslip-prod-bugs 2026-10-04] Sync the throwaway DB schema
+      # so public.payslip exists with RLS enabled. The RLS end-state
+      # test in payslip-partial-unique-drift probes pg_class/pg_policy
+      # on public.payslip; the integration-smoke test seeds real rows.
+      # Skipping this means the throws-away DB is empty and both
+      # suites fail on the first relation lookup.
+      #
+      # We use `prisma db push` rather than `prisma migrate deploy`
+      # because the migration history has an idempotency bug:
+      # init_baseline and 20260902000000 both `CREATE TYPE
+      # "TrainingEnrollmentStatus"`. `migrate deploy` runs them in
+      # order and the second one fails with 42710 ("type already
+      # exists") on a fresh DB — because init_baseline was added
+      # later (it's the schema snapshot), the replay order no longer
+      # matches the historical order. `db push` reads only
+      # schema.prisma and creates each type once, regardless of
+      # history. Render's prod schema is NOT touched by this step
+      # (different DATABASE_URL).
+      - name: Sync throwaway DB schema (db push, throwaway-only)
         env:
           DATABASE_URL: postgresql://acs:acspw@localhost:5432/acs_portal
           DIRECT_DATABASE_URL: postgresql://acs:acspw@localhost:5432/acs_portal
-        run: npx prisma migrate deploy
+        run: npx prisma db push --skip-generate
 
       # [DR-034 2026-09-23] Release-channel gate: backend tests are now
       # BLOCKING for normal release. Per audit DR-034 ("Automatic release
