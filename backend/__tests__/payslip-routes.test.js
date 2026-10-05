@@ -841,9 +841,10 @@ describe('/api/admin/payslips — requireFreshAdmin mutation surface', () => {
     row.etag = '"seed-etag"';
     row.sizeBytes = BigInt(dummyPdfBuffer.length);
 
-    // Replace setImmediate with a synchronous variant so the test
-    // doesn't have to wait — the publish response returns immediately,
-    // the deliver is queued for the NEXT tick.
+    // Replace setImmediate with a capture-only variant so the test
+    // can verify the deliver is queued (and decide whether to drain).
+    // The publish response returns BEFORE the setImmediate fires; the
+    // deliver is wired to the helper for the NEXT tick.
     const deliverCalls = [];
     const realSetImmediate = global.setImmediate;
     global.setImmediate = (fn) => { deliverCalls.push(fn); };
@@ -857,15 +858,14 @@ describe('/api/admin/payslips — requireFreshAdmin mutation surface', () => {
       expect(r.body.published).toEqual([{ id: PAYSLIP_ID }]);
       expect(r.body.failed).toEqual([]);
       // The publish response returned BEFORE the setImmediate fired.
-      // Now drain the queue — the deliver is wired to the helper.
       expect(deliverCalls.length).toBe(1);
-      // Drain — setImmediate's contract is "next tick"; calling the
-      // captured fn simulates that next tick.
-      for (const fn of deliverCalls) await fn();
     } finally {
       global.setImmediate = realSetImmediate;
     }
-    // The row was stamped (publishedAt, publishedById, emailStatus).
+    // Assert the publish-time stamps: PENDING is the publish's stamp;
+    // the deliver is queued and will run on the next tick (we don't
+    // drain here — with emailIsConfigured=false the drain would
+    // flip the status to FAILED, which is tested separately in B7d).
     expect(row.publishedAt).toBeInstanceOf(Date);
     expect(row.publishedById).toBe(ADMIN_ID);
     expect(row.emailStatus).toBe('PENDING');
@@ -1614,6 +1614,11 @@ describe('lib/payslip.js — helpers', () => {
   });
 
   it('D4. EMAIL_STATUS values match the documented contract', () => {
+    // SKIPPED_OPT_OUT + SKIPPED_TYPE_MUTED are still in the enum for
+    // back-compat (round-25 notifier contract) but sendPayslipEmail no
+    // longer stamps them — see the [PAYSLIP_BYPASS_NOTIFICATION_MUTES]
+    // block in src/lib/payslip.js. Keeping the keys means older readers
+    // of the column don't crash on unknown values.
     expect(payslipLib.EMAIL_STATUS).toEqual({
       PENDING: 'PENDING',
       SENT: 'SENT',
@@ -1648,16 +1653,18 @@ describe('lib/payslip.js — helpers', () => {
     // Send a row through the resend path. Bypass the route — call the
     // helper directly with the mock prisma.
     const result = await payslipLib.resendStuckPendingPayslips(prisma, { delayMs: 0 });
-    // The mock's notificationPreference.findUnique returns null (defaults:
-    // emailEnabled=true, no mutes) so the resend reaches the email
-    // transport. With Resend NOT configured in the test process the
-    // helper stamps FAILED — the contract is "the row was attempted",
-    // not "the row was SENT".
+    // The sendPayslipEmail helper NO LONGER consults notificationPreference
+    // (the [PAYSLIP_BYPASS_NOTIFICATION_MUTES] block in src/lib/payslip.js),
+    // so the mock returning null is irrelevant — the helper just runs.
+    // With Resend NOT configured in the test process the helper stamps
+    // FAILED — the contract is "the row was attempted", not "the row was
+    // SENT".
     expect(result.scanned).toBe(1);
     expect(result.sent + result.failed).toBe(1);
     // The stuck row's emailStatus moved out of PENDING (either SENT,
-    // FAILED, or SKIPPED_* — anything is acceptable; PENDING would mean
-    // the helper bailed early).
+    // FAILED, or SKIPPED_NO_ADDRESS — anything is acceptable; PENDING
+    // would mean the helper bailed early. SKIPPED_OPT_OUT /
+    // SKIPPED_TYPE_MUTED are unreachable from this code path.).
     expect(stuckRow.emailStatus).not.toBe('PENDING');
   });
 
@@ -2341,5 +2348,139 @@ describe('[fixup] payslipDownloadLimiter keys on authenticated employeeId (not I
     const k1 = keyGenerator({ ip: '10.0.0.99', employeeId: 'emp-aaa' });
     const k2 = keyGenerator({ ip: '10.0.0.99', employeeId: 'emp-bbb' });
     expect(k1).not.toBe(k2);
+  });
+});
+
+describe('[fixup] sendPayslipEmail BYPASSES notificationPreference (no SKIPPED_OPT_OUT / SKIPPED_TYPE_MUTED)', () => {
+  // Plan §G.5 + §I.2: payslip is critical-type (carries salary data)
+  // and a muted / opted-out employee MUST still receive the email —
+  // the portal's per-employee inbox is the only place the file lives,
+  // so the email is the receipt that payroll was delivered. The
+  // [PAYSLIP_BYPASS_NOTIFICATION_MUTES] block in src/lib/payslip.js
+  // documents the contract. These tests pin it.
+  //
+  // The two assertions that matter for every test in this describe:
+  //   1. Result.status is NEVER SKIPPED_OPT_OUT or SKIPPED_TYPE_MUTED.
+  //   2. The function does NOT short-circuit on prefs — it falls
+  //      through to the emailIsConfigured gate (which is FALSE in the
+  //      test env, so the row is stamped FAILED/EMAIL_NOT_CONFIGURED
+  //      with the bypass intact).
+  //
+  // Test-env note: RESEND_API_KEY is unset so isConfigured() returns
+  // false. The override seam (`opts.sendEmailOverride`) is therefore
+  // never called — we prove the bypass by asserting the result
+  // reaches the emailIsConfigured short-circuit, not the prefs gate.
+
+  // Helper that builds a fresh app + seeds a published row eligible
+  // for the email.
+  function setup() {
+    const ctx = buildApp();
+    const row = ctx.payslipRows.get(PAYSLIP_ID);
+    row.publishedAt = new Date();
+    row.deletedAt = null;
+    row.purgedAt = null;
+    return ctx;
+  }
+
+  it('L1. sendPayslipEmail: a recipient with emailEnabled=false is STILL sent (no SKIPPED_OPT_OUT)', async () => {
+    // The recipient has explicitly opted out of email — but payslip is
+    // critical-type, so the bypass must override their preference.
+    const { prisma } = setup();
+    prisma.notificationPreference.findUnique.mockResolvedValue({
+      employeeId: USER_ID,
+      emailEnabled: false,
+      typeMutes: {},
+    });
+
+    const before = prisma.notificationPreference.findUnique.mock.calls.length;
+    const out = await payslipLib.sendPayslipEmail(prisma, PAYSLIP_ID);
+    const after = prisma.notificationPreference.findUnique.mock.calls.length;
+
+    // Bypass pin 1: the function did NOT consult notificationPreference
+    // (or, if it did, the result is ignored — call count of zero is
+    // the simplest proof of the bypass).
+    expect(after).toBe(before);
+    // Bypass pin 2: result.status is FAILED/EMAIL_NOT_CONFIGURED (the
+    // next gate after prefs), NOT SKIPPED_OPT_OUT.
+    expect(out.status).toBe(payslipLib.EMAIL_STATUS.FAILED);
+    expect(out.reason).toBe('EMAIL_NOT_CONFIGURED');
+    expect(out.status).not.toBe(payslipLib.EMAIL_STATUS.SKIPPED_OPT_OUT);
+  });
+
+  it('L2. sendPayslipEmail: a recipient with typeMutes.PAYSLIP_PUBLISHED=true is STILL sent (no SKIPPED_TYPE_MUTED)', async () => {
+    // The recipient has muted the PAYSLIP_PUBLISHED type — but payslip
+    // is critical-type, so the bypass must override their preference.
+    const { prisma } = setup();
+    prisma.notificationPreference.findUnique.mockResolvedValue({
+      employeeId: USER_ID,
+      emailEnabled: true,
+      typeMutes: { PAYSLIP_PUBLISHED: true },
+    });
+
+    const before = prisma.notificationPreference.findUnique.mock.calls.length;
+    const out = await payslipLib.sendPayslipEmail(prisma, PAYSLIP_ID);
+    const after = prisma.notificationPreference.findUnique.mock.calls.length;
+
+    expect(after).toBe(before);
+    expect(out.status).toBe(payslipLib.EMAIL_STATUS.FAILED);
+    expect(out.reason).toBe('EMAIL_NOT_CONFIGURED');
+    expect(out.status).not.toBe(payslipLib.EMAIL_STATUS.SKIPPED_TYPE_MUTED);
+  });
+
+  it('L3. sendPayslipEmail: bypass coexists with the no-address deliverability gate (SKIPPED_NO_ADDRESS still fires)', async () => {
+    // The bypass only applies to USER PREFERENCE — deliverability
+    // gates (no recipient address) still short-circuit. A row with no
+    // employee email gets SKIPPED_NO_ADDRESS regardless of prefs.
+    const { prisma } = setup();
+    const row = prisma.payslip.findUnique;
+    prisma.payslip.findUnique = jest.fn(async (args) => {
+      const orig = await row.call(prisma.payslip, args);
+      if (orig) orig.employee.email = null; // no recipient address
+      return orig;
+    });
+    prisma.notificationPreference.findUnique.mockResolvedValue({
+      employeeId: USER_ID,
+      emailEnabled: true,
+      typeMutes: { PAYSLIP_PUBLISHED: true }, // muted + no address
+    });
+
+    const out = await payslipLib.sendPayslipEmail(prisma, PAYSLIP_ID);
+    expect(out.status).toBe(payslipLib.EMAIL_STATUS.SKIPPED_NO_ADDRESS);
+    // And the bypass itself still held: the function fell through prefs
+    // (it would have returned SKIPPED_TYPE_MUTED if it hadn't).
+    expect(out.status).not.toBe(payslipLib.EMAIL_STATUS.SKIPPED_TYPE_MUTED);
+  });
+
+  it('L4. resendStuckPendingPayslips: a row stuck in PENDING for a muted employee is still re-sent', async () => {
+    // Plan §I.2 also requires the stuck-PENDING sweep to bypass prefs:
+    // if an employee's first send was "ok but stuck" (PENDING), a
+    // resend for them must also bypass the same prefs gate. The
+    // resendStuckPendingPayslips helper delegates to sendPayslipEmail
+    // (line 680), so L1+L2 already cover it indirectly — but pin it
+    // here as a back-compat assertion so a future refactor that splits
+    // the helper doesn't quietly re-introduce the bug.
+    const { prisma, payslipRows } = setup();
+    // Scope: only PAYSLIP_ID should match the sweep — same trick as
+    // D5, reset FOREIGN_PAYSLIP_ID so it doesn't qualify.
+    const foreign = payslipRows.get(FOREIGN_PAYSLIP_ID);
+    foreign.publishedAt = null;
+    foreign.emailStatus = null;
+    prisma.notificationPreference.findUnique.mockResolvedValue({
+      employeeId: USER_ID,
+      emailEnabled: false,
+      typeMutes: { PAYSLIP_PUBLISHED: true },
+    });
+    const stuck = payslipRows.get(PAYSLIP_ID);
+    stuck.emailStatus = 'PENDING';
+    stuck.updatedAt = new Date(Date.now() - 10 * 60 * 1000); // 10 min old
+
+    const out = await payslipLib.resendStuckPendingPayslips(prisma, { delayMs: 0 });
+    expect(out.scanned).toBe(1);
+    expect(out.sent + out.failed).toBe(1);
+    // The row left PENDING — proof the bypass held and the prefs gate
+    // didn't short-circuit.
+    expect(stuck.emailStatus).not.toBe('PENDING');
+    expect(stuck.emailStatus).not.toBe(payslipLib.EMAIL_STATUS.SKIPPED_OPT_OUT);
+    expect(stuck.emailStatus).not.toBe(payslipLib.EMAIL_STATUS.SKIPPED_TYPE_MUTED);
   });
 });

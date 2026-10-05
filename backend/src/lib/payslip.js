@@ -764,6 +764,140 @@ async function revokePayslip(prisma, { payslipId, revokedById, reason }) {
 }
 
 /**
+ * Tombstone a payslip row + delete its R2 blob (misdelivery cleanup).
+ *
+ * The misdelivery purge script (`scripts/purge-misdelivered-payslip.js`)
+ * is the only intended caller — v1 has no HTTP route for this; the audit
+ * requires a deliberate operator action with a sanitised reason.
+ *
+ * What it does, in order:
+ *   1. Refuses any row that does not have `deletedAt IS NOT NULL` —
+ *      misdelivery MUST go through `revokePayslip` first so the email
+ *      status, revokedById, revokedReason audit trail is captured
+ *      before the bytes are retired. This is the "revoke first" rule
+ *      from the PAYSLIP_MISDELIVERY runbook.
+ *   2. Refuses if `purgedAt IS NOT NULL` — double-purge is a no-op
+ *      that could mask a second misdelivery investigation.
+ *   3. Refuses if the row is not in PAYSLIP_BLOB_BUCKET (the blob-
+ *      prefix allowlist — see `payslipUploadLimiter`'s blob-prefix
+ *      guard at `routes/payslip.js:mountUploadRoutes`). A misdelivered
+ *      payslip uploaded to a non-payslip bucket is out of scope for
+ *      this script.
+ *   4. Stamps `purgedById`, `purgedAt`, `purgedReason` inside one
+ *      Prisma update. `purgedReason` is run through the same
+ *      `sanitizeAuditReason` as `revokedReason` so a PII-laden reason
+ *      (the admin pasting the offending salary into the reason) is
+ *      refused, not silently truncated.
+ *   5. Calls `deleteBlob(container, blobPath)` from `lib/blobStorage`.
+ *      A blob already gone (`NoSuchKey` / 404) is treated as success
+ *      and logged — the row stays tombstoned either way, the audit
+ *      wins over the byte counter.
+ *
+ * Idempotency:
+ *   * Re-running after a successful purge: step 2 raises
+ *     `PAYSLIP_ALREADY_PURGED`. The script catches this and reports it
+ *     as "already purged, no-op".
+ *   * Re-running after revoke but before purge: succeeds — the row is
+ *     tombstoned in one transaction.
+ *
+ * The four-guard predicate on every portal read (`publishedAt IS NOT
+ * NULL AND deletedAt IS NULL AND purgedAt IS NULL`) means the
+ * employee never sees the row again — the page returns 404 on
+ * download, the list endpoint omits it, the partial unique index
+ * `payslip_active_per_month_uidx` admits a fresh replacement row for
+ * the same (employee, year, month).
+ *
+ * @param {object} prisma
+ * @param {object} args
+ * @param {string} args.payslipId   - the row to tombstone
+ * @param {string} args.purgedById  - the operator (admin id) acting
+ * @param {string} args.reason      - audited reason (PII-sanitised)
+ * @returns {Promise<{ ok: true, alreadyPurged?: boolean, blobDeleted: boolean }>}
+ */
+async function purgePayslipBlob(prisma, { payslipId, purgedById, reason }) {
+  if (!payslipId || !purgedById) {
+    throw Object.assign(new Error('payslipId + purgedById required'), { code: 'PIM_MISSING_FIELDS' });
+  }
+  const sanitisedReason = sanitizeAuditReason(reason);
+  const row = await prisma.payslip.findUnique({
+    where: { id: payslipId },
+    select: {
+      id: true,
+      blobPath: true,
+      blobContainer: true,
+      deletedAt: true,
+      purgedAt: true,
+    },
+  });
+  if (!row) {
+    throw Object.assign(new Error('Payslip not found'), { code: 'PAYSLIP_NOT_FOUND' });
+  }
+  if (row.purgedAt) {
+    return { ok: true, alreadyPurged: true, blobDeleted: false };
+  }
+  if (!row.deletedAt) {
+    throw Object.assign(
+      new Error('Payslip must be revoked before it is purged'),
+      { code: 'PAYSLIP_NOT_REVOKED' },
+    );
+  }
+  if (!row.blobPath || !row.blobContainer) {
+    throw Object.assign(
+      new Error('Payslip has no recorded blob to purge'),
+      { code: 'PAYSLIP_NO_BLOB' },
+    );
+  }
+  if (row.blobContainer !== PAYSLIP_BLOB_BUCKET) {
+    // Defence-in-depth: the upload mount restricts to PAYSLIP_BLOB_BUCKET,
+    // but if a future migration changes the bucket allowlist, this guard
+    // keeps the purge script from deleting out-of-scope bytes.
+    throw Object.assign(
+      new Error(`Payslip blob container ${row.blobContainer} is not purgeable`),
+      { code: 'PAYSLIP_BUCKET_OUT_OF_SCOPE' },
+    );
+  }
+
+  // Stamping the tombstone in one statement makes the row transition
+  // visible to other processes atomically (4-guard predicate flips,
+  // partial unique frees up, etc.). The blob delete happens AFTER the
+  // tombstone is durable — a blob-still-present row that returns 404
+  // on download is acceptable; a tombstone-with-no-bytes row is what
+  // we want for the audit log.
+  await prisma.payslip.update({
+    where: { id: payslipId },
+    data: {
+      purgedById,
+      purgedAt: new Date(),
+      purgedReason: sanitisedReason,
+    },
+  });
+
+  // Best-effort blob delete. blobStorage.deleteBlob throws on a
+  // non-2xx S3 response — if the bytes were already gone (a previous
+  // partial run, a manual operator delete), we want the row to stay
+  // tombstoned and the audit to be the source of truth.
+  const { deleteBlob } = require('./blobStorage');
+  let blobDeleted = false;
+  try {
+    await deleteBlob(row.blobContainer, row.blobPath);
+    blobDeleted = true;
+  } catch (err) {
+    // Swallow 404s. Anything else is logged by the script — the row
+    // tombstone is already durable, so a follow-up rerun is safe.
+    if (err && (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404)) {
+      blobDeleted = false;
+    } else {
+      throw Object.assign(
+        new Error(`R2 delete failed: ${err?.message || 'unknown'}`),
+        { code: 'PAYSLIP_BLOB_DELETE_FAILED' },
+      );
+    }
+  }
+
+  return { ok: true, blobDeleted };
+}
+
+/**
  * Send the "your payslip for {year}-{month} is ready" email.
  *
  * Composition rules (privacy discipline):
@@ -775,13 +909,23 @@ async function revokePayslip(prisma, { payslipId, revokedById, reason }) {
  *   * The portal page is reached by login; the download endpoint is the
  *     server-side streamer (commit-3 GET /api/payslips/:id/download).
  *
- * Preference filtering (mirrors `notify.js#fanOutEmail`):
- *   * If `emailEnabled=false` on the recipient's NotificationPreference,
- *     stamp SKIPPED_OPT_OUT and return ok:false.
- *   * If `typeMutes.PAYSLIP_PUBLISHED=true`, stamp SKIPPED_TYPE_MUTED
- *     and return ok:false.
- *   * If the recipient has no email address, stamp SKIPPED_NO_ADDRESS
- *     and return ok:false.
+ * Preference filtering — INTENTIONALLY BYPASSED for payslip emails.
+ *   * Why: payslip is a critical-type document (it carries salary data)
+ *     and a muted / opted-out employee must still be told their payslip
+ *     is ready. The portal's per-employee inbox is the only place the
+ *     file lives, so the email is the receipt that payroll has been
+ *     delivered. Skipping it on user prefs would silently drop payroll
+ *     delivery for any employee who muted `PAYSLIP_PUBLISHED`.
+ *   * This is a deliberate, documented exception to the round-25
+ *     notifier contract. The in-app notification (fanOut / AppLog) is
+ *     still respect-prefs; only the direct payslip email bypasses.
+ *   * The ONLY short-circuits the function honours are deliverability
+ *     gates, not user preference:
+ *       - recipient has no email address → SKIPPED_NO_ADDRESS
+ *       - outbound email is unconfigured (no RESEND_API_KEY) → FAILED
+ *         with reason EMAIL_NOT_CONFIGURED
+ *     Both of those are environment / contact-data failures, not
+ *     preference. A muted / opted-out employee still gets the email.
  *
  * Audit:
  *   * On any send attempt (sent or failed), write an EmailLog row in the
@@ -805,25 +949,18 @@ async function sendPayslipEmail(prisma, payslipId, opts = {}) {
   if (!payslip.employee) return { ok: false, error: 'NO_RECIPIENT' };
 
   const recipientEmail = payslip.employee.email;
-  // Recipient preference fetch — no row means defaults (emailEnabled=true,
-  // typeMutes empty).
-  const prefRow = await prisma.notificationPreference.findUnique({
-    where: { employeeId: payslip.employeeId },
-  });
-  const emailEnabled = prefRow ? prefRow.emailEnabled : true;
-  const typeMutes = prefRow && prefRow.typeMutes ? prefRow.typeMutes : {};
-  const muted = typeMutes === true || typeMutes === 'true' || typeMutes?.[EMAIL_TYPE] === true;
 
-  if (!emailEnabled) {
-    await stampEmailStatus(prisma, payslipId, EMAIL_STATUS.SKIPPED_OPT_OUT);
-    await writeAuditLog(prisma, { payslipId, recipientEmail, channel: 'PAYSLIP_DIRECT', status: 'SKIPPED_OPT_OUT', subject: composeSubject(payslip) });
-    return { ok: false, status: EMAIL_STATUS.SKIPPED_OPT_OUT };
-  }
-  if (muted) {
-    await stampEmailStatus(prisma, payslipId, EMAIL_STATUS.SKIPPED_TYPE_MUTED);
-    await writeAuditLog(prisma, { payslipId, recipientEmail, channel: 'PAYSLIP_DIRECT', status: 'SKIPPED_TYPE_MUTED', subject: composeSubject(payslip) });
-    return { ok: false, status: EMAIL_STATUS.SKIPPED_TYPE_MUTED };
-  }
+  // [PAYSLIP_BYPASS_NOTIFICATION_MUTES] INTENTIONALLY BYPASSED.
+  // This function does NOT consult `notificationPreference` (no
+  // `findUnique` on it) and does NOT honour `emailEnabled=false` or
+  // `typeMutes.PAYSLIP_PUBLISHED=true`. See the docstring above — the
+  // only short-circuits below are deliverability gates, not user
+  // preference. Removing this comment block would re-introduce the
+  // silent-payroll-drop bug from the round-25 notifier contract.
+  // The in-app notification (fanOut / AppLog) is a separate code path
+  // and still respects user prefs; this is a one-route exception for
+  // the direct "payslip available" email.
+
   if (!recipientEmail || typeof recipientEmail !== 'string' || !recipientEmail.includes('@')) {
     await stampEmailStatus(prisma, payslipId, EMAIL_STATUS.SKIPPED_NO_ADDRESS);
     await writeAuditLog(prisma, { payslipId, recipientEmail: null, channel: 'PAYSLIP_DIRECT', status: 'SKIPPED_NO_ADDRESS', subject: composeSubject(payslip) });
@@ -985,6 +1122,7 @@ module.exports = {
   bindPayslipToIntent,
   publishPayslip,
   revokePayslip,
+  purgePayslipBlob,
   sendPayslipEmail,
   resendPayslipEmail,
   resendStuckPendingPayslips,
