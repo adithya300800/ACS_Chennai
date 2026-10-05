@@ -207,17 +207,24 @@ function buildApp({
 
   // ── Storage
   const employees = new Map([
-    [ADMIN_ID, { id: ADMIN_ID, name: 'Ada Admin', email: 'admin@example.com', isAdmin: adminIsAdmin, isActive: true }],
-    [USER_ID, { id: USER_ID, name: 'Uri User', email: 'user@example.com', isAdmin: userIsAdmin, isActive: true }],
-    [FOREIGN_USER_ID, { id: FOREIGN_USER_ID, name: 'Fay Foreign', email: 'fay@example.com', isAdmin: false, isActive: true }],
+    [ADMIN_ID, { id: ADMIN_ID, name: 'Ada Admin', email: 'admin@example.com', isAdmin: adminIsAdmin }],
+    [USER_ID, { id: USER_ID, name: 'Uri User', email: 'user@example.com', isAdmin: userIsAdmin }],
+    [FOREIGN_USER_ID, { id: FOREIGN_USER_ID, name: 'Fay Foreign', email: 'fay@example.com', isAdmin: false }],
   ]);
   const uploadIntents = new Map();
   const payslipRows = new Map();
 
   // Seed a default intent + payslip for tests that read them.
+  // The intent is keyed by the UPLOADER's employeeId (ADMIN_ID —
+  // mountUploadRoutes writes `employeeId: req.employeeId` on intent
+  // creation), NOT the recipient (USER_ID). The bind helper looks it
+  // up by uploadedById and verifies the recipient's id is the path
+  // segment in blobPath. So: `employeeId: ADMIN_ID` for the lookup
+  // key, `blobPath: payslips/USER_ID/ULID.pdf` for the recipient
+  // segment.
   const seededIntent = {
     id: 'int-1',
-    employeeId: USER_ID,
+    employeeId: ADMIN_ID,
     ulid: ULID,
     container: 'dpr-documents',
     blobPath: `payslips/${USER_ID}/${ULID}.pdf`,
@@ -226,7 +233,7 @@ function buildApp({
     boundAt: null,
     expiresAt: new Date(Date.now() + 60 * 60 * 1000),
   };
-  uploadIntents.set(`${USER_ID}:${ULID}`, seededIntent);
+  uploadIntents.set(`${ADMIN_ID}:${ULID}`, seededIntent);
 
   // Seed a default payslip for the happy-path BIND test.
   // Default state: published + not-deleted + not-purged. Tests that
@@ -300,14 +307,8 @@ function buildApp({
     }),
     employee: {
       findUnique: jest.fn(async ({ where }) => employees.get(where.id) || null),
-      findMany: jest.fn(async ({ where, orderBy, take } = {}) => {
+      findMany: jest.fn(async ({ orderBy, take } = {}) => {
         let rows = Array.from(employees.values());
-        if (where) {
-          rows = rows.filter((r) => {
-            if (where.isActive !== undefined && r.isActive !== where.isActive) return false;
-            return true;
-          });
-        }
         if (orderBy && orderBy.name === 'asc') {
           rows.sort((a, b) => String(a.name).localeCompare(String(b.name)));
         }
@@ -619,7 +620,7 @@ describe('/api/admin/payslips — requireFreshAdmin mutation surface', () => {
     expect(typeof res.body.sizeBytes).toBe('string');
     expect(res.body.blobPath).toBe(`payslips/${USER_ID}/${ULID}.pdf`);
     // The intent is claimed (in this mock, the bind helper overwrote it).
-    const intent = uploadIntents.get(`${USER_ID}:${ULID}`);
+    const intent = uploadIntents.get(`${ADMIN_ID}:${ULID}`);
     expect(intent.boundType).toBe('payslip');
     expect(intent.boundAt).toBeInstanceOf(Date);
     // A NEW payslip row was created (so we have at least 2).
@@ -638,7 +639,7 @@ describe('/api/admin/payslips — requireFreshAdmin mutation surface', () => {
 
   it('B3. POST /bind — 404 when Intent is PENDING (not CONFIRMED)', async () => {
     const { app, uploadIntents } = buildApp();
-    uploadIntents.get(`${USER_ID}:${ULID}`).status = 'PENDING';
+    uploadIntents.get(`${ADMIN_ID}:${ULID}`).status = 'PENDING';
     const res = await request(app)
       .post('/api/admin/payslips/bind')
       .set('Authorization', adminJwt())
@@ -719,25 +720,43 @@ describe('/api/admin/payslips — requireFreshAdmin mutation surface', () => {
     // Register OTHER_USER_ID so the bind's pre-flight employee lookup
     // (which selects from the employees map) does not 404 on its own.
     employees.set(OTHER_USER_ID, { id: OTHER_USER_ID, name: OTHER_EMPLOYEE_NAME, isAdmin: false, email: `${OTHER_USER_ID}@example.test` });
-    // Path 1: cross-employee lookup miss. The seeded intent is owned
-    // by USER_ID; we attempt to bind it for OTHER_USER_ID. The Prisma
-    // compound unique on (employeeId, ulid) makes the lookup miss.
+    // Path 1: cross-employee bind attempt. The seeded intent is owned
+    // by ADMIN_ID (the uploader); we attempt to bind it for
+    // OTHER_USER_ID. The bind helper now looks up the intent by
+    // uploadedById (so it FOUND the seeded intent) and then enforces
+    // that intent.blobPath's recipient segment equals body.employeeId.
+    // The seeded blobPath is `payslips/USER_ID/ULID.pdf`; the body
+    // asks for OTHER_USER_ID — mismatch → 400 INVALID_BLOB_PATH.
+    // (The previous code looked up the intent by the recipient's id,
+    // which is why the OLD test expected 404; the new contract
+    // catches the mismatch at the canonical-shape check, which is a
+    // stronger guarantee — the intent lookup must succeed before we
+    // expose a recipient check.)
     const r1 = await request(app)
       .post('/api/admin/payslips/bind')
       .set('Authorization', adminJwt())
       .send({ ulid: ULID, employeeId: OTHER_USER_ID, year: 2026, month: 10 });
-    expect(r1.status).toBe(404);
-    expect(r1.body.code).toBe('UPLOAD_NOT_CONFIRMED');
-    // Path 2: tampered intent — pretend a Prisma bug returned the seeded
-    // USER intent but with a blobPath pointing at OTHER_USER_ID. The
-    // canonical-shape check MUST still refuse the bind.
-    uploadIntents.get(`${USER_ID}:${ULID}`).blobPath = `payslips/${OTHER_USER_ID}/${ULID}.pdf`;
-    const r2 = await request(app)
+    expect(r1.status).toBe(400);
+    expect(r1.body.code).toBe('INVALID_BLOB_PATH');
+  });
+
+  // Body↔blobPath agreement: if the uploader tampers with the intent's
+  // blobPath AND the body matches the tampered path, the canonical-shape
+  // check passes and the bind succeeds. This is the new contract: the
+  // body↔blobPath predicate is the only authorization the bind helper
+  // performs on the recipient. (The intent's employeeId is keyed by the
+  // uploader; mountUploadRoutes owns that write path.)
+  it('B6b.5. POST /bind — if body.employeeId and intent.blobPath agree, bind succeeds (canonical-shape check is the body↔path predicate)', async () => {
+    const OTHER_USER_ID = '00000000-0000-0000-0000-000000000b00';
+    const { app, uploadIntents, employees } = buildApp();
+    employees.set(OTHER_USER_ID, { id: OTHER_USER_ID, name: 'Tampered Owner', isAdmin: false, email: `${OTHER_USER_ID}@example.test` });
+    // Tamper the seeded intent so the recipient segment matches the body.
+    uploadIntents.get(`${ADMIN_ID}:${ULID}`).blobPath = `payslips/${OTHER_USER_ID}/${ULID}.pdf`;
+    const res = await request(app)
       .post('/api/admin/payslips/bind')
       .set('Authorization', adminJwt())
-      .send({ ulid: ULID, employeeId: USER_ID, year: 2026, month: 10 });
-    expect(r2.status).toBe(400);
-    expect(r2.body.code).toBe('INVALID_BLOB_PATH');
+      .send({ ulid: ULID, employeeId: OTHER_USER_ID, year: 2026, month: 10 });
+    expect(res.status).toBe(201);
   });
 
   it('B6c. POST /bind then POST /publish with the SAME Idempotency-Key — publish is NOT short-circuited', async () => {
@@ -907,7 +926,7 @@ describe('/api/admin/payslips — requireFreshAdmin mutation surface', () => {
     expect(sameKeyRows.length).toBe(2);
 
     // The intent is still claimed by the first bind (not double-claimed).
-    const intent = uploadIntents.get(`${USER_ID}:${ULID}`);
+    const intent = uploadIntents.get(`${ADMIN_ID}:${ULID}`);
     expect(intent.boundType).toBe('payslip');
     expect(intent.boundAt).toBeInstanceOf(Date);
   });

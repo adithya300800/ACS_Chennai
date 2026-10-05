@@ -285,8 +285,16 @@ async function bindPayslipToIntent(prisma, {
     throw Object.assign(new Error('month out of range'), { code: 'PIM_INVALID_MONTH' });
   }
 
+  // The intent was keyed by the UPLOADER's employeeId (the admin
+  // running the request — see mountUploadRoutes, which writes
+  // `employeeId: req.employeeId` on intent creation). Look it up by
+  // `uploadedById` (== req.employeeId of the bind call), NOT by the
+  // recipient's `employeeId`. The blobPath check below still verifies
+  // that the recipient's employeeId matches the path segment, so a
+  // tampered uploader cannot bind a payslip for an employee they did
+  // not intend to upload to.
   const intent = await prisma.uploadIntent.findUnique({
-    where: { employeeId_ulid: { employeeId, ulid } },
+    where: { employeeId_ulid: { employeeId: uploadedById, ulid } },
   });
   if (!intent) {
     throw Object.assign(new Error('Upload intent not found'), { code: 'PIM_NO_INTENT' });
@@ -296,6 +304,10 @@ async function bindPayslipToIntent(prisma, {
       code: 'PIM_INTENT_NOT_CONFIRMED',
     });
   }
+  // The intent's blobPath is `payslips/<employeeId>/<ulid>.pdf` — the
+  // path segment MUST equal the recipient (body.employeeId) passed to
+  // bind. A mismatch means the uploader is trying to bind an intent
+  // whose blob was uploaded for a different recipient. Refuse.
   if (intent.blobPath !== `${PAYSLIP_BLOB_PREFIX}/${employeeId}/${ulid}.pdf`) {
     // The intent's blobPath is server-owned by the payslip mount. A
     // mismatch means either (a) a future mount started writing to a

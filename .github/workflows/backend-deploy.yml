@@ -60,6 +60,30 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # [payslip-prod-bugs 2026-10-04] Service container for the
+    # throwaway Postgres that the payslip-integration-smoke and
+    # payslip-partial-unique-drift tests need. Without this the two
+    # real-DB test suites skipped themselves (THROWAWAY_* env vars
+    # unset) and the bug-A/B fixes had no CI coverage. The
+    # credentials match the docker-compose fallback URL used in
+    # __tests__/payslip-integration-smoke.test.js:37
+    # (`postgresql://acs:acspw@localhost:55432/acs_portal`) but on
+    # the CI service-container port 5432 (host port 5432 is fine —
+    # the job only has one container, no port conflict).
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: acs
+          POSTGRES_PASSWORD: acspw
+          POSTGRES_DB: acs_portal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U acs -d acs_portal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     defaults:
       run:
         working-directory: backend
@@ -89,6 +113,29 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate
 
+      # [payslip-prod-bugs 2026-10-04] Install `psql` so the
+      # payslip-partial-unique-drift test can shell out to a real
+      # Postgres for catalog queries (pg_class, pg_policy, pg_index).
+      # The drift test's external-mode helpers do
+      # `psql -h $THROWAWAY_PG_HOST -U ... -c ...`; without psql on
+      # PATH the test errors with ENOENT and aborts the run.
+      - name: Install postgresql-client (for psql)
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      # [payslip-prod-bugs 2026-10-04] Apply the migration history to
+      # the throwaway DB so public.payslip exists with RLS enabled.
+      # The RLS end-state test in payslip-partial-unique-drift probes
+      # pg_class/pg_policy on public.payslip; the integration-smoke
+      # test seeds real rows. Skipping this means the throws-away DB
+      # is empty and both suites fail on the first relation lookup.
+      # The schema state is throwaway-only — Render's prod schema is
+      # not touched by this step.
+      - name: Apply migrations to throwaway DB
+        env:
+          DATABASE_URL: postgresql://acs:acspw@localhost:5432/acs_portal
+          DIRECT_DATABASE_URL: postgresql://acs:acspw@localhost:5432/acs_portal
+        run: npx prisma migrate deploy
+
       # [DR-034 2026-09-23] Release-channel gate: backend tests are now
       # BLOCKING for normal release. Per audit DR-034 ("Automatic release
       # is not bound to passing checks on the published SHA"), the prior
@@ -117,6 +164,20 @@ jobs:
         # push (no inputs → null) or a workflow_dispatch that didn't set
         # the input (default false), `!= true` is true → step runs.
         if: ${{ inputs.override_checks != true }}
+        # [payslip-prod-bugs 2026-10-04] Wire the throwaway DB env vars
+        # so the real-DB suites in __tests__/payslip-integration-smoke
+        # and __tests__/payslip-partial-unique-drift actually run on
+        # the CI service container. Without these the tests self-skipped
+        # (THROWAWAY_* unset) and the bug-A/B fixes had no CI coverage.
+        # The drift test shells out to `psql` — that's why we install
+        # postgresql-client one step above.
+        env:
+          THROWAWAY_PG_HOST: localhost
+          THROWAWAY_PG_PORT: '5432'
+          THROWAWAY_PG_USER: acs
+          THROWAWAY_PG_PASSWORD: acspw
+          THROWAWAY_PG_DB: acs_portal
+          THROW_AWAY_DATABASE_URL: postgresql://acs:acspw@localhost:5432/acs_portal
         run: npm test
 
       # LPR-001: deployment no longer runs `prisma db push` (destructive,
