@@ -554,8 +554,20 @@ export default function AdminPayslips() {
       // Payslip row. The server runs the magic-byte verification on
       // the blob, asserts the blobPath prefix, and 409s on a duplicate
       // (employee_id, year, month) per the partial-unique index.
+      //
+      // Idempotency-Key: SEPARATE per endpoint call. The current
+      // backend does NOT consult the Idempotency-Key header on the
+      // payslip admin routes (it is idempotent at the DB level via
+      // the partial-unique index on bind and the publishedAt CAS on
+      // publish), but defensive separation is the right contract:
+      // if a future change adds an Idempotency-Key-aware cache that
+      // keys on the raw header alone, a single key for "bind +
+      // publish" would short-circuit publish as a replay of bind.
+      // See backend/__tests__/payslip-routes.test.js:
+      //   "C-bind-publish-distinct-keys. publish is NOT short-circuited
+      //    when the same Idempotency-Key is sent on bind and publish."
       setUploadPhase('binding');
-      const idempotencyKey = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      const bindKey = (typeof crypto !== 'undefined' && crypto.randomUUID)
         ? crypto.randomUUID()
         : `payslip-bind-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const bound = await api.bindPayslip({
@@ -563,7 +575,7 @@ export default function AdminPayslips() {
         employeeId: uploadEmployeeId,
         year,
         month,
-      }, accessToken, idempotencyKey);
+      }, accessToken, bindKey);
 
       // Step 5 — optional publish. Default ON so the "upload and
       // notify" common case is one click. Admins who want to stage
@@ -572,7 +584,10 @@ export default function AdminPayslips() {
       // button (or the bulk Publish all).
       if (publishAfterBind) {
         setUploadPhase('publishing');
-        await api.publishPayslips([bound.id], accessToken, idempotencyKey);
+        const publishKey = (typeof crypto !== 'undefined' && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : `payslip-publish-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        await api.publishPayslips([bound.id], accessToken, publishKey);
         toast.push('Payslip uploaded and published. Email is on its way.', 'success');
       } else {
         toast.push('Payslip uploaded as draft. Use Publish when ready.', 'success');

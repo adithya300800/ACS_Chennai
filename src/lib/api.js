@@ -34,10 +34,22 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const REFRESH_TIMEOUT_MS = 15_000; // shorter — refresh is on the auth hot path
 
 export class ApiError extends Error {
-  constructor(message, status, code) {
+  // `extra` lets structured body fields (e.g. `rejectedWord` from
+  // AUDIT_REASON_REJECTED on /api/admin/payslips/:id/revoke) ride along
+  // on the Error so callers can branch on them without re-parsing the
+  // raw fetch response. `code` and `status` are NOT overridden if the
+  // caller passes the same keys in `extra`.
+  constructor(message, status, code, extra = null) {
     super(message);
     this.status = status;
     this.code = code;
+    if (extra && typeof extra === 'object') {
+      for (const k of Object.keys(extra)) {
+        if (k !== 'status' && k !== 'code' && k !== 'message') {
+          this[k] = extra[k];
+        }
+      }
+    }
   }
 }
 
@@ -348,7 +360,7 @@ async function request(method, path, body, token, { _retried, _networkRetried, i
       dispatchLogoutOnce(data.code || 'no_token');
     }
 
-    throw new ApiError(data.error || 'Request failed', res.status, data.code);
+    throw new ApiError(data.error || 'Request failed', res.status, data.code, data);
   }
 
   return data;
