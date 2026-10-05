@@ -354,3 +354,49 @@ export const BILLING_CERTIFICATION_STATUS_LABELS = {
   CERTIFIED: { label: 'Certified', tone: 'success' },
   DISPUTED: { label: 'Disputed', tone: 'danger' },
 };
+
+// [Payslips Stage 1 / commit 6 — frontend] payslip file caps + status
+// vocabulary. The 2 MB cap mirrors backend PAYSLIP_MAX_BYTES
+// (backend/src/lib/payslip.js) — a single month's payslip PDF is well
+// under 1 MB so 2 MB is the upper safety bound and matches the
+// upload-mount + download-stream guard on the server. PDF is the only
+// accepted MIME (server enforces too, with a magic-byte verification
+// at bind time — see verifyBlobMagicBytes in backend/src/lib/payslip.js).
+//
+// The 3-state status machine (DRAFT / PUBLISHED / REVOKED) mirrors the
+// backend serializer's view: DRAFT = uploaded but not yet published
+// (publishedAt IS NULL), PUBLISHED = publishedAt IS NOT NULL AND
+// deletedAt IS NULL, REVOKED = deletedAt IS NOT NULL. The admin list
+// filter accepts these as well as the all/null state.
+export const MAX_PAYSLIP_BYTES = 2 * 1024 * 1024; // 2 MB
+export const ACCEPTED_PAYSLIP_TYPES = ['application/pdf'];
+export const PAYSLIP_STATUSES = {
+  DRAFT: 'DRAFT',
+  PUBLISHED: 'PUBLISHED',
+  REVOKED: 'REVOKED',
+};
+export const PAYSLIP_STATUS_LABELS = {
+  DRAFT: { label: 'Draft', tone: 'muted' },
+  PUBLISHED: { label: 'Published', tone: 'success' },
+  REVOKED: { label: 'Revoked', tone: 'danger' },
+};
+
+// Email status vocabulary from the backend (EMAIL_STATUS in
+// backend/src/lib/payslip.js). Mirrored here so the admin "N emails
+// pending or failed" indicator can colour-code each row consistently.
+export const PAYSLIP_EMAIL_STATUS_LABELS = {
+  PENDING:                 { label: 'Sending…',   tone: 'muted' },
+  SENT:                    { label: 'Sent',       tone: 'success' },
+  FAILED:                  { label: 'Failed',     tone: 'danger' },
+  SKIPPED_OPT_OUT:         { label: 'Opt-out',    tone: 'muted' },
+  SKIPPED_NO_ADDRESS:      { label: 'No email',   tone: 'muted' },
+  SKIPPED_TYPE_MUTED:      { label: 'Muted',      tone: 'muted' },
+};
+
+// Predicate the admin panel uses for the "N emails pending or failed"
+// indicator. SKIPPED_* are terminal recipient-state skips, not delivery
+// failures, and must NOT count toward the headline "pending or failed"
+// number — admins can drill into the per-row `emailStatus` to see them.
+export function isPayslipEmailAttention(status) {
+  return status === 'PENDING' || status === 'FAILED';
+}

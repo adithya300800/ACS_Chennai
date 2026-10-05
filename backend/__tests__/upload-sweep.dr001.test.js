@@ -181,6 +181,22 @@ function buildPrisma({
         });
       }),
     },
+    // Payslip Stage 1 / commit 2 — sweep now protects payslip bytes
+    // via uploadIntentUlid + blobPath. Legacy DR-001 fixtures don't
+    // seed payslip rows; the empty default keeps the dry-run contract
+    // intact (the route's protect-list sources pre-collect honour the
+    // delegate's response, and the fatal-abort contract is what
+    // payslip-sweep-safety.test.js pins explicitly).
+    payslip: {
+      findMany: jest.fn(async ({ where, select } = {}) => {
+        const filtered = applyWhere([], where);
+        return filtered.map((d) => {
+          const out = {};
+          for (const k of Object.keys(select || {})) out[k] = d[k];
+          return out;
+        });
+      }),
+    },
     _intents: intents,
     _updateManyCalls: updateManyCalls,
   };

@@ -412,6 +412,11 @@ const REQUIRED_BUCKETS = [
   // don't write to it yet, but a missing bucket should fail readiness now so
   // the gap shows up in CI rather than at first upload attempt.
   process.env.R2_BUCKET_TRAINING_MATERIALS || 'training-materials',
+  // [Payslip Stage 1 / commit 2] Payslips share the `dpr-documents`
+  // bucket — there is no separate `payslips` bucket. The probe is keyed
+  // on bucket NAME, so a missing or renamed bucket must surface as a
+  // /ready 503 instead of silently failing every payslip upload with
+  // "Network error" at first deploy.
 ].filter(Boolean);
 
 /**

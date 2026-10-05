@@ -156,6 +156,100 @@ const trainingWriteLimiter = rateLimit({
   message: { error: 'Too many training write requests. Please slow down.', code: 'TRAINING_THROTTLED' },
 });
 
+// [Payslips Stage 1 / commit 3, fixup] — 3 payslip-specific limiters.
+//
+// Why three? The three surfaces have distinct abuse profiles:
+//
+//   * payslipUploadLimiter (admin uploads): a misbehaving admin tab or a
+//     stolen admin token can mint SAS URLs / confirm uploads to fill
+//     R2 with junk.
+//
+//   * payslipAdminLimiter (admin bind / publish / revoke / resend /
+//     resend-stuck): the mutating endpoints that stamp audit fields.
+//     A scripted admin token can otherwise generate hundreds of
+//     EmailLog rows per minute via repeated publish attempts.
+//
+//   * payslipDownloadLimiter (employee GET /:id/download): the only
+//     path that streams the PDF. A script that hammers this endpoint
+//     burns CPU + R2 bandwidth; a leaked employee token can otherwise
+//     exfiltrate every published payslip in the user's session.
+//
+// All three key on req.ip via the shared `ipKey` helper.
+//
+// Sizing for a 15-employee monthly session (the smallest realistic
+// payroll cycle — pay-1 v3.10 will support up to ~80 employees but the
+// first 1-2 months of usage are well under 20):
+//
+//   payslipUploadLimiter     40/h   (was 20/h in commit 3, raised)
+//   ─────────────────────────────────────────────────────────────
+//   Per admin IP per month:
+//     15 intents + 15 confirms + 0 SAS-retries (binding CAS auto-retries
+//     on the server)  = 30 calls. 40/h comfortably absorbs the burst.
+//
+//   payslipAdminLimiter      60/h
+//   ─────────────────────────────────────────────────────────────
+//   Per admin IP per month:
+//     15 binds (counted under payslipAdminLimiter via POST /bind),
+//     15 publishes (1 per row) + 15 setImmediate email fires (NOT
+//     counted — they're background), 0-5 revokes, 0-3 resends,
+//     and 0-2 manual resend-stuck sweeps. Worst-case: ~55 in the first
+//     hour. 60/h is the floor, not the ceiling.
+//
+//   payslipDownloadLimiter   120/h
+//   ─────────────────────────────────────────────────────────────
+//   Per employee IP per month:
+//     15 employees × (1 list + 1 download) = 30 calls. UI polling on
+//     /api/portal/payslips is the SAME endpoint, so each poll counts.
+//     30 calls fits; 120/h leaves room for one download per 30s across
+//     an 8h work day if an employee re-downloads several times.
+//
+//   The 15-emp burst fits all three limiters with headroom. The
+//   numbers are pinned in payslip-routes.test.js (D-series) and the
+//   rate-limit constants are tested indirectly via the limiter
+//   message shape. A burst beyond ~80 employees would require raising
+//   the admin limit and/or splitting by employeeId — tracked for the
+//   scale-out round.
+
+const payslipUploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  validate: { trustProxy: true },
+  message: { error: 'Too many payslip upload requests. Please slow down.', code: 'PAYSLIP_UPLOAD_THROTTLED' },
+});
+
+const payslipAdminLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  validate: { trustProxy: true },
+  message: { error: 'Too many payslip admin operations. Please slow down.', code: 'PAYSLIP_ADMIN_THROTTLED' },
+});
+
+const payslipDownloadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Key on the authenticated employee id (set by `requireAuth` which
+  // runs BEFORE this limiter on every portal route). IP-keying would
+  // share the bucket across all employees on a corporate NAT — a
+  // single downloader on a shared network could starve a coworker of
+  // their 120/h budget. The admin limiters (payslipAdminLimiter,
+  // payslipUploadLimiter) keep IP-keying because they're behind
+  // requireFreshAdmin and the operators are not a NAT'd user pool.
+  // Falls back to ipKey if the limiter is ever mounted on a route
+  // without requireAuth (the mount order is enforced at the route
+  // layer — this is the safety net for a future re-arrangement).
+  keyGenerator: (req) => (req && req.employeeId ? `emp:${req.employeeId}` : ipKey(req)),
+  validate: { trustProxy: true },
+  message: { error: 'Too many payslip download requests. Please slow down.', code: 'PAYSLIP_DOWNLOAD_THROTTLED' },
+});
+
 module.exports = {
   loginLimiter,
   loginEmailLimiter,
@@ -166,4 +260,7 @@ module.exports = {
   exportLimiter,
   leaveCreateLimiter,
   trainingWriteLimiter,
+  payslipUploadLimiter,
+  payslipAdminLimiter,
+  payslipDownloadLimiter,
 };

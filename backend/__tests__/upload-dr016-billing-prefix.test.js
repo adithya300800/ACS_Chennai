@@ -310,4 +310,55 @@ describe('DR-016 — server-owned `billing/` prefix on COP PDF uploads', () => {
     expect(res.body.error).toBe('INVALID_PATH_PREFIX');
     expect(blobStorage.generateUploadSASUrl).not.toHaveBeenCalled();
   });
+
+  it('8. The DPR mount REJECTS pathPrefix="payslips" — admin route gets its own allowlist', async () => {
+    // [Payslip Stage 1 / commit 2] Security regression pin. The
+    // future admin payslip mount owns `payslips/` exclusively.
+    // Listing it here would let any employee (DPR route is not
+    // admin-gated) mint a `payslips/<employeeId>/<ulid>.pdf` SAS,
+    // polluting the admin-only namespace with employee-issued
+    // upload intents. This test pins the SEPARATION at the
+    // mount-config level: the DPR allowlist is `['billing']` and
+    // nothing else.
+    //
+    // `buildApp({ resolvedAllowlist: undefined })` simulates the
+    // production mount exactly — `routes/dpr.js` only passes
+    // `{ 'dpr-documents': ['billing'] }`, so passing undefined here
+    // would mean the production config. We pass it explicitly to
+    // keep the test self-documenting; the comment block in
+    // `routes/dpr.js` is the matching source-of-truth note.
+    const { app } = buildApp({ resolvedAllowlist: { 'dpr-documents': ['billing'] } });
+    const res = await request(app)
+      .post('/api/dpr/sas-url')
+      .send({
+        filename: 'payslip.pdf',
+        contentType: 'application/pdf',
+        container: 'dpr-documents',
+        pathPrefix: 'payslips', // <-- would mint payslips/<employeeId>/<ulid>.pdf if allowed
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('INVALID_PATH_PREFIX');
+    // Issuer was NEVER called — no `payslips/` blob ever minted.
+    expect(blobStorage.generateUploadSASUrl).not.toHaveBeenCalled();
+  });
+
+  it('9. A successful /sas-url with payslips/ would never have a matching /confirm-upload through the DPR mount — prisma.uploadIntent.create is NOT called', async () => {
+    // Defence-in-depth: the prefix is enforced at /sas-url time (test 8
+    // above). A bad actor who hits the DPR mount with payslips/ never
+    // gets an UploadIntent row created, so a follow-up /confirm-upload
+    // would 404 BLOB_NOT_FOUND (no intent to confirm). This test
+    // pins that the prisma store is untouched.
+    const { app, prisma } = buildApp({ resolvedAllowlist: { 'dpr-documents': ['billing'] } });
+    const mint = await request(app)
+      .post('/api/dpr/sas-url')
+      .send({
+        filename: 'payslip.pdf',
+        contentType: 'application/pdf',
+        container: 'dpr-documents',
+        pathPrefix: 'payslips', // <-- rejected
+      });
+    expect(mint.status).toBe(400);
+    expect(mint.body.error).toBe('INVALID_PATH_PREFIX');
+    expect(prisma.uploadIntent.create).not.toHaveBeenCalled();
+  });
 });

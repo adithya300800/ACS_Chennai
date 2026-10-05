@@ -216,6 +216,12 @@ async function collectReferencedUlids(prisma) {
     { name: 'drawing.uploadIntentUlid', delegate: prisma && prisma.drawing, selectField: 'uploadIntentUlid' },
     { name: 'projectAttachment.uploadIntentUlid', delegate: prisma && prisma.projectAttachment, selectField: 'uploadIntentUlid' },
     { name: 'billingCertification.uploadIntentUlid', delegate: prisma && prisma.billingCertification, selectField: 'uploadIntentUlid' },
+    // [Payslip Stage 1 / commit 2] Payslip rows carry their upload intent
+    // ulid on `Payslip.uploadIntentUlid`. Without this entry the sweep's
+    // 15-min cron would retire payslip bytes the moment the binding
+    // writes them — the same class of bug DR-001 caught at the request
+    // layer for DPR / Inspection / Drawing / ProjectAttachment.
+    { name: 'payslip.uploadIntentUlid', delegate: prisma && prisma.payslip, selectField: 'uploadIntentUlid' },
   ];
   for (const src of sources) {
     if (!src.delegate || typeof src.delegate.findMany !== 'function') {
@@ -284,6 +290,33 @@ async function collectReferencedBlobPaths(prisma) {
       name: 'billingCertification.blobPath',
       delegate: prisma && prisma.billingCertification,
       where: { deletedAt: null, blobPath: { not: null } },
+      field: 'blobPath',
+    },
+    // [Payslip Stage 1 / commit 2] Payslip rows reference the salary-
+    // bearing PDF by `Payslip.blobPath` (R2 path: payslips/{year}/{month}/
+    // {employeeId}/{ulid}.pdf).
+    //
+    // IMPORTANT: protect-list predicate is `purgedAt IS NULL`, NOT
+    // `deletedAt IS NULL`. Reason: only the operator-driven misdelivery
+    // purge script (scripts/purge-payslip-misdelivery.js, commit 8) is
+    // authorised to retire payslip bytes. Revoke (which sets
+    // `deletedAt`) does NOT retire the bytes; the payslip stays
+    // downloadable for the employee and HR (audit) for the entire
+    // `purgedAt IS NULL` window. The sweep is a SAFETY NET for the
+    // purge script: a payslip with `purgedAt` set has already been
+    // retired through the controlled flow, so the sweep may delete
+    // its bytes if it encounters them. A REVOKED payslip (deletedAt
+    // set, purgedAt null) is NOT in the sweep's protect list under
+    // the previous predicate — which would let the sweep silently
+    // delete a payslip that HR still needs as audit evidence. The
+    // `purgedAt IS NULL` predicate fixes that.
+    //
+    // See payslip-sweep-safety.test.js: "a revoked payslip's blob is
+    // NOT deleted by the sweep" — explicit coverage.
+    {
+      name: 'payslip.blobPath',
+      delegate: prisma && prisma.payslip,
+      where: { purgedAt: null, blobPath: { not: null } },
       field: 'blobPath',
     },
   ];

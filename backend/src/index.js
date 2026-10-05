@@ -455,6 +455,24 @@ function createApp(deps = {}) {
   // (Drawings / BOQ / Variations).
   const adminReportsRoutes = require('./routes/adminReports');
   app.use('/api/admin/reports', adminReportsRoutes);
+  // [Payslips Stage 1 / commit 3] Payslip HTTP surface. Three sub-routers
+  // mounted at three distinct prefixes so the admin/upload/employee
+  // boundaries are explicit at the URL layer:
+  //   * /api/admin/payslips/upload  → mountUploadRoutes; admin-only SAS
+  //     + confirm-upload. Owns the `payslips/` path-prefix allowlist —
+  //     the prefix split is pinned by
+  //     __tests__/payslip-upload-intent-prefix.test.js.
+  //   * /api/admin/payslips         → requireFreshAdmin mutations
+  //     (bind / publish / revoke / resend / coverage / list).
+  //   * /api/portal/payslips        → employee-facing reads; the
+  //     download route streams the PDF through the backend (no storage
+  //     URL ever leaves the process — the user explicitly required it
+  //     in the commit-2 review). IDOR-guarded by row ownership.
+  // See src/routes/payslip.js for the per-route auth gates + validators.
+  const payslipRoutes = require('./routes/payslip');
+  app.use('/api/admin/payslips/upload', payslipRoutes.adminUploadRouter);
+  app.use('/api/admin/payslips', payslipRoutes.adminRouter);
+  app.use('/api/portal/payslips', payslipRoutes.portalRouter);
   // TEMPORARY (BLOB_GONE root-cause investigation, 2026-09-15):
   // [REMOVED 2026-09-19] /api/admin/diag/photo-head (first-cut, 222c006)
   // and /api/admin/diag/photo-reconcile (second-cut, f53c22b) — both
