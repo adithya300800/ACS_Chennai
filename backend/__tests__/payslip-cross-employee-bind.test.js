@@ -125,7 +125,6 @@ const ADMIN_ID   = 'cccccccc-1111-1111-1111-ccccccccccc1';
 const RECIP_ID   = 'cccccccc-1111-1111-1111-ccccccccccc2'; // the employee the admin uploads FOR
 const OTHER_ID   = 'cccccccc-1111-1111-1111-ccccccccccc3'; // a second employee (must not see the row)
 const ADMIN2_ID  = 'cccccccc-1111-1111-1111-ccccccccccc4'; // a second admin (must not bind admin1's intent)
-const ULID_BASE  = '01HXC1ABCD0123456789XYZAB';
 
 function jwtFor(employeeId, isAdmin) {
   return `Bearer ${jwt.sign(
@@ -154,14 +153,22 @@ beforeAll(async () => {
 
   if (canConnect) {
     const { requireAuth, requireFreshAdmin } = require('../src/middleware/auth');
+    const {
+      payslipUploadLimiter,
+      payslipAdminLimiter,
+      payslipDownloadLimiter,
+    } = require('../src/middleware/rateLimit');
     const payslipRoutes = require('../src/routes/payslip');
     app = express();
     app.set('prisma', prisma);
     app.use(express.json({ limit: '5mb' }));
-    // Mount exactly like src/index.js:472-475.
-    app.use('/api/admin/payslips/upload', requireAuth, requireFreshAdmin, payslipRoutes.adminUploadRouter);
-    app.use('/api/admin/payslips', requireAuth, requireFreshAdmin, payslipRoutes.adminRouter);
-    app.use('/api/portal/payslips', requireAuth, payslipRoutes.portalRouter);
+    // Mount exactly like src/index.js:472-475, with the production
+    // rate limiters (payslipUploadLimiter, payslipAdminLimiter,
+    // payslipDownloadLimiter) inline so the test exercises the real
+    // limit contract and CodeQL sees rate-limited routes.
+    app.use('/api/admin/payslips/upload', requireAuth, requireFreshAdmin, payslipUploadLimiter, payslipRoutes.adminUploadRouter);
+    app.use('/api/admin/payslips', requireAuth, requireFreshAdmin, payslipAdminLimiter, payslipRoutes.adminRouter);
+    app.use('/api/portal/payslips', requireAuth, payslipDownloadLimiter, payslipRoutes.portalRouter);
   }
 });
 
