@@ -292,6 +292,11 @@ const navGroups = [
       // a sidebar entry lets a new employee reach it without having to
       // know the dropdown exists.
       { to: '/portal/support', label: 'Help & Support', icon: HELP_ICON },
+      // [Sidebar 2026-10-06] "My Payslips" moved out of "My Reports" into
+      // "My Work". Payslips are a personal HR self-service item alongside
+      // attendance / leave / training / support, not a filed report. Admin
+      // cross-org coverage stays under Records as "Payslips".
+      { to: '/portal/payslips', label: 'My Payslips', icon: PAYSLIP_ICON },
     ],
   },
   {
@@ -337,12 +342,6 @@ const navGroups = [
       // /portal/admin/billing-certifications (Records group). Same
       // BILLING_ICON so the two entries feel like siblings.
       { to: '/portal/certifications', label: 'My Certifications', icon: BILLING_ICON },
-      // [Payslips Stage 1] Employee-facing payslip inbox — read-only list
-      // of published payslips (plus revoked / failed) with a one-click
-      // download that streams the PDF through the backend. Sits at the
-      // bottom of My Reports so it doesn't push existing entries around.
-      // Admin cross-org coverage stays under Records as "Payslips".
-      { to: '/portal/payslips', label: 'My Payslips', icon: PAYSLIP_ICON },
     ],
   },
   ...(employee?.isAdmin ? [

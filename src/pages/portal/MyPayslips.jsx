@@ -180,7 +180,7 @@ export default function MyPayslips() {
   return (
     <div className="portal-page">
       <PullToRefreshIndicator pullDistance={pullDistance} isRefreshing={isRefreshing} />
-      <Breadcrumb items={[{ label: 'My Reports' }, { label: 'My Payslips' }]} />
+      <Breadcrumb items={[{ label: 'My Work' }, { label: 'My Payslips' }]} />
 
       <header style={{ marginBottom: '0.75rem' }}>
         <h1 style={{ margin: '0 0 0.25rem', color: 'var(--navy)' }}>
