@@ -289,10 +289,15 @@ async function bindPayslipToIntent(prisma, {
   // running the request — see mountUploadRoutes, which writes
   // `employeeId: req.employeeId` on intent creation). Look it up by
   // `uploadedById` (== req.employeeId of the bind call), NOT by the
-  // recipient's `employeeId`. The blobPath check below still verifies
-  // that the recipient's employeeId matches the path segment, so a
-  // tampered uploader cannot bind a payslip for an employee they did
-  // not intend to upload to.
+  // recipient's `employeeId`. The body.employeeId is the RECIPIENT
+  // and is stored on the Payslip row, but it is NOT validated against
+  // any blobPath path segment — the upload route's path builder keys
+  // by the UPLOADER's id (not the recipient's), so a strict
+  // path-segment equality check made cross-employee binds impossible.
+  // Authorization on the recipient side is the EMPLOYEE EXISTS check
+  // the route handler already performs (findUnique on body.employeeId)
+  // and the 4-guard publish pipeline (employeeId = payslip.employeeId
+  // in the row's own data, not a path).
   const intent = await prisma.uploadIntent.findUnique({
     where: { employeeId_ulid: { employeeId: uploadedById, ulid } },
   });
@@ -304,16 +309,22 @@ async function bindPayslipToIntent(prisma, {
       code: 'PIM_INTENT_NOT_CONFIRMED',
     });
   }
-  // The intent's blobPath is `payslips/<employeeId>/<ulid>.pdf` — the
-  // path segment MUST equal the recipient (body.employeeId) passed to
-  // bind. A mismatch means the uploader is trying to bind an intent
-  // whose blob was uploaded for a different recipient. Refuse.
-  if (intent.blobPath !== `${PAYSLIP_BLOB_PREFIX}/${employeeId}/${ulid}.pdf`) {
-    // The intent's blobPath is server-owned by the payslip mount. A
-    // mismatch means either (a) a future mount started writing to a
-    // different path, or (b) a client tampered with the row. Either
-    // way, refuse.
-    throw Object.assign(new Error(`blobPath ${intent.blobPath} does not match payslip canonical shape`), {
+  // The intent's blobPath is server-owned by the payslip mount and was
+  // minted by the same /sas-url call that created this intent row. We
+  // sanity-check its shape (must be in the payslips/ prefix and end
+  // with this intent's ulid.pdf) so a tampered or corrupted row cannot
+  // steer the magic-bytes check at an unexpected key. We do NOT
+  // require the middle path segment to equal the recipient — the
+  // upload route's path builder uses the UPLOADER's id there, and
+  // pulling the recipient into the path would require a second mount
+  // change (out of scope for the cross-employee fix).
+  if (typeof intent.blobPath !== 'string' || !intent.blobPath.startsWith(`${PAYSLIP_BLOB_PREFIX}/`)) {
+    throw Object.assign(new Error(`blobPath ${intent.blobPath} is not in the payslips/ prefix`), {
+      code: 'PIM_INVALID_BLOB_PATH',
+    });
+  }
+  if (!intent.blobPath.endsWith(`/${ulid}.pdf`)) {
+    throw Object.assign(new Error(`blobPath ${intent.blobPath} does not end with /${ulid}.pdf`), {
       code: 'PIM_INVALID_BLOB_PATH',
     });
   }

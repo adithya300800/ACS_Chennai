@@ -697,66 +697,68 @@ describe('/api/admin/payslips — requireFreshAdmin mutation surface', () => {
     expect(res.body.code).toBe('INVALID_ULID');
   });
 
-  it('B6b. POST /bind — cross-employee bind refused: intent for OTHER employee cannot be bound to a different employeeId', async () => {
-    // Threat model: an admin tries to bind a payslip intent that was
-    // uploaded for one employee (employee A) to a different employee
-    // (employee B) — the classic wrong-recipient bind. Two defenses
-    // catch this:
-    //   1. The Prisma compound unique on UploadIntent.(employeeId, ulid)
-    //      means the lookup `findUnique({ where: { employeeId_ulid: { employeeId: B, ulid } } })`
-    //      does NOT find the intent (which is owned by A). The route
-    //      returns 404 UPLOAD_NOT_CONFIRMED.
-    //   2. Even if (1) were ever broken (a future migration that
-    //      re-shapes the intent's employee column), the canonical-shape
-    //      check on blobPath would still refuse — intent.blobPath is
-    //      `payslips/A/<ulid>.pdf` and the body would be
-    //      `payslips/B/<ulid>.pdf`, mismatching the canonical shape.
-    //      The route returns 400 INVALID_BLOB_PATH.
-    // This test exercises BOTH paths: the cross-employee lookup miss
-    // (the realistic surface) AND a tampered intent (defense in depth).
+  it('B6b. POST /bind — cross-employee bind SUCCEEDS: admin uploads under their own key, binds for a different employee', async () => {
+    // New contract (2026-10-05): the intent is keyed by the UPLOADER
+    // (admin), and the recipient is taken from body.employeeId. The
+    // blobPath sanity check (must start with 'payslips/' and end with
+    // '/<ulid>.pdf') does NOT require the middle segment to equal the
+    // recipient — the upload route's path builder keys by the
+    // uploader, so a strict path-recipient match made cross-employee
+    // binds impossible. The recipient's only authorization gate is
+    // "the employee exists" (the route handler's pre-flight findUnique
+    // on body.employeeId) and the publish row's own employeeId being
+    // the recipient.
     const OTHER_USER_ID = '00000000-0000-0000-0000-000000000b00';
-    const OTHER_EMPLOYEE_NAME = 'Tampered Owner';
     const { app, uploadIntents, employees } = buildApp();
     // Register OTHER_USER_ID so the bind's pre-flight employee lookup
-    // (which selects from the employees map) does not 404 on its own.
-    employees.set(OTHER_USER_ID, { id: OTHER_USER_ID, name: OTHER_EMPLOYEE_NAME, isAdmin: false, email: `${OTHER_USER_ID}@example.test` });
-    // Path 1: cross-employee bind attempt. The seeded intent is owned
-    // by ADMIN_ID (the uploader); we attempt to bind it for
-    // OTHER_USER_ID. The bind helper now looks up the intent by
-    // uploadedById (so it FOUND the seeded intent) and then enforces
-    // that intent.blobPath's recipient segment equals body.employeeId.
-    // The seeded blobPath is `payslips/USER_ID/ULID.pdf`; the body
-    // asks for OTHER_USER_ID — mismatch → 400 INVALID_BLOB_PATH.
-    // (The previous code looked up the intent by the recipient's id,
-    // which is why the OLD test expected 404; the new contract
-    // catches the mismatch at the canonical-shape check, which is a
-    // stronger guarantee — the intent lookup must succeed before we
-    // expose a recipient check.)
+    // does not 404 on its own.
+    employees.set(OTHER_USER_ID, { id: OTHER_USER_ID, name: 'Cross Bind Recipient', isAdmin: false, email: `${OTHER_USER_ID}@example.test` });
+    // The seeded intent's blobPath is `payslips/USER_ID/ULID.pdf` —
+    // the path's middle segment is the UPLOADER (USER_ID) in this
+    // mock, NOT the recipient. Cross-employee bind must still succeed
+    // because the path's prefix `payslips/` and suffix `/ULID.pdf`
+    // both pass the sanity check.
+    expect(uploadIntents.get(`${ADMIN_ID}:${ULID}`).blobPath).toBe(`payslips/${USER_ID}/${ULID}.pdf`);
     const r1 = await request(app)
       .post('/api/admin/payslips/bind')
       .set('Authorization', adminJwt())
       .send({ ulid: ULID, employeeId: OTHER_USER_ID, year: 2026, month: 10 });
-    expect(r1.status).toBe(400);
-    expect(r1.body.code).toBe('INVALID_BLOB_PATH');
+    expect(r1.status).toBe(201);
+    // The Payslip row's employeeId is the recipient (body), not the
+    // uploader. The intent's employeeId remains the uploader.
+    expect(r1.body.employeeId).toBe(OTHER_USER_ID);
   });
 
-  // Body↔blobPath agreement: if the uploader tampers with the intent's
-  // blobPath AND the body matches the tampered path, the canonical-shape
-  // check passes and the bind succeeds. This is the new contract: the
-  // body↔blobPath predicate is the only authorization the bind helper
-  // performs on the recipient. (The intent's employeeId is keyed by the
-  // uploader; mountUploadRoutes owns that write path.)
-  it('B6b.5. POST /bind — if body.employeeId and intent.blobPath agree, bind succeeds (canonical-shape check is the body↔path predicate)', async () => {
-    const OTHER_USER_ID = '00000000-0000-0000-0000-000000000b00';
-    const { app, uploadIntents, employees } = buildApp();
-    employees.set(OTHER_USER_ID, { id: OTHER_USER_ID, name: 'Tampered Owner', isAdmin: false, email: `${OTHER_USER_ID}@example.test` });
-    // Tamper the seeded intent so the recipient segment matches the body.
-    uploadIntents.get(`${ADMIN_ID}:${ULID}`).blobPath = `payslips/${OTHER_USER_ID}/${ULID}.pdf`;
+  it('B6b.5. POST /bind — refuses an intent whose blobPath is NOT in the payslips/ prefix (defense in depth against a tampered row)', async () => {
+    // The sanity check in bindPayslipToIntent requires the intent's
+    // blobPath to start with 'payslips/'. A future mount that writes
+    // a different prefix, or a client that tampers with the row, must
+    // be refused with 400 INVALID_BLOB_PATH — even though the lookup
+    // and CONFIRMED-status check would otherwise pass.
+    const { app, uploadIntents } = buildApp();
+    // Tamper the seeded intent's blobPath to a different prefix.
+    uploadIntents.get(`${ADMIN_ID}:${ULID}`).blobPath = `dpr-photos/${USER_ID}/${ULID}.pdf`;
     const res = await request(app)
       .post('/api/admin/payslips/bind')
       .set('Authorization', adminJwt())
-      .send({ ulid: ULID, employeeId: OTHER_USER_ID, year: 2026, month: 10 });
-    expect(res.status).toBe(201);
+      .send({ ulid: ULID, employeeId: USER_ID, year: 2026, month: 10 });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_BLOB_PATH');
+  });
+
+  it('B6b.6. POST /bind — refuses an intent whose blobPath does not end with /<ulid>.pdf (mismatched ulid)', async () => {
+    // Defense in depth: the suffix check prevents a tampered intent
+    // row from steering the magic-bytes HEAD at a different ulid's
+    // blob. Even if the prefix is 'payslips/' the suffix mismatch
+    // must 400.
+    const { app, uploadIntents } = buildApp();
+    uploadIntents.get(`${ADMIN_ID}:${ULID}`).blobPath = `payslips/${USER_ID}/OTHER_ULID.pdf`;
+    const res = await request(app)
+      .post('/api/admin/payslips/bind')
+      .set('Authorization', adminJwt())
+      .send({ ulid: ULID, employeeId: USER_ID, year: 2026, month: 10 });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_BLOB_PATH');
   });
 
   it('B6c. POST /bind then POST /publish with the SAME Idempotency-Key — publish is NOT short-circuited', async () => {

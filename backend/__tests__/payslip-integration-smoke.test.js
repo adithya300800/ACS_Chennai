@@ -390,56 +390,61 @@ describe('[integration smoke] payslip lifecycle against Docker throwaway Postgre
   }, 30000);
 
   // ────────────────────────────────────────────────────────────────────
-  // Path/body employee mismatch: seed an intent whose blobPath points
-  // to ATTACKER_ID, then try to bind with body.employeeId = OWNER_ID.
-  // bindPayslipToIntent must reject with 400 INVALID_BLOB_PATH.
+  // [fixup commit 2026-10-05] The bind path validator was loosened
+  // from a strict `payslips/<body.employeeId>/<ulid>.pdf` shape check
+  // to a prefix + suffix check (`payslips/` + `/<ulid>.pdf`). The
+  // reason: the upload route's path builder keys by the UPLOADER's
+  // id, not the recipient, so the strict shape check could never
+  // match for a cross-employee upload. The path's middle segment is
+  // now treated as opaque metadata; the recipient is the body.
+  //
+  // What this test pins: a tampered intent whose blobPath doesn't
+  // start with `payslips/` IS rejected (defense in depth against
+  // a compromised or hand-rolled intent row). The previous "path
+  // middle segment must equal body.employeeId" assertion is no
+  // longer part of the contract — that case is now the
+  // happy path, exercised by the headline cross-employee test in
+  // payslip-cross-employee-bind.test.js, not a failure mode.
   // ────────────────────────────────────────────────────────────────────
-  it('C. path/body employee mismatch is rejected (400 INVALID_BLOB_PATH)', async () => {
+  it('C. path without payslips/ prefix is rejected (400 INVALID_BLOB_PATH)', async () => {
     if (!canConnect) {
       throw new Error(`[integration smoke] cannot reach throwaway DB — ${connectError ? (connectError.code || connectError.message) : 'connect check failed'}`);
     }
-    const mismatchUlid = '01ARZ3NDEKTSV4RRFFQ69G5FAB';
-    // Seed ADMIN + ATTACKER + the mismatched intent.
+    const tamperUlid = '01ARZ3NDEKTSV4RRFFQ69G5FAB';
     await prisma.employee.upsert({
       where: { id: ADMIN_ID },
       update: { isAdmin: true, email: `${ADMIN_ID}@smoke.test`, name: 'Smoke Admin' },
       create: { id: ADMIN_ID, email: `${ADMIN_ID}@smoke.test`, name: 'Smoke Admin', isAdmin: true },
     });
     await prisma.employee.upsert({
-      where: { id: ATTACKER_ID },
-      update: { email: `${ATTACKER_ID}@smoke.test`, name: 'Smoke Attacker' },
-      create: { id: ATTACKER_ID, email: `${ATTACKER_ID}@smoke.test`, name: 'Smoke Attacker' },
-    });
-    await prisma.employee.upsert({
       where: { id: OWNER_ID },
       update: { email: `${OWNER_ID}@smoke.test`, name: 'Smoke Owner' },
       create: { id: OWNER_ID, email: `${OWNER_ID}@smoke.test`, name: 'Smoke Owner' },
     });
-    await prisma.uploadIntent.deleteMany({ where: { employeeId: ADMIN_ID, ulid: mismatchUlid } });
+    await prisma.uploadIntent.deleteMany({ where: { employeeId: ADMIN_ID, ulid: tamperUlid } });
+    // Tampered blobPath: NOT in the payslips/ prefix. This must
+    // be refused even though the lookup-by-(uploader, ulid) succeeds.
     await prisma.uploadIntent.create({
       data: {
         employeeId: ADMIN_ID,
-        ulid: mismatchUlid,
+        ulid: tamperUlid,
         container: 'dpr-documents',
-        blobPath: `payslips/${ATTACKER_ID}/${mismatchUlid}.pdf`, // recipient in path = ATTACKER
+        blobPath: `dpr-documents/${OWNER_ID}/${tamperUlid}.pdf`, // WRONG prefix
         contentType: 'application/pdf',
         status: 'CONFIRMED',
         confirmedAt: new Date(),
         expiresAt: new Date(Date.now() + 60 * 60 * 1000),
       },
     });
-    // Caller is admin; body.employeeId = OWNER (mismatch with blobPath).
     const res = await request(app)
       .post('/api/admin/payslips/bind')
       .set('Authorization', jwtFor(ADMIN_ID, true))
-      .send({ ulid: mismatchUlid, employeeId: OWNER_ID, year: 2026, month: 11 });
+      .send({ ulid: tamperUlid, employeeId: OWNER_ID, year: 2026, month: 11 });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_BLOB_PATH');
-    // No payslip row should have been created.
-    const stray = await prisma.payslip.findFirst({ where: { ulid: mismatchUlid } });
+    const stray = await prisma.payslip.findFirst({ where: { ulid: tamperUlid } });
     expect(stray).toBeNull();
-    // Cleanup the mismatched intent.
-    await prisma.uploadIntent.deleteMany({ where: { employeeId: ADMIN_ID, ulid: mismatchUlid } });
+    await prisma.uploadIntent.deleteMany({ where: { employeeId: ADMIN_ID, ulid: tamperUlid } });
   }, 30000);
 
   // ────────────────────────────────────────────────────────────────────
