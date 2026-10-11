@@ -1330,4 +1330,19 @@ export const api = {
   // (api.download at api.js:378-496) returns that name verbatim.
   downloadPayslip: (id, token) =>
     api.download(`/portal/payslips/${id}/download?download=1`, token),
+  // Admin-only viewer fetch of a published payslip. Default
+  // Content-Disposition on the backend is `inline` (so the browser's
+  // built-in PDF viewer opens the bytes in a tab when the admin
+  // uses the "Open in new tab" affordance). The AdminPayslips
+  // viewer (src/pages/admin/AdminPayslips.jsx openViewer) mints a
+  // `blob:` URL from the returned blob and renders it through an
+  // <object> — so the Content-Disposition in the response is
+  // informational; the viewer always saves a copy via the
+  // `<a download="Payslip-YYYY-MM.pdf">` link or opens in a new tab
+  // via `<a target="_blank">`. The shared `api.download` helper
+  // returns the same { blob, filename, contentType } shape as
+  // `downloadPayslip` so the viewer's success/failure handling is
+  // uniform across surfaces.
+  getAdminPayslipDownload: (id, token) =>
+    api.download(`/admin/payslips/${id}/download`, token),
 };

@@ -2885,3 +2885,225 @@ describe('[fixup] SIZE_DRIFT — ranged GET records full size from ContentRange'
     }
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [fixup] ADMIN payslip download — published-row viewer
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// New route: GET /api/admin/payslips/:id/download
+// Lives on the same adminRouter as the existing mutation surface, so
+// it's gated by requireFreshAdmin + payslipAdminLimiter. The 3-guard
+// predicate is `publishedAt IS NOT NULL · deletedAt IS NULL ·
+// purgedAt IS NULL` (no IDOR — admin can read any row). The default
+// Content-Disposition is `inline` so the browser's built-in PDF
+// viewer opens the bytes in a tab when the admin uses the
+// "Open in new tab" affordance. The portal route's X-Frame-Options
+// and CSP frame-ancestors are intentionally OMITTED on the admin
+// stream — the AdminPayslips viewer fetches as a Blob and mints a
+// `blob:` URL on the client, which doesn't inherit the response
+// headers.
+//
+// These tests pin the contracts the route must satisfy. They mirror
+// the C-download-* tests on the portal route with two deltas:
+//   * the route lives on adminRouter, not portalRouter, so the
+//     happy path uses adminJwt() not userJwt()
+//   * the response is `inline` (not `attachment`) by default
+
+describe('[fixup] ADMIN payslip download — published-row viewer', () => {
+  it('Z-admin-download-published. GET /api/admin/payslips/:id/download → 200 + Content-Type pdf + inline disposition + %PDF- body', async () => {
+    const { app, payslipRows } = buildApp();
+    const row = payslipRows.get(PAYSLIP_ID);
+    row.deletedAt = null;
+    row.purgedAt = null;
+    row.publishedAt = new Date('2026-10-02T00:00:00.000Z');
+    row.contentType = 'application/pdf';
+
+    const res = await request(app)
+      .get(`/api/admin/payslips/${PAYSLIP_ID}/download`)
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/application\/pdf/);
+    // Content-Length reflects the recorded sizeBytes (BigInt → string).
+    expect(res.headers['content-length']).toBe(String(dummyPdfBuffer.length));
+    // The body is the dummy PDF bytes.
+    expect(res.body).toBeInstanceOf(Buffer);
+    expect(res.body.length).toBe(dummyPdfBuffer.length);
+    expect(res.body.slice(0, 5).toString('ascii')).toBe('%PDF-');
+    // Default disposition is `inline` (not `attachment`) so the
+    // browser's built-in PDF viewer opens the bytes in a tab when
+    // the admin uses the "Open in new tab" affordance.
+    expect(res.headers['content-disposition']).toMatch(/^inline;/);
+    // The filename is `Payslip-YYYY-MM.pdf`, never the ulid or
+    // any recipient identifier.
+    expect(res.headers['content-disposition']).toMatch(/Payslip-2026-10\.pdf/);
+    // nosniff is kept on the admin stream (defense in depth). The
+    // portal route's X-Frame-Options + CSP frame-ancestors are
+    // intentionally OMITTED — the viewer fetches as a Blob, so
+    // these headers are not needed.
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+    expect(res.headers['x-frame-options']).toBeUndefined();
+    expect(res.headers['content-security-policy']).toBeUndefined();
+  });
+
+  it('Z-admin-download-revoked-404. GET /api/admin/payslips/:id/download → 404 when deletedAt IS NOT NULL', async () => {
+    // The 3-guard predicate requires `deletedAt IS NULL`. A revoked
+    // row (soft-deleted) MUST 404 — surfacing the PDF would create
+    // an audit loophole (the admin's revoke action explicitly
+    // intended to hide the row). The admin's openViewer on a
+    // revoked-row View button click would surface a "This payslip
+    // is no longer available." toast — but we tightened the
+    // frontend gate to not even render the View button for
+    // revoked rows.
+    const { app, payslipRows } = buildApp();
+    const row = payslipRows.get(PAYSLIP_ID);
+    row.purgedAt = null;
+    row.publishedAt = new Date('2026-10-02T00:00:00.000Z');
+    row.deletedAt = new Date('2026-10-05T00:00:00.000Z');
+
+    const res = await request(app)
+      .get(`/api/admin/payslips/${PAYSLIP_ID}/download`)
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('NOT_FOUND');
+  });
+
+  it('Z-admin-download-draft-404. GET /api/admin/payslips/:id/download → 404 when publishedAt IS NULL', async () => {
+    // Drafts are admin's own (they uploaded them; the upload-modal
+    // preview already shows the local file). The route MUST NOT
+    // expose draft bytes to anyone — the front-end `openViewer` is
+    // already gated on `published`, but the route's invariant is
+    // what we pin here.
+    const { app, payslipRows } = buildApp();
+    const row = payslipRows.get(PAYSLIP_ID);
+    row.deletedAt = null;
+    row.purgedAt = null;
+    row.publishedAt = null;
+
+    const res = await request(app)
+      .get(`/api/admin/payslips/${PAYSLIP_ID}/download`)
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('NOT_FOUND');
+  });
+
+  it('Z-admin-download-purged-404. GET /api/admin/payslips/:id/download → 404 when purgedAt IS NOT NULL', async () => {
+    // Purged rows have no R2 object to stream. Even if the row
+    // metadata is intact, the tombstoned blobPath would 404 the
+    // GetObjectCommand. The route's `purgedAt IS NULL` guard fires
+    // BEFORE the S3 fetch.
+    const { app, payslipRows } = buildApp();
+    const row = payslipRows.get(PAYSLIP_ID);
+    row.deletedAt = null;
+    row.publishedAt = new Date('2026-10-02T00:00:00.000Z');
+    row.purgedAt = new Date('2026-10-10T00:00:00.000Z');
+
+    const res = await request(app)
+      .get(`/api/admin/payslips/${PAYSLIP_ID}/download`)
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('NOT_FOUND');
+  });
+
+  it('Z-admin-download-foreign-blobpath-404. GET /api/admin/payslips/:id/download → 404 when blobPath lacks payslips/ prefix', async () => {
+    // Defence in depth — the row's blobPath must be in the payslips/
+    // namespace. A row with a foreign blobPath (data drift, manual
+    // seed) MUST NOT stream from a non-payslips prefix even when
+    // all 3 status guards pass. Same contract the portal route
+    // enforces (see C6 in this file).
+    const { app, payslipRows } = buildApp();
+    const row = payslipRows.get(PAYSLIP_ID);
+    row.deletedAt = null;
+    row.purgedAt = null;
+    row.publishedAt = new Date('2026-10-02T00:00:00.000Z');
+    row.blobPath = `dpr-documents/some-other-prefix/${ULID}.pdf`;
+
+    const res = await request(app)
+      .get(`/api/admin/payslips/${PAYSLIP_ID}/download`)
+      .set('Authorization', adminJwt());
+    expect(res.status).toBe(404);
+  });
+
+  it('Z-admin-download-bigger-than-cap-413. GET /api/admin/payslips/:id/download → 413 when the streamed body exceeds PAYSLIP_MAX_BYTES', async () => {
+    // Same cap as the portal route (PAYSLIP_MAX_BYTES = 2 MB). A
+    // payslip is 1-2 pages with text + numbers, well under 1 MB;
+    // 2 MB is a generous ceiling that matches the upload mount's
+    // maxSizeBytesPerContainer so a row can never reach a size
+    // the download route refuses.
+    const oversized = 2 * 1024 * 1024 + 1024;
+    const originalSend = mockFakeS3Client.send;
+    mockFakeS3Client.send = jest.fn(async (cmd) => {
+      if (cmd && cmd.constructor && cmd.constructor.name === 'GetObjectCommand') {
+        return {
+          Body: makeBodyBuffer(Buffer.alloc(oversized, 0x20)),
+          ContentType: 'application/pdf',
+          ContentLength: oversized,
+          ETag: '"oversize-etag"',
+        };
+      }
+      return {};
+    });
+    try {
+      const { app, payslipRows } = buildApp();
+      const row = payslipRows.get(PAYSLIP_ID);
+      row.deletedAt = null;
+      row.purgedAt = null;
+      row.publishedAt = new Date('2026-10-02T00:00:00.000Z');
+
+      const res = await request(app)
+        .get(`/api/admin/payslips/${PAYSLIP_ID}/download`)
+        .set('Authorization', adminJwt());
+      expect(res.status).toBe(413);
+      expect(res.body.code).toBe('PAYSLIP_TOO_LARGE');
+    } finally {
+      mockFakeS3Client.send = originalSend;
+    }
+  });
+
+  it('Z-admin-download-blob-gone-410. GET /api/admin/payslips/:id/download → 410 PAYSLIP_BLOB_GONE when R2 has no SuchKey', async () => {
+    // Mirror the portal route's BLOB_GONE contract so the
+    // viewer's 404/410 mapping is consistent across admin and
+    // employee surfaces. An admin clicking View on a row whose
+    // R2 object was deleted out from under them (a manual R2
+    // purge, a storage-class migration that left the row's
+    // blobPath orphaned, etc.) gets the same 410 PAYSLIP_BLOB_GONE
+    // the employee would.
+    const { app, payslipRows } = buildApp();
+    const row = payslipRows.get(PAYSLIP_ID);
+    row.deletedAt = null;
+    row.purgedAt = null;
+    row.publishedAt = new Date('2026-10-02T00:00:00.000Z');
+    const original = mockFakeS3Client.send;
+    mockFakeS3Client.send = jest.fn(async (cmd) => {
+      const err = new Error('NoSuchKey');
+      err.$metadata = { httpStatusCode: 404 };
+      throw err;
+    });
+    try {
+      const res = await request(app)
+        .get(`/api/admin/payslips/${PAYSLIP_ID}/download`)
+        .set('Authorization', adminJwt());
+      expect(res.status).toBe(410);
+      expect(res.body.code).toBe('PAYSLIP_BLOB_GONE');
+    } finally {
+      mockFakeS3Client.send = original;
+    }
+  });
+
+  it('Z-admin-download-non-admin-401. GET /api/admin/payslips/:id/download → 401/403 with a non-admin token', async () => {
+    // The adminRouter is gated by requireFreshAdmin BEFORE the
+    // route handler runs. An employee token MUST NOT reach the
+    // streaming logic. The exact status code is middleware
+    // dependent (the test asserts 401/403) — the contract is
+    // "the row's bytes are not exposed to a non-admin".
+    const { app, payslipRows } = buildApp();
+    const row = payslipRows.get(PAYSLIP_ID);
+    row.deletedAt = null;
+    row.purgedAt = null;
+    row.publishedAt = new Date('2026-10-02T00:00:00.000Z');
+
+    const res = await request(app)
+      .get(`/api/admin/payslips/${PAYSLIP_ID}/download`)
+      .set('Authorization', userJwt(USER_ID));
+    expect([401, 403]).toContain(res.status);
+  });
+});
