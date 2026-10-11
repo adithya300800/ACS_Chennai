@@ -242,6 +242,33 @@ export default function AdminPayslips() {
   const [publishAfterBind, setPublishAfterBind] = useState(true);
   const fileInputRef = useRef(null);
 
+  // In-page PDF preview — when the admin picks a PDF, mint a
+  // `blob:` object URL and render it inside the modal so the admin
+  // can sanity-check the file before clicking Upload. No network
+  // call: the bytes are still on the admin's machine. The URL is
+  // revoked on file change, modal close, and component unmount
+  // (URL.createObjectURL leaks the underlying blob until either
+  // revokeObjectURL runs or the document is unloaded, so we have
+  // to be explicit). Non-PDF files: no preview, validation message
+  // stays visible. The endpoint CSP check (no Content-Security-
+  // Policy on https://acs-portal-spa.onrender.com — verified via
+  // curl -sI) lets `blob:` frames render without any header change.
+  const [previewUrl, setPreviewUrl] = useState(null);
+  const previewUrlRef = useRef(null);
+  const revokePreview = useCallback(() => {
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = null;
+    }
+    setPreviewUrl(null);
+  }, []);
+  // Revoke on unmount as a safety net (closeUpload also revokes on
+  // each close, but an admin navigating away mid-modal still has to
+  // release the URL).
+  useEffect(() => () => {
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+  }, []);
+
   // Employee directory for the picker. Capped at 500 by the backend;
   // a 15-80 employee payroll fits comfortably. Reuse the admin
   // employees endpoint — same one TrainingCourseNew uses.
@@ -490,12 +517,14 @@ export default function AdminPayslips() {
     setUploadError('');
     setUploadPhase('');
     setUploadProgress(0);
+    revokePreview();
     if (fileInputRef.current) fileInputRef.current.value = '';
-  }, []);
+  }, [revokePreview]);
   const closeUpload = useCallback(() => {
     if (submitting) return;
+    revokePreview();
     setUploadOpen(false);
-  }, [submitting]);
+  }, [submitting, revokePreview]);
   const handleFileChange = useCallback((e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
@@ -503,11 +532,24 @@ export default function AdminPayslips() {
     if (err) {
       setUploadError(err);
       setUploadFile(null);
+      revokePreview();
       return;
     }
     setUploadError('');
     setUploadFile(f);
-  }, []);
+    // Mint a fresh object URL for the in-page preview. Revoke any
+    // previous URL first so the modal never accumulates dangling
+    // `blob:` references. Only PDFs get a preview — non-PDFs flow
+    // through `validatePayslipFile` above and are rejected (the
+    // validation message in the modal is the user-facing signal,
+    // not a preview).
+    revokePreview();
+    if (f.type === 'application/pdf') {
+      const url = URL.createObjectURL(f);
+      previewUrlRef.current = url;
+      setPreviewUrl(url);
+    }
+  }, [revokePreview]);
   const handleUploadSubmit = useCallback(async () => {
     if (!uploadFile || !uploadEmployeeId) {
       setUploadError('Pick an employee and a PDF file.');
@@ -592,6 +634,7 @@ export default function AdminPayslips() {
       } else {
         toast.push('Payslip uploaded as draft. Use Publish when ready.', 'success');
       }
+      revokePreview();
       setUploadOpen(false);
       setUploadFile(null);
       setUploadEmployeeId('');
@@ -630,7 +673,7 @@ export default function AdminPayslips() {
       setUploadPhase('');
       setUploadProgress(0);
     }
-  }, [uploadFile, uploadEmployeeId, year, month, publishAfterBind, accessToken, toast, fetchCoverage, fetchList]);
+  }, [uploadFile, uploadEmployeeId, year, month, publishAfterBind, accessToken, toast, fetchCoverage, fetchList, revokePreview]);
 
   // Submitting-phase label — mirrors BillingCertificationsAdmin:251-257
   // so the modal surfaces "Uploading PDF… 47%" instead of a frozen
@@ -1072,6 +1115,82 @@ export default function AdminPayslips() {
               borderRadius: 6, fontSize: '0.85rem', color: '#075985',
             }}>
               {submittingLabel}
+            </div>
+          )}
+
+          {/* In-page PDF preview — admin sanity-check the local file
+              before clicking Upload. No network call: the bytes are
+              still on the admin's machine, served from a `blob:`
+              object URL. Revoked on file change, modal close, and
+              component unmount (see the revokePreview() wiring at
+              openUpload / closeUpload / handleFileChange / the
+              unmount useEffect). Non-PDFs never set previewUrl — the
+              validation message above is the user-facing signal. */}
+          {previewUrl && uploadFile && (
+            <div
+              data-testid="payslip-preview"
+              style={{
+                marginTop: '0.75rem',
+                border: '1px solid var(--line, #d6dbe2)',
+                borderRadius: 6,
+                overflow: 'hidden',
+                background: '#f8fafc',
+              }}
+            >
+              <div style={{
+                padding: '0.5rem 0.75rem',
+                background: '#eef2f7',
+                borderBottom: '1px solid var(--line, #d6dbe2)',
+                fontSize: '0.8rem',
+                color: 'var(--navy, #0b2545)',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: '0.5rem',
+                flexWrap: 'wrap',
+              }}>
+                <span style={{ fontWeight: 600 }}>
+                  Preview ·{' '}
+                  {(() => {
+                    const emp = employees.find((e) => e.id === uploadEmployeeId);
+                    return emp ? emp.name : 'recipient';
+                  })()}
+                  {' · '}
+                  {monthYearLabel(year, month)}
+                  {' · '}
+                  {uploadFile.name} ({formatBytes(uploadFile.size)})
+                </span>
+                <a
+                  href={previewUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn btn-ghost btn-sm"
+                  data-testid="payslip-preview-open-newtab"
+                  aria-label="Open preview in new tab"
+                >
+                  Open in new tab
+                </a>
+              </div>
+              <object
+                data={previewUrl}
+                type="application/pdf"
+                aria-label={`Preview of ${uploadFile.name}`}
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  height: 360,
+                  border: 0,
+                  background: '#fff',
+                }}
+              >
+                <div style={{ padding: '0.75rem', fontSize: '0.85rem', color: 'var(--steel)' }}>
+                  Your browser cannot render this PDF inline.{' '}
+                  <a href={previewUrl} target="_blank" rel="noreferrer">
+                    Open in new tab
+                  </a>{' '}
+                  to preview.
+                </div>
+              </object>
             </div>
           )}
 

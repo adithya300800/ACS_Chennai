@@ -147,10 +147,21 @@ async function verifyBlobMagicBytes(client, container, blobPath, opts = {}) {
         observedMagic,
       };
     }
+    // [SIZE_DRIFT fix] The ranged GET returns 206 Partial Content. In
+    // that response, `ContentLength` is the size of the RANGE, not the
+    // full object — using it as `sizeBytes` makes every PDF > 4 KiB
+    // look like a 4096-byte blob, which then mismatches the real
+    // `ContentLength` reported by the publish-time `HeadObjectCommand`
+    // and trips `verifyBlobMatchesRecorded` → SIZE_DRIFT. The full
+    // size is in the `ContentRange` header, format
+    // `bytes 0-4095/<total>`. Fall back to `ContentLength` only when
+    // `ContentRange` is absent (e.g. a defensive request that
+    // ignored the Range header or a backend that strips it).
+    const fullSize = parseContentRangeTotal(resp.ContentRange) ?? Number(resp.ContentLength ?? 0);
     return {
       ok: true,
       contentType: resp.ContentType || 'application/pdf',
-      sizeBytes: Number(resp.ContentLength ?? 0),
+      sizeBytes: fullSize,
       etag: (resp.ETag || '').replace(/^"|"$/g, ''),
     };
   } catch (err) {
@@ -185,6 +196,21 @@ function streamToBuffer(stream) {
     stream.on('error', reject);
     stream.on('end', () => resolve(Buffer.concat(chunks)));
   });
+}
+
+// [SIZE_DRIFT fix] Parse the `ContentRange` response header to extract
+// the FULL object size. RFC-7233 §4.1: `bytes <start>-<end>/<total>`,
+// where `<total>` may be `*` if unknown. Returns `null` when the header
+// is missing or malformed — the caller falls back to `ContentLength`.
+// A leading `bytes ` is mandatory per the spec; we tolerate
+// case-variation but otherwise do not over-parse.
+function parseContentRangeTotal(header) {
+  if (typeof header !== 'string' || header.length === 0) return null;
+  const m = /^bytes\s+\d+-\d+\/(\d+|\*)$/i.exec(header.trim());
+  if (!m) return null;
+  if (m[1] === '*') return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 /**
@@ -1140,6 +1166,7 @@ module.exports = {
   MAX_AUDIT_REASON_LEN,
   verifyBlobMagicBytes,
   verifyBlobMatchesRecorded,
+  parseContentRangeTotal,
   sanitizeAuditReason,
   serializePayslipForWire,
   bindPayslipToIntent,
