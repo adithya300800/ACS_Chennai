@@ -439,6 +439,167 @@ adminRouter.post('/resend-stuck', asyncHandler(async (req, res) => {
   }
 }));
 
+// GET /api/admin/payslips/:id/download
+//
+// Admin-only download of a published payslip PDF. The portal route
+// (line 622+) is IDOR-guarded to `req.employeeId`; this route is the
+// admin's view — no employee ownership filter, the three remaining
+// guards (publishedAt IS NOT NULL · deletedAt IS NULL · purgedAt IS
+// NULL) plus the `PAYSLIP_BLOB_PREFIX/` blobPath check stay so
+// drafts / revoked / purged / foreign-blobPath rows all 404.
+//
+// Auth: requireFreshAdmin (mounted on adminRouter). The user must be
+// a current admin — a stale JWT (demoted claim) is rejected by the
+// middleware BEFORE the route handler runs.
+//
+// Streaming approach mirrors the portal route's body but drops the
+// IDOR guard and the frame-blocking headers. The frontend
+// AdminPayslips viewer fetches the response as a Blob and mints a
+// `blob:` URL on the client (see src/pages/admin/AdminPayslips.jsx
+// — the new `openViewer` action). The blob URL is same-origin and
+// does not inherit the response's headers, so the `X-Frame-Options:
+// DENY` + `Content-Security-Policy: frame-ancestors 'none'` that the
+// portal route emits for <frame>/<iframe> embedding protection are
+// NOT needed here. `X-Content-Type-Options: nosniff` stays as a
+// defense-in-depth measure on the stream itself.
+//
+// Default `Content-Disposition: inline` so the browser's built-in PDF
+// viewer opens the bytes in a tab when an admin uses the
+// viewer's "Open in new tab" affordance. `?download=1` switches to
+// `attachment` (browser saves to disk) — same flag the portal route
+// honours.
+adminRouter.get('/:id/download', asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  const { id } = req.params;
+  if (!UUID_RE.test(id) && !ULID_RE.test(id)) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', code: 'INVALID_ID' });
+  }
+  let row;
+  try {
+    // Three-guard predicate — admin's view omits the IDOR
+    // `employeeId = req.employeeId` clause the portal route enforces.
+    //   * publishedAt  IS NOT NULL  — drafts are admin's own (they
+    //                                  uploaded them; the upload-modal
+    //                                  preview already shows the local
+    //                                  file) and a separate "View"
+    //                                  affordance is unnecessary.
+    //   * deletedAt    IS NULL      — soft-deleted (revoked) rows MUST
+    //                                  not expose the underlying bytes
+    //                                  to anyone; the `deletedAt` stamp
+    //                                  is the operational signal that
+    //                                  the row is no longer live.
+    //   * purgedAt     IS NULL      — tombstoned (purged) rows have no
+    //                                  R2 object to stream.
+    row = await prisma.payslip.findFirst({
+      where: {
+        id,
+        publishedAt: { not: null },
+        deletedAt: null,
+        purgedAt: null,
+      },
+      select: { id: true, blobPath: true, contentType: true, sizeBytes: true, year: true, month: true },
+    });
+  } catch (err) {
+    console.error('[payslip] admin download query error', {
+      adminHash: hashIdentifier(req.employeeId),
+      payslipHash: hashIdentifier(id),
+      prismaCode: err.code,
+      message: err.message?.split('\n')[0],
+    });
+    res.status(500).json({ error: 'Failed to fetch payslip' });
+    return;
+  }
+  if (!row) {
+    return res.status(404).json({ error: 'NOT_FOUND', code: 'NOT_FOUND' });
+  }
+  if (!row.blobPath || !row.blobPath.startsWith(`${PAYSLIP_BLOB_PREFIX}/`)) {
+    // Defence in depth — the row's blobPath must be in the payslips/
+    // namespace. A row with a foreign blobPath (data drift, manual
+    // seed) MUST NOT stream from a non-payslips prefix.
+    return res.status(404).json({ error: 'NOT_FOUND', code: 'NOT_FOUND' });
+  }
+  // The blobPath on the row is the canonical full key the upload minted
+  // (`payslips/<employeeId>/<ulid>.pdf`). The container for payslip
+  // uploads is `dpr-documents` (per the admin upload mount's
+  // allowedContainers allowlist). Hardcoded here — never accept a
+  // container from the URL or body.
+  const CONTAINER = 'dpr-documents';
+  // Same 2 MB cap as the portal route + the upload mount's
+  // maxSizeBytesPerContainer. A payslip is 1-2 pages with text +
+  // numbers, well under 1 MB; 2 MB is a generous ceiling that
+  // matches the upload and download invariants so a row can never
+  // reach a size the download route refuses.
+  const MAX_DOWNLOAD_BYTES = PAYSLIP_MAX_BYTES;
+  try {
+    const client = getS3Client();
+    if (!client) {
+      return res.status(503).json({ error: 'STORAGE_UNAVAILABLE', code: 'STORAGE_UNAVAILABLE' });
+    }
+    const { GetObjectCommand } = require('@aws-sdk/client-s3');
+    const cmd = new GetObjectCommand({ Bucket: CONTAINER, Key: row.blobPath });
+    const obj = await client.send(cmd);
+    const chunks = [];
+    let total = 0;
+    let oversized = false;
+    for await (const chunk of obj.Body) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buf.length;
+      if (total > MAX_DOWNLOAD_BYTES) {
+        oversized = true;
+        break;
+      }
+      chunks.push(buf);
+    }
+    if (oversized) {
+      return res.status(413).json({
+        error: `Payslip exceeds the ${PAYSLIP_MAX_BYTES} byte cap`,
+        code: 'PAYSLIP_TOO_LARGE',
+      });
+    }
+    const body = Buffer.concat(chunks);
+    res.setHeader('Content-Type', row.contentType || 'application/pdf');
+    if (row.sizeBytes) res.setHeader('Content-Length', String(row.sizeBytes));
+    // Filename is `Payslip-YYYY-MM.pdf` — never the ulid or any
+    // recipient identifier. ?download=1 switches the disposition to
+    // `attachment` (browser saves to disk); default is `inline`
+    // (browser opens the PDF in a tab when an admin clicks
+    // "Open in new tab" in the viewer modal).
+    const monthName = MONTH_NAMES[(row.month || 1) - 1] || String(row.month);
+    const safeName = `Payslip-${row.year}-${String(row.month).padStart(2, '0')}.pdf`;
+    const wantAttachment = req.query.download === '1';
+    const disposition = wantAttachment
+      ? `attachment; filename="${safeName}"`
+      : `inline; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(`ACS Chennai ${monthName} ${row.year}`)}.pdf`;
+    res.setHeader('Content-Disposition', disposition);
+    res.setHeader('Cache-Control', 'private, no-store');
+    // nosniff is kept (defense in depth) so a misconfigured client
+    // cannot re-interpret the PDF body as a script/HTML on a
+    // sniff error. The portal route's X-Frame-Options / CSP
+    // frame-ancestors are intentionally OMITTED here — the viewer
+    // mints a `blob:` URL on the client which doesn't inherit the
+    // response headers, and the admin UI is allowed to render the
+    // PDF inline via <object> as a same-origin document.
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.status(200).end(body);
+  } catch (err) {
+    const status = err && err.$metadata && err.$metadata.httpStatusCode;
+    if (status === 404) {
+      // BLOB_GONE — the R2 object is missing. Mirror the portal
+      // contract so the viewer's 404/410 mapping is consistent
+      // across admin and employee surfaces.
+      return res.status(410).json({ error: 'GONE', code: 'PAYSLIP_BLOB_GONE' });
+    }
+    console.error('[payslip] admin download stream error', {
+      adminHash: hashIdentifier(req.employeeId),
+      payslipHash: hashIdentifier(id),
+      httpStatus: status,
+      errCode: err && err.code,
+      message: err?.message?.split('\n')[0],
+    });
+    res.status(500).json({ error: 'Failed to stream payslip', code: 'PAYSLIP_DOWNLOAD_FAILED' });
+  }
+}));
+
 // GET /api/admin/payslips — admin's cross-org coverage list. ?year&month
 // filter, default to the latest (year, month) seen in the table so the
 // admin dashboard loads the most recent coverage view by default.

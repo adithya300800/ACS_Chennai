@@ -269,6 +269,41 @@ export default function AdminPayslips() {
     if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
   }, []);
 
+  // ── Viewer modal (PUBLISHED rows) ──────────────────────────────────
+  // Mirrors the upload-preview plumbing above. When the admin clicks
+  // "View" on a PUBLISHED row, we fetch the PDF as a Blob via
+  // `api.getAdminPayslipDownload` (which routes through the shared
+  // api.download helper — 401-refresh + filename-parse +
+  // AbortController timeout), mint a `blob:` object URL, and render
+  // it inside an `<object data type="application/pdf">`. The blob
+  // URL is same-origin and does not inherit the API response's
+  // headers, so the portal's X-Frame-Options / CSP frame-ancestors
+  // are not in play for the rendered document (and the admin
+  // download route doesn't emit them).
+  //
+  // Gated on PUBLISHED rows only — drafts are the admin's own
+  // (upload-modal preview already shows the local file) and revoked
+  // rows must not expose the underlying bytes to anyone.
+  const [viewerRow, setViewerRow] = useState(null); // { id, year, month, employeeName, sizeBytes }
+  const [viewerBlobUrl, setViewerBlobUrl] = useState(null);
+  const viewerUrlRef = useRef(null);
+  const [viewerLoading, setViewerLoading] = useState(false);
+  const [viewerError, setViewerError] = useState('');
+  const revokeViewer = useCallback(() => {
+    if (viewerUrlRef.current) {
+      URL.revokeObjectURL(viewerUrlRef.current);
+      viewerUrlRef.current = null;
+    }
+    setViewerBlobUrl(null);
+  }, []);
+  // Unmount safety net — covers the case where the admin navigates
+  // away from the page while the modal is still mounted (route
+  // transition, sidebar click, etc.). The ref-tracked URL is the
+  // canonical source; the state copy is just for re-render.
+  useEffect(() => () => {
+    if (viewerUrlRef.current) URL.revokeObjectURL(viewerUrlRef.current);
+  }, []);
+
   // Employee directory for the picker. Capped at 500 by the backend;
   // a 15-80 employee payroll fits comfortably. Reuse the admin
   // employees endpoint — same one TrainingCourseNew uses.
@@ -508,6 +543,50 @@ export default function AdminPayslips() {
       setRevoking(false);
     }
   }, [confirmRevoke, revoking, revokeReason, accessToken, toast, fetchCoverage, fetchList]);
+
+  // ── Action: view a published payslip (admin viewer modal) ─────────
+  // The row argument is the union of the coverage + list shapes — the
+  // { id, year, month, employeeName/recipientName, sizeBytes } keys
+  // are present on both. The viewer does NOT mutate the row — it's a
+  // pure read — so no fetchCoverage/fetchList refresh on close.
+  const openViewer = useCallback(async (row) => {
+    if (!row || viewerLoading) return;
+    // Tear down any previous blob URL before opening a new modal so
+    // a back-to-back View click on row B after row A doesn't leave
+    // row A's blob dangling. (Each call mints a fresh URL.)
+    revokeViewer();
+    setViewerError('');
+    setViewerRow(row);
+    setViewerLoading(true);
+    try {
+      const { blob } = await api.getAdminPayslipDownload(row.id, accessToken);
+      const url = URL.createObjectURL(blob);
+      viewerUrlRef.current = url;
+      setViewerBlobUrl(url);
+    } catch (err) {
+      // Map the common cases to friendly toasts; fall back to the
+      // server's message for anything else. 404 / 410 are the
+      // "this row is no longer available" path — a revoke-then-click
+      // sequence, or a BLOB_GONE purge-then-click sequence.
+      const code = err?.code || '';
+      if (code === 'NOT_FOUND' || code === 'PAYSLIP_BLOB_GONE') {
+        toast.push('This payslip is no longer available.', 'error');
+      } else {
+        toast.push(err?.message || 'Could not load the payslip PDF.', 'error');
+      }
+      // Close the modal on failure so the admin isn't stuck on a
+      // blank modal frame.
+      setViewerRow(null);
+    } finally {
+      setViewerLoading(false);
+    }
+  }, [viewerLoading, revokeViewer, accessToken, toast]);
+  const closeViewer = useCallback(() => {
+    if (viewerLoading) return;
+    revokeViewer();
+    setViewerRow(null);
+    setViewerError('');
+  }, [viewerLoading, revokeViewer]);
 
   // ── Action: upload + bind + (optional) publish (admin modal) ───────
   const openUpload = useCallback(() => {
@@ -943,6 +1022,24 @@ export default function AdminPayslips() {
                       {resendingId === c.payslip.id ? 'Resending…' : 'Resend email'}
                     </button>
                   )}
+                  {c.payslip && c.payslip.published && !c.payslip.deletedAt && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => openViewer({
+                        id: c.payslip.id,
+                        year,
+                        month,
+                        employeeName: c.employeeName,
+                        sizeBytes: c.payslip.sizeBytes,
+                      })}
+                      disabled={viewerLoading}
+                      title="Open the published PDF in a viewer"
+                      data-testid="payslip-view-btn"
+                    >
+                      View
+                    </button>
+                  )}
                   {c.payslip && (
                     <button
                       type="button"
@@ -1018,6 +1115,24 @@ export default function AdminPayslips() {
                           disabled={resendingId === p.id || !!resendingId}
                         >
                           {resendingId === p.id ? 'Resending…' : 'Resend'}
+                        </button>
+                      )}
+                      {st === 'PUBLISHED' && !p.deletedAt && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => openViewer({
+                            id: p.id,
+                            year: p.year,
+                            month: p.month,
+                            employeeName: p.recipientName,
+                            sizeBytes: p.sizeBytes,
+                          })}
+                          disabled={viewerLoading}
+                          title="Open the published PDF in a viewer"
+                          data-testid="payslip-view-btn-list"
+                        >
+                          View
                         </button>
                       )}
                       <button
@@ -1272,6 +1387,110 @@ export default function AdminPayslips() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── Viewer modal (PUBLISHED rows) ────────────────────────────
+          Renders the published PDF in an <object> via a freshly
+          minted `blob:` URL. The blob is fetched by
+          `api.getAdminPayslipDownload` (openViewer), which routes
+          through the shared api.download helper. The modal is gated
+          on `viewerRow` so a successful fetch renders the inline
+          PDF; a failed fetch tears the modal back down (toast
+          carries the user-facing message). A separate "Open in new
+          tab" link is the same blob URL with target=_blank for
+          browsers without an inline PDF viewer; a "Download" link
+          uses the same href with a `download` attribute so the
+          browser saves the bytes with a stable filename. The
+          filename is hardcoded — the blob has no Content-Disposition
+          visible to the browser, so we supply the same
+          `Payslip-YYYY-MM.pdf` name the portal route emits. */}
+      {viewerRow && (
+        <Modal
+          open={true}
+          onClose={closeViewer}
+          ariaLabel="View payslip"
+          maxWidth={720}
+          dismissable={!viewerLoading}
+        >
+          <div data-testid="payslip-viewer-modal">
+            <h2 style={{ margin: '0 0 0.5rem', color: 'var(--navy)' }}>
+              View payslip
+            </h2>
+            <div style={{ margin: '0 0 0.75rem', color: 'var(--steel)', fontSize: '0.85rem' }}>
+              {viewerRow.employeeName ? `${viewerRow.employeeName} · ` : ''}
+              {monthYearLabel(viewerRow.year, viewerRow.month)}
+              {viewerRow.sizeBytes ? ` · ${formatBytes(viewerRow.sizeBytes)}` : ''}
+            </div>
+
+            {viewerLoading && (
+              <div className="dpr-card" style={{ textAlign: 'center', color: 'var(--steel)', padding: '1.5rem' }} data-testid="payslip-viewer-loading">
+                Loading payslip PDF…
+              </div>
+            )}
+
+            {!viewerLoading && viewerBlobUrl && (
+              <div className="dpr-card" style={{ padding: '0.5rem', background: '#f8fafc' }} data-testid="payslip-viewer-frame">
+                <object
+                  data={viewerBlobUrl}
+                  type="application/pdf"
+                  width="100%"
+                  height="480"
+                  aria-label={`Payslip PDF for ${viewerRow.employeeName || 'employee'} ${monthYearLabel(viewerRow.year, viewerRow.month)}`}
+                >
+                  <div style={{ padding: '1rem', color: 'var(--steel)' }}>
+                    Your browser cannot render this PDF inline.{' '}
+                    <a
+                      href={viewerBlobUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      data-testid="payslip-viewer-open-newtab"
+                    >
+                      Open in new tab
+                    </a>{' '}
+                    or use Download.
+                  </div>
+                </object>
+              </div>
+            )}
+
+            {viewerError && (
+              <div className="portal-auth-error" role="alert" style={{ marginTop: '0.75rem' }}>
+                {viewerError}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginTop: '1rem', flexWrap: 'wrap' }}>
+              <a
+                href={viewerBlobUrl || '#'}
+                target="_blank"
+                rel="noreferrer"
+                className="btn btn-ghost btn-sm"
+                data-testid="payslip-viewer-open-newtab-link"
+                style={{
+                  pointerEvents: viewerBlobUrl ? 'auto' : 'none',
+                  opacity: viewerBlobUrl ? 1 : 0.5,
+                }}
+              >
+                Open in new tab
+              </a>
+              <a
+                href={viewerBlobUrl || '#'}
+                download={`Payslip-${viewerRow.year}-${String(viewerRow.month).padStart(2, '0')}.pdf`}
+                className="btn btn-ghost btn-sm"
+                data-testid="payslip-viewer-download-link"
+                style={{
+                  pointerEvents: viewerBlobUrl ? 'auto' : 'none',
+                  opacity: viewerBlobUrl ? 1 : 0.5,
+                }}
+              >
+                Download
+              </a>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={closeViewer} disabled={viewerLoading}>
+                Close
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );
