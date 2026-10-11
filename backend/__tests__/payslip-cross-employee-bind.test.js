@@ -52,6 +52,26 @@ const REAL_PDF = Buffer.from(
   'binary',
 );
 
+// [fixup / SIZE_DRIFT] 150 KiB PDF — well above the 4 KiB magic-bytes
+// scan window, so the bug pattern only shows on objects larger than
+// PDF_MAGIC_SCAN_BYTES. The mock's GetObject response includes a
+// `ContentRange: bytes 0-4095/153600` header so the real
+// verifyBlobMagicBytes code path must parse RFC-7233 to recover the
+// true size, not the 4096-byte range size.
+const LARGE_PDF_SIZE = 153_600;
+function buildLargePdf() {
+  const out = Buffer.alloc(LARGE_PDF_SIZE, 0x20);
+  Buffer.from('%PDF-1.4\n', 'binary').copy(out, 0);
+  const trailer = '\n%%EOF\n';
+  Buffer.from(trailer, 'binary').copy(out, LARGE_PDF_SIZE - trailer.length);
+  return out;
+}
+const LARGE_PDF = buildLargePdf();
+const PDF_MAGIC_SCAN_BYTES = 4096; // must match lib/payslip.js
+// The body the mock returns is per-test mutable — the large-PDF test
+// swaps it via `setMockBody()`. REAL_PDF is the default.
+let __currentMockBody = REAL_PDF;
+
 // ─── R2 boundary stub: only the network call is mocked. We mock the
 // ─── S3Client constructor at the @aws-sdk level so that ANY code path
 // ─── inside lib/blobStorage.js (verifyBlobExists, verifyBlobMagicBytes,
@@ -62,18 +82,46 @@ const REAL_PDF = Buffer.from(
 // ─── returns our stub client instead of opening a real R2 connection.
 const mockSend = jest.fn(async (cmd) => {
   const ctor = cmd && cmd.constructor && cmd.constructor.name;
+  const input = cmd && cmd.input ? cmd.input : {};
+  // Honor the Range header — if the production code asked for
+  // `bytes=0-4095`, the mock returns just the first 4 KiB of the
+  // current body (so a 150 KiB body really is 150 KiB on the wire
+  // and `ContentLength: 4096` is the legitimate range size, while
+  // `ContentRange` reports the full object size).
+  let rangeBytes = null;
+  if (typeof input.Range === 'string') {
+    const m = /^bytes=(\d+)-(\d+)$/.exec(input.Range.trim());
+    if (m) rangeBytes = [Number(m[1]), Number(m[2])];
+  }
   if (ctor === 'GetObjectCommand') {
+    const bodyBuf = rangeBytes
+      ? __currentMockBody.subarray(rangeBytes[0], rangeBytes[1] + 1)
+      : __currentMockBody;
+    const headers = {
+      'content-type': 'application/pdf',
+      etag: '"xc-etag"',
+    };
+    if (rangeBytes) {
+      headers['content-length'] = String(bodyBuf.length);
+      headers['content-range'] = `bytes ${rangeBytes[0]}-${rangeBytes[1]}/${__currentMockBody.length}`;
+    } else {
+      headers['content-length'] = String(bodyBuf.length);
+    }
     return {
-      Body: require('stream').Readable.from([REAL_PDF]),
+      Body: require('stream').Readable.from([bodyBuf]),
       ContentType: 'application/pdf',
-      ContentLength: REAL_PDF.length,
+      ContentLength: bodyBuf.length,
+      ContentRange: rangeBytes ? `bytes ${rangeBytes[0]}-${rangeBytes[1]}/${__currentMockBody.length}` : undefined,
       ETag: '"xc-etag"',
+      // The S3 SDK exposes response headers on `$metadata.httpHeaders`
+      // for some code paths; include them for both.
+      $metadata: { httpHeaders: headers },
     };
   }
   if (ctor === 'HeadObjectCommand') {
     return {
       ContentType: 'application/pdf',
-      ContentLength: REAL_PDF.length,
+      ContentLength: __currentMockBody.length,
       ETag: '"xc-etag"',
       LastModified: new Date(),
     };
@@ -410,5 +458,109 @@ describe('[xc-bind] real-uploadRoutes cross-employee bind contract', () => {
     // Cleanup: confirm no stray payslip was created by ADMIN2.
     const stray = await prisma.payslip.count({ where: { uploadedById: ADMIN2_ID, employeeId: RECIP_ID } });
     expect(stray).toBe(0);
+  });
+
+  // 10. ─── Large 150 KB PDF: bind records true size, publish succeeds ───
+  // [fixup / SIZE_DRIFT] This is the integration-test counterpart to
+  // the K4 unit test in payslip-routes.test.js. It exercises the FULL
+  // real-pipeline: /sas-url → /confirm-upload (real R2 magic-bytes
+  // check via the stub) → /bind → /publish → employee list/download.
+  // The body is 150 KiB so it's well past the 4 KiB magic-bytes scan
+  // window — the bug only manifested on objects > 4 KiB. The mock's
+  // GetObject response carries `ContentRange: bytes 0-4095/153600`
+  // so the real verifyBlobMagicBytes code path must parse RFC-7233
+  // to recover the true size.
+  it('10. large 150 KB PDF: bind records true size, publish succeeds, employee downloads full bytes', async () => {
+    // Swap the mock body to the large PDF for this test only.
+    const prevBody = __currentMockBody;
+    __currentMockBody = LARGE_PDF;
+    try {
+      // a) /sas-url — the real path builder. Path is uploader-keyed
+      // (ADMIN), not recipient.
+      const sas = await request(app)
+        .post('/api/admin/payslips/upload/sas-url')
+        .set('Authorization', jwtFor(ADMIN_ID, true))
+        .send({
+          container: 'dpr-documents',
+          filename: 'xc-large.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: LARGE_PDF_SIZE,
+          pathPrefix: 'payslips',
+        });
+      expect(sas.status).toBe(200);
+      const ulid = sas.body.ulid;
+      expect(sas.body.blobPath).toBe(`payslips/${ADMIN_ID}/${ulid}.pdf`);
+
+      // b) /confirm-upload — real verifyBlobMagicBytes runs against
+      // the mock. The bug was that sizeBytes=4096 was stamped; the
+      // fix should stamp sizeBytes=LARGE_PDF_SIZE.
+      const confirm = await request(app)
+        .post('/api/admin/payslips/upload/confirm-upload')
+        .set('Authorization', jwtFor(ADMIN_ID, true))
+        .send({
+          ulid,
+          filename: 'xc-large.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: LARGE_PDF_SIZE,
+          container: 'dpr-documents',
+          pathPrefix: 'payslips',
+        });
+      expect(confirm.status).toBe(200);
+      expect(confirm.body.verified).toBe(true);
+
+      // c) /bind — the row must record the FULL size, not 4096.
+      const bind = await request(app)
+        .post('/api/admin/payslips/bind')
+        .set('Authorization', jwtFor(ADMIN_ID, true))
+        .send({ ulid, employeeId: RECIP_ID, year: 2026, month: 9 });
+      expect(bind.status).toBe(201);
+      const row = await prisma.payslip.findUnique({ where: { id: bind.body.id } });
+      // sizeBytes is BigInt in Prisma — compare as BigInt.
+      expect(row.sizeBytes).toBe(BigInt(LARGE_PDF_SIZE));
+      // The bug stamped 4096 — the fix stamps 153600. Pin the
+      // load-bearing assertion.
+      expect(Number(row.sizeBytes)).toBe(LARGE_PDF_SIZE);
+      expect(Number(row.sizeBytes)).not.toBe(PDF_MAGIC_SCAN_BYTES);
+
+      // d) /publish — must succeed with published=1. The bug
+      // returned failed=[{reason: 'SIZE_DRIFT'}]; the fix returns
+      // published=[{id}].
+      const pub = await request(app)
+        .post('/api/admin/payslips/publish')
+        .set('Authorization', jwtFor(ADMIN_ID, true))
+        .send({ payslipIds: [bind.body.id] });
+      expect(pub.status).toBe(200);
+      expect(pub.body.published).toHaveLength(1);
+      expect(pub.body.published[0].id).toBe(bind.body.id);
+      expect(pub.body.failed).toHaveLength(0);
+      const published = await prisma.payslip.findUnique({ where: { id: bind.body.id } });
+      expect(published.publishedAt).not.toBeNull();
+
+      // e) Recipient lists + downloads — bytes start with %PDF and
+      // match the LARGE_PDF_SIZE exactly.
+      const list = await request(app)
+        .get('/api/portal/payslips')
+        .set('Authorization', jwtFor(RECIP_ID, false));
+      expect(list.status).toBe(200);
+      expect(list.body.payslips.map((p) => p.id)).toContain(bind.body.id);
+
+      const dl = await request(app)
+        .get(`/api/portal/payslips/${bind.body.id}/download`)
+        .set('Authorization', jwtFor(RECIP_ID, false));
+      expect(dl.status).toBe(200);
+      expect(dl.headers['content-type']).toMatch(/^application\/pdf/);
+      const bodyBytes = Buffer.from(dl.body);
+      expect(bodyBytes.slice(0, 5).toString('ascii')).toBe('%PDF-');
+      expect(bodyBytes.length).toBe(LARGE_PDF_SIZE);
+
+      // Cleanup: revoke + delete the row so subsequent test runs on
+      // the same throwaway DB are not polluted. The afterAll hook
+      // will also catch it but doing it here keeps the DB tidy if
+      // the test is run in isolation.
+      await prisma.payslip.delete({ where: { id: bind.body.id } });
+      await prisma.uploadIntent.deleteMany({ where: { employeeId: ADMIN_ID, ulid } });
+    } finally {
+      __currentMockBody = prevBody;
+    }
   });
 }, 60000);

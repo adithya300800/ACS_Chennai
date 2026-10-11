@@ -116,6 +116,34 @@ function makeBodyBuffer(buf) {
   return Readable.from([buf]);
 }
 
+// [SIZE_DRIFT regression] the underlying real PDF size we return for
+// every GetObjectCommand. The magic-bytes scan window is 4 KiB, so
+// anything strictly larger than 4096 bytes triggers the
+// partial-vs-full ContentLength/ContentRange distinction in
+// `verifyBlobMagicBytes`. The default 96-byte `dummyPdfBuffer` is
+// smaller than 4 KiB and would mask the regression — the K-series
+// regression tests below override the mock with a 150 KiB PDF so the
+// ContentRange-vs-ContentLength split actually surfaces. The default
+// mock stays at 96 bytes to preserve every existing test's seeded
+// `sizeBytes: BigInt(dummyPdfBuffer.length)` invariant.
+const REGRESSION_PDF_SIZE = 153_600; // 150 KiB
+
+// Build a PDF-shaped buffer of arbitrary length so the regression
+// tests can exercise the ranged-GET path. The first 5 bytes are the
+// canonical `%PDF-` magic, then space padding to the requested size
+// (valid PDF body bytes), then a `%%EOF\n` trailer. `Readable.from`
+// cannot take a Buffer directly so we wrap in `[buf]`.
+function buildPdfBufferOfSize(targetSize) {
+  if (targetSize < dummyPdfBuffer.length) {
+    return dummyPdfBuffer;
+  }
+  const out = Buffer.alloc(targetSize, 0x20); // spaces, valid PDF body bytes
+  Buffer.from('%PDF-1.4\n', 'binary').copy(out, 0);
+  const trailer = '\n%%EOF\n';
+  Buffer.from(trailer, 'binary').copy(out, targetSize - trailer.length);
+  return out;
+}
+
 const mockFakeS3Client = {
   send: jest.fn(async (cmd) => {
     const ctorName = cmd && cmd.constructor && cmd.constructor.name;
@@ -2659,5 +2687,201 @@ describe('[fixup] sendPayslipEmail BYPASSES notificationPreference (no SKIPPED_O
     expect(stuck.emailStatus).not.toBe('PENDING');
     expect(stuck.emailStatus).not.toBe(payslipLib.EMAIL_STATUS.SKIPPED_OPT_OUT);
     expect(stuck.emailStatus).not.toBe(payslipLib.EMAIL_STATUS.SKIPPED_TYPE_MUTED);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// [fixup] SIZE_DRIFT — ContentRange carries full object size, ContentLength
+// carries range size on a 206 Partial Content response.
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// The user-facing bug: a payslip PDF larger than the 4 KiB magic-byte scan
+// window was being stamped with `sizeBytes: 4096` (the range size) at bind
+// time. At publish time, the HEAD returns the real ~150 KB size →
+// `verifyBlobMatchesRecorded` returns 'SIZE_DRIFT' → publish fails.
+//
+// The default mock returns 96 bytes (well under 4 KiB) so the bug never
+// surfaces in the B/C/E series. The K-series overrides the mock to return
+// a 150 KiB PDF with a real `ContentRange` header so the regression is
+// pinned. Each test restores the original `send` impl in a `finally` so
+// subsequent tests aren't affected.
+
+describe('[fixup] SIZE_DRIFT — ranged GET records full size from ContentRange', () => {
+  // Override helper: returns a ranged-aware mock for the duration of one
+  // test. Caller must call `restore()` (we use try/finally in the tests).
+  function installLargePdfMock() {
+    const originalSend = mockFakeS3Client.send;
+    mockFakeS3Client.send = jest.fn(async (cmd) => {
+      const ctorName = cmd && cmd.constructor && cmd.constructor.name;
+      if (ctorName === 'GetObjectCommand') {
+        const fullSize = REGRESSION_PDF_SIZE;
+        const rangeHeader = cmd && cmd.input ? cmd.input.Range : null;
+        const isRanged = typeof rangeHeader === 'string' && /^bytes=/.test(rangeHeader);
+        const buf = buildPdfBufferOfSize(fullSize);
+        const responseBuf = isRanged ? buf.slice(0, 4096) : buf;
+        const resp = {
+          Body: makeBodyBuffer(responseBuf),
+          ContentType: 'application/pdf',
+          ContentLength: responseBuf.length,
+          ETag: '"fake-etag"',
+        };
+        if (isRanged) {
+          // RFC-7233 §4.1: `bytes <start>-<end>/<total>`.
+          resp.ContentRange = `bytes 0-${responseBuf.length - 1}/${fullSize}`;
+        }
+        return resp;
+      }
+      if (ctorName === 'HeadObjectCommand') {
+        return {
+          ContentType: 'application/pdf',
+          ContentLength: REGRESSION_PDF_SIZE,
+          ETag: '"fake-etag"',
+          LastModified: new Date(),
+        };
+      }
+      return {};
+    });
+    return () => { mockFakeS3Client.send = originalSend; };
+  }
+
+  it('K1. parseContentRangeTotal parses RFC-7233 `bytes a-b/total` header', () => {
+    expect(payslipLib.parseContentRangeTotal('bytes 0-4095/153600')).toBe(153600);
+    expect(payslipLib.parseContentRangeTotal('bytes 0-0/1')).toBe(1);
+    expect(payslipLib.parseContentRangeTotal('BYTES 10-19/12345')).toBe(12345);
+    // Unknown total: header value `*` is RFC-7233-allowed.
+    expect(payslipLib.parseContentRangeTotal('bytes 0-4095/*')).toBeNull();
+    // Missing or malformed.
+    expect(payslipLib.parseContentRangeTotal(null)).toBeNull();
+    expect(payslipLib.parseContentRangeTotal('')).toBeNull();
+    expect(payslipLib.parseContentRangeTotal(undefined)).toBeNull();
+    expect(payslipLib.parseContentRangeTotal('not a content-range')).toBeNull();
+    expect(payslipLib.parseContentRangeTotal('bytes 0-4095')).toBeNull(); // no /total
+  });
+
+  it('K2. verifyBlobMagicBytes returns FULL object size from ContentRange, not the 4096 range size', async () => {
+    const restore = installLargePdfMock();
+    try {
+      const out = await payslipLib.verifyBlobMagicBytes(
+        mockFakeS3Client, 'dpr-documents', 'payslips/test/key.pdf',
+      );
+      expect(out.ok).toBe(true);
+      // BUG: pre-fix this would be 4096 (the partial response ContentLength).
+      // FIX: it must be the full REGRESSION_PDF_SIZE.
+      expect(out.sizeBytes).toBe(REGRESSION_PDF_SIZE);
+      expect(out.sizeBytes).not.toBe(4096);
+      // ContentType + etag still flow through.
+      expect(out.contentType).toBe('application/pdf');
+      expect(out.etag).toBe('fake-etag');
+    } finally {
+      restore();
+    }
+  });
+
+  it('K3. verifyBlobMagicBytes falls back to ContentLength when ContentRange is absent', async () => {
+    const restore = installLargePdfMock();
+    try {
+      // Replace send with a non-ranged response (no ContentRange header).
+      mockFakeS3Client.send = jest.fn(async () => ({
+        Body: makeBodyBuffer(buildPdfBufferOfSize(REGRESSION_PDF_SIZE)),
+        ContentType: 'application/pdf',
+        ContentLength: REGRESSION_PDF_SIZE,
+        ETag: '"no-range"',
+      }));
+      const out = await payslipLib.verifyBlobMagicBytes(
+        mockFakeS3Client, 'dpr-documents', 'payslips/test/key.pdf',
+      );
+      expect(out.ok).toBe(true);
+      expect(out.sizeBytes).toBe(REGRESSION_PDF_SIZE);
+    } finally {
+      restore();
+    }
+  });
+
+  it('K4. bindPayslipToIntent + publishPayslip end-to-end: a 150 KB PDF survives publish without SIZE_DRIFT', async () => {
+    // The end-to-end regression: bind with the large-PDF mock, then
+    // publish. The buggy code would stamp sizeBytes=4096 at bind, and
+    // publish would 500 on SIZE_DRIFT. With the fix, sizeBytes=150 KiB
+    // at bind matches the HeadObject ContentLength at publish.
+    const restore = installLargePdfMock();
+    try {
+      const { app, payslipRows, prisma } = buildApp();
+      // buildApp() injects a verifyMagicBytes override (returns the
+      // 54-byte dummyPdfBuffer size) — clear it so the bind handler
+      // exercises the real verifyBlobMagicBytes against the large-PDF
+      // mock. The route reads `payslipTestOverrides?.verifyMagicBytes ||
+      // undefined`, so `null` falls through to the module's default.
+      const previousOverride = payslipLib.payslipTestOverrides.verifyMagicBytes;
+      payslipLib.payslipTestOverrides.verifyMagicBytes = null;
+      // The mock's default prisma.payslip.create returns a random
+      // base36 id like `pay-xxxxxxxx` — not a UUID/ULID — and the
+      // publish route's regex would 400 on it. Override create() to
+      // return a UUID-shaped id so the publish round-trip is valid.
+      const originalCreate = prisma.payslip.create;
+      prisma.payslip.create = jest.fn(async ({ data }) => {
+        // Deterministic id per test call — uuid v4-shape.
+        const id = '00000000-0000-0000-0000-000000000abc';
+        // Stamp the four-guard columns explicitly as null so the
+        // publish-time `updateMany WHERE publishedAt IS NULL AND
+        // deletedAt IS NULL` finds this row. The default mock create
+        // leaves them undefined, which the where-clause parser treats
+        // as a non-match (the row never gets stamped as published,
+        // and the route returns { reason: 'NOT_PUBLISHABLE' }).
+        const row = { id, publishedAt: null, deletedAt: null, purgedAt: null, ...data };
+        payslipRows.set(id, row);
+        return row;
+      });
+      try {
+        // Step 1: bind (POST /api/admin/payslips/bind). The seeded
+        // intent is keyed by (ADMIN_ID, ULID) and the test will
+        // resolve it.
+        const bindRes = await request(app)
+          .post('/api/admin/payslips/bind')
+          .set('Authorization', adminJwt())
+          .send({ ulid: ULID, employeeId: USER_ID, year: 2026, month: 11 });
+        expect(bindRes.status).toBe(201);
+        // The freshly-bound row must record the FULL size — not 4096.
+        expect(bindRes.body.sizeBytes).toBe(String(REGRESSION_PDF_SIZE));
+        // And the underlying prisma row must agree.
+        const boundRow = payslipRows.get(bindRes.body.id);
+        expect(boundRow.sizeBytes).toBe(BigInt(REGRESSION_PDF_SIZE));
+        // Step 2: publish (POST /api/admin/payslips/publish). The buggy
+        // code path would record { published: 0, failed: 1
+        // (SIZE_DRIFT) }. The fix must publish cleanly.
+        const publishRes = await request(app)
+          .post('/api/admin/payslips/publish')
+          .set('Authorization', adminJwt())
+          .send({ payslipIds: [bindRes.body.id] });
+        expect(publishRes.status).toBe(200);
+        expect(publishRes.body.published).toHaveLength(1);
+        expect(publishRes.body.failed).toHaveLength(0);
+        expect(publishRes.body.published[0].id).toBe(bindRes.body.id);
+        // The row's publishedAt must now be set.
+        expect(boundRow.publishedAt).toBeTruthy();
+        // And sizeBytes is unchanged.
+        expect(boundRow.sizeBytes).toBe(BigInt(REGRESSION_PDF_SIZE));
+      } finally {
+        prisma.payslip.create = originalCreate;
+        payslipLib.payslipTestOverrides.verifyMagicBytes = previousOverride;
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it('K5. verifyBlobMatchesRecorded with the full-size row does NOT trip SIZE_DRIFT', async () => {
+    // Pin the per-row primitive: with the bind-time sizeBytes correctly
+    // recorded (150 KiB), the publish-time HEAD must match exactly. The
+    // previous bug recorded 4096 at bind, so the same HEAD returned
+    // 'SIZE_DRIFT' and the publish handler skipped the row.
+    const restore = installLargePdfMock();
+    try {
+      const out = await payslipLib.verifyBlobMatchesRecorded(
+        mockFakeS3Client, 'dpr-documents', 'payslips/test/key.pdf',
+        '"fake-etag"', BigInt(REGRESSION_PDF_SIZE),
+      );
+      expect(out).toBe('ok');
+    } finally {
+      restore();
+    }
   });
 });
