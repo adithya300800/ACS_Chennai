@@ -57,20 +57,23 @@ describe('Footer — DR-043 (no dead-affordance placeholders)', () => {
     expect(submitButtons.length).toBe(0);
   });
 
-  test('3. Privacy Policy and Terms of Service are present as static text, not links', () => {
+  test('3. Privacy Policy is a real link to /privacy.html; Terms of Service is still a static text label', () => {
     renderFooter();
-    // These are now <span> labels. queryByRole('link', ...) returns null
-    // for non-anchor elements, so the assertion is: the visible text
-    // exists in the document but is NOT exposed as a link role.
-    const privacyLinks = document.querySelectorAll('a');
-    const privacyTexts = Array.from(privacyLinks).map((a) => a.textContent);
-    expect(privacyTexts).not.toContain('Privacy Policy');
-    expect(privacyTexts).not.toContain('Terms of Service');
+    // Privacy Policy is now a real <a> pointing at the static
+    // /privacy.html page (Vite copies public/privacy.html to dist/).
+    const privacyPolicyLinks = Array.from(
+      document.querySelectorAll('a[href="/privacy.html"]')
+    );
+    const privacyPolicyLabels = privacyPolicyLinks.map((a) => a.textContent.trim());
+    expect(privacyPolicyLabels).toContain('Privacy Policy');
 
-    // And the labels themselves ARE present (so the legal/contact
-    // section still reads as a footer — we just don't pretend they're
-    // clickable).
-    expect(document.body.textContent).toMatch(/Privacy Policy/);
+    // Terms of Service still has no owned destination — keep it as a
+    // plain text label so the footer column still reads as a legal row
+    // without presenting a dead link.
+    const termsLinks = Array.from(document.querySelectorAll('a')).filter(
+      (a) => a.textContent.trim() === 'Terms of Service'
+    );
+    expect(termsLinks.length).toBe(0);
     expect(document.body.textContent).toMatch(/Terms of Service/);
   });
 

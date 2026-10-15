@@ -63,10 +63,14 @@ export default function Footer() {
         <div className="footer-bottom">
           <p>&copy; {new Date().getFullYear()} ACS Chennai. All rights reserved.</p>
           <div style={{ display: 'flex', gap: '1.2rem' }}>
-            {/* DR-043: Privacy Policy / Terms of Service were href="#" placeholders.
-                No real policy destination exists yet — render as plain text labels
-                (no role, no tabindex) instead of dead links that navigate to home. */}
-            <span style={{ fontSize: '0.82rem' }}>Privacy Policy</span>
+            {/* Privacy Policy points to the static /privacy.html served
+                from public/privacy.html (Vite copies it to dist/ as-is).
+                It is a plain <a href> — NOT a router <Link> — so crawlers
+                and JavaScript-disabled clients can reach it. The path is
+                also exposed in index.html so it is discoverable from the
+                raw homepage HTML. Terms of Service still has no
+                destination — keep as a plain text label. */}
+            <a href="/privacy.html" style={{ fontSize: '0.82rem' }}>Privacy Policy</a>
             <span style={{ fontSize: '0.82rem' }}>Terms of Service</span>
           </div>
         </div>

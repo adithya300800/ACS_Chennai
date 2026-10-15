@@ -16,8 +16,26 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+    <link rel="privacy-policy" href="/privacy.html" />
+    <style>
+      /* sr-only: hidden visually but read by screen readers and crawlers.
+         No layout impact; used for the static privacy-policy link that
+         Google's consent-screen check may scan. */
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0;
+        margin: -1px; overflow: hidden; clip: rect(0,0,0,0);
+        white-space: nowrap; border: 0;
+      }
+    </style>
   </head>
   <body>
+    <!-- Crawler-visible footer link to the static privacy policy.
+         The SPA's React-rendered footer link in src/components/Footer.jsx
+         also points here, but Google's OAuth consent-screen check and
+         general crawlers may not execute JavaScript — this static link
+         is what they actually read. Hidden from sighted users via the
+         sr-only class (still indexed as on-page content). -->
+    <a href="/privacy.html" class="sr-only">Privacy Policy</a>
     <div id="root"></div>
     <!-- YouTube IFrame Player API — loaded once globally so VideoPlayer can
          construct YT.Player on first YouTube course load. async + deferred
