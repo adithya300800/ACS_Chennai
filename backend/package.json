@@ -32,6 +32,7 @@
     "express-rate-limit": "^7.4.1",
     "handlebars": "^4.7.9",
     "helmet": "^8.0.0",
+    "jose": "^5.10.0",
     "jsonwebtoken": "^9.0.2",
     "nodemailer": "^9.1.1",
     "resend": "^4.0.0"

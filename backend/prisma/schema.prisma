@@ -124,6 +124,13 @@ model Employee {
   payslipsPublished          Payslip[]               @relation("PayslipPublisher")
   payslipsRevoked            Payslip[]               @relation("PayslipRevoker")
   payslipsPurged             Payslip[]               @relation("PayslipPurger")
+  // [feat/google-login-allowlist] Back-relation for the Google allowlist.
+  // Optional + SetNull on the FK side: an Employee can exist without a
+  // Google allowlist row (the Zoho path), and a Google allowlist row can
+  // exist before its first login (userId is NULL until the OAuth flow
+  // provisions / links the user). Mirrors NotificationPreference's
+  // pattern at line 78 (optional 1:1).
+  googleLoginAllowlist       GoogleLoginAllowlist?
 
   @@map("employees")
 }
@@ -2038,4 +2045,56 @@ model Payslip {
   @@index([employeeId, year(sort: Desc), month(sort: Desc)])
   @@index([year, month, deletedAt])
   @@map("payslip")
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Google login allowlist — parallel sign-in path for Gmail users.
+//
+// One allowlist row per Gmail address that may sign in. The mere
+// existence of an active row is the only way Google's OAuth flow can
+// produce a session for a Gmail address — there is no self-service
+// path, no "first user to claim this email gets in" race, and no
+// domain-level open door. Operator-driven only via the management
+// script (see scripts/google-allowlist.js) and raw SQL.
+//
+// `userId` is back-linked to the Employee row that the Google flow
+// provisioned (or, on a re-`add --user <existing>`, pre-existing)
+// Employee. SetNull on the FK mirrors the rest of the codebase:
+// removing an Employee must not orphan the allowlist row, the row
+// must surface "no user is bound yet" instead.
+//
+// `googleSub` is Google's stable per-user id (the `sub` claim on the
+// verified id_token). First login persists it; subsequent logins
+// must match — a Gmail address can be reclaimed after the original
+// owner deletes it, so a sub mismatch is treated as a security
+// failure and denied.
+//
+// `email` is plain-unique (Prisma generates
+// `google_login_allowlist_email_key`). The CHECK constraint
+// `email = lower(email)` is migration-only; the partial
+// `WHERE is_active` index is also migration-only. The Prisma side
+// and the migration side agree on every other column shape
+// (verified by `npx prisma migrate diff`, see
+// docs/google-login-allowlist.md).
+// ───────────────────────────────────────────────────────────────────────
+model GoogleLoginAllowlist {
+  id          String    @id @default(uuid())
+  email       String    @unique
+  // @unique is required: this is a 1:1 relation (an Employee can be
+  // linked from at most one allowlist row, since email is also
+  // unique). Prisma rejects a 1:1 `@relation` whose FK side is not
+  // unique. The migration also creates the matching
+  // `google_login_allowlist_user_id_key` unique index so
+  // `prisma migrate diff` reports no drift.
+  userId      String?   @unique @map("user_id")
+  googleSub   String?   @map("google_sub")
+  isActive    Boolean   @default(true) @map("is_active")
+  note        String?
+  addedBy     String?   @map("added_by")
+  createdAt   DateTime  @default(now())   @map("created_at")    @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt        @map("updated_at")    @db.Timestamptz(6)
+  lastLoginAt DateTime? @map("last_login_at")                  @db.Timestamptz(6)
+  employee    Employee? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@map("google_login_allowlist")
 }
