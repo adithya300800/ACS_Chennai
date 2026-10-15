@@ -5,6 +5,10 @@ import { useToast } from '../contexts/ToastContext.jsx';
 import { api } from '../lib/api.js';
 import { useDocumentTitle } from '../hooks/useDocumentTitle.js';
 import { resolveLanding } from '../lib/loginRedirect.js';
+// All `import.meta.env` access lives in env.js (project convention) so
+// tests can stub it via `jest.mock('../lib/env.js', ...)` and the
+// babel-jest parse of this file stays free of `import.meta` syntax.
+import { VITE_API_URL } from '../lib/env.js';
 
 // Map the backend's typed OAuth error codes to something a human can act on.
 // The popup posts `{ type: 'zoho-oauth-error', error: '<code>' }`; showing the
@@ -328,7 +332,7 @@ export default function PortalLogin() {
         // origin. Accept either; the typed `event.data.type` check below
         // is the real defense against rogue messages (origin can't be
         // spoofed by other windows).
-        const expected = (import.meta.env.VITE_API_URL || '').trim();
+        const expected = (VITE_API_URL || '').trim();
         const allowedOrigins = expected
           ? [new URL(expected).origin, window.location.origin]
           : [window.location.origin];
@@ -446,7 +450,7 @@ export default function PortalLogin() {
         // page on the backend origin) and from the current page origin.
         // The typed `event.data.type` check is the real defense against
         // rogue messages; origin can't be spoofed by other windows.
-        const expected = (import.meta.env.VITE_API_URL || '').trim();
+        const expected = (VITE_API_URL || '').trim();
         const allowedOrigins = expected
           ? [new URL(expected).origin, window.location.origin]
           : [window.location.origin];

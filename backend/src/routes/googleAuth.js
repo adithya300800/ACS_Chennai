@@ -369,6 +369,16 @@ async function runGoogleCallback(req, res, { code, state, mode }) {
 // GET /api/auth/google/callback — popup flow. Google redirects the
 // popup here with ?code=...&state=... in the query string.
 router.get('/callback', googleCallbackLimiter, (req, res) => {
+  // Kill switch: when Google is not fully configured, every route
+  // (including the callbacks) returns 404. The plan mandates this:
+  // "every route — including /active — returns 404" so the frontend
+  // never offers a button that would 404 the user mid-flow. Without
+  // this check, a callback request would still go through the
+  // handler, find no matching state, and return an INVALID_STATE
+  // popup — leaking the fact that the endpoint exists.
+  if (!isFullyConfigured()) {
+    return res.status(404).end();
+  }
   return runGoogleCallback(req, res, {
     code: req.query.code,
     state: req.query.state,
@@ -382,6 +392,9 @@ router.get('/callback', googleCallbackLimiter, (req, res) => {
 // setAuthData directly. IP-only rate limit (no email pre-parse —
 // the email is inside the id_token, only known after verification).
 router.post('/callback', googleSpaCallbackLimiter, (req, res) => {
+  if (!isFullyConfigured()) {
+    return res.status(404).end();
+  }
   return runGoogleCallback(req, res, {
     code: req.body && req.body.code,
     state: req.body && req.body.state,

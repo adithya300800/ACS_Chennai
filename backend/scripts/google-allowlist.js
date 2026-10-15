@@ -440,7 +440,12 @@ async function main() {
   const { command, positional, flags } = parsed;
   if (!command) {
     console.error(USAGE);
-    process.exit(command === undefined ? 0 : 2);
+    // No command → usage error. (The previous expression
+    // `command === undefined ? 0 : 2` exited 0 when no positional
+    // args were passed, which silently swallowed the "no command"
+    // case and made `node scripts/google-allowlist.js` succeed with
+    // just a usage print. Always exit 2 here.)
+    process.exit(2);
     return;
   }
   if (command === 'list') {
