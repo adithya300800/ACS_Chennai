@@ -404,6 +404,15 @@ function createApp(deps = {}) {
   app.use('/api/auth/login', loginLimiter);
   app.use('/api/auth/refresh', refreshLimiter);
   app.use('/api/auth', authRoutes);
+  // [feat/google-login-allowlist] Parallel "Sign in with Google" path.
+  // No callbackLimiter at the mount — the dedicated googleStartLimiter /
+  // googleCallbackLimiter / googleSpaCallbackLimiter are applied per
+  // route inside the router, and the /active endpoint is unthrottled.
+  // The /active endpoint returning 404 when the env-var kill switch is
+  // off means the SPA never renders the button in a misconfigured
+  // environment, so a missing limiter there is safe.
+  const googleAuthRouter = require('./routes/googleAuth');
+  app.use('/api/auth/google', googleAuthRouter);
   // Round-13: rate-limit the binary export BEFORE requireAuth so the limiter
   // fires even for unauthenticated floods (saves a DB lookup). The handler
   // itself still requires admin, so a banned admin still gets 403.

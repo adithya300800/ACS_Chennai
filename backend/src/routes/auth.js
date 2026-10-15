@@ -198,12 +198,24 @@ async function findOrCreateEmployee(prisma, { email, accessToken, refreshToken }
 // Validate OAuth state against the in-memory store. Returns the stored entry
 // on success and consumes it (one-time use). Returns null on any failure so
 // every call site can branch identically.
-function consumeOAuthState(state) {
+//
+// [feat/google-login-allowlist] Each state entry is now stamped with
+// its issuing flow ('zoho' or 'google'). When `requiredFlow` is
+// passed, a state whose flow does not match is rejected as well —
+// so a Zoho-issued state cannot be replayed on the Google callback
+// and vice versa. The state entry is consumed (deleted from the
+// store) on first read regardless of whether the flow matched, so
+// a replay returns null on the second attempt as well.
+function consumeOAuthState(state, requiredFlow) {
   if (!state || typeof state !== 'string') return null;
   const entry = oauthStateStore.get(state);
   if (!entry) return null;
+  // Delete on first read — one-time use. Doing the delete BEFORE the
+  // flow + TTL checks means a replay always returns null, even if
+  // the entry was minted in the last few ms.
   oauthStateStore.delete(state);
   if (!entry.expiresAt || Date.now() > entry.expiresAt) return null;
+  if (requiredFlow && entry.flow !== requiredFlow) return null;
   return entry;
 }
 
@@ -303,8 +315,10 @@ router.post('/zoho', (req, res) => {
   }
 
   // Cryptographically random state (AppSec #6) with an explicit expiresAt.
+  // [feat/google-login-allowlist] Stamp the flow so a Zoho state cannot
+  // be replayed on the Google callback (and vice versa).
   const state = crypto.randomBytes(32).toString('base64url');
-  oauthStateStore.set(state, { timestamp: now, expiresAt: now + STATE_TTL_MS });
+  oauthStateStore.set(state, { timestamp: now, expiresAt: now + STATE_TTL_MS, flow: 'zoho' });
 
   const scopes = 'openid profile email';
   const authUrl = `${ZOHO_DOMAIN}/oauth/v2/auth?` +
@@ -331,7 +345,7 @@ router.get('/zoho/callback', async (req, res) => {
 
   // Round-9: TTL-enforced state check. consumeOAuthState both validates
   // expiresAt and one-time-uses the entry.
-  if (!consumeOAuthState(state)) {
+  if (!consumeOAuthState(state, 'zoho')) {
     return errorHtml('invalid_state');
   }
 
@@ -426,7 +440,7 @@ router.post('/zoho/callback', async (req, res) => {
   // Round-9: TTL-enforced state. Both missing/expired states collapse to a
   // single INVALID_STATE so an attacker can't distinguish "never issued" from
   // "expired".
-  if (!consumeOAuthState(state)) {
+  if (!consumeOAuthState(state, 'zoho')) {
     return res.status(400).json({ error: 'Invalid or missing OAuth state', code: 'INVALID_STATE' });
   }
 
@@ -799,4 +813,21 @@ router.get('/me', requireAuth, async (req, res) => {
   }
 });
 
+// [feat/google-login-allowlist] The popup-closing helper and the
+// OAuth state store are shared with the Google auth route so both
+// providers mint state into the same Map (tagged with `flow`) and
+// render the same kind of postMessage closing page. Keeping the
+// store in this file avoids a second in-memory Map that the two
+// routes would have to coordinate. `consumeOAuthState` is also
+// re-exported so the Google route can call it with `'google'`
+// without reaching into auth.js's internals. `issueSession` and
+// `sanitizeEmployee` are re-exported so the Google route can mint
+// the same JWT shape (employeeId, email, isAdmin, jti) and return
+// the same Employee DTO the Zoho path returns to the SPA.
 module.exports = router;
+module.exports.sendPopupPage = sendPopupPage;
+module.exports.consumeOAuthState = consumeOAuthState;
+module.exports.oauthStateStore = oauthStateStore;
+module.exports.STATE_TTL_MS = STATE_TTL_MS;
+module.exports.issueSession = issueSession;
+module.exports.sanitizeEmployee = sanitizeEmployee;
