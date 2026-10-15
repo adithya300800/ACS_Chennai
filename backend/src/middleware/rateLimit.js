@@ -116,6 +116,62 @@ const callbackLimiter = rateLimit({
   message: { error: 'Too many OAuth callbacks from this address. Please slow down.', code: 'OAUTH_THROTTLED' },
 });
 
+// [feat/google-login-allowlist] Dedicated Google-OAuth rate limiters.
+//
+// These are deliberately separate instances from `loginLimiter` /
+// `callbackLimiter` so Google attempts do not share a counter with
+// password logins or Zoho callbacks from the same IP. A user on a
+// corporate NAT who hits the Google button three times must not
+// burn three of the five password-login slots for that IP's minute.
+//
+// Sizing matches the Zoho analogues where it makes sense:
+//   googleStartLimiter      5/min  ≈  loginLimiter (POST /google)
+//   googleCallbackLimiter  10/h    ≈  callbackLimiter (GET /google/callback)
+//   googleSpaCallbackLimiter 5/min ≈  loginLimiter (POST /google/callback)
+//
+// `skipSuccessfulRequests: true` on googleCallbackLimiter: a shared
+// office IP may legitimately retry the GET callback after a transient
+// (network blip, popup closed by user, etc.). Successful responses
+// don't penalise the IP — only failures do. The Zoho callbackLimiter
+// above does NOT have this flag and has the same shared-IP risk; that
+// is a known issue and is out of scope for this round (per the
+// plan's "report only" decision).
+const googleStartLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  validate: { trustProxy: true },
+  message: { error: 'Too many Google sign-in attempts from this address. Please slow down.', code: 'GOOGLE_START_THROTTLED' },
+});
+
+const googleCallbackLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  validate: { trustProxy: true },
+  skipSuccessfulRequests: true,
+  message: { error: 'Too many Google OAuth callbacks from this address. Please slow down.', code: 'GOOGLE_CALLBACK_THROTTLED' },
+});
+
+// SPA callback (POST /google/callback): can't key on email pre-parse
+// (the email is inside the Google id_token and only known after
+// token exchange). IP-only, 5/min — a single user re-submitting
+// because of a transient network blip is the worst case, and the
+// legitimate worst case is well under the 5/min budget.
+const googleSpaCallbackLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  validate: { trustProxy: true },
+  message: { error: 'Too many Google sign-in attempts from this address. Please slow down.', code: 'GOOGLE_SPA_THROTTLED' },
+});
+
 // Round-13: 5 / minute / IP — attendance Excel export. HR/admin regenerates
 // the file rarely; a runaway button or scripted abuse is the risk.
 const exportLimiter = rateLimit({
@@ -263,4 +319,7 @@ module.exports = {
   payslipUploadLimiter,
   payslipAdminLimiter,
   payslipDownloadLimiter,
+  googleStartLimiter,
+  googleCallbackLimiter,
+  googleSpaCallbackLimiter,
 };

@@ -141,6 +141,21 @@ services:
       - key: ZOHO_REDIRECT_URI
         sync: false
 
+      # [feat/google-login-allowlist] Google OAuth (parallel sign-in path,
+      # gated by the allowlist table). All four are read at module load
+      # by backend/src/routes/googleAuth.js. GOOGLE_LOGIN_ENABLED defaults
+      # to OFF so the code can ship before the OAuth client is created.
+      # The button visibility is a runtime check (GET /api/auth/google/
+      # active) — no VITE_* counterpart needed on the SPA.
+      - key: GOOGLE_LOGIN_ENABLED
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+
   # ========================================================================
   # 2. Frontend SPA (static site)  —  srv-dad741lg1s2s73fatpf0
   #    https://acs-portal-spa.onrender.com

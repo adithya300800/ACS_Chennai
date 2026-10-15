@@ -684,6 +684,24 @@ export const api = {
   getZohoAuthUrl: () => api.post('/auth/zoho'),
   postZohoCallback: (code) => api.post('/auth/zoho/callback', { code }),
 
+  // [feat/google-login-allowlist] Parallel "Sign in with Google" helpers.
+  //
+  // Mirrors the Zoho helpers above but with two extra endpoints:
+  //   * getGoogleLoginActive() — drive the button visibility on the SPA.
+  //     Returns 200 { enabled: true } iff the backend's
+  //     GOOGLE_LOGIN_ENABLED kill switch is on AND all three Google env
+  //     vars are set. Any non-200 (404 when disabled, 5xx when the API is
+  //     down, network error) surfaces as an ApiError that the SPA treats
+  //     as "do not render the Google button".
+  //   * postGoogleCallback(code, state) — SPA-callback path. Mirrors the
+  //     Zoho postZohoCallback shape but also forwards the OAuth `state`
+  //     so the server can validate it. The popup-flow path doesn't need
+  //     this helper (the popup's postMessage carries the tokens
+  //     directly).
+  getGoogleLoginActive: () => api.get('/auth/google/active'),
+  getGoogleAuthUrl: () => api.post('/auth/google'),
+  postGoogleCallback: (code, state) => api.post('/auth/google/callback', { code, state }),
+
   // Round-12: Inspection & Compliance Records — first-class resource that
   // owns the 15 structured sub-work types (material / cube / water /
   // waterproofing / villa / day-activity / NCR / safety / major_deviation)
