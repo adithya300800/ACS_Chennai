@@ -18,6 +18,26 @@ const ZOHO_ERRORS = {
   server_error: 'Something went wrong on our end. Please try again.',
 };
 
+// [feat/google-login-allowlist] Google OAuth error map. The backend
+// distinguishes four denial modes internally (not_allowlisted, sub_mismatch,
+// email_not_verified, token_invalid) but the popup and JSON responses
+// always return a single GOOGLE_DENIED code — the internal reason is only
+// logged. So every distinct code in the table except INVALID_STATE and
+// MISSING_CODE maps to the same generic message; we keep the keys
+// distinct so future internal codes don't accidentally fall through to
+// the "Google login failed" fallback.
+const GOOGLE_ERRORS = {
+  INVALID_STATE: 'Your sign-in session expired. Please try again.',
+  MISSING_CODE: 'Google did not return an authorization code. Please try again.',
+  GOOGLE_DENIED: 'Sign-in with Google is not enabled for this account. Please contact your administrator.',
+  // Throttle codes (mirrors the structured `code` field the rate
+  // limiters return at api.js:139-173). The message here is the
+  // human-readable version of the structured payload.
+  GOOGLE_START_THROTTLED: 'Too many Google sign-in attempts from this address. Please slow down.',
+  GOOGLE_CALLBACK_THROTTLED: 'Too many Google sign-in attempts from this address. Please slow down.',
+  GOOGLE_SPA_THROTTLED: 'Too many Google sign-in attempts from this address. Please slow down.',
+};
+
 // B-04 (round-15+): one-time welcome toast on first successful login per
 // employee. Keyed by employee ID in localStorage so (a) it only fires once
 // per user, and (b) logging out and a different employee logging in on the
@@ -78,6 +98,13 @@ export default function PortalLogin() {
   const [formError, setFormError] = useState('');
   const [status, setStatus] = useState('idle'); // idle | loading
   const [showPassword, setShowPassword] = useState(false);
+  // [feat/google-login-allowlist] Visibility flag for the Google sign-in
+  // button. Defaults to false (button hidden) so a render before the
+  // /active check resolves never shows a button that 404s the user
+  // mid-flow. A successful 200 { enabled: true } flips this to true.
+  // Any non-200 (404 when kill switch is off, 5xx when the API is down,
+  // a network error) keeps it false.
+  const [googleEnabled, setGoogleEnabled] = useState(false);
 
   // DR-015: resolved by `resolveLanding(from, employee)` (see
   // src/lib/loginRedirect.js). When ProtectedRoute redirected an
@@ -155,6 +182,30 @@ export default function PortalLogin() {
         });
     }
   }, [searchParams, navigate, setAuthData]);
+
+  // [feat/google-login-allowlist] Probe the backend's /active endpoint
+  // on mount. A 200 { enabled: true } means GOOGLE_LOGIN_ENABLED is on
+  // AND all three Google env vars are set; we render the Google button.
+  // Any non-200 (404 when kill switch is off, 5xx when the API is down,
+  // a network error) keeps the button hidden. Single mount-time fetch
+  // — we do not poll, and we do not refetch on tab focus. If the
+  // operator flips the kill switch at runtime, the page is reloaded
+  // to pick up the new state. Wrapped in a try/catch so a fetch
+  // failure (no /active route at all on an older build) leaves the
+  // button hidden instead of throwing during render.
+  useEffect(() => {
+    let cancelled = false;
+    api.getGoogleLoginActive()
+      .then((data) => {
+        if (cancelled) return;
+        setGoogleEnabled(data && data.enabled === true);
+      })
+      .catch(() => {
+        // Disabled, network down, or 5xx — leave the button hidden.
+        if (!cancelled) setGoogleEnabled(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const handleChange = (e) => {
     setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
@@ -340,6 +391,113 @@ export default function PortalLogin() {
     }
   };
 
+  // [feat/google-login-allowlist] "Sign in with Google" — parallel to
+  // handleZohoLogin above. Uses the same popup-gesture trick (open
+  // about:blank synchronously inside the click handler, navigate to
+  // authUrl after the fetch resolves) so the popup isn't blocked by
+  // modern browsers' user-activation rules. The backend's
+  // `prompt=select_account` forces the Google account picker on every
+  // login, defending against a shared browser with a cached Google
+  // session.
+  //
+  // The popup posts `{ type: 'google-oauth-success', ...sessionTokens,
+  // employee }` on success, or `{ type: 'google-oauth-error', error:
+  // '<code>' }` on denial. We use the SAME message listener scaffolding
+  // (allowedOrigins check, closedWatch, giveUp) as the Zoho path — the
+  // only branch is on the message type and the error code map.
+  const handleGoogleLogin = async () => {
+    setStatus('loading');
+
+    // CRITICAL: open the popup SYNCHRONOUSLY (before any await) — see
+    // the equivalent block in handleZohoLogin for the full rationale.
+    const width = 600;
+    const height = 700;
+    const left = window.screenX + (window.outerWidth - width) / 2;
+    const top = window.screenY + (window.outerHeight - height) / 2;
+    const features = `width=${width},height=${height},left=${left},top=${top},scrollbars=yes`;
+    const popup = window.open('about:blank', 'GoogleOAuth', features);
+
+    if (!popup) {
+      toast.push('Pop-ups are blocked for this site. Please allow pop-ups and try again.', 'error');
+      setStatus('idle');
+      return;
+    }
+
+    try {
+      const { authUrl } = await api.getGoogleAuthUrl();
+      popup.location.href = authUrl;
+
+      let settled = false;
+      let closedWatch = null;
+      let giveUp = null;
+      const cleanup = () => {
+        settled = true;
+        window.removeEventListener('message', handleMessage);
+        clearInterval(closedWatch);
+        clearTimeout(giveUp);
+        try { popup.close(); } catch {}
+      };
+
+      function handleMessage(event) {
+        // Same origin allowlist as the Zoho path — accept messages from
+        // the configured backend origin (the popup redirects to Google
+        // then back to the backend at https://acs-chennai.onrender.com/
+        // api/auth/google/callback, which renders the postMessage closing
+        // page on the backend origin) and from the current page origin.
+        // The typed `event.data.type` check is the real defense against
+        // rogue messages; origin can't be spoofed by other windows.
+        const expected = (import.meta.env.VITE_API_URL || '').trim();
+        const allowedOrigins = expected
+          ? [new URL(expected).origin, window.location.origin]
+          : [window.location.origin];
+        if (!allowedOrigins.includes(event.origin)) return;
+        if (event.data?.type === 'google-oauth-success') {
+          cleanup();
+          setAuthData(event.data.accessToken, event.data.employee, event.data.refreshToken);
+          try {
+            Object.keys(sessionStorage).forEach((k) => {
+              if (k.startsWith('acs_logout_toast_')) sessionStorage.removeItem(k);
+            });
+          } catch {}
+          maybeShowWelcomeToast(toast, event.data.employee);
+          // DR-015: same `from`-aware landing resolution as the Zoho
+          // and password paths.
+          const landing = resolveLanding(location.state?.from, event.data.employee);
+          navigate(landing, { replace: true });
+        } else if (event.data?.type === 'google-oauth-error') {
+          cleanup();
+          // The popup's `error` field is the typed code
+          // (GOOGLE_DENIED / GOOGLE_*_THROTTLED / INVALID_STATE /
+          // MISSING_CODE). Map it to a human message via GOOGLE_ERRORS;
+          // unknown codes fall through to the generic copy so a future
+          // server-side addition never crashes the SPA.
+          toast.push(GOOGLE_ERRORS[event.data.error] || 'Google sign-in failed. Please try again.', 'error');
+          setStatus('idle');
+        }
+      }
+      window.addEventListener('message', handleMessage);
+
+      closedWatch = setInterval(() => {
+        if (popup.closed) {
+          cleanup();
+          setStatus((s) => (s === 'loading' ? 'idle' : s));
+        }
+      }, 500);
+
+      giveUp = setTimeout(() => {
+        if (settled) return;
+        cleanup();
+        toast.push('Google sign-in timed out. Please close the Google window and try again.', 'error');
+        setStatus('idle');
+      }, 3 * 60 * 1000);
+
+    } catch (err) {
+      try { popup.close(); } catch {}
+      toast.push(err.message || 'Google sign-in is not available.', 'error');
+      setStatus('idle');
+    }
+  };
+
   return (
     <div className="portal-auth-bg">
       <div className="portal-auth-card">
@@ -372,6 +530,42 @@ export default function PortalLogin() {
           </svg>
           Sign in with Zoho
         </button>
+
+        {/* [feat/google-login-allowlist] Google sign-in button. Renders
+            ONLY when the backend's /api/auth/google/active returned
+            { enabled: true } — i.e. the kill switch is on AND all three
+            Google env vars are set. Otherwise the button is hidden so a
+            misconfigured environment never surfaces a broken flow. The
+            Google branding SVG is the official 4-color "G" mark. */}
+        {googleEnabled && (
+          <button
+            type="button"
+            onClick={handleGoogleLogin}
+            className="btn btn-google"
+            style={{
+              width: '100%',
+              justifyContent: 'center',
+              padding: '0.85rem',
+              marginBottom: '1rem',
+              background: 'white',
+              color: '#3c4043',
+              border: '1px solid #dadce0',
+              borderRadius: '4px',
+              display: 'flex',
+              alignItems: 'center',
+            }}
+            disabled={status === 'loading'}
+            data-testid="google-signin-button"
+          >
+            <svg width="20" height="20" viewBox="0 0 48 48" style={{ marginRight: '0.75rem' }} aria-hidden="true">
+              <path fill="#4285F4" d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z"/>
+              <path fill="#34A853" d="M24 46c5.94 0 10.92-1.97 14.56-5.33l-7.11-5.52c-1.97 1.32-4.49 2.1-7.45 2.1-5.73 0-10.58-3.87-12.31-9.07H4.34v5.7C7.96 41.07 15.4 46 24 46z"/>
+              <path fill="#FBBC05" d="M11.69 28.18c-.44-1.32-.69-2.73-.69-4.18s.25-2.86.69-4.18v-5.7H4.34C2.85 17.09 2 20.45 2 24s.85 6.91 2.34 9.88l7.35-5.7z"/>
+              <path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z"/>
+            </svg>
+            Sign in with Google
+          </button>
+        )}
 
         <div style={{ display: 'flex', alignItems: 'center', margin: '1rem 0', color: 'var(--steel)', fontSize: '0.85rem' }}>
           <div style={{ flex: 1, height: '1px', background: '#ddd' }} />
