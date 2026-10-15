@@ -5,6 +5,14 @@ const crypto = require('crypto');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
 const { hashIdentifier } = require('../lib/pii');
+// [feat/google-login-allowlist] Shared provisioning helper — owns the
+// P2002 race-safe re-fetch dance so the Zoho path here and the
+// (upcoming) Google path in routes/googleAuth.js cannot drift. The
+// Zoho-specific `zohoAccessToken` / `zohoRefreshToken` columns are
+// passed through as `extraFields`; the helper writes them verbatim
+// to both the create and the update branches, so the Zoho behaviour
+// is byte-identical to the previous inline implementation.
+const { findOrCreateEmployeeFromProvider } = require('../lib/userProvisioning');
 const {
   ACCESS_TOKEN_TTL,
   recordRefreshToken,
@@ -162,33 +170,29 @@ function sanitizeEmployee(employee) {
 // `prisma.employee.create` and surface P2002 as a 500 (P1-#9). The catch
 // path re-fetches the row so the loser of the race continues down the
 // "update tokens" branch instead of erroring out.
+//
+// [feat/google-login-allowlist] This wrapper is now a thin shim over
+// `findOrCreateEmployeeFromProvider` in lib/userProvisioning.js. The
+// Zoho-specific `zohoAccessToken` / `zohoRefreshToken` columns are
+// passed as `extraFields`; the helper writes them verbatim to both
+// the create and the update branches. The previous inline name-from-
+// email-local-part derivation is also in the helper, so behaviour is
+// byte-identical and the existing Zoho tests stay green. We keep this
+// thin wrapper (instead of deleting it and updating every call site)
+// so the diff to the Zoho path is a 1:1 swap that is easy to audit
+// line-by-line.
 async function findOrCreateEmployee(prisma, { email, accessToken, refreshToken }) {
-  let employee = await prisma.employee.findUnique({ where: { email } });
-  if (employee) {
-    return prisma.employee.update({
-      where: { email },
-      data: { zohoAccessToken: accessToken, zohoRefreshToken: refreshToken },
-    });
-  }
-  const nameParts = email.split('@')[0].replace(/[._]/g, ' ').split(' ');
-  const name = nameParts.map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
-  try {
-    return await prisma.employee.create({
-      data: { email, name, zohoAccessToken: accessToken, zohoRefreshToken: refreshToken },
-    });
-  } catch (err) {
-    if (err && err.code === 'P2002') {
-      // Lost the race; the winner created the row. Refetch and update.
-      const existing = await prisma.employee.findUnique({ where: { email } });
-      if (existing) {
-        return prisma.employee.update({
-          where: { email },
-          data: { zohoAccessToken: accessToken, zohoRefreshToken: refreshToken },
-        });
-      }
-    }
-    throw err;
-  }
+  return findOrCreateEmployeeFromProvider(prisma, {
+    email,
+    // No displayName: the Zoho path has always derived the name from
+    // the email local-part. Changing that here would change the UX
+    // for existing @acschennai.com users — out of scope for this
+    // round.
+    extraFields: {
+      zohoAccessToken: accessToken,
+      zohoRefreshToken: refreshToken,
+    },
+  });
 }
 
 // Validate OAuth state against the in-memory store. Returns the stored entry
