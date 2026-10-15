@@ -184,11 +184,15 @@ describe('PortalLogin — Google sign-in button', () => {
     // The handler compares `event.origin` to the URL derived from
     // VITE_API_URL (mocked above as 'http://localhost') and the
     // current window's origin (also 'http://localhost' under
-    // MemoryRouter + jsdom).
+    // MemoryRouter + jsdom). We also pin `event.source` to mockPopup:
+    // [fix/google-oauth-redirect-uri] the Google handler now requires
+    // event.source === popup before it processes the message, so a
+    // bare MessageEvent with no source would be rejected.
     const ev = new MessageEvent('message', {
       origin: 'http://localhost',
       data: { type: 'google-oauth-error', error: 'GOOGLE_DENIED' },
     });
+    Object.defineProperty(ev, 'source', { value: mockPopup, configurable: true });
     window.dispatchEvent(ev);
     await waitFor(() => {
       expect(mockToastPush).toHaveBeenCalledWith(

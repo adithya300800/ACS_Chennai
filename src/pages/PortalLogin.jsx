@@ -10,6 +10,21 @@ import { resolveLanding } from '../lib/loginRedirect.js';
 // babel-jest parse of this file stays free of `import.meta` syntax.
 import { VITE_API_URL } from '../lib/env.js';
 
+// [fix/google-oauth-redirect-uri] Origin of the Google OAuth callback
+// page. The popup at https://api.acschennai.com (the CNAME'd custom
+// domain behind which GOOGLE_REDIRECT_URI is served in production)
+// is the source of the postMessage. This value MUST match the host
+// of GOOGLE_REDIRECT_URI exactly — if either is moved, update this
+// and the Google Cloud Console "Authorized redirect URIs" in lockstep.
+//
+// Why a build-time constant instead of a VITE_* env var: the apex
+// site is built by GitHub Actions (Pages), not Render. Adding a new
+// VITE_* var would require extending the Pages build's environment,
+// and the custom domain is tied to the OAuth client and not expected
+// to move. A named constant is the simpler choice; if the host ever
+// changes, one line changes here and one in the Google Cloud Console.
+const GOOGLE_CALLBACK_ORIGIN = 'https://api.acschennai.com';
+
 // Map the backend's typed OAuth error codes to something a human can act on.
 // The popup posts `{ type: 'zoho-oauth-error', error: '<code>' }`; showing the
 // raw code ("token_exchange_failed") to an employee is not an error message.
@@ -443,17 +458,31 @@ export default function PortalLogin() {
       };
 
       function handleMessage(event) {
-        // Same origin allowlist as the Zoho path — accept messages from
-        // the configured backend origin (the popup redirects to Google
-        // then back to the backend at https://acs-chennai.onrender.com/
-        // api/auth/google/callback, which renders the postMessage closing
-        // page on the backend origin) and from the current page origin.
-        // The typed `event.data.type` check is the real defense against
-        // rogue messages; origin can't be spoofed by other windows.
+        // [fix/google-oauth-redirect-uri] The popup runs on
+        // https://api.acschennai.com (the CNAME'd custom domain behind
+        // which GOOGLE_REDIRECT_URI is served — see GOOGLE_CALLBACK_ORIGIN
+        // above), so the postMessage's event.origin is that host, not
+        // VITE_API_URL's host. Accept VITE_API_URL + the current page
+        // origin (same as the Zoho path, kept for the case where the
+        // Render host is the popup's origin in some non-prod env) AND
+        // the Google callback origin. The Zoho handler's allowlist is
+        // deliberately byte-identical and does NOT include
+        // GOOGLE_CALLBACK_ORIGIN — Zoho's popup is never on
+        // api.acschennai.com.
+        //
+        // event.source check: the message must come from the popup
+        // window THIS click handler opened, not from some other window
+        // a malicious page might have standing by. The browser fills
+        // in event.source with the Window that called postMessage, and
+        // the click handler captures the popup ref in a closure, so a
+        // direct identity check is reliable. We check source BEFORE
+        // the origin allowlist so a wrong-source message from the
+        // right origin is also rejected (defense in depth).
+        if (event.source !== popup) return;
         const expected = (VITE_API_URL || '').trim();
         const allowedOrigins = expected
-          ? [new URL(expected).origin, window.location.origin]
-          : [window.location.origin];
+          ? [new URL(expected).origin, window.location.origin, GOOGLE_CALLBACK_ORIGIN]
+          : [window.location.origin, GOOGLE_CALLBACK_ORIGIN];
         if (!allowedOrigins.includes(event.origin)) return;
         if (event.data?.type === 'google-oauth-success') {
           cleanup();
