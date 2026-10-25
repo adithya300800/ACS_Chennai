@@ -56,6 +56,36 @@ const CACHE_TTL_MS = 60 * 1000;
 // like token theft and would log the user out everywhere.
 const ROTATION_REPLAY_MS = 30 * 1000;
 
+// Durable rotation-receipt lifetime.
+//
+// WHY THIS IS NOT THE SUCCESSOR'S TTL.
+//
+// The rotation_receipt row is the only place in the schema where a refresh
+// token is stored IN THE CLEAR (the refresh_token table stores a sha256
+// digest precisely so a read-only DB leak — backup, SQLi, over-broad support
+// query — cannot yield a usable 7-day credential; see hashRefreshToken()).
+// When the receipt's TTL matched the successor's 7-day lifetime, that
+// guarantee was undone: a single leaked receipt row handed the attacker a
+// working session for a week.
+//
+// Bounding the receipt therefore matters for the same reason the digest
+// exists. The bound has to be long enough for the recovery DR-002 was
+// built for (a rotation that committed but whose response never reached the
+// client — network blip, laptop wake, Render cold start) and short enough
+// that a leaked receipt is worthless almost immediately.
+//
+//   30s  (ROTATION_REPLAY_MS) is too tight — it is the in-memory tab-race
+//         window, and a client that was offline for longer than that comes
+//         back holding a spent token, which the route then treats as theft
+//         and answers with REFRESH_REUSED (every session revoked). That is
+//         the round-5 "session expired ... multiple times" complaint.
+//   7d   (the old value) is the exposure the digest design exists to prevent.
+//
+// 5 minutes covers the realistic recovery gaps (15s client timeout + retry,
+// ~60s cold start, a brief laptop wake) while cutting the leaked-credential
+// window from 7 days to 5 minutes. Raise it only with a matching reason.
+const ROTATION_RECEIPT_TTL_MS = 5 * 60 * 1000;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Cache invalidation bus
 // ─────────────────────────────────────────────────────────────────────────────
@@ -348,9 +378,11 @@ async function rotateRefreshTokenAtomic(prisma, { row, tokens, employeeId }) {
         employeeId,
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
-        // The recovery copy is valid only during the concurrent-request
-        // grace period, not for the successor refresh token's full lifetime.
-        expiresAt: new Date(Date.now() + ROTATION_REPLAY_MS),
+        // The recovery copy is bounded by ROTATION_RECEIPT_TTL_MS, NOT by the
+        // successor refresh token's full 7-day lifetime — this row stores the
+        // token pair in the clear, so its lifetime IS the exposure window.
+        // See the constant's comment for the reasoning.
+        expiresAt: new Date(Date.now() + ROTATION_RECEIPT_TTL_MS),
       },
     });
     return { successor };
@@ -366,9 +398,19 @@ async function rotateRefreshTokenAtomic(prisma, { row, tokens, employeeId }) {
  * winner's token pair instead of being killed as a thief. Returns null
  * if no receipt exists (genuine theft / unrelated revocation).
  *
- * The receipt's TTL matches the successor refresh_token row's TTL, so
- * we also gate on `expiresAt > now` — an expired receipt means the
- * successor is also dead and the client must re-authenticate.
+ * TWO independent gates must both pass before a pair is handed back:
+ *
+ *   1. The receipt's own TTL (`ROTATION_RECEIPT_TTL_MS`). This row holds
+ *      the token pair in the clear, so it is deliberately short-lived —
+ *      it bounds both the recovery window and the blast radius of a
+ *      read-only leak of the rotation_receipt table.
+ *
+ *   2. The successor refresh_token row must still be LIVE. Without this
+ *      check the receipt outlives the session it belongs to: a client
+ *      that signed out (POST /logout revokes the successor row but not
+ *      the predecessor's receipt) could replay the OLD token and be
+ *      handed a fresh session for a credential the user explicitly
+ *      retired. Revoking the successor kills the receipt's usefulness.
  */
 async function findRotationReceiptBySpentRowId(prisma, spentRowId) {
   if (!spentRowId) return null;
@@ -394,10 +436,17 @@ async function revokeAllRefreshTokensForEmployee(prisma, employeeId, { reason = 
   });
   // Delete durable credential copies when their associated sessions are
   // revoked; replay memory is cleared as well, including logout and reuse.
+  //
+  // The receipt rows hold the token pair IN THE CLEAR, so leaving them
+  // behind after the session they belong to is revoked would keep a
+  // usable credential alive. Deleting them is the durable half of the
+  // same intent as clearRotationReplayForEmployee() below.
   if (prisma.rotationReceipt?.deleteMany) {
     await prisma.rotationReceipt.deleteMany({ where: { employeeId } }).catch(() => {});
   }
-  clearRotationReplay();
+  // Scoped to THIS employee: revoking one employee's sessions must not
+  // wipe an unrelated employee's in-flight rotation fast path.
+  clearRotationReplayForEmployee(employeeId);
   revocationEvents.emit('employee:sessions-revoked', {
     employeeId,
     count: result.count,
@@ -435,11 +484,21 @@ async function revokeRefreshTokenByValue(prisma, token) {
 //
 // The tokens sit in memory only, for 30 seconds, and are never written to disk
 // or logs. That is a strictly smaller exposure than the client's localStorage.
-const rotationReplay = new Map(); // spentRowId → { payload, storedAt }
+const rotationReplay = new Map(); // spentRowId → { payload, storedAt, employeeId }
 
-function rememberRotation(spentRowId, payload) {
+/**
+ * Remember the pair we handed out for a spent row so a sibling tab that
+ * raced us can be given the SAME pair instead of being treated as a thief.
+ *
+ * @param spentRowId the id of the refresh_token row we just spent
+ * @param payload    { accessToken, refreshToken } we returned to the winner
+ * @param employeeId owner of the session — used to scope the per-employee
+ *                   purge in clearRotationReplayForEmployee(). Optional so
+ *                   existing callers keep working.
+ */
+function rememberRotation(spentRowId, payload, employeeId = null) {
   if (!spentRowId) return;
-  rotationReplay.set(spentRowId, { payload, storedAt: Date.now() });
+  rotationReplay.set(spentRowId, { payload, storedAt: Date.now(), employeeId });
   // Opportunistic sweep — the map only ever holds a few seconds of rotations.
   const cutoff = Date.now() - ROTATION_REPLAY_MS;
   for (const [key, entry] of rotationReplay.entries()) {
@@ -463,6 +522,25 @@ function clearRotationReplay() {
   rotationReplay.clear();
 }
 
+/**
+ * Drop only ONE employee's replay entries.
+ *
+ * The revoke path (logout-all, detected reuse) must not disturb any OTHER
+ * employee's in-flight rotation: a global wipe would make an unrelated
+ * employee's concurrent tab miss the in-memory fast path. The durable
+ * rotation_receipt still covers that case, but the in-memory path is the
+ * cheap one and there is no reason to degrade it for someone else.
+ *
+ * Entries recorded before `employeeId` was threaded through have no owner
+ * and are left alone — they expire on their own within ROTATION_REPLAY_MS.
+ */
+function clearRotationReplayForEmployee(employeeId) {
+  if (!employeeId) return;
+  for (const [key, entry] of rotationReplay.entries()) {
+    if (entry.employeeId === employeeId) rotationReplay.delete(key);
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pruning
 // ─────────────────────────────────────────────────────────────────────────────
@@ -470,9 +548,10 @@ function clearRotationReplay() {
 /**
  * Delete rows that can no longer deny anything (`expiresAt` in the past).
  * Both tables are indexed on `expiresAt` for exactly this scan. The
- * rotation_receipt table is swept alongside the successor refresh_token
- * row whose TTL it mirrors — a live receipt with a dead successor would
- * hand back a useless pair.
+ * rotation_receipt table is swept on its OWN horizon
+ * (`ROTATION_RECEIPT_TTL_MS`), which is deliberately shorter than the
+ * successor refresh_token row's lifetime — a receipt that outlived its
+ * usefulness would keep a cleartext token pair alive for nothing.
  *
  * Called opportunistically from the logout path rather than on a timer, so
  * there is no interval to leak across test runs or graceful shutdown.
@@ -481,9 +560,8 @@ async function pruneExpired(prisma, { now = new Date() } = {}) {
   const [revoked, refresh, receipts] = await Promise.all([
     prisma.revokedToken.deleteMany({ where: { expiresAt: { lt: now } } }),
     prisma.refreshToken.deleteMany({ where: { expiresAt: { lt: now } } }),
-    // DR-002: a receipt outlives its successor only if pruneExpired on
-    // refresh_token ran first; deleting by the same horizon here keeps
-    // them in lockstep.
+    // DR-002: receipts expire on their own (short) horizon; pruning them
+    // here just reclaims the rows sooner than the next logout would.
     prisma.rotationReceipt.deleteMany({ where: { expiresAt: { lt: now } } }).catch(() => ({ count: 0 })),
   ]);
   return {
@@ -498,6 +576,7 @@ module.exports = {
   REFRESH_TOKEN_TTL_DAYS,
   REFRESH_TOKEN_TTL_MS,
   ROTATION_REPLAY_MS,
+  ROTATION_RECEIPT_TTL_MS,
   CACHE_TTL_MS,
   CACHE_MAX_ENTRIES,
   revocationEvents,
@@ -515,6 +594,7 @@ module.exports = {
   rememberRotation,
   takeRotationReplay,
   clearRotationReplay,
+  clearRotationReplayForEmployee,
   clearRevocationCache,
   pruneExpired,
 };

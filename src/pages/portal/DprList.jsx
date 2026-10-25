@@ -259,8 +259,24 @@ export default function DprList() {
     return expandedDpr && expandedDpr.submittedById && expandedDpr.submittedById === (employee?.id || null);
   }
 
+  // [DR-034 evidence lock] The server rejects evidence replacement once
+  // a DPR leaves DRAFT (409 DPR_EVIDENCE_LOCKED): swapping the bytes of
+  // an already-submitted report would let the submitter replace the
+  // evidence an admin is reviewing, under the admin's nose. Mirror that
+  // gate here so the button is disabled WITH a reason, instead of
+  // letting the user pick a file and then fail at the PATCH.
+  function isEvidenceLocked() {
+    return !expandedDpr || expandedDpr.status !== 'DRAFT';
+  }
+
   function startReplacePhoto(photo) {
     if (replaceBusyPhotoId) return;
+    if (isEvidenceLocked()) {
+      const msg = 'Evidence can only be replaced while the report is a draft.';
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+      return;
+    }
     if (!canReplacePhoto(photo)) {
       const msg = 'Only the DPR’s submitter or an admin can replace this photo.';
       setReplaceError(msg);
@@ -1206,9 +1222,11 @@ export default function DprList() {
                                 className="btn btn-ghost btn-sm"
                                 style={{ marginTop: '0.25rem', width: '100%' }}
                                 onClick={() => startReplacePhoto(p)}
-                                disabled={replaceBusyPhotoId === p.id || (replaceBusyPhotoId !== null && replaceBusyPhotoId !== p.id)}
+                                disabled={isEvidenceLocked() || replaceBusyPhotoId === p.id || (replaceBusyPhotoId !== null && replaceBusyPhotoId !== p.id)}
                                 aria-label={`Replace photo ${i + 1} of ${expandedDpr.photos.length}`}
-                                title="Re-upload a new photo in place — use this when the existing one is broken (BLOB_GONE)"
+                                title={isEvidenceLocked()
+                                  ? 'Evidence can only be replaced while the report is a draft'
+                                  : 'Re-upload a new photo in place — use this when the existing one is broken (BLOB_GONE)'}
                               >
                                 {replaceBusyPhotoId === p.id ? 'Uploading…' : 'Replace'}
                               </button>

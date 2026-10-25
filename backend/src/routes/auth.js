@@ -726,7 +726,7 @@ router.post('/refresh', async (req, res) => {
     }
 
     const payload = { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken };
-    rememberRotation(row.id, payload);
+    rememberRotation(row.id, payload, employee.id);
     res.json(payload);
   } catch (err) {
     console.error('[refresh] error', err.message);

@@ -34,12 +34,12 @@
 #
 # [DR-034 2026-09-23] Release-channel gate: the Pages publisher is
 # now bound to the gating workflow's PASS receipt on the exact tested
-# SHA. The publisher runs only after a successful trusted push gate;
-# fork PRs, failed checks, and manual dispatch cannot publish. Audit
-# DR-034 acceptance: "A deliberately failing existing check prevents
-# normal deployment; successful publication identifies the exact
-# checked artifact, even if the branch advances afterward." Both halves
-# are addressed below:
+# SHA. The publisher runs only after a successful trusted push gate,
+# or via the explicitly-authorized `workflow_dispatch` emergency
+# override. Audit DR-034 acceptance: "A deliberately failing existing
+# check prevents normal deployment; successful publication identifies
+# the exact checked artifact, even if the branch advances afterward."
+# Both halves are addressed below:
 #   1. The `push` trigger is REMOVED. Only `workflow_run` from a
 #      successful same-repository push publishes. Every
 #      normal push goes through `frontend-ci` first because that
@@ -51,6 +51,14 @@
 #      push would publish a *newer* commit than the one tested.
 #      Successful publication now always identifies the exact
 #      artifact the gate cleared.
+#
+# [DR-034 2026-10-25] MEASURED BEHAVIOUR — READ BEFORE EDITING `on:`.
+# The `workflow_run` trigger added in fbc493b has NEVER fired in this
+# repository (`actions/runs?event=workflow_run` -> total_count 0),
+# while `workflow_dispatch` accounts for all 32 runs and every Pages
+# publish since 2026-09-24. The `workflow_dispatch` override is
+# therefore load-bearing, not decorative: removing it freezes the
+# frontend publish path. Keep it. See the `on:` block for details.
 # ============================================================
 
 name: Deploy to GitHub Pages
@@ -74,6 +82,35 @@ on:
   # push that frontend-ci watches (the gate's own `on.push` matches
   # the same branch + paths filter).
   #
+  # [DR-034 2026-10-25] The bare `push:` trigger stays removed, and the
+  # `workflow_dispatch` emergency override is RESTORED. Removing the
+  # override (as a hardening proposal did) would have removed the only
+  # publish path that actually works in this repository:
+  #
+  #   MEASURED (GitHub API, `actions/runs?event=workflow_run`):
+  #     event=workflow_run  -> total_count 0   (never fired, ever)
+  #     event=workflow_dispatch -> 32 runs      (every publish since)
+  #
+  # The `workflow_run` trigger was introduced in fbc493b (2026-09-24)
+  # and has produced ZERO runs despite dozens of successful
+  # `Frontend CI (test + build gate)` push runs on this branch. Every
+  # production Pages deploy since then (runs 38107395404, 38116749479,
+  # 38118667576, 38691458143, 38722915556, 38730660624) went through
+  # this manual dispatch. Deleting the dispatch trigger would have
+  # frozen acschennai.com's frontend with no way to publish again.
+  #
+  # The DR-034 audit contract this file implements says: "Keep an
+  # explicitly authorized emergency override separate rather than
+  # weakening every deployment." The override is therefore kept, and
+  # it stays explicitly authorized — `bypass_gate` must be set to
+  # true by the operator, and it defaults to false.
+  workflow_dispatch:
+    inputs:
+      bypass_gate:
+        description: '[DR-034] Skip the frontend-ci success gate (emergency override only)'
+        type: boolean
+        default: false
+        required: false
 
 permissions:
   contents: read
@@ -91,11 +128,28 @@ jobs:
     # `success` on the same head commit from a trusted repository push.
     # Fork PR/workflow_run events cannot enter this privileged context.
     # A failed or untrusted gate therefore cannot publish the Pages bundle.
+    #
+    # [DR-034 2026-10-25] The `workflow_run` path additionally requires
+    #   - `workflow_run.event == 'push'` — a gate run started by
+    #     `pull_request` proves nothing about the pushed artifact, and
+    #     `workflow_run` fires for PR runs too (their head_branch is the
+    #     PR branch, so the `branches:` filter usually filters them out —
+    #     but same-repo PRs whose head IS `add-react-website` would not).
+    #   - `head_repository.full_name == github.repository` — a fork's
+    #     workflow_run must never enter this privileged Pages context.
+    #
+    # The `workflow_dispatch` path is the audited emergency override
+    # (DR-034) and requires `bypass_gate: true`. It is the ONLY path
+    # that has actually produced a Pages publish in this repo — see the
+    # `on:` block's measurement note.
     if: >
       (github.event_name == 'workflow_run'
         && github.event.workflow_run.conclusion == 'success'
         && github.event.workflow_run.event == 'push'
         && github.event.workflow_run.head_repository.full_name == github.repository)
+      ||
+      (github.event_name == 'workflow_dispatch'
+        && inputs.bypass_gate == true)
     runs-on: ubuntu-latest
     steps:
       # [DR-034 2026-09-23] Pin Checkout to the exact commit the
@@ -104,8 +158,10 @@ jobs:
       # branch (main) — meaning the publish could advance past the
       # tested SHA between the gate completing and Pages receiving
       # the bundle. The conditional binds `ref` to `head_sha` for
-      # the gated path; it identifies the exact checked artifact even
-      # if the branch advances afterward (DR-034 acceptance).
+      # the gated path and to the dispatched `github.ref` for the
+      # override path; both cases identify the exact checked
+      # artifact, even if the branch advances afterward (DR-034
+      # acceptance).
       - name: Checkout
         uses: actions/checkout@v4
         with:
