@@ -348,7 +348,9 @@ async function rotateRefreshTokenAtomic(prisma, { row, tokens, employeeId }) {
         employeeId,
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
-        expiresAt,
+        // The recovery copy is valid only during the concurrent-request
+        // grace period, not for the successor refresh token's full lifetime.
+        expiresAt: new Date(Date.now() + ROTATION_REPLAY_MS),
       },
     });
     return { successor };
@@ -375,6 +377,8 @@ async function findRotationReceiptBySpentRowId(prisma, spentRowId) {
   });
   if (!receipt) return null;
   if (receipt.expiresAt.getTime() <= Date.now()) return null;
+  const successor = await prisma.refreshToken.findUnique({ where: { id: receipt.successorRowId } });
+  if (!successor || successor.revokedAt || successor.expiresAt.getTime() <= Date.now()) return null;
   return receipt;
 }
 
@@ -388,6 +392,12 @@ async function revokeAllRefreshTokensForEmployee(prisma, employeeId, { reason = 
     where: { employeeId, revokedAt: null },
     data: { revokedAt: now },
   });
+  // Delete durable credential copies when their associated sessions are
+  // revoked; replay memory is cleared as well, including logout and reuse.
+  if (prisma.rotationReceipt?.deleteMany) {
+    await prisma.rotationReceipt.deleteMany({ where: { employeeId } }).catch(() => {});
+  }
+  clearRotationReplay();
   revocationEvents.emit('employee:sessions-revoked', {
     employeeId,
     count: result.count,

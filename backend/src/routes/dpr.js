@@ -3099,7 +3099,7 @@ router.patch('/:id/photos/:photoId', asyncHandler(async (req, res) => {
     }
     const dpr = await prisma.dPR.findUnique({
       where: { id: dprId },
-      select: { submittedById: true },
+      select: { submittedById: true, status: true },
     });
     if (!dpr) {
       return res.status(404).json({ error: 'DPR_NOT_FOUND', code: 'DPR_NOT_FOUND', message: 'DPR not found' });
@@ -3110,6 +3110,16 @@ router.patch('/:id/photos/:photoId', asyncHandler(async (req, res) => {
         error: 'NOT_PHOTO_OWNER',
         code: 'NOT_PHOTO_OWNER',
         message: 'Only the DPR submitter or an admin may replace this photo',
+      });
+    }
+    // Evidence replacement is a draft-only operation. Keep the lifecycle
+    // check inside the same transaction as the photo update so a concurrent
+    // submission/review cannot approve different bytes under the old state.
+    if (dpr.status !== 'DRAFT') {
+      return res.status(409).json({
+        error: 'DPR_EVIDENCE_LOCKED',
+        code: 'DPR_EVIDENCE_LOCKED',
+        message: 'Evidence can only be replaced while the report is a draft',
       });
     }
 
@@ -3129,6 +3139,15 @@ router.patch('/:id/photos/:photoId', asyncHandler(async (req, res) => {
     if (intentErr) return res.status(intentErr.status).json(intentErr.body);
 
     const updated = await withRecordTransaction(prisma, 'dpr', async (db) => {
+      const draftClaim = await db.dPR.updateMany({
+        where: { id: dprId, status: 'DRAFT' },
+        data: { version: { increment: 1 } },
+      });
+      if (draftClaim.count !== 1) {
+        const error = new Error('DPR_EVIDENCE_LOCKED');
+        error.code = 'DPR_EVIDENCE_LOCKED';
+        throw error;
+      }
       await assertPhotoIntentsBindable({
         tx: db,
         employeeId: req.employeeId,
@@ -3196,6 +3215,13 @@ router.patch('/:id/photos/:photoId', asyncHandler(async (req, res) => {
 
     res.json({ ...updated, readUrl });
   } catch (err) {
+    if (err?.code === 'DPR_EVIDENCE_LOCKED') {
+      return res.status(409).json({
+        error: 'DPR_EVIDENCE_LOCKED',
+        code: 'DPR_EVIDENCE_LOCKED',
+        message: 'Evidence can only be replaced while the report is a draft',
+      });
+    }
     console.error('[dpr] replace photo failed', {
       employeeHash: hashIdentifier(req.employeeId),
       dprId,
