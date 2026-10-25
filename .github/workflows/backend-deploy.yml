@@ -113,21 +113,20 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate
 
-      # [payslip-prod-bugs 2026-10-04] Install `psql` so the
-      # payslip-partial-unique-drift test can shell out to a real
-      # Postgres for catalog queries (pg_class, pg_policy, pg_index).
-      # The drift test's external-mode helpers do
-      # `psql -h $THROWAWAY_PG_HOST -U ... -c ...`; without psql on
-      # PATH the test errors with ENOENT and aborts the run.
-      - name: Install postgresql-client (for psql)
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      # [2026-10-25] The `postgresql-client` install that used to live
+      # here is gone: its only consumer was the drift test's "external
+      # Postgres" path, which could never pass (see the note in
+      # backend/__tests__/payslip-partial-unique-drift.test.js). The
+      # drift test now starts its own throwaway `postgres:17` container
+      # and talks to it with `docker exec … psql`, so the runner needs
+      # no psql client. GitHub-hosted runners do have a working Docker
+      # daemon — the same one that backs this workflow's `services:`
+      # block — so `docker run` from a step works.
 
       # [payslip-prod-bugs 2026-10-04] Sync the throwaway DB schema
-      # so public.payslip exists with RLS enabled. The RLS end-state
-      # test in payslip-partial-unique-drift probes pg_class/pg_policy
-      # on public.payslip; the integration-smoke test seeds real rows.
-      # Skipping this means the throws-away DB is empty and both
-      # suites fail on the first relation lookup.
+      # so public.payslip exists with RLS enabled. The integration-smoke
+      # test seeds real rows into it; Skipping this means the throws-away
+      # DB is empty and that suite fails on the first relation lookup.
       #
       # We use `prisma db push` rather than `prisma migrate deploy`
       # because the migration history has an idempotency bug:
@@ -174,19 +173,15 @@ jobs:
         # push (no inputs → null) or a workflow_dispatch that didn't set
         # the input (default false), `!= true` is true → step runs.
         if: ${{ inputs.override_checks != true }}
-        # [payslip-prod-bugs 2026-10-04] Wire the throwaway DB env vars
-        # so the real-DB suites in __tests__/payslip-integration-smoke
-        # and __tests__/payslip-partial-unique-drift actually run on
-        # the CI service container. Without these the tests self-skipped
-        # (THROWAWAY_* unset) and the bug-A/B fixes had no CI coverage.
-        # The drift test shells out to `psql` — that's why we install
-        # postgresql-client one step above.
+        # [payslip-prod-bugs 2026-10-04] Wire the throwaway DB URL so the
+        # real-DB suites in __tests__/payslip-integration-smoke and
+        # __tests__/payslip-cross-employee-bind actually run against the
+        # CI service container. Without it those tests self-skipped
+        # (THROW_AWAY_DATABASE_URL unset) and the bug-A/B fixes had no CI
+        # coverage.
+        # [2026-10-25] The THROWAWAY_PG_* pair is gone: it only fed the
+        # drift test's external-Postgres path, which never passed.
         env:
-          THROWAWAY_PG_HOST: localhost
-          THROWAWAY_PG_PORT: '5432'
-          THROWAWAY_PG_USER: acs
-          THROWAWAY_PG_PASSWORD: acspw
-          THROWAWAY_PG_DB: acs_portal
           THROW_AWAY_DATABASE_URL: postgresql://acs:acspw@localhost:5432/acs_portal
         run: npm test
 
