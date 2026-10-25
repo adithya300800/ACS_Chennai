@@ -161,6 +161,24 @@ The PR's implementation is sound and was kept as-is:
 
 > **Reproduction note.** Run jest through the binary, not `npx`/`npm exec`: `npm exec` stalls for minutes on registry resolution in this sandbox. `node node_modules/.bin/jest --listTests` takes **0.47 s**; the same command via `npx` takes > 4 minutes.
 
+### CI on the PR — all green (`fd6caca`)
+
+12/12 checks passed on the head commit:
+
+```
+CodeQL                                completed/success
+Analyze (javascript-typescript)        completed/success
+Credential literal check (HEAD)       completed/success
+gitleaks (history)                    completed/success
+npm audit (backend)                   completed/success
+npm audit (root / frontend)           completed/success
+Semgrep scan                          completed/success
+test-and-build                        completed/success   <- frontend suite + build
+assert-workflows-on-default           completed/success
+check-tenancy-doc                     completed/success
+Supabase Preview                      completed/skipped
+```
+
 ### Frontend — all green
 
 | Scope | Command | Result |
@@ -199,6 +217,20 @@ The full suite was run three times on this branch and twice on a clean `add-reac
 
 `payslip-routes.test.js` also **passes standalone** on this branch (86/86), confirming the run-1 failure was contention, not the diff.
 
+### The backend suite is already RED in CI on `add-react-website` (pre-existing, and it blocks the push-triggered backend deploy)
+
+Extracted from the logs of the last push-triggered backend-deploy run (`38116291082`, base `5d867f2`, 2026-10-11):
+
+```
+Test Suites: 2 failed, 13 skipped, 128 passed, 130 of 143 total
+Tests:       9 failed, 177 skipped, 1660 passed, 1846 total
+##[error]Process completed with exit code 1.
+```
+
+The two failing suites are `payslip-partial-unique-drift` (needs a throwaway Postgres — the workflow *does* wire `THROWAWAY_PG_*`, and it still fails) and `projects.dr014`. Consequence: **every push-triggered `backend-deploy.yml` run has failed since 2026-10-05** (`38116291082`, `38109253139`, `37402974715`, `37344212248` — all `failure`), and the backend has been shipping via the audited `workflow_dispatch` + `override_checks: true` escape hatch (last success: run `38690736267` on `433df9a`, 2026-10-15).
+
+This is **pre-existing and unrelated to PR #11** — it is the reason the deploy needs the override, not a consequence of it. It is also why the PR's removal of the *frontend* `workflow_dispatch` trigger was so consequential: with the backend deploy already relying on its escape hatch, the frontend publisher had no fallback at all.
+
 ### Other guards
 
 | Check | Result |
@@ -232,3 +264,43 @@ The full suite was run three times on this branch and twice on a clean `add-reac
 | `backend/__tests__/dpr.evidence-lock.test.js` | **New** — 8 tests. |
 | `src/pages/portal/DprList.jsx` | Replace button disabled with a reason when the DPR is not DRAFT; guard in `startReplacePhoto`. |
 | `src/pages/portal/DprAll.jsx` | Same. |
+
+---
+
+## 9. Status and operator next steps
+
+**Done:** reviewed, corrected, pushed to `fix/google-oauth-redirect-uri` (`fd6caca`), PR description rewritten with the verdict, 12/12 CI checks green.
+
+**Not done — needs an operator click:** the merge was not executed. The agent session's permission policy blocks "merge without review", so the merge is left for a human. Three steps, in order:
+
+### Step 1 — merge PR #11
+
+```bash
+gh pr merge 11 --merge
+```
+
+Base is `add-react-website`. The merge is clean (`mergeable: MERGEABLE`, `mergeStateStatus: CLEAN`).
+
+### Step 2 — deploy the backend (Render)
+
+Merging touches `backend/**`, so a push-triggered `backend-deploy.yml` run **will** start — and it **will fail at the `npm test` step**, because the backend suite is already red in CI on `add-react-website` for reasons unrelated to this PR (see §6). Use the audited override, exactly as the previous rounds did (last success: run `38690736267`):
+
+```bash
+gh workflow run backend-deploy.yml \
+  --ref add-react-website \
+  -f override_checks=true
+```
+
+All the other gates (drift gate, ledger inspection, Render deploy trigger, `/version` SHA verify, smoke test) still run — `override_checks` bypasses **only** the test step.
+
+### Step 3 — deploy the frontend (Pages)
+
+The `workflow_run` trigger does not fire in this repo (§2), so the Pages publish needs the emergency override. **This step is only possible because this PR restores the `workflow_dispatch` trigger** — as written, PR #11 would have left no way to publish `acschennai.com` at all:
+
+```bash
+gh workflow run deploy.yml \
+  --ref add-react-website \
+  -f bypass_gate=true
+```
+
+Then confirm the live bundle carries the new code (the receipt-TTL constant is inlined by the bundler, and the evidence-lock string appears in the DPR chunks).
