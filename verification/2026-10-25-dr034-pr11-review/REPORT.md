@@ -498,3 +498,76 @@ run by hand without any policy friction.
   notifications) — which **contradicts** the older
   `s3-perf-advisor-investigation-v3` memory that claimed GH Actions cron
   workflows had never fired in this repo.
+
+---
+
+## 12. Execution — merged, deployed, verified
+
+All three actions in §11.3 were authorised by the user (naming PR #12, the
+Pages deploy with `bypass_gate`, and the production reads) and then executed.
+
+### 12.1 Merge
+
+```
+gh pr merge 12 --merge          ->  ce394a7
+```
+
+`add-react-website` head moved `0501803..ce394a7`. PR #12's diff: 4 files,
++281/−252 — two backend test files, `backend-deploy.yml`, and this report.
+No production code changed.
+
+### 12.2 Backend deploy — the blocker is gone
+
+The merge push re-triggered `backend-deploy.yml` (run `40230762605`). For
+comparison, the same workflow on `0501803` **failed** at the test step.
+
+| Step | Result |
+|---|---|
+| Run tests | **success** — `Test Suites: 13 skipped, 134 passed, 134 of 147 total` / `Tests: 177 skipped, 1715 passed, 1892 total` — **0 failed** |
+| Prisma drift gate (status + drift-only fail) | success |
+| Migration ledger inspection (DR-032) | success — no non-applied allowlisted rows |
+| Stamp DEPLOY_SHA / Trigger Render Deploy | success — Render accepted `commit=ce394a73e2c48adc22229503b49ecba59542bc27` (HTTP 201) |
+| Verify exact release SHA via `/version` | success — poll 1–6 saw the old `433df9a…`, **poll 7 saw `ce394a73e2c48adc22229503b49ecba59542bc27` → "SHA verified — release matches the pushed commit"** |
+| Smoke test deployed app | success — `Health=200 DPR_SAS=401 DPR_NOTIF=401` |
+
+The CI test counts are **identical to the local run** (1715 passed / 0 failed),
+which is the proof that the two suite fixes are correct in the runner's
+environment and not just on this machine.
+
+### 12.3 Frontend deploy — PR #11's frontend is finally published
+
+```
+gh workflow run deploy.yml --ref add-react-website -f bypass_gate=true
+                              ->  run 40230774005  (success)
+```
+
+PR #11's frontend change (the DPR evidence lock) was merged at `0501803` but
+never published, because `workflow_run` has never fired in this repo.
+Verified against the live site:
+
+| Live asset | Bytes | Evidence-lock code present |
+|---|---|---|
+| `https://acschennai.com/assets/DprAll-D7uWT38W.js` | 27818 | `Evidence can only be replaced while the report is a draft.` + `status!=="DRAFT"` |
+| `https://acschennai.com/assets/DprList-ll6h6tEs.js` | 24395 | same |
+
+Entry bundle in production: `assets/index-Szl5LbYi.js` (245411 bytes).
+
+### 12.4 Production state after this round
+
+- Backend `https://acs-chennai.onrender.com` → `deploySha = ce394a7` (live).
+- Frontend `https://acschennai.com` → DPR evidence lock live in both DPR chunks.
+- Every push-triggered workflow on `ce394a7` is green, including
+  `Deploy Backend to Render` — **the first green backend deploy in this
+  repo since 2026-10-05**.
+
+### 12.5 One leftover
+
+The scratch worktree `/private/tmp/acs-base` (the pre-fix baseline clone used
+to prove the two suites were already red before this session's changes) is
+still registered. `git worktree remove /private/tmp/acs-base` was refused by
+the session's destructive-operation policy because the target was not named
+explicitly. It is inert — remove it with:
+
+```bash
+git worktree remove --force /private/tmp/acs-base
+```
