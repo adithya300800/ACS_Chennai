@@ -3099,7 +3099,7 @@ router.patch('/:id/photos/:photoId', asyncHandler(async (req, res) => {
     }
     const dpr = await prisma.dPR.findUnique({
       where: { id: dprId },
-      select: { submittedById: true },
+      select: { submittedById: true, status: true },
     });
     if (!dpr) {
       return res.status(404).json({ error: 'DPR_NOT_FOUND', code: 'DPR_NOT_FOUND', message: 'DPR not found' });
@@ -3110,6 +3110,25 @@ router.patch('/:id/photos/:photoId', asyncHandler(async (req, res) => {
         error: 'NOT_PHOTO_OWNER',
         code: 'NOT_PHOTO_OWNER',
         message: 'Only the DPR submitter or an admin may replace this photo',
+      });
+    }
+    // Evidence replacement is a draft-only operation.
+    //
+    // Once a DPR leaves DRAFT its evidence is "on file": a reviewer is
+    // looking at these bytes, and a replace would swap them underneath
+    // that review (the admin approves bytes they never saw). The
+    // terminal-state rule (DR-006) already made APPROVED/REJECTED
+    // immutable for narrative edits; this closes the same hole for the
+    // evidence bytes, and for the review window itself.
+    //
+    // This pre-check is the fast path (clear 409, no transaction). The
+    // authoritative check is the conditional write inside the transaction
+    // below — this read can be stale by the time we get there.
+    if (dpr.status !== 'DRAFT') {
+      return res.status(409).json({
+        error: 'DPR_EVIDENCE_LOCKED',
+        code: 'DPR_EVIDENCE_LOCKED',
+        message: 'Evidence can only be replaced while the report is a draft',
       });
     }
 
@@ -3129,6 +3148,27 @@ router.patch('/:id/photos/:photoId', asyncHandler(async (req, res) => {
     if (intentErr) return res.status(intentErr.status).json(intentErr.body);
 
     const updated = await withRecordTransaction(prisma, 'dpr', async (db) => {
+      // Claim the DRAFT state with a conditional write. `updateMany` with
+      // `status: 'DRAFT'` in the WHERE is a compare-and-swap: it succeeds
+      // for exactly one caller, and only if the DPR is still a draft at
+      // the moment of the write. If a concurrent submit/review moved the
+      // row out of DRAFT between the read above and this write, `count`
+      // is 0 and we abort the whole transaction — no photo row is
+      // re-bound, so the reviewer never sees swapped bytes.
+      //
+      // The version bump is deliberate: the record's evidence changed, so
+      // the optimistic-concurrency token must advance. Otherwise a
+      // concurrent editor holding the old version would keep editing a
+      // record whose evidence is no longer what they last saw.
+      const draftClaim = await db.dPR.updateMany({
+        where: { id: dprId, status: 'DRAFT' },
+        data: { version: { increment: 1 } },
+      });
+      if (draftClaim.count !== 1) {
+        const error = new Error('DPR_EVIDENCE_LOCKED');
+        error.code = 'DPR_EVIDENCE_LOCKED';
+        throw error;
+      }
       await assertPhotoIntentsBindable({
         tx: db,
         employeeId: req.employeeId,
@@ -3196,6 +3236,13 @@ router.patch('/:id/photos/:photoId', asyncHandler(async (req, res) => {
 
     res.json({ ...updated, readUrl });
   } catch (err) {
+    if (err?.code === 'DPR_EVIDENCE_LOCKED') {
+      return res.status(409).json({
+        error: 'DPR_EVIDENCE_LOCKED',
+        code: 'DPR_EVIDENCE_LOCKED',
+        message: 'Evidence can only be replaced while the report is a draft',
+      });
+    }
     console.error('[dpr] replace photo failed', {
       employeeHash: hashIdentifier(req.employeeId),
       dprId,

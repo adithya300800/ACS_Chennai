@@ -59,7 +59,10 @@ const authRouter = require('../src/routes/auth');
 //      contract rotateRefreshTokenAtomic relies on.
 //
 //   2. rotationReceipt — UNIQUE on spentRowId so the loser-path lookup is
-//      a single findUnique. TTL matches the successor row's expiresAt.
+//      a single findUnique. [DR-034] The receipt's TTL is its OWN bounded
+//      horizon (ROTATION_RECEIPT_TTL_MS), not the successor row's 7-day
+//      lifetime — the receipt stores the token pair in the clear, so its
+//      lifetime IS the exposure window.
 //
 // Anything else would fail loudly, which is the desired failure mode.
 

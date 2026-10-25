@@ -129,8 +129,21 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
     return dpr && dpr.submittedById && dpr.submittedById === (employee?.id || null);
   };
 
+  // [DR-034 evidence lock] The server rejects evidence replacement once
+  // a DPR leaves DRAFT (409 DPR_EVIDENCE_LOCKED) — swapping the bytes of
+  // an already-submitted report would replace the evidence an admin is
+  // reviewing. Mirror that gate here so the button is disabled WITH a
+  // reason instead of failing after the upload.
+  const isEvidenceLocked = () => !dpr || dpr.status !== 'DRAFT';
+
   function startReplacePhoto(photo) {
     if (replaceBusyPhotoId) return;
+    if (isEvidenceLocked()) {
+      const msg = 'Evidence can only be replaced while the report is a draft.';
+      setReplaceError(msg);
+      toast.push(msg, 'error');
+      return;
+    }
     if (!canReplacePhoto(photo)) {
       const msg = 'Only the DPR’s submitter or an admin can replace this photo.';
       setReplaceError(msg);
@@ -479,9 +492,11 @@ function DprDetailModal({ dprSummary, onClose, returnFocusRef }) {
                           className="btn btn-ghost btn-sm"
                           style={{ marginTop: '0.25rem', width: '100%' }}
                           onClick={() => startReplacePhoto(p)}
-                          disabled={replaceBusyPhotoId === p.id || (replaceBusyPhotoId !== null && replaceBusyPhotoId !== p.id)}
+                          disabled={isEvidenceLocked() || replaceBusyPhotoId === p.id || (replaceBusyPhotoId !== null && replaceBusyPhotoId !== p.id)}
                           aria-label={`Replace photo ${i + 1} of ${dpr.photos.length}`}
-                          title="Re-upload a new photo in place — use this when the existing one is broken (BLOB_GONE)"
+                          title={isEvidenceLocked()
+                            ? 'Evidence can only be replaced while the report is a draft'
+                            : 'Re-upload a new photo in place — use this when the existing one is broken (BLOB_GONE)'}
                         >
                           {replaceBusyPhotoId === p.id ? 'Uploading…' : 'Replace'}
                         </button>

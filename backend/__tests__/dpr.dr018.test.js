@@ -163,6 +163,18 @@ function buildPrismaMock({
         }
         return out;
       },
+      // [DR-034 evidence lock] The replace endpoint claims the DRAFT
+      // state with a conditional write (`updateMany` + `status: 'DRAFT'`
+      // in the WHERE) inside the transaction. Without this delegate the
+      // route throws a TypeError and the whole repair path 500s — so the
+      // mock has to model the compare-and-swap, not just the read.
+      updateMany: async ({ where, data }) => {
+        const row = dprs[where.id];
+        if (!row) return { count: 0 };
+        if (where.status !== undefined && row.status !== where.status) return { count: 0 };
+        if (data?.version?.increment) row.version = (row.version || 0) + data.version.increment;
+        return { count: 1 };
+      },
     },
     employee: {
       findUnique: async ({ where: { id } }) => ({
