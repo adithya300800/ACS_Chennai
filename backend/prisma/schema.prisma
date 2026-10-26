@@ -124,6 +124,9 @@ model Employee {
   payslipsPublished          Payslip[]               @relation("PayslipPublisher")
   payslipsRevoked            Payslip[]               @relation("PayslipRevoker")
   payslipsPurged             Payslip[]               @relation("PayslipPurger")
+  // BOQ Generator jobs are employee-owned. Snapshot actor IDs are retained
+  // as audit scalars so snapshots outlive the employees who created them.
+  boqGeneratorJobs           BoqJob[]                @relation("BoqJobEmployee")
   // [feat/google-login-allowlist] Back-relation for the Google allowlist.
   // Optional + SetNull on the FK side: an Employee can exist without a
   // Google allowlist row (the Zoho path), and a Google allowlist row can
@@ -988,6 +991,13 @@ model UploadIntent {
   container           String    @map("container")
   blobPath            String    @map("blob_path")
   contentType         String    @map("content_type")
+  // BOQ Generator upload intents are explicitly scoped to the active project
+  // and retain the sanitized display name supplied at presign time.
+  projectId           String?   @map("project_id")
+  originalFilename    String?   @map("original_filename")
+  // Captures the declared size for BOQ drawing intents so confirmation can
+  // compare it with the private object's authoritative content length.
+  expectedSizeBytes   Int?      @map("expected_size_bytes")
   status              String    @default("PENDING") @map("status") // PENDING | CONFIRMED | EXPIRED
   expiresAt           DateTime  @map("expires_at")
   confirmedAt         DateTime? @map("confirmed_at")
@@ -1143,6 +1153,9 @@ model Project {
   // Cascade on the certification side — a COP IS the project record,
   // same contract as VariationOrder (see Phase C / N2 header above).
   billingCertifications BillingCertification[]
+  // BOQ Generator jobs are project-scoped and cascade with a hard-deleted
+  // project. The ordinary project archive path only flips isActive.
+  boqGeneratorJobs      BoqJob[]
   // [Project Assignments] back-relation for the project_assignment join
   // table. Cascade-deletes are handled by the FK on project_assignment
   // (CASCADE) — when a Project row is hard-deleted (rare; the soft-delete
@@ -1768,6 +1781,76 @@ model BoqExecution {
   @@index([boqItemId, executedAt])
   @@index([stage])
   @@map("boq_execution")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BOQ Generator — durable project-scoped runs and immutable snapshots.
+// These models are separate from BoqItem / BoqExecution, which serve the
+// existing registry and variance-report workflows.
+// ─────────────────────────────────────────────────────────────────────────────
+model BoqJob {
+  id               String    @id @default(uuid())
+  employeeId       String    @map("employee_id")
+  projectId        String    @map("project_id")
+  // The upstream service id is private to the backend; never expose it as a
+  // route parameter or in a browser response.
+  serviceJobId     String?   @map("service_job_id")
+  status           String    @default("DRAFT") @map("status")
+  dataStatus       String?   @map("data_status")
+  productionMode   Boolean?  @map("production_mode")
+  dxfScale         Float?    @map("dxf_scale")
+  scaleConfirmedBy String?   @map("scale_confirmed_by")
+  scaleConfirmedAt DateTime? @map("scale_confirmed_at")
+  idempotencyKey   String?   @map("idempotency_key")
+  revision         Int       @default(1) @map("revision")
+  settingsJson     Json?     @map("settings_json")
+  inputFiles       Json      @map("input_files")
+  errorCode        String?   @map("error_code")
+  errorMessage     String?   @map("error_message")
+  errorDetails     Json?     @map("error_details")
+  startedAt        DateTime? @map("started_at")
+  completedAt      DateTime? @map("completed_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  employee  Employee      @relation("BoqJobEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
+  project   Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  snapshots BoqSnapshot[]
+
+  @@unique([employeeId, idempotencyKey])
+  @@index([employeeId, createdAt])
+  @@index([projectId, createdAt])
+  @@index([status])
+  @@map("boq_job")
+}
+
+model BoqSnapshot {
+  id               String    @id @default(uuid())
+  boqJobId         String    @map("boq_job_id")
+  revision         Int       @map("revision")
+  schemaVersion    String    @map("schema_version")
+  kind             String    @default("acs.boq.snapshot")
+  serviceVersion   String?   @map("service_version")
+  dataStatus       String    @map("data_status")
+  productionMode   Boolean   @map("production_mode")
+  currency         String    @default("INR")
+  totalsAmount     Decimal?  @map("totals_amount") @db.Decimal(15, 2)
+  lineCount        Int       @default(0) @map("line_count")
+  withheldCount    Int       @default(0) @map("withheld_count")
+  snapshotBlobPath String    @map("snapshot_blob_path")
+  exportBlobPath   String?   @map("export_blob_path")
+  dxfScale         Float?    @map("dxf_scale")
+  scaleConfirmedBy String?   @map("scale_confirmed_by")
+  acknowledgedById String?   @map("acknowledged_by_id")
+  acknowledgedAt   DateTime? @map("acknowledged_at")
+  savedById        String    @map("saved_by_id")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  boqJob BoqJob @relation(fields: [boqJobId], references: [id], onDelete: Cascade)
+
+  @@unique([boqJobId, revision])
+  @@index([boqJobId])
+  @@map("boq_snapshot")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -516,6 +516,10 @@ function createApp(deps = {}) {
   // gate lives inside the route file (requireAuth for reads,
   // creator-or-admin for writes).
   app.use('/api/boq', boqRoutes);
+  // BOQ Generator uploads and durable project-scoped jobs are intentionally
+  // isolated from the existing /api/boq registry and its route contract.
+  const boqGeneratorRoutes = require('./routes/boqGenerator');
+  app.use('/api/boq-generator', boqGeneratorRoutes);
   // N3 (Phase E): Drawing Revision Register — list / create / detail /
   // patch / soft-delete. Auth gate lives inside the route file
   // (requireAuth for reads, requireFreshAdmin for mutations).
