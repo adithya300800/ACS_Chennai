@@ -13,7 +13,6 @@ let mockVerifiedUpload = {
 };
 let mockUploadSequence = 0;
 const mockStoredArtifacts = new Map();
-const mockExcelSheets = [];
 const mockVerifyUpload = jest.fn(async () => mockVerifiedUpload);
 const mockCreateUploadUrl = jest.fn(async ({ projectId, employeeId, uploadId, extension }) => ({
   sasUrl: `https://private.example/${uploadId}`,
@@ -99,6 +98,8 @@ const PROJECT_ID = 'project-1';
 const EMPLOYEE_ID = 'employee-1';
 const OTHER_EMPLOYEE_ID = 'employee-2';
 const ADMIN_ID = 'admin-1';
+const RATE_LIMIT_EMPLOYEE_ID = 'employee-rate-limit';
+const NON_PILOT_EMPLOYEE_ID = 'employee-non-pilot';
 
 function buildPrisma() {
   const intents = [];
@@ -109,6 +110,8 @@ function buildPrisma() {
     [EMPLOYEE_ID, { id: EMPLOYEE_ID, name: 'Owner', email: 'owner@example.test', isAdmin: false }],
     [OTHER_EMPLOYEE_ID, { id: OTHER_EMPLOYEE_ID, name: 'Colleague', email: 'colleague@example.test', isAdmin: false }],
     [ADMIN_ID, { id: ADMIN_ID, name: 'Admin', email: 'admin@example.test', isAdmin: true }],
+    [RATE_LIMIT_EMPLOYEE_ID, { id: RATE_LIMIT_EMPLOYEE_ID, name: 'Rate Limit', email: 'rate-limit@example.test', isAdmin: false }],
+    [NON_PILOT_EMPLOYEE_ID, { id: NON_PILOT_EMPLOYEE_ID, name: 'Not Pilot', email: 'not-pilot@example.test', isAdmin: false }],
   ]);
 
   const matchesIntent = (row, where = {}) => {
@@ -131,7 +134,7 @@ function buildPrisma() {
     projectAssignment: {
       findUnique: jest.fn(async ({ where }) => (
         where.projectId_employeeId?.projectId === PROJECT_ID &&
-        [EMPLOYEE_ID, OTHER_EMPLOYEE_ID].includes(where.projectId_employeeId?.employeeId)
+        [EMPLOYEE_ID, OTHER_EMPLOYEE_ID, RATE_LIMIT_EMPLOYEE_ID].includes(where.projectId_employeeId?.employeeId)
           ? { id: 'assignment-owner' }
           : null
       )),
@@ -196,7 +199,7 @@ function buildPrisma() {
       }),
       findFirst: jest.fn(async ({ where }) => snapshots.filter((row) => row.boqJobId === where.boqJobId)
         .sort((a, b) => b.revision - a.revision)[0] || null),
-      findMany: jest.fn(async ({ where }) => snapshots.filter((row) => (
+      findMany: jest.fn(async ({ where = {} }) => snapshots.filter((row) => (
         Array.isArray(where?.boqJobId?.in)
           ? where.boqJobId.in.includes(row.boqJobId)
           : row.boqJobId === where?.boqJobId
@@ -284,7 +287,11 @@ async function createConfirmedUpload(app, prisma, overrides = {}) {
 
 beforeEach(() => {
   process.env.INTERNAL_API_TOKEN = 'test-boq-reconcile-token';
+  global.setImmediate = global.setImmediate || ((callback, ...args) => setTimeout(callback, 0, ...args));
+  delete process.env.BOQ_PILOT_EMPLOYEE_IDS;
+  process.env.BOQ_PILOT_EMPLOYEE_IDS = [EMPLOYEE_ID, OTHER_EMPLOYEE_ID, RATE_LIMIT_EMPLOYEE_ID, NON_PILOT_EMPLOYEE_ID].join(',');
   router.resetMetaCacheForTests();
+  router.resetRateLimitsForTests([EMPLOYEE_ID, OTHER_EMPLOYEE_ID, ADMIN_ID, RATE_LIMIT_EMPLOYEE_ID, NON_PILOT_EMPLOYEE_ID]);
   require('../src/lib/idempotency')._clearCache();
   mockUploadSequence = 0;
   mockStoredArtifacts.clear();
@@ -327,6 +334,7 @@ describe('BOQ Generator private upload lifecycle', () => {
 
   it('refuses upload and job creation when the authenticated employee row no longer exists', async () => {
     const prisma = buildPrisma();
+    prisma.employee.findUnique.mockResolvedValueOnce(null);
     const app = buildApp(prisma);
     const upload = await request(app)
       .post('/api/boq-generator/uploads/presign')
@@ -433,10 +441,10 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     const app = buildApp(prisma);
 
     const ownRuns = await request(app)
-      .get('/api/boq-generator/jobs')
+      .post('/api/boq-generator/jobs/search').send({})
       .set('x-test-employee', EMPLOYEE_ID);
     const adminRuns = await request(app)
-      .get('/api/boq-generator/jobs')
+      .post('/api/boq-generator/jobs/search').send({})
       .set('x-test-employee', ADMIN_ID)
       .set('x-test-admin', 'true');
 
@@ -444,7 +452,7 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     expect(ownRuns.body.jobs.map((job) => job.id)).toEqual(['job-owner']);
     expect(adminRuns.status).toBe(200);
     expect(adminRuns.body.jobs.map((job) => job.id)).toEqual(['job-owner', 'job-colleague']);
-    expect(adminRuns.body.jobs[1].employeeId).toBe(OTHER_EMPLOYEE_ID);
+    expect(adminRuns.body.jobs).toContainEqual(expect.objectContaining({ employeeId: OTHER_EMPLOYEE_ID }));
   });
 
   it('atomically binds confirmed uploads, durably creates a job, and replays the same key', async () => {
@@ -580,7 +588,7 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     expect(replay.body.settings).not.toHaveProperty('serviceAdvisory');
   });
 
-  it('releases claimed upload intents when initial service submission fails', async () => {
+  it('keeps upload claims bound to a retryable draft after service submission fails', async () => {
     const prisma = buildPrisma();
     mockBoqClient.submitJob.mockRejectedValueOnce({ kind: 'network' });
     const app = buildApp(prisma);
@@ -593,7 +601,64 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
 
     expect(response.status).toBe(504);
     expect(prisma._jobs[0]).toMatchObject({ status: 'DRAFT', errorCode: 'BOQ_TIMEOUT' });
-    expect(prisma._intents[0]).toMatchObject({ boundAt: null, boundType: null });
+    expect(prisma._intents[0]).toMatchObject({ boundAt: expect.any(Date), boundType: 'boq_job' });
+
+    mockBoqClient.submitJob.mockResolvedValueOnce({ job_id: 'service-job-retry', status: 'queued' });
+    const retry = await request(app)
+      .post('/api/boq-generator/jobs')
+      .set('x-test-employee', EMPLOYEE_ID)
+      .set('Idempotency-Key', 'job-key-service-failure-release')
+      .send({ projectId: PROJECT_ID, uploads: [presign.body.uploadId] });
+    expect(retry.status).toBe(200);
+    expect(retry.body.status).toBe('SUBMITTED');
+    expect(prisma._intents[0]).toMatchObject({ boundAt: expect.any(Date), boundType: 'boq_job' });
+    expect(mockBoqClient.submitJob).toHaveBeenCalledTimes(2);
+  });
+
+  it('denies non-pilot employees before BOQ metadata or project work', async () => {
+    process.env.BOQ_PILOT_EMPLOYEE_IDS = EMPLOYEE_ID;
+    const prisma = buildPrisma();
+    const app = buildApp(prisma);
+    const access = await request(app).get('/api/boq-generator/access').set('x-test-employee', NON_PILOT_EMPLOYEE_ID);
+    const meta = await request(app).get('/api/boq-generator/meta').set('x-test-employee', NON_PILOT_EMPLOYEE_ID);
+
+    expect(access.status).toBe(200);
+    expect(access.body).toEqual({ isPilot: false, pilotEnabled: true });
+    expect(meta.status).toBe(403);
+    expect(meta.body.code).toBe('BOQ_PILOT_ACCESS');
+    expect(mockBoqClient.getMeta).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for employees when the pilot list is unset, while admins can still access', async () => {
+    process.env.BOQ_PILOT_EMPLOYEE_IDS = '';
+    const app = buildApp(buildPrisma());
+    const access = await request(app).get('/api/boq-generator/access')
+      .set('x-test-employee', ADMIN_ID).set('x-test-admin', 'true');
+    const meta = await request(app).get('/api/boq-generator/meta')
+      .set('x-test-employee', ADMIN_ID).set('x-test-admin', 'true');
+    process.env.BOQ_PILOT_EMPLOYEE_IDS = `${ADMIN_ID}`;
+    const denied = await request(app).get('/api/boq-generator/meta').set('x-test-employee', NON_PILOT_EMPLOYEE_ID);
+
+    expect(access.body).toEqual({ isPilot: true, pilotEnabled: true });
+    expect(meta.status).toBe(200);
+    expect(denied.status).toBe(403);
+  });
+
+  it('rate limits upload presigns and job submissions per employee', async () => {
+    const app = buildApp(buildPrisma());
+    const presignRequests = await Promise.all(Array.from({ length: 31 }, () => request(app)
+      .post('/api/boq-generator/uploads/presign')
+      .set('x-test-employee', RATE_LIMIT_EMPLOYEE_ID)
+      .send({ projectId: PROJECT_ID, filename: 'floor.dxf', sizeBytes: 128 })));
+    expect(presignRequests.slice(0, 30).every((response) => response.status === 201)).toBe(true);
+    expect(presignRequests[30].status).toBe(429);
+
+    const jobRequests = await Promise.all(Array.from({ length: 11 }, () => request(app)
+      .post('/api/boq-generator/jobs')
+      .set('x-test-employee', OTHER_EMPLOYEE_ID)
+      .send({})));
+    expect(jobRequests.slice(0, 10).every((response) => response.status === 400)).toBe(true);
+    expect(jobRequests[10].status).toBe(429);
   });
 
   it('polls upstream service status and persists it without exposing service job id', async () => {
@@ -1100,6 +1165,35 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     expect(snapshot.body).toMatchObject({ schema_version: '1.0' });
   });
 
+  it('resubmits a LOST job from its still-bound private uploads using a fresh service idempotency key', async () => {
+    const prisma = buildPrisma();
+    prisma._jobs.push({
+      id: 'portal-job-lost-retry', employeeId: EMPLOYEE_ID, projectId: PROJECT_ID,
+      serviceJobId: 'service-job-forgotten', status: 'LOST', dxfScale: 1,
+      inputFiles: [{ uploadId: '01ARZ3NDEKTSV4RRFFQ69G5FAV', filename: 'floor.dxf', fileType: 'dxf', sizeBytes: 128, blobPath: 'drawings/project-1/employee-1/file.dxf' }],
+      settingsJson: {}, createdAt: new Date(), updatedAt: new Date(),
+    });
+    mockBoqClient.submitJob.mockResolvedValueOnce({ job_id: 'service-job-retry', status: 'queued' });
+    const app = buildApp(prisma);
+    const response = await request(app).post('/api/boq-generator/jobs/portal-job-lost-retry/retry')
+      .set('x-test-employee', EMPLOYEE_ID);
+
+    expect(response.status).toBe(200);
+    expect(response.body.id).toBe('portal-job-lost-retry');
+    expect(mockBoqClient.submitJob).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: 'portal-job-lost-retry:retry:1',
+    }));
+  });
+
+  it('does not advertise retry for a LOST job with no source files', async () => {
+    const prisma = buildPrisma();
+    prisma._jobs.push({ id: 'lost-without-files', employeeId: EMPLOYEE_ID, projectId: PROJECT_ID, status: 'LOST', inputFiles: [], settingsJson: {} });
+    const app = buildApp(prisma);
+    const response = await request(app).post('/api/boq-generator/jobs/lost-without-files/retry').set('x-test-employee', EMPLOYEE_ID);
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('BOQ_NOT_RETRYABLE');
+  });
+
   it('persists sanitized upstream job error details for operator diagnosis', async () => {
     const prisma = buildPrisma();
     prisma._jobs.push({
@@ -1189,6 +1283,15 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     expect(JSON.stringify(response.body)).not.toMatch(/private\.internal|private operational|private-reader|private tuning/);
     expect(mockBoqClient.getMeta).toHaveBeenCalledTimes(1);
     expect(mockBoqClient.getMeta).toHaveBeenCalledWith({ requestId: 'portal-meta-request' });
+  });
+
+  it('does not accept GET job-list filters in a query string', async () => {
+    const prisma = buildPrisma();
+    const app = buildApp(prisma);
+    const response = await request(app).get('/api/boq-generator/jobs?employeeId=employee-2&projectId=project-1')
+      .set('x-test-employee', ADMIN_ID).set('x-test-admin', 'true');
+    expect(response.status).toBe(405);
+    expect(prisma.boqJob.findMany).not.toHaveBeenCalled();
   });
 
   it('uses the service priced-line counts when regenerating coverage', async () => {
@@ -1374,6 +1477,7 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     expect(created.status).toBe(201);
     prisma._snapshots.push({ boqJobId: created.body.id, revision: 1, snapshotBlobPath: 'snapshots/private.json' });
     prisma._employees.get(ADMIN_ID).isAdmin = false;
+    process.env.BOQ_PILOT_EMPLOYEE_IDS = [EMPLOYEE_ID, OTHER_EMPLOYEE_ID, RATE_LIMIT_EMPLOYEE_ID, ADMIN_ID].join(',');
 
     const response = await request(app)
       .get(`/api/boq-generator/jobs/${created.body.id}/boq`)
@@ -1417,7 +1521,7 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     });
 
     const response = await request(app)
-      .get('/api/boq-generator/jobs')
+      .post('/api/boq-generator/jobs/search').send({})
       .set('x-test-employee', EMPLOYEE_ID);
 
     expect(response.status).toBe(200);

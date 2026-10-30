@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
+import { api } from '../lib/api.js';
 // SOL-P2#17: removed the useToast import; pushToast was only used by
 // the now-removed Assets coming-soon branch. Re-introduce when a
 // sidebar item genuinely needs a toast.
@@ -36,7 +37,7 @@ const readSidebarPref = () => {
 };
 
 export default function PortalLayout() {
-  const { employee, logout } = useAuth();
+  const { employee, logout, accessToken } = useAuth();
   const navigate = useNavigate();
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const [sidebarOpen, setSidebarOpenState] = useState(() => {
@@ -46,7 +47,16 @@ export default function PortalLayout() {
     const saved = readSidebarPref();
     return saved === null ? true : saved;
   });
+  const [boqPilot, setBoqPilot] = useState(null);
   const sidebarRef = useRef(null);
+
+  React.useEffect(() => {
+    let active = true;
+    api.boqGenerator.access(accessToken).then((result) => {
+      if (active) setBoqPilot(result);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [accessToken]);
 
   // Wrapper that also persists the desktop choice. On mobile the drawer
   // state isn't persisted — every reload starts closed, by design — so
@@ -489,7 +499,7 @@ const navGroups = [
             ] : [];
             return [
               ...labelEls,
-              ...group.items.map((item) => (
+              ...group.items.filter((item) => item.to !== '/portal/boq-generator' || boqPilot?.isPilot || employee?.isAdmin).map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}

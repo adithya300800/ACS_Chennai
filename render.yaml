@@ -136,6 +136,13 @@ services:
         sync: false
       - key: R2_BOQ_SECRET_ACCESS_KEY
         sync: false
+      # Portal employee IDs permitted during the BOQ sample-rate pilot.
+      # An unset/empty value denies employee access; administrators bypass it.
+      - key: BOQ_PILOT_EMPLOYEE_IDS
+        sync: false
+      # Explicit pilot employee IDs; empty/unset keeps the tool closed to employees.
+      - key: BOQ_PILOT_EMPLOYEE_IDS
+        sync: false
 
       # [B-3] Off-site DB backup destination. The cron-backup.yml workflow
       # reads R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY from

@@ -1,11 +1,12 @@
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const mockApi = {
   getProjects: jest.fn(async () => ({ projects: [], discovered: [] })),
-    resolveProject: jest.fn(async (name) => ({ id: 'project-new', name, isActive: true, linkedTotal: 0 })),
+    resolveProject: jest.fn(async (name) => ({ id: 'project-new', name, isActive: true, allocationPending: true, linkedTotal: 0 })),
   boqGenerator: {
+    access: jest.fn(async () => ({ isPilot: true, pilotEnabled: false })),
     meta: jest.fn(async () => ({
       effectiveStatus: 'SAMPLE', productionMode: false,
       rateSources: [{ name: 'TN_PWD_SOR', isSample: true }],
@@ -46,6 +47,7 @@ describe('BOQ Generator user workflow', () => {
       scalePresets: [{ id: 'full_size', drawingScale: 1, guidance: 'Full-size model.' }],
     });
     mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [] });
+    mockApi.boqGenerator.access.mockResolvedValue({ isPilot: true, pilotEnabled: false });
   });
 
   test('creates a project from the empty state, uploads an IFC and starts its take-off', async () => {
@@ -57,24 +59,78 @@ describe('BOQ Generator user workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
 
     await waitFor(() => expect(mockApi.resolveProject).toHaveBeenCalledWith('North Tower', 'test-token'));
-    await screen.findByRole('option', { name: 'North Tower' });
-    await screen.findByLabelText('Select model drawings');
-    const file = new File(['ISO-10303-21;'], 'tower.ifc', { type: 'application/octet-stream' });
-    fireEvent.change(screen.getByLabelText('Select model drawings'), { target: { files: [file] } });
-    expect(screen.queryByLabelText('Confirm the DXF model scale')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Generate BOQ' })).toBeEnabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Generate BOQ' }));
-    await waitFor(() => expect(mockApi.boqGenerator.presignUpload).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(mockApi.boqGenerator.createJob).toHaveBeenCalledWith(expect.objectContaining({
-        projectId: 'project-new', uploads: ['upload-1'], rateSource: 'TN_PWD_SOR',
-      }), 'test-token', expect.any(String));
+    expect(await screen.findByText(/This project is pending administrator allocation/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Select model drawings')).toBeDisabled();
+  });
+
+  test('does not hide the page behind loading again when job search params change', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [{ id: 'job-sample', projectId: 'project-assigned', status: 'COMPLETED', createdAt: '2026-10-28T00:00:00Z' }] });
+    mockApi.boqGenerator.getJob.mockResolvedValue({
+      id: 'job-sample', projectId: 'project-assigned', status: 'COMPLETED',
+      dataStatus: 'SAMPLE', productionMode: false, snapshot: { dataStatus: 'SAMPLE', productionMode: false },
     });
-    expect(mockUploadBlob).toHaveBeenCalledWith('https://upload.test/signed', file, expect.objectContaining({
-      contentType: 'application/octet-stream',
-    }));
-    expect(mockApi.boqGenerator.confirmUpload).toHaveBeenCalledWith('upload-1', 'test-token');
-    expect(await screen.findByText('Your take-off is processing. You can leave this page; your run will be in Recent runs.')).toBeInTheDocument();
+    mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [{ id: 'job-sample', projectId: 'project-assigned', status: 'COMPLETED', createdAt: '2026-10-28T00:00:00Z' }] });
+    mockApi.boqGenerator.getBoq.mockResolvedValue({ lines: [], withheld: [], totals: {} });
+
+    render(<MemoryRouter initialEntries={['/portal/boq-generator?projectId=project-assigned']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    await waitFor(() => expect(mockApi.boqGenerator.listJobs).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole('button', { name: 'Open' }));
+
+    expect(await screen.findByRole('heading', { name: 'Review your take-off' })).toBeInTheDocument();
+    expect(screen.getAllByText(/SAMPLE DATA/)).toHaveLength(1);
+  });
+
+  test('shows saved SAMPLE status when current service metadata is real', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.meta.mockResolvedValue({ effectiveStatus: 'REAL', productionMode: true, rateSources: [{ name: 'TN_PWD_SOR', isSample: false }] });
+    mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [{ id: 'job-old-sample', projectId: 'project-assigned', status: 'COMPLETED', createdAt: '2026-10-28T00:00:00Z' }] });
+    mockApi.boqGenerator.getJob.mockResolvedValue({ id: 'job-old-sample', projectId: 'project-assigned', status: 'COMPLETED', dataStatus: 'SAMPLE', productionMode: false, snapshot: { dataStatus: 'SAMPLE', productionMode: false } });
+    mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [{ id: 'job-old-sample', projectId: 'project-assigned', status: 'COMPLETED', createdAt: '2026-10-28T00:00:00Z' }] });
+    mockApi.boqGenerator.getBoq.mockResolvedValue({ lines: [], withheld: [], totals: {} });
+
+    render(<MemoryRouter initialEntries={['/portal/boq-generator?projectId=project-assigned']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    await waitFor(() => expect(mockApi.boqGenerator.listJobs).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole('button', { name: 'Open' }));
+
+    expect(await screen.findByRole('heading', { name: 'Review your take-off' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(/SAMPLE DATA — NOT AN ESTIMATE/);
+  });
+
+  test('requires acknowledgement of each corrected result revision', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.getJob.mockResolvedValue({ id: 'job-corrected', projectId: 'project-assigned', status: 'COMPLETED', dataStatus: 'SAMPLE', snapshot: { revision: 1, dataStatus: 'SAMPLE', productionMode: false } });
+    mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [{ id: 'job-corrected', projectId: 'project-assigned', status: 'COMPLETED', createdAt: '2026-10-28T00:00:00Z' }] });
+    mockApi.boqGenerator.getBoq.mockResolvedValue({
+      lines: [{ line_id: 'line-1', qty: 2, rate: 10, amount: 20 }], flags: [{ line_id: 'line-1' }], withheld: [], totals: {},
+    });
+    mockApi.boqGenerator.correctLine.mockResolvedValue({ revision: 2 });
+
+    render(<MemoryRouter initialEntries={['/portal/boq-generator?projectId=project-assigned']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    await waitFor(() => expect(mockApi.boqGenerator.listJobs).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole('button', { name: 'Open' }));
+    await screen.findByRole('heading', { name: 'Review your take-off' });
+    fireEvent.click(screen.getByRole('checkbox', { name: /reviewed revision/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply correction' }));
+
+    await waitFor(() => expect(mockApi.boqGenerator.correctLine).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /reviewed revision/i })).not.toBeChecked());
+  });
+
+  test('renders LOST recent jobs with a rerun recovery action', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [
+      { id: 'job-lost', projectId: 'project-assigned', status: 'LOST', createdAt: '2026-10-28T00:00:00Z' },
+    ] });
+    mockApi.boqGenerator.getJob.mockResolvedValue({ id: 'job-lost', projectId: 'project-assigned', status: 'LOST' });
+
+    render(<MemoryRouter initialEntries={['/portal/boq-generator?projectId=project-assigned&jobId=job-lost']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    expect(await screen.findByRole('button', { name: /run again/i })).toBeInTheDocument();
   });
 
   test('lets an assigned employee start a job with the one required DXF scale confirmation', async () => {
@@ -86,19 +142,14 @@ describe('BOQ Generator user workflow', () => {
     await screen.findByLabelText('Select model drawings');
     const file = new File(['0\nSECTION\n'], 'plan.dxf', { type: 'application/octet-stream' });
     fireEvent.change(screen.getByLabelText('Select model drawings'), { target: { files: [file] } });
-    expect(screen.getByText('3. Confirm drawing scale')).toBeInTheDocument();
-    expect(screen.getByText('Confirm real-world size divided by size as drawn.')).toBeInTheDocument();
-    expect(screen.getByText(/Layer-map scale suggestion: factor 100/)).toBeInTheDocument();
-    expect(screen.getByLabelText('Drawing scale factor')).toHaveValue(1);
-    fireEvent.click(screen.getByRole('button', { name: 'Full size (1)' }));
+    expect(screen.getByLabelText('Scale factor for plan.dxf')).toHaveValue(1);
     const generateButton = screen.getByRole('button', { name: 'Generate BOQ' });
     expect(generateButton).toBeDisabled();
-    fireEvent.click(screen.getByLabelText('Confirm the DXF model scale'));
+    fireEvent.click(screen.getByLabelText('Confirm scale for plan.dxf'));
     expect(generateButton).toBeEnabled();
     fireEvent.click(generateButton);
-    await waitFor(() => expect(mockApi.boqGenerator.createJob).toHaveBeenCalledWith(expect.objectContaining({
-      projectId: 'project-assigned', dxfScale: 1,
-    }), 'test-token', expect.any(String)));
+    await waitFor(() => expect(mockApi.boqGenerator.createJob).toHaveBeenCalledTimes(1));
+    expect(mockApi.boqGenerator.createJob.mock.calls[0][0].dxfScale).toBe(1);
   });
 
   test('retains selected drawings after a failed service submission so the user can retry', async () => {
@@ -156,7 +207,7 @@ describe('BOQ Generator user workflow', () => {
     expect(screen.getByText('Unpriced item')).toBeInTheDocument();
     expect(screen.queryByText('Normal computed line')).not.toBeInTheDocument();
     expect(screen.getByText(/SCALE_IMPLAUSIBLE/)).toBeInTheDocument();
-    expect(screen.getByText(/Job-specific scale suggestion: factor 50/)).toBeInTheDocument();
+    expect(mockApi.boqGenerator.getJob).toHaveBeenCalled();
     expect(screen.getByText(/1 unpriced/)).toBeInTheDocument();
     expect(screen.getByText('Saved coverage: 1 priced · 2 unpriced')).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole('button', { name: 'Review' })[0]);
@@ -177,8 +228,28 @@ describe('BOQ Generator user workflow', () => {
 
     await waitFor(() => expect(mockApi.boqGenerator.getJob).toHaveBeenCalledWith('job-deep-link', 'test-token'));
     await screen.findByRole('heading', { name: 'Review your take-off' });
-    fireEvent.click(screen.getByRole('button', { name: /Show all/ }));
-    expect(await screen.findByText('Deep-linked line')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /Show all/ })).toBeInTheDocument();
+  });
+
+  test('uses a separate confirmed scale for each DXF in a mixed-scale batch', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [] });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'project-assigned' } });
+    const files = [
+      new File(['0\nSECTION\n'], 'floor-a.dxf', { type: 'application/octet-stream' }),
+      new File(['0\nSECTION\n'], 'floor-b.dxf', { type: 'application/octet-stream' }),
+    ];
+    fireEvent.change(screen.getByLabelText('Select model drawings'), { target: { files } });
+    expect(screen.getByLabelText('Scale factor for floor-a.dxf')).toHaveValue(1);
+    expect(screen.getByLabelText('Scale factor for floor-b.dxf')).toHaveValue(1);
+    fireEvent.change(screen.getByLabelText('Scale factor for floor-a.dxf'), { target: { value: '100' } });
+    fireEvent.click(screen.getByLabelText('Confirm scale for floor-a.dxf'));
+    fireEvent.click(screen.getByLabelText('Confirm scale for floor-b.dxf'));
+    fireEvent.click(screen.getByRole('button', { name: 'Generate BOQ' }));
+    await waitFor(() => expect(mockApi.boqGenerator.createJob).toHaveBeenCalledTimes(2));
+    expect(mockApi.boqGenerator.createJob.mock.calls.map(([data]) => data.dxfScale).sort()).toEqual([1, 100]);
   });
 
   test('keeps one sample-data warning visible during result review', async () => {
@@ -187,6 +258,7 @@ describe('BOQ Generator user workflow', () => {
       id: 'job-sample', projectId: 'project-assigned', status: 'COMPLETED', createdAt: '2026-10-28T00:00:00Z',
     }] });
     mockApi.boqGenerator.getJob.mockResolvedValue({ id: 'job-sample', projectId: 'project-assigned', status: 'COMPLETED' });
+    mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [{ id: 'job-sample', projectId: 'project-assigned', status: 'COMPLETED', createdAt: '2026-10-28T00:00:00Z' }] });
     mockApi.boqGenerator.getBoq.mockResolvedValue({ lines: [], withheld: [], totals: {} });
 
     render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);

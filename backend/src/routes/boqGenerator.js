@@ -11,6 +11,7 @@ const {
   complete: completeIdempotency,
   release: releaseIdempotency,
 } = require('../lib/idempotency');
+const { boqUploadLimiter, boqJobLimiter, boqWriteLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
@@ -207,7 +208,7 @@ async function captureCompletedServiceJob({ prisma, job, req }) {
     const workbook = await boqClient.getBoqXlsx({ serviceJobId: job.serviceJobId, requestId: requestId(req) });
     const exportBlobPath = `exports/${job.projectId}/${job.id}/boq-${job.id}-rev-${snapshot.revision}.xlsx`;
     await boqStorage.writeExport({ blobPath: exportBlobPath, buffer: workbook });
-    snapshot = await prisma.boqSnapshot.update({
+    await prisma.boqSnapshot.update({
       where: { id: snapshot.id },
       data: { exportBlobPath },
     });
@@ -219,7 +220,7 @@ async function captureCompletedServiceJob({ prisma, job, req }) {
       status: 'COMPLETED',
       completedAt: new Date(),
       ...(job.settingsJson?.pendingSnapshotRevision ? {
-        revision: job.settingsJson.pendingSnapshotRevision,
+        settingsJson: Object.fromEntries(Object.entries(job.settingsJson).filter(([key]) => key !== 'pendingSnapshotRevision')),
         settingsJson: Object.fromEntries(Object.entries(job.settingsJson).filter(([key]) => key !== 'pendingSnapshotRevision')),
       } : {}),
     },
@@ -267,8 +268,6 @@ async function capturePendingCorrectionRevision({ prisma, job, req, baseSnapshot
       id: randomUUID(),
       boqJobId: job.id,
       ...snapshotMetadata(document, snapshotBlobPath, exportBlobPath, { ...job, revision }, job.employeeId),
-      acknowledgedById: baseSnapshot.acknowledgedById,
-      acknowledgedAt: baseSnapshot.acknowledgedAt,
     },
   });
   return prisma.boqJob.update({
@@ -332,7 +331,6 @@ async function buildRegeneratedWorkbook({ document, job, revision }) {
   const unpricedCount = Number.isInteger(document.totals?.unpriced_line_count)
     ? document.totals.unpriced_line_count
     : Math.max(0, totalLines - pricedCount);
-  const percentPriced = totalLines ? Math.round((pricedCount / totalLines) * 100) : 0;
   const withheldCounts = new Map();
   for (const item of document.withheld || []) {
     const reason = item.reason_code || 'OTHER';
@@ -363,7 +361,7 @@ function requestId(req) {
   return typeof req.id === 'string' && req.id.length <= 128 ? req.id : undefined;
 }
 
-async function submitServiceJob({ prisma, job, req }) {
+async function submitServiceJob({ prisma, job, req, serviceAttempt = 0 }) {
   const meta = await getServiceMeta(req);
   const inputFiles = Array.isArray(job.inputFiles) ? job.inputFiles : [];
   const sources = await Promise.all(inputFiles.map(async (file) => {
@@ -385,7 +383,11 @@ async function submitServiceJob({ prisma, job, req }) {
       requested_by: employee?.name || job.employeeId,
     },
   };
-  const serviceJob = await boqClient.submitJob({ jobId: job.id, requestId: requestId(req), payload });
+  const serviceJob = await boqClient.submitJob({
+    jobId: serviceAttempt ? `${job.id}:retry:${serviceAttempt}` : job.id,
+    requestId: requestId(req),
+    payload,
+  });
   if (!serviceJob || typeof serviceJob.job_id !== 'string') {
     const invalid = new Error('BOQ service returned an invalid job response');
     invalid.kind = 'invalid-response';
@@ -402,6 +404,7 @@ async function submitServiceJob({ prisma, job, req }) {
         : (typeof meta.productionMode === 'boolean' ? meta.productionMode : job.productionMode),
       settingsJson: {
         ...(job.settingsJson || {}),
+        ...(serviceAttempt ? { retryAttempt: serviceAttempt } : {}),
         serviceAdvisory: {
           ...(job.settingsJson?.serviceAdvisory || {}),
           ...(typeof serviceJob.needs_scale_check === 'boolean' ? { needs_scale_check: serviceJob.needs_scale_check } : {}),
@@ -428,24 +431,16 @@ async function respondWithServiceSubmission({ prisma, job, req, res, statusCode 
     return res.status(statusCode).json(body);
   } catch (err) {
     const mapped = mapServiceError(err);
-    const cleanup = await Promise.allSettled([
+    await Promise.all([
       prisma.boqJob.update({
         where: { id: job.id },
         data: { status: 'DRAFT', errorCode: mapped.body.code, errorMessage: mapped.body.message },
       }),
       prisma.uploadIntent.updateMany({
-        where: {
-          employeeId: job.employeeId,
-          ulid: { in: (Array.isArray(job.inputFiles) ? job.inputFiles : []).map((file) => file.uploadId) },
-          boundType: 'boq_job',
-          boundAt: { not: null },
-        },
-        data: { boundType: null, boundAt: null },
+        where: { employeeId: job.employeeId, ulid: { in: (job.inputFiles || []).map((file) => file.uploadId) }, boundType: 'boq_job', boundAt: { not: null } },
+        data: { boundAt: new Date() },
       }),
     ]);
-    if (cleanup.some((result) => result.status === 'rejected')) {
-      console.error('[boq-generator] failed to release a service submission after failure', { jobId: job.id });
-    }
     return res.status(mapped.status).json(mapped.body);
   }
 }
@@ -525,6 +520,32 @@ function projectServiceMeta(upstream = {}) {
 
 router.use(requireAuth);
 
+function pilotAccess(req, isAdmin = req.isAdmin) {
+  const configured = process.env.BOQ_PILOT_EMPLOYEE_IDS;
+  const allowed = (configured || '').split(',').map((id) => id.trim()).filter(Boolean);
+  return { pilotEnabled: true, isPilot: Boolean(isAdmin) || allowed.includes(req.employeeId) };
+}
+
+function requirePilot(req, res, next) {
+  return getPrisma(req).employee.findUnique({ where: { id: req.employeeId }, select: { id: true, isAdmin: true } })
+    .then((employee) => {
+      if (!employee) return respondUnauthorizedProject(res);
+      if (!pilotAccess(req, employee.isAdmin).isPilot) {
+        return res.status(403).json(errorBody('BOQ_PILOT_ACCESS', 'This tool is in pilot and is not available to your account'));
+      }
+      return next();
+    })
+    .catch(next);
+}
+
+router.get('/access', asyncHandler(async (req, res) => {
+  const employee = await getPrisma(req).employee.findUnique({ where: { id: req.employeeId }, select: { isAdmin: true } });
+  if (!employee) return respondUnauthorizedProject(res);
+  return res.json(pilotAccess({ ...req, isAdmin: employee.isAdmin }));
+}));
+
+router.use(requirePilot);
+
 router.get('/meta', asyncHandler(async (req, res) => {
   try {
     const meta = await getServiceMeta(req);
@@ -535,8 +556,10 @@ router.get('/meta', asyncHandler(async (req, res) => {
   }
 }));
 
-router.post('/uploads/presign', asyncHandler(async (req, res) => {
+router.post('/uploads/presign', boqUploadLimiter, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
+  const employee = await prisma.employee.findUnique({ where: { id: req.employeeId }, select: { id: true } });
+  if (!employee) return respondUnauthorizedProject(res);
   const { projectId, filename, sizeBytes } = req.body || {};
   const safeName = sanitizeFilename(filename);
   if (typeof projectId !== 'string' || !projectId || !safeName) {
@@ -574,7 +597,7 @@ router.post('/uploads/presign', asyncHandler(async (req, res) => {
   return res.status(201).json({ uploadId, sasUrl: signed.sasUrl, blobPath: signed.blobPath, expiresAt: signed.expiresAt });
 }));
 
-router.post('/uploads/confirm', asyncHandler(async (req, res) => {
+router.post('/uploads/confirm', boqUploadLimiter, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const { uploadId } = req.body || {};
   if (typeof uploadId !== 'string' || !/^[0-9A-HJKMNP-TV-Z]{26}$/.test(uploadId)) {
@@ -652,7 +675,7 @@ router.post('/uploads/confirm', asyncHandler(async (req, res) => {
   return res.json({ uploadId, verified: true, sizeBytes: verified.contentLength, fileType: detected.fileType });
 }));
 
-router.post('/jobs', asyncHandler(async (req, res) => {
+router.post('/jobs', boqJobLimiter, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const body = req.body || {};
   const { projectId, uploads, dxfScale, rateSource, wastagePct } = body;
@@ -682,9 +705,7 @@ router.post('/jobs', asyncHandler(async (req, res) => {
     const replayedId = reservation.cached.body?.id || reservation.cached.body?.recordId;
     if (replayedId) {
       const existingJob = await prisma.boqJob.findUnique({ where: { id: replayedId } });
-      if (existingJob && existingJob.employeeId === req.employeeId && !existingJob.serviceJobId) {
-        return respondWithServiceSubmission({ prisma, job: existingJob, req, res, statusCode: reservation.cached.status || 201 });
-      }
+      if (existingJob && existingJob.employeeId === req.employeeId && existingJob.status === 'DRAFT') return respondWithServiceSubmission({ prisma, job: existingJob, req, res });
       if (existingJob && existingJob.employeeId === req.employeeId) {
         const replayBody = {
           ...sanitizeJob(existingJob),
@@ -856,24 +877,54 @@ router.post('/jobs', asyncHandler(async (req, res) => {
   }
 }));
 
-router.get('/jobs', asyncHandler(async (req, res) => {
+router.post('/jobs/:boqJobId/retry', boqJobLimiter, asyncHandler(async (req, res) => {
+  const prisma = getPrisma(req);
+  const job = await prisma.boqJob.findUnique({ where: { id: req.params.boqJobId } });
+  if (!job || !await canReadJob(prisma, job, req.employeeId)) return respondUnauthorizedProject(res);
+  if (job.status === 'DRAFT' && !job.serviceJobId) return respondWithServiceSubmission({ prisma, job, req, res });
+  if (job.status === 'LOST') {
+    if (!job.inputFiles?.length) return res.status(409).json(errorBody('BOQ_NOT_RETRYABLE', 'This lost run has no stored drawing files. Select and upload the drawings again'));
+    const attempt = (job.settingsJson?.retryAttempt || 0) + 1;
+    const retryableJob = { ...job, serviceJobId: null, status: 'DRAFT', settingsJson: { ...(job.settingsJson || {}), retryAttempt: attempt } };
+    try {
+      return res.json(sanitizeJob(await submitServiceJob({ prisma, job: retryableJob, req, serviceAttempt: attempt })));
+    } catch (err) {
+      const mapped = mapServiceError(err);
+      await prisma.boqJob.update({ where: { id: job.id }, data: { status: 'LOST', settingsJson: retryableJob.settingsJson, errorCode: mapped.body.code, errorMessage: mapped.body.message } });
+      return res.status(mapped.status).json(mapped.body);
+    }
+  }
+  if (job.status !== 'FAILED') return res.status(409).json(errorBody('BOQ_NOT_RETRYABLE', 'Only failed or lost runs can be retried'));
+  const attempt = (job.settingsJson?.retryAttempt || 0) + 1;
+  const retryableJob = { ...job, serviceJobId: null, status: 'DRAFT', settingsJson: { ...(job.settingsJson || {}), retryAttempt: attempt } };
+  try {
+    return res.json(sanitizeJob(await submitServiceJob({ prisma, job: retryableJob, req, serviceAttempt: attempt })));
+  } catch (err) {
+    const mapped = mapServiceError(err);
+    await prisma.boqJob.update({ where: { id: job.id }, data: { status: job.status, settingsJson: retryableJob.settingsJson, errorCode: mapped.body.code, errorMessage: mapped.body.message } });
+    return res.status(mapped.status).json(mapped.body);
+  }
+}));
+
+router.post('/jobs/search', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const employee = await prisma.employee.findUnique({ where: { id: req.employeeId }, select: { id: true, isAdmin: true } });
   if (!employee) return respondUnauthorizedProject(res);
+  req.isAdmin = Boolean(employee.isAdmin);
+  const filters = req.body || {};
   const where = {};
   if (!employee.isAdmin) {
     where.employeeId = req.employeeId;
-    if (typeof req.query.projectId === 'string' && req.query.projectId) where.projectId = req.query.projectId;
+    if (typeof filters.projectId === 'string' && filters.projectId) where.projectId = filters.projectId;
   } else {
-    if (typeof req.query.projectId === 'string' && req.query.projectId) where.projectId = req.query.projectId;
-    if (typeof req.query.employeeId === 'string' && req.query.employeeId) where.employeeId = req.query.employeeId;
+    if (typeof filters.projectId === 'string' && filters.projectId) where.projectId = filters.projectId;
   }
-  if (typeof req.query.status === 'string' && LISTABLE_STATUSES.includes(req.query.status)) {
-    where.status = req.query.status;
+  if (typeof filters.status === 'string' && LISTABLE_STATUSES.includes(filters.status)) {
+    where.status = filters.status;
   } else if (!employee.isAdmin) {
     where.status = { in: LISTABLE_STATUSES };
   }
-  const parsedLimit = Number.parseInt(req.query.limit, 10);
+  const parsedLimit = Number.parseInt(filters.limit, 10);
   const take = Number.isInteger(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 100) : 50;
   const jobs = await prisma.boqJob.findMany({ where, orderBy: { createdAt: 'desc' }, take });
   const snapshots = jobs.length ? await prisma.boqSnapshot.findMany({
@@ -899,6 +950,8 @@ router.get('/jobs', asyncHandler(async (req, res) => {
   }
   return res.json({ jobs: sanitizedJobs });
 }));
+
+router.get('/jobs', (req, res) => res.status(405).json(errorBody('METHOD_NOT_ALLOWED', 'Use POST /jobs/search to list BOQ runs')));
 
 router.get('/jobs/:boqJobId', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
@@ -1009,7 +1062,7 @@ router.get('/jobs/:boqJobId/boq', asyncHandler(async (req, res) => {
   return res.json(document);
 }));
 
-router.post('/jobs/:boqJobId/save', asyncHandler(async (req, res) => {
+router.post('/jobs/:boqJobId/save', boqWriteLimiter, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const job = await prisma.boqJob.findUnique({ where: { id: req.params.boqJobId } });
   if (!await canReadJob(prisma, job, req.employeeId)) return respondUnauthorizedProject(res);
@@ -1036,7 +1089,7 @@ router.post('/jobs/:boqJobId/save', asyncHandler(async (req, res) => {
   return res.json({ ...sanitizeJob(persisted), revision: snapshot?.revision || job.revision || 1, saved: true });
 }));
 
-router.post('/jobs/:boqJobId/lines/:lineId/corrections', asyncHandler(async (req, res) => {
+router.post('/jobs/:boqJobId/lines/:lineId/corrections', boqWriteLimiter, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const job = await prisma.boqJob.findUnique({ where: { id: req.params.boqJobId } });
   if (!await canReadJob(prisma, job, req.employeeId)) return respondUnauthorizedProject(res);
@@ -1094,7 +1147,7 @@ router.post('/jobs/:boqJobId/lines/:lineId/corrections', asyncHandler(async (req
         });
       }
     }
-    const { job_id: _serviceJobId, ...portalResult } = result;
+  const portalResult = Object.fromEntries(Object.entries(result).filter(([key]) => key !== 'job_id'));
     return res.json(portalResult);
   } catch (err) {
     const mapped = mapServiceError(err);
@@ -1102,7 +1155,7 @@ router.post('/jobs/:boqJobId/lines/:lineId/corrections', asyncHandler(async (req
   }
 }));
 
-router.delete('/jobs/:boqJobId', asyncHandler(async (req, res) => {
+router.delete('/jobs/:boqJobId', boqWriteLimiter, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const job = await prisma.boqJob.findUnique({ where: { id: req.params.boqJobId } });
   if (!await canReadJob(prisma, job, req.employeeId)) return respondUnauthorizedProject(res);
@@ -1149,7 +1202,7 @@ router.delete('/jobs/:boqJobId', asyncHandler(async (req, res) => {
   return res.json({ id: job.id, deleted: true });
 }));
 
-router.post('/jobs/:boqJobId/export/acknowledge', asyncHandler(async (req, res) => {
+router.post('/jobs/:boqJobId/export/acknowledge', boqWriteLimiter, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const job = await prisma.boqJob.findUnique({ where: { id: req.params.boqJobId } });
   if (!await canReadJob(prisma, job, req.employeeId)) return respondUnauthorizedProject(res);
@@ -1203,7 +1256,7 @@ router.get('/jobs/:boqJobId/export', asyncHandler(async (req, res) => {
   }
 }));
 
-router.post('/jobs/:boqJobId/export/regenerate', asyncHandler(async (req, res) => {
+router.post('/jobs/:boqJobId/export/regenerate', boqWriteLimiter, asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const job = await prisma.boqJob.findUnique({ where: { id: req.params.boqJobId } });
   if (!await canReadJob(prisma, job, req.employeeId)) return respondUnauthorizedProject(res);
@@ -1236,6 +1289,11 @@ router.post('/jobs/:boqJobId/export/regenerate', asyncHandler(async (req, res) =
 }));
 
 router.resetMetaCacheForTests = () => { metaCache = null; };
+router.resetRateLimitsForTests = async (employeeIds = []) => {
+  await Promise.all([boqUploadLimiter, boqJobLimiter, boqWriteLimiter].map(async (limiter) => {
+    await Promise.all(employeeIds.map((employeeId) => limiter.resetKey(`emp:${employeeId}`)));
+  }));
+};
 router.captureCompletedServiceJob = captureCompletedServiceJob;
 
 module.exports = router;

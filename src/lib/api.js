@@ -959,17 +959,16 @@ export const api = {
   // Project-scoped model take-off; intentionally separate from the legacy
   // BOQ item registry/variance routes above.
   boqGenerator: {
+    access: (token) => api.get('/boq-generator/access', token),
     meta: (token) => api.get('/boq-generator/meta', token, { timeoutMs: 45_000 }),
-    listJobs: (projectId, token) => api.get(
-      `/boq-generator/jobs${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`,
-      token,
-    ),
+    listJobs: (projectId, token) => api.post('/boq-generator/jobs/search', { projectId }, token),
     presignUpload: (data, token) => api.post('/boq-generator/uploads/presign', data, token),
     confirmUpload: (uploadId, token) => api.post('/boq-generator/uploads/confirm', { uploadId }, token),
     createJob: (data, token, idempotencyKey) => api.post(
       '/boq-generator/jobs', data, token, idempotencyKey, { timeoutMs: 240_000 },
     ),
     getJob: (id, token) => api.get(`/boq-generator/jobs/${encodeURIComponent(id)}`, token, { timeoutMs: 90_000 }),
+    retryJob: (id, token) => api.post(`/boq-generator/jobs/${encodeURIComponent(id)}/retry`, {}, token, undefined, { timeoutMs: 240_000 }),
     getBoq: (id, token) => api.get(`/boq-generator/jobs/${encodeURIComponent(id)}/boq`, token),
     save: (id, token) => api.post(`/boq-generator/jobs/${encodeURIComponent(id)}/save`, {}, token),
     correctLine: (id, lineId, data, token) => api.post(

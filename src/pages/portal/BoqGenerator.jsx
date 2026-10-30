@@ -30,7 +30,7 @@ function cleanError(err) {
 
 export default function BoqGenerator() {
   useDocumentTitle('BOQ Generator');
-  const { accessToken } = useAuth();
+  const { accessToken, employee } = useAuth();
   const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const [projects, setProjects] = useState([]);
@@ -41,14 +41,16 @@ export default function BoqGenerator() {
   const [files, setFiles] = useState([]);
   const [confirmedUploads, setConfirmedUploads] = useState([]);
   const [confirmedForJob, setConfirmedForJob] = useState([]);
-  const [scale, setScale] = useState('1');
-  const [scaleConfirmed, setScaleConfirmed] = useState(false);
+  const [scaleByFileId, setScaleByFileId] = useState({});
+  const [confirmedScaleFileIds, setConfirmedScaleFileIds] = useState([]);
   const [wastagePct, setWastagePct] = useState('0');
   const [meta, setMeta] = useState(null);
+  const [metaLoading, setMetaLoading] = useState(true);
   const [jobs, setJobs] = useState([]);
   const [job, setJob] = useState(null);
   const [boq, setBoq] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [pilotAccess, setPilotAccess] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState('');
@@ -58,7 +60,9 @@ export default function BoqGenerator() {
   const [correctionReason, setCorrectionReason] = useState('Measured on site');
   const [savingCorrection, setSavingCorrection] = useState(false);
   const [onlyFlagged, setOnlyFlagged] = useState(true);
-  const [acknowledged, setAcknowledged] = useState(false);
+  const [acknowledgedRevision, setAcknowledgedRevision] = useState(null);
+  const currentRevision = job?.snapshot?.revision || job?.revision || 1;
+  const acknowledged = acknowledgedRevision === currentRevision;
   const [submitting, setSubmitting] = useState(false);
   const openedJobIdRef = useRef('');
   const submissionRef = useRef(null);
@@ -68,37 +72,14 @@ export default function BoqGenerator() {
   const selectedProject = projects.find((project) => project.id === projectId);
   const rateSources = meta?.rateSources || [];
   const activeRateSource = rateSources[0]?.name || 'TN_PWD_SOR';
-  const isSample = !meta || meta.effectiveStatus !== 'REAL' || meta.productionMode !== true;
-  const hasDxf = files.some((file) => (file.file?.name || file.filename).toLowerCase().endsWith('.dxf'));
+  const completedJob = ['COMPLETED', 'COMPLETED_PENDING_EXPORT'].includes(job?.status);
+  const isSample = job?.snapshot
+    ? job.snapshot.dataStatus !== 'REAL' || job.snapshot.productionMode !== true
+    : completedJob
+      ? job.dataStatus !== 'REAL' || job.productionMode !== true
+      : !meta || meta.effectiveStatus !== 'REAL' || meta.productionMode !== true;
   const supportedTypes = (meta?.supportedInputTypes || ['ifc', 'dxf']).filter((type) => ['ifc', 'dxf'].includes(type));
   const acceptedExtensions = supportedTypes.length ? supportedTypes : ['ifc', 'dxf'];
-  const hasIfc = files.some((file) => (file.file?.name || file.filename).toLowerCase().endsWith('.ifc'));
-  const scalePresets = meta?.scalePresets || [];
-  const scaleSuggestion = meta?.scaleSuggestion;
-  const suggestedFactor = scaleSuggestion && typeof scaleSuggestion === 'object'
-    ? (scaleSuggestion.drawing_scale ?? scaleSuggestion.scale ?? scaleSuggestion.value ?? null)
-    : scaleSuggestion;
-  const jobScaleSuggestion = job?.scaleSuggestion;
-  const jobSuggestedFactor = jobScaleSuggestion && typeof jobScaleSuggestion === 'object'
-    ? (jobScaleSuggestion.drawing_scale ?? jobScaleSuggestion.scale ?? jobScaleSuggestion.value ?? null)
-    : jobScaleSuggestion;
-  const completedJob = ['COMPLETED', 'COMPLETED_PENDING_EXPORT'].includes(job?.status);
-
-  const loadProjects = useCallback(async () => {
-    try {
-      const response = await api.getProjects({ scope: 'assigned' }, accessToken);
-      const assigned = response.projects || [];
-      const combined = [...assigned];
-      localProjectsRef.current.forEach((project) => {
-        if (!combined.some((candidate) => candidate.id === project.id)) combined.push(project);
-      });
-      setProjects(combined);
-      return combined;
-    } catch (err) {
-      setError(cleanError(err));
-      return [];
-    }
-  }, [accessToken]);
 
   const loadJobs = useCallback(async (forProject = projectId) => {
     try {
@@ -107,27 +88,64 @@ export default function BoqGenerator() {
     } catch (err) {
       setError(cleanError(err));
     }
-  }, [accessToken, projectId]);
+  }, [accessToken]);
+
+  const refreshProjects = async () => {
+    try {
+      const response = await api.getProjects({ scope: 'assigned' }, accessToken);
+      setProjects((current) => [
+        ...(response.projects || []),
+        ...current.filter((project) => !(response.projects || []).some((assigned) => assigned.id === project.id)),
+      ]);
+      if ((response.projects || []).some((project) => project.id === projectId)) {
+        setNotice('Your project assignment is active. You can upload drawings now.');
+      }
+    } catch (err) {
+      setError(cleanError(err));
+    }
+  };
 
   const loadJob = useCallback(async (id) => {
     const next = await api.boqGenerator.getJob(id, accessToken);
     setJob(next);
     setOnlyFlagged(true);
     setExpandedLineId('');
-    setAcknowledged(false);
-    setBoq(['COMPLETED', 'COMPLETED_PENDING_EXPORT'].includes(next.status)
-      ? await api.boqGenerator.getBoq(id, accessToken)
-      : null);
+    setAcknowledgedRevision(null);
+    if (['COMPLETED', 'COMPLETED_PENDING_EXPORT'].includes(next.status)) setBoq(await api.boqGenerator.getBoq(id, accessToken));
+    else setBoq(null);
     return next;
   }, [accessToken]);
+
+  const retryJob = async (run) => {
+    setError('');
+    try {
+      const original = await api.boqGenerator.getJob(run.id, accessToken);
+      if (['DRAFT', 'LOST'].includes(original.status)) {
+        const retried = await api.boqGenerator.retryJob(run.id, accessToken);
+        setJob(retried);
+        setSearchParams({ projectId: retried.projectId, jobId: retried.id });
+        return;
+      if (original.status === 'LOST') {
+        const retried = await api.boqGenerator.retryJob(run.id, accessToken);
+        setJob(retried);
+        setBoq(null);
+        setSearchParams({ projectId: retried.projectId, jobId: retried.id });
+        return;
+      }
+      }
+      setNotice(`The original files for this ${run.status.toLowerCase()} run are not in this browser. Select and upload them again to create a new run.`);
+      setSearchParams({ projectId: original.projectId });
+    } catch (err) {
+      setError(cleanError(err));
+    }
+  };
 
   useEffect(() => {
     let alive = true;
     (async () => {
-      setLoading(true);
-      const [projectsResult, metaResult] = await Promise.allSettled([
+      const [projectsResult, accessResult] = await Promise.allSettled([
         api.getProjects({ scope: 'assigned' }, accessToken),
-        api.boqGenerator.meta(accessToken),
+        api.boqGenerator.access(accessToken),
       ]);
       if (!alive) return;
       if (projectsResult.status === 'fulfilled') {
@@ -140,12 +158,16 @@ export default function BoqGenerator() {
         if (fromQuery && assigned.some((project) => project.id === fromQuery)) setProjectId(fromQuery);
         else if (!projectId && assigned.length === 1) setProjectId(assigned[0].id);
       } else setError(cleanError(projectsResult.reason));
-      if (metaResult.status === 'fulfilled') setMeta(metaResult.value);
-      else setError(cleanError(metaResult.reason));
+      if (accessResult.status === 'fulfilled') setPilotAccess(accessResult.value);
+      else setError(cleanError(accessResult.reason));
       setLoading(false);
+      if (accessResult.status === 'fulfilled' && !accessResult.value.isPilot) { setMetaLoading(false); return; }
+      try { setMeta(await api.boqGenerator.meta(accessToken)); } catch (err) { setError(cleanError(err)); }
+      finally { setMetaLoading(false); }
+      if (alive) setLoading(false);
     })();
     return () => { alive = false; };
-  }, [accessToken, searchParams, projectId]);
+  }, [accessToken]);
 
   useEffect(() => {
     loadJobs(projectId);
@@ -158,15 +180,13 @@ export default function BoqGenerator() {
     openedJobIdRef.current = requestedJobId;
     (async () => {
       try {
-        const opened = await api.boqGenerator.getJob(requestedJobId, accessToken);
-        if (!active) return;
-        setJob(opened);
-        setOnlyFlagged(true);
-        setExpandedLineId('');
-        setAcknowledged(false);
-        if (['COMPLETED', 'COMPLETED_PENDING_EXPORT'].includes(opened.status)) {
-          setBoq(await api.boqGenerator.getBoq(opened.id, accessToken));
-        } else setBoq(null);
+      const opened = await api.boqGenerator.getJob(requestedJobId, accessToken);
+      setJob(opened);
+      setOnlyFlagged(true);
+      setExpandedLineId('');
+      setAcknowledgedRevision(null);
+      if (['COMPLETED', 'COMPLETED_PENDING_EXPORT'].includes(opened.status)) setBoq(await api.boqGenerator.getBoq(requestedJobId, accessToken));
+      else setBoq(null);
       } catch (err) {
         if (active) {
           openedJobIdRef.current = '';
@@ -207,7 +227,7 @@ export default function BoqGenerator() {
     };
     timer = window.setTimeout(poll, POLL_INTERVAL_MS);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [job?.id, job?.status, accessToken, loadJobs, projectId]);
+  }, [job?.id, job?.status, accessToken, loadJobs]);
 
   const selectProject = (id) => {
     submissionRef.current = null;
@@ -218,10 +238,13 @@ export default function BoqGenerator() {
     setFiles([]);
     setConfirmedUploads([]);
     setConfirmedForJob([]);
+    setScaleByFileId({});
+    setConfirmedScaleFileIds([]);
     setOnlyFlagged(true);
     setExpandedLineId('');
-    setAcknowledged(false);
+    setAcknowledgedRevision(null);
     setError('');
+    setNotice('');
     if (id) setSearchParams({ projectId: id });
     else setSearchParams({});
   };
@@ -241,12 +264,21 @@ export default function BoqGenerator() {
     setFiles([]);
     setConfirmedUploads([]);
     setConfirmedForJob([]);
+    setScaleByFileId({});
+    setConfirmedScaleFileIds([]);
     setOnlyFlagged(true);
     setExpandedLineId('');
-    setAcknowledged(false);
+    setAcknowledgedRevision(null);
     setError('');
     setSearchParams({ projectId: project.id });
     setJobs([]);
+    if (project.allocationPending) {
+      localProjectsRef.current.set(project.id, { ...project, allocationPending: true });
+      setNotice(`“${project.name}” is pending administrator allocation. Choose an assigned project, or wait until an administrator assigns you before uploading drawings.`);
+      localProjectsRef.current.set(project.id, { ...project, allocationPending: true });
+      toast.push(`Project “${project.name}” is pending administrator allocation.`, 'info');
+      return;
+    }
     if (project.linkedTotal > 0) setNotice(`${project.linkedTotal} existing record${project.linkedTotal === 1 ? '' : 's'} linked to this project.`);
     toast.push(`Project “${project.name}” is ready. Add your IFC or DXF drawings below.`, 'success');
   };
@@ -259,7 +291,7 @@ export default function BoqGenerator() {
     setError('');
     try {
       const project = await api.resolveProject(name, accessToken);
-      loadCreatedProjectAndContinue(project);
+      await loadCreatedProjectAndContinue(project);
     } catch (err) {
       setError(err?.code === 'PROJECT_INACTIVE'
         ? 'That project is archived. Ask an administrator to reactivate it.'
@@ -285,7 +317,8 @@ export default function BoqGenerator() {
       return;
     }
     if (rejected.length) setError(rejected.join(' '));
-    if (newFiles.some((item) => item.file.name.toLowerCase().endsWith('.dxf'))) setScaleConfirmed(false);
+    setScaleByFileId((current) => ({ ...current, ...Object.fromEntries(newFiles.map((item) => [item.id, '1'])) }));
+    setConfirmedScaleFileIds((current) => current.filter((id) => files.some((file) => file.id === id)));
     setFiles((current) => [...current, ...newFiles]);
     if (accepted.length) setError('');
   };
@@ -315,7 +348,7 @@ export default function BoqGenerator() {
       setConfirmedUploads((current) => [...current.filter((upload) => upload.fileId !== item.id), { fileId: item.id, uploadId: signed.uploadId }]);
       setConfirmedForJob((current) => [...current.filter((upload) => upload.fileId !== item.id), { fileId: item.id, uploadId: signed.uploadId }]);
     }
-    return files.map((file) => uploadsByFileId.get(file.id)).filter(Boolean);
+    return files.map((file) => ({ uploadId: uploadsByFileId.get(file.id), file })).filter(({ uploadId }) => uploadId);
   };
 
   const generate = async (event) => {
@@ -327,42 +360,45 @@ export default function BoqGenerator() {
     setProgress(0);
     try {
       if (!submissionRef.current) {
-        const uploads = await prepareUploads();
-        if (!uploads.length) throw new Error('The selected drawings could not be confirmed. Choose them again and retry.');
+        const uploadsByScale = await prepareUploads();
+        if (!uploadsByScale.length) throw new Error('The selected drawings could not be confirmed. Choose them again and retry.');
         submissionRef.current = {
           key: typeof crypto !== 'undefined' && crypto.randomUUID
             ? crypto.randomUUID()
             : `boq-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          body: {
-            projectId,
-            uploads,
-            dxfScale: hasDxf ? Number(scale) : null,
-            rateSource: activeRateSource,
-            wastagePct: Number(wastagePct) || 0,
-          },
+          batches: Object.values(uploadsByScale.reduce((batches, upload) => {
+            const key = upload.file.file.name.toLowerCase().endsWith('.dxf') ? String(scaleByFileId[upload.file.id] || 1) : 'ifc';
+            batches[key] ||= { projectId, uploads: [], dxfScale: key === 'ifc' ? null : Number(key), rateSource: activeRateSource, wastagePct: Number(wastagePct) || 0 };
+            batches[key].uploads.push(upload.uploadId);
+            return batches;
+          }, {})),
+          index: 0,
+          job: job?.status === 'DRAFT' ? job : null,
         };
       }
       setUploading(false);
-      const created = await api.boqGenerator.createJob(
-        submissionRef.current.body, accessToken, submissionRef.current.key,
-      );
+      let created = submissionRef.current.job;
+      for (let index = submissionRef.current.index; index < submissionRef.current.batches.length; index += 1) {
+        const batch = submissionRef.current.batches[index];
+        created = await api.boqGenerator.createJob(batch, accessToken, `${submissionRef.current.key}-${index}`);
+        submissionRef.current.job = created;
+        submissionRef.current.index = index + 1;
+      }
       submissionRef.current = null;
       openedJobIdRef.current = created.id;
       setJob(created);
       setOnlyFlagged(true);
       setExpandedLineId('');
-      setAcknowledged(false);
+      setAcknowledgedRevision(null);
       setBoq(null);
-      setFiles((current) => current.filter((file) => !confirmedForJob.some((upload) => upload.fileId === file.id)));
-      setConfirmedUploads((current) => current.filter((upload) => !confirmedForJob.some((confirmed) => confirmed.fileId === upload.fileId)));
+      setFiles([]);
+      setConfirmedUploads([]);
       setConfirmedForJob([]);
-      openedJobIdRef.current = created.id;
+      setScaleByFileId({});
+      setConfirmedScaleFileIds([]);
       setSearchParams({ projectId, jobId: created.id });
       await loadJobs(projectId);
     } catch (err) {
-      if (submissionRef.current && !['TIMEOUT', 'NETWORK_ERROR', 'REFRESH_TRANSIENT', 'BOQ_TIMEOUT', 'BOQ_SERVICE_UNAVAILABLE'].includes(err?.code)) {
-        submissionRef.current = null;
-      }
       setError(cleanError(err));
     } finally {
       setSubmitting(false);
@@ -387,10 +423,10 @@ export default function BoqGenerator() {
     try {
       await api.boqGenerator.save(job.id, accessToken);
       await api.boqGenerator.acknowledgeExport(job.id, accessToken);
-      const result = await api.boqGenerator.downloadExport(job.id, accessToken);
+      const download = await api.boqGenerator.downloadExport(job.id, accessToken);
       const anchor = document.createElement('a');
-      anchor.href = result.downloadUrl;
-      anchor.download = result.filename || `boq-${job.id}.xlsx`;
+      anchor.href = download.downloadUrl;
+      anchor.download = download.filename || `boq-${job.id}.xlsx`;
       anchor.rel = 'noopener';
       document.body.appendChild(anchor);
       anchor.click();
@@ -399,6 +435,11 @@ export default function BoqGenerator() {
     } catch (err) {
       setError(cleanError(err));
     }
+  };
+
+  const setFileScale = (fileId, value) => {
+    setScaleByFileId((current) => ({ ...current, [fileId]: value }));
+    setConfirmedScaleFileIds((current) => current.filter((id) => id !== fileId));
   };
 
   const correctLine = async (line) => {
@@ -410,11 +451,14 @@ export default function BoqGenerator() {
     setSavingCorrection(true);
     setError('');
     try {
-      await api.boqGenerator.correctLine(job.id, line.line_id, {
+      const correction = await api.boqGenerator.correctLine(job.id, line.line_id, {
         kind: 'override_qty', qty: quantity, reason: correctionReason,
       }, accessToken);
       const revised = await api.boqGenerator.getBoq(job.id, accessToken);
-      setBoq(revised);
+      const priorCorrections = boq?.corrections || [];
+      setBoq({ ...revised, corrections: [...priorCorrections, correction.correction].filter(Boolean) });
+      setAcknowledgedRevision(null);
+      setJob((current) => ({ ...current, revision: correction.revision || (current.revision || 1) + 1, snapshot: { ...current.snapshot, revision: correction.revision || (current.snapshot?.revision || current.revision || 1) + 1, acknowledgedAt: null } }));
       setExpandedLineId('');
       toast.push('Quantity correction saved to the audit trail.', 'success');
     } catch (err) {
@@ -436,7 +480,17 @@ export default function BoqGenerator() {
   const flaggedCount = reviewLines.length;
   const isInProgress = job && ['DRAFT', 'SUBMITTING', 'SUBMITTED', 'RUNNING', 'COMPLETED_PENDING_EXPORT'].includes(job.status);
 
+  useEffect(() => {
+    if (!loading && searchParams.get('jobId') && !job && !error) {
+      api.boqGenerator.getJob(searchParams.get('jobId'), accessToken)
+        .then(setJob)
+        .catch((err) => setError(cleanError(err)));
+    }
+  }, [loading, searchParams, job, error, accessToken]);
+
   if (loading) return <div className="dpr-page"><p role="status">Loading BOQ Generator…</p></div>;
+
+  if (pilotAccess && !pilotAccess.isPilot) return <main className="dpr-page"><h1>BOQ Generator</h1><p role="status">This tool is in pilot and is not available to your account.</p></main>;
 
   return (
     <main className="dpr-page" aria-labelledby="boq-generator-title">
@@ -451,13 +505,14 @@ export default function BoqGenerator() {
       {error && <div role="alert" style={{ padding: '0.85rem 1rem', marginBottom: '1rem', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 10, color: '#991B1B' }}>{error}</div>}
       {notice && <div role="status" style={{ padding: '0.75rem 1rem', marginBottom: '1rem', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 10 }}>{notice}</div>}
 
-      {isSample && !completedJob && <div role="status" style={{ background: '#FEF3C7', color: '#78350F', border: '1px solid #F59E0B', borderRadius: 10, padding: '0.85rem 1rem', marginBottom: '1rem', fontWeight: 600 }}>
+      {metaLoading && pilotAccess?.pilotEnabled && <div role="status">Checking BOQ data status…</div>}
+      {pilotAccess?.pilotEnabled && isSample && !completedJob && <div role="status" style={{ background: '#FEF3C7', color: '#78350F', border: '1px solid #F59E0B', borderRadius: 10, padding: '0.85rem 1rem', marginBottom: '1rem', fontWeight: 600 }}>
         SAMPLE DATA — {RATE_NOTICE}
       </div>}
 
-      <section className="dpr-card" aria-labelledby="boq-project-heading" style={{ padding: '1.25rem', marginBottom: '1rem' }}>
+      <section className="dpr-card" aria-labelledby="boq-drawings-heading" style={{ padding: '1.25rem', marginBottom: '1rem' }}>
         <h2 id="boq-project-heading" style={{ marginTop: 0 }}>1. Choose a project</h2>
-        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '1rem' }}>
           <label htmlFor="boq-project-select" style={{ fontWeight: 600 }}>Project</label>
           <select id="boq-project-select" className="form-input" style={{ flex: '1 1 260px', maxWidth: 560 }} value={projectId} onChange={(event) => { selectProject(event.target.value); setNotice(''); }}>
             <option value="">Select an assigned project…</option>
@@ -473,39 +528,46 @@ export default function BoqGenerator() {
           <button type="submit" className="btn btn-primary" disabled={creatingProject}>{creatingProject ? 'Creating…' : 'Create project'}</button>
         </form>}
         {projects.length === 0 && !showProjectForm && <p style={{ color: 'var(--steel)', marginBottom: 0 }}>No assigned projects yet. Add a project to get started.</p>}
-        {selectedProject && <p style={{ color: 'var(--steel)', marginBottom: 0, marginTop: '0.5rem' }}>Your project and uploads are private to your portal account.</p>}
+        {selectedProject?.allocationPending && <div role="status" style={{ color: 'var(--steel)', marginTop: '0.5rem' }}><p style={{ margin: 0 }}>This project is pending administrator allocation. Choose an assigned project or ask an administrator to assign you before uploading drawings.</p><button type="button" className="btn btn-secondary" style={{ marginTop: '0.5rem' }} onClick={refreshProjects}>Check allocation</button></div>}
+        {selectedProject && !selectedProject.allocationPending && <p style={{ color: 'var(--steel)', marginBottom: 0, marginTop: '0.5rem' }}>Your project and uploads are private to your portal account.</p>}
       </section>
 
       <section className="dpr-card" aria-labelledby="boq-drawings-heading" style={{ padding: '1.25rem', marginBottom: '1rem', opacity: projectId ? 1 : 0.7 }}>
         <h2 id="boq-drawings-heading" style={{ marginTop: 0 }}>2. Add model drawings</h2>
         <p style={{ color: 'var(--steel)', marginTop: 0 }}>Choose {acceptedExtensions.map((type) => type.toUpperCase()).join(' or ')} files from your device. PDF sheets can be kept in the drawing register, but cannot be measured here.</p>
-        <input ref={fileInputRef} aria-label="Select model drawings" type="file" accept={acceptedExtensions.map((type) => `.${type}`).join(',')} multiple onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }} style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }} />
+        <input ref={fileInputRef} aria-label="Select model drawings" type="file" accept={acceptedExtensions.map((type) => `.${type}`).join(',')} multiple disabled={!projectId || selectedProject?.allocationPending} onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }} style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }} />
         <button
           type="button"
           className="boq-upload-dropzone"
-          disabled={!projectId}
+          disabled={!projectId || selectedProject?.allocationPending}
           aria-label={`Choose ${acceptedExtensions.map((type) => type.toUpperCase()).join(' or ')} drawing files`}
-          onClick={() => projectId && fileInputRef.current?.click()}
+          onClick={() => projectId && !selectedProject?.allocationPending && fileInputRef.current?.click()}
           onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => { event.preventDefault(); if (projectId) addFiles(event.dataTransfer.files); }}
+          onDrop={(event) => { event.preventDefault(); if (projectId && !selectedProject?.allocationPending) addFiles(event.dataTransfer.files); }}
           style={{ display: 'block', width: '100%', border: '2px dashed #94A3B8', borderRadius: 12, padding: '1.5rem', textAlign: 'center', cursor: projectId ? 'pointer' : 'not-allowed', background: '#F8FAFC', color: 'inherit', font: 'inherit' }}
         >
           <strong>{projectId ? `Drop ${acceptedExtensions.map((type) => type.toUpperCase()).join('/')} files here or browse` : 'Choose a project first'}</strong>
           <div style={{ color: 'var(--steel)', fontSize: 14, marginTop: 4 }}>Up to {MAX_FILES} files · 50 MB each</div>
         </button>
         {files.length > 0 && <ul aria-label="Selected drawings" style={{ listStyle: 'none', padding: 0, margin: '0.75rem 0' }}>
-          {files.map((item) => <li key={item.id} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.55rem 0', borderBottom: '1px solid var(--border)' }}>
+          {files.map((item) => <li key={item.id} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', padding: '0.55rem 0', borderBottom: '1px solid var(--border)' }}>
             <span style={{ flex: 1 }}>{item.file?.name || item.filename} <span style={{ color: 'var(--steel)' }}>({formatBytes(item.file?.size ?? item.sizeBytes)})</span></span>
+            {item.file?.name.toLowerCase().endsWith('.dxf') && <label>Scale factor
+              <input className="form-input" aria-label={`Scale factor for ${item.file.name}`} type="number" min="0.000001" step="any" value={scaleByFileId[item.id] ?? '1'} onChange={(event) => setFileScale(item.id, event.target.value)} />
+            </label>}
+            {item.file?.name.toLowerCase().endsWith('.dxf') && <label><input type="checkbox" aria-label={`Confirm scale for ${item.file.name}`} checked={confirmedScaleFileIds.includes(item.id)} onChange={(event) => setConfirmedScaleFileIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /> Confirm scale</label>}
             {uploading && <span aria-label="Upload progress">{progress}%</span>}
             <button type="button" className="btn btn-secondary" onClick={() => {
               submissionRef.current = null;
               setFiles((current) => current.filter((file) => file.id !== item.id));
               setConfirmedUploads((current) => current.filter((upload) => upload.fileId !== item.id));
               setConfirmedForJob((current) => current.filter((upload) => upload.fileId !== item.id));
+              setScaleByFileId((current) => { const next = { ...current }; delete next[item.id]; return next; });
+              setConfirmedScaleFileIds((current) => current.filter((id) => id !== item.id));
             }} disabled={uploading} aria-label={`Remove ${item.file?.name || item.filename}`}>Remove</button>
           </li>)}
         </ul>}
-        {projectId && !hasDxf && <details style={{ marginTop: '1rem' }}>
+        {projectId && <details style={{ marginTop: '1rem' }}>
           <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Rate settings</summary>
           <label style={{ display: 'block', marginTop: '0.75rem' }}>Rate source
             {rateSources.length > 1 ? <select className="form-input" value={activeRateSource} onChange={(event) => setMeta((current) => ({ ...current, rateSources: [current.rateSources.find((source) => source.name === event.target.value), ...current.rateSources.filter((source) => source.name !== event.target.value)] }))}>
@@ -513,34 +575,7 @@ export default function BoqGenerator() {
             </select> : <span style={{ display: 'block', padding: '0.6rem 0' }}>{activeRateSource}{rateSources[0]?.isSample || isSample ? ' — sample rates' : ''}</span>}
           </label>
         </details>}
-        {projectId && hasDxf && <section aria-labelledby="boq-scale-heading" style={{ marginTop: '1rem', padding: '1rem', border: '1px solid var(--border)', borderRadius: 10 }}>
-          <h3 id="boq-scale-heading" style={{ marginTop: 0 }}>3. Confirm drawing scale</h3>
-          <p style={{ color: 'var(--steel)', marginTop: 0 }}>{meta?.scaleGuidance || 'Confirm real-world size divided by size as drawn. Full-size model geometry uses a factor of 1.'}</p>
-          {hasIfc && <p style={{ color: 'var(--steel)' }}>IFC reports no scale requirement; confirm a scale for the DXF file.</p>}
-          {suggestedFactor != null && <p role="note">Layer-map scale suggestion: factor {suggestedFactor}. Confirm or change it; it is not applied automatically.</p>}
-          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'end', flexWrap: 'wrap' }}>
-            <label>Drawing scale factor
-              <input className="form-input" type="number" min="0.000001" step="any" value={scale} onChange={(event) => { setScale(event.target.value); setScaleConfirmed(false); }} />
-            </label>
-            {scalePresets.filter((preset) => preset.id === 'full_size' && Number(preset.drawingScale) === 1).map((preset) => <button key={preset.id} type="button" className="btn btn-secondary" onClick={() => { setScale(String(preset.drawingScale)); setScaleConfirmed(false); }}>Full size (1)</button>)}
-          </div>
-          <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'start', marginTop: '0.5rem' }}>
-            <input type="checkbox" aria-label="Confirm the DXF model scale" checked={scaleConfirmed} onChange={(event) => setScaleConfirmed(event.target.checked)} />
-            <span>I checked this model’s units and confirm the scale factor.</span>
-          </label>
-          <details style={{ marginTop: '0.75rem' }}>
-            <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Advanced settings</summary>
-            <label style={{ display: 'block', marginTop: '0.75rem' }}>Material wastage (%)
-              <input className="form-input" type="number" min="0" max="100" step="0.5" value={wastagePct} onChange={(event) => setWastagePct(event.target.value)} />
-            </label>
-          </details>
-          <label style={{ display: 'block', marginTop: '0.75rem' }}>Rate source
-            {rateSources.length > 1 ? <select className="form-input" value={activeRateSource} onChange={(event) => setMeta((current) => ({ ...current, rateSources: [current.rateSources.find((source) => source.name === event.target.value), ...current.rateSources.filter((source) => source.name !== event.target.value)] }))}>
-              {rateSources.map((source) => <option key={source.name} value={source.name}>{source.name}{source.isSample ? ' (sample)' : ''}</option>)}
-            </select> : <span style={{ display: 'block', padding: '0.6rem 0' }}>{activeRateSource}{rateSources[0]?.isSample || isSample ? ' — sample rates' : ''}</span>}
-          </label>
-        </section>}
-        <button type="button" className="btn btn-primary" style={{ marginTop: '1rem' }} disabled={!projectId || !files.length || submitting || (hasDxf && (!(Number(scale) > 0) || !scaleConfirmed))} onClick={generate}>
+        <button type="button" className="btn btn-primary" style={{ marginTop: '1rem' }} disabled={!projectId || selectedProject?.allocationPending || !files.length || submitting || files.some((file) => file.file?.name.toLowerCase().endsWith('.dxf') && (!(Number(scaleByFileId[file.id]) > 0) || !confirmedScaleFileIds.includes(file.id)))} onClick={generate}>
           {uploading ? 'Uploading drawings…' : submitting ? 'Starting take-off…' : 'Generate BOQ'}
         </button>
       </section>
@@ -562,7 +597,7 @@ export default function BoqGenerator() {
             <strong>{flag.reason_code || 'Review'}</strong>{flag.description ? ` — ${flag.description}` : ''}{flag.detail ? `: ${flag.detail}` : ''}
           </li>)}</ul>
         </div>}
-        {jobSuggestedFactor != null && <p role="note">Job-specific scale suggestion: factor {jobSuggestedFactor}. Advisory only; confirm or change the entered factor.</p>}
+        {(boq.corrections || []).length > 0 && <details><summary>Correction history ({boq.corrections.length})</summary><ol>{boq.corrections.map((correction, index) => <li key={correction.id || index}>{correction.reason || correction.kind} — {correction.kind} {correction.old_qty != null && `from ${correction.old_qty} to ${correction.qty}`}</li>)}</ol></details>}
         {(boq.withheld || []).some((item) => !item.line_id) && <p role="status" style={{ color: 'var(--steel)' }}>Some diagnostics or material flags are listed with unpriced items; they are not all unpriced BOQ lines.</p>}
         <h2 id="boq-results-heading" style={{ marginTop: 0 }}>Review your take-off</h2>
         <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
@@ -616,9 +651,10 @@ export default function BoqGenerator() {
           <div>{boq.totals?.line_count ?? lines.length} measured lines · {Number.isInteger(boq.totals?.unpriced_line_count) ? boq.totals.unpriced_line_count : lines.filter((line) => line.rate == null).length} unpriced · {activeRateSource}</div>
           {Number.isInteger(job.snapshot?.pricedLineCount) && <div>Saved coverage: {job.snapshot.pricedLineCount} priced · {job.snapshot.unpricedLineCount} unpriced</div>}
         </div>
+        {isSample && <p><strong>Sample rates</strong> — these are placeholders, not project cost.</p>}
         <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'start', marginTop: '1rem' }}>
-          <input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} />
-          <span>I understand the rates may be samples and this take-off must be checked before use.</span>
+          <input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledgedRevision(event.target.checked ? currentRevision : null)} />
+          <span>I have reviewed revision {job.snapshot?.revision || job.revision || 1}, understand rates may be samples, and will check quantities before use.</span>
         </label>
         <button type="button" className="btn btn-primary" style={{ marginTop: '0.75rem' }} disabled={!acknowledged} onClick={saveExport}>Save & download Excel</button>
         {job.status === 'COMPLETED_PENDING_EXPORT' && <p role="status" style={{ color: 'var(--steel)' }}>Your BOQ is saved. The workbook is still being prepared; this page will keep checking.</p>}
@@ -631,6 +667,7 @@ export default function BoqGenerator() {
             <span style={{ flex: 1 }}>{projects.find((project) => project.id === run.projectId)?.name || run.projectId} · {new Date(run.createdAt).toLocaleString()}</span>
             <span>{String(run.status || 'unknown').replaceAll('_', ' ').toLowerCase()}</span>
             <button type="button" className="btn btn-secondary" onClick={() => openJob(run)}>Open</button>
+            {['DRAFT', 'LOST'].includes(run.status) && <button type="button" className="btn btn-secondary" onClick={() => retryJob(run)}>Run again</button>}
           </li>)}
         </ul>}
         <button type="button" className="btn btn-secondary" style={{ marginTop: '0.75rem' }} onClick={() => loadJobs(projectId)}>Refresh runs</button>
