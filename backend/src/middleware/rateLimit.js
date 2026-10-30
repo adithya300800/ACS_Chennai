@@ -316,6 +316,16 @@ const boqUploadLimiter = rateLimit({
   message: { error: 'Too many BOQ upload requests. Please try again later.', code: 'BOQ_UPLOAD_THROTTLED' },
 });
 
+const boqApiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.employeeId ? `emp:${req.employeeId}` : ipKey(req)),
+  validate: { trustProxy: true },
+  message: { error: 'Too many BOQ requests. Please slow down.', code: 'BOQ_API_THROTTLED' },
+});
+
 const boqJobLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
@@ -350,6 +360,7 @@ module.exports = {
   payslipAdminLimiter,
   payslipDownloadLimiter,
   boqUploadLimiter,
+  boqApiLimiter,
   boqJobLimiter,
   boqWriteLimiter,
   googleStartLimiter,

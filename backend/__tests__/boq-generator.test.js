@@ -285,13 +285,13 @@ async function createConfirmedUpload(app, prisma, overrides = {}) {
   return { presign, confirm, intent: prisma._intents[0] };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   process.env.INTERNAL_API_TOKEN = 'test-boq-reconcile-token';
   global.setImmediate = global.setImmediate || ((callback, ...args) => setTimeout(callback, 0, ...args));
   delete process.env.BOQ_PILOT_EMPLOYEE_IDS;
   process.env.BOQ_PILOT_EMPLOYEE_IDS = [EMPLOYEE_ID, OTHER_EMPLOYEE_ID, RATE_LIMIT_EMPLOYEE_ID, NON_PILOT_EMPLOYEE_ID].join(',');
   router.resetMetaCacheForTests();
-  router.resetRateLimitsForTests([EMPLOYEE_ID, OTHER_EMPLOYEE_ID, ADMIN_ID, RATE_LIMIT_EMPLOYEE_ID, NON_PILOT_EMPLOYEE_ID]);
+  await router.resetRateLimitsForTests([EMPLOYEE_ID, OTHER_EMPLOYEE_ID, ADMIN_ID, RATE_LIMIT_EMPLOYEE_ID, NON_PILOT_EMPLOYEE_ID]);
   require('../src/lib/idempotency')._clearCache();
   mockUploadSequence = 0;
   mockStoredArtifacts.clear();
@@ -316,6 +316,26 @@ beforeEach(() => {
 });
 
 describe('BOQ Generator private upload lifecycle', () => {
+  it('limits authenticated BOQ API requests per employee', async () => {
+    const prisma = buildPrisma();
+    const app = buildApp(prisma);
+    const responses = [];
+
+    for (let index = 0; index < 121; index += 1) {
+      responses.push(await request(app)
+        .get('/api/boq-generator/meta')
+        .set('x-test-employee', EMPLOYEE_ID));
+    }
+    const otherEmployee = await request(app)
+      .get('/api/boq-generator/meta')
+      .set('x-test-employee', OTHER_EMPLOYEE_ID);
+
+    expect(responses.slice(0, 120).every((response) => response.status === 200)).toBe(true);
+    expect(responses[120].status).toBe(429);
+    expect(responses[120].body.code).toBe('BOQ_API_THROTTLED');
+    expect(otherEmployee.status).toBe(200);
+  });
+
   it('requires authentication and allows assigned employees to upload', async () => {
     const prisma = buildPrisma();
     const app = buildApp(prisma);

@@ -30,7 +30,7 @@ function cleanError(err) {
 
 export default function BoqGenerator() {
   useDocumentTitle('BOQ Generator');
-  const { accessToken, employee } = useAuth();
+  const { accessToken } = useAuth();
   const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const [projects, setProjects] = useState([]);
@@ -40,10 +40,9 @@ export default function BoqGenerator() {
   const [showProjectForm, setShowProjectForm] = useState(false);
   const [files, setFiles] = useState([]);
   const [confirmedUploads, setConfirmedUploads] = useState([]);
-  const [confirmedForJob, setConfirmedForJob] = useState([]);
   const [scaleByFileId, setScaleByFileId] = useState({});
   const [confirmedScaleFileIds, setConfirmedScaleFileIds] = useState([]);
-  const [wastagePct, setWastagePct] = useState('0');
+  const wastagePct = '0';
   const [meta, setMeta] = useState(null);
   const [metaLoading, setMetaLoading] = useState(true);
   const [jobs, setJobs] = useState([]);
@@ -123,15 +122,9 @@ export default function BoqGenerator() {
       if (['DRAFT', 'LOST'].includes(original.status)) {
         const retried = await api.boqGenerator.retryJob(run.id, accessToken);
         setJob(retried);
+        if (original.status === 'LOST') setBoq(null);
         setSearchParams({ projectId: retried.projectId, jobId: retried.id });
         return;
-      if (original.status === 'LOST') {
-        const retried = await api.boqGenerator.retryJob(run.id, accessToken);
-        setJob(retried);
-        setBoq(null);
-        setSearchParams({ projectId: retried.projectId, jobId: retried.id });
-        return;
-      }
       }
       setNotice(`The original files for this ${run.status.toLowerCase()} run are not in this browser. Select and upload them again to create a new run.`);
       setSearchParams({ projectId: original.projectId });
@@ -237,7 +230,6 @@ export default function BoqGenerator() {
     setBoq(null);
     setFiles([]);
     setConfirmedUploads([]);
-    setConfirmedForJob([]);
     setScaleByFileId({});
     setConfirmedScaleFileIds([]);
     setOnlyFlagged(true);
@@ -263,7 +255,6 @@ export default function BoqGenerator() {
     setBoq(null);
     setFiles([]);
     setConfirmedUploads([]);
-    setConfirmedForJob([]);
     setScaleByFileId({});
     setConfirmedScaleFileIds([]);
     setOnlyFlagged(true);
@@ -346,7 +337,6 @@ export default function BoqGenerator() {
       confirmedFileIds.add(item.id);
       uploadsByFileId.set(item.id, signed.uploadId);
       setConfirmedUploads((current) => [...current.filter((upload) => upload.fileId !== item.id), { fileId: item.id, uploadId: signed.uploadId }]);
-      setConfirmedForJob((current) => [...current.filter((upload) => upload.fileId !== item.id), { fileId: item.id, uploadId: signed.uploadId }]);
     }
     return files.map((file) => ({ uploadId: uploadsByFileId.get(file.id), file })).filter(({ uploadId }) => uploadId);
   };
@@ -393,7 +383,6 @@ export default function BoqGenerator() {
       setBoq(null);
       setFiles([]);
       setConfirmedUploads([]);
-      setConfirmedForJob([]);
       setScaleByFileId({});
       setConfirmedScaleFileIds([]);
       setSearchParams({ projectId, jobId: created.id });
@@ -561,7 +550,6 @@ export default function BoqGenerator() {
               submissionRef.current = null;
               setFiles((current) => current.filter((file) => file.id !== item.id));
               setConfirmedUploads((current) => current.filter((upload) => upload.fileId !== item.id));
-              setConfirmedForJob((current) => current.filter((upload) => upload.fileId !== item.id));
               setScaleByFileId((current) => { const next = { ...current }; delete next[item.id]; return next; });
               setConfirmedScaleFileIds((current) => current.filter((id) => id !== item.id));
             }} disabled={uploading} aria-label={`Remove ${item.file?.name || item.filename}`}>Remove</button>

@@ -11,7 +11,7 @@ const {
   complete: completeIdempotency,
   release: releaseIdempotency,
 } = require('../lib/idempotency');
-const { boqUploadLimiter, boqJobLimiter, boqWriteLimiter } = require('../middleware/rateLimit');
+const { boqUploadLimiter, boqApiLimiter, boqJobLimiter, boqWriteLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
@@ -220,7 +220,6 @@ async function captureCompletedServiceJob({ prisma, job, req }) {
       status: 'COMPLETED',
       completedAt: new Date(),
       ...(job.settingsJson?.pendingSnapshotRevision ? {
-        settingsJson: Object.fromEntries(Object.entries(job.settingsJson).filter(([key]) => key !== 'pendingSnapshotRevision')),
         settingsJson: Object.fromEntries(Object.entries(job.settingsJson).filter(([key]) => key !== 'pendingSnapshotRevision')),
       } : {}),
     },
@@ -518,7 +517,7 @@ function projectServiceMeta(upstream = {}) {
   };
 }
 
-router.use(requireAuth);
+router.use(requireAuth, boqApiLimiter);
 
 function pilotAccess(req, isAdmin = req.isAdmin) {
   const configured = process.env.BOQ_PILOT_EMPLOYEE_IDS;
@@ -1290,7 +1289,7 @@ router.post('/jobs/:boqJobId/export/regenerate', boqWriteLimiter, asyncHandler(a
 
 router.resetMetaCacheForTests = () => { metaCache = null; };
 router.resetRateLimitsForTests = async (employeeIds = []) => {
-  await Promise.all([boqUploadLimiter, boqJobLimiter, boqWriteLimiter].map(async (limiter) => {
+  await Promise.all([boqUploadLimiter, boqApiLimiter, boqJobLimiter, boqWriteLimiter].map(async (limiter) => {
     await Promise.all(employeeIds.map((employeeId) => limiter.resetKey(`emp:${employeeId}`)));
   }));
 };
