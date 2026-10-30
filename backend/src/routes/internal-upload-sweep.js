@@ -124,6 +124,7 @@
 const express = require('express');
 const router = express.Router();
 const { deleteBlob } = require('../lib/blobStorage');
+const boqStorage = require('../lib/boqStorage');
 const { hashIdentifier } = require('../lib/pii');
 
 function getPrisma(req) { return req.app.get('prisma'); }
@@ -165,7 +166,13 @@ const EXPIRED_VERIFY_AFTER_MS = readPositiveInt(process.env.UPLOAD_SWEEP_EXPIRED
  */
 async function tryDeleteBlob(intent) {
   try {
-    await deleteBlob(intent.container, intent.blobPath);
+    // The BOQ bucket uses separate credentials and is private. Never pass
+    // these keys through the generic photo/document bucket client.
+    if (intent.container === boqStorage.bucketName()) {
+      await boqStorage.deleteBlob(intent.blobPath);
+    } else {
+      await deleteBlob(intent.container, intent.blobPath);
+    }
     return { cleaned: true };
   } catch (err) {
     if (err && err.$metadata && err.$metadata.httpStatusCode === 404) {

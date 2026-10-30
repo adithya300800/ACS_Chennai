@@ -516,6 +516,10 @@ function createApp(deps = {}) {
   // gate lives inside the route file (requireAuth for reads,
   // creator-or-admin for writes).
   app.use('/api/boq', boqRoutes);
+  // BOQ Generator uploads and durable project-scoped jobs are intentionally
+  // isolated from the existing /api/boq registry and its route contract.
+  const boqGeneratorRoutes = require('./routes/boqGenerator');
+  app.use('/api/boq-generator', boqGeneratorRoutes);
   // N3 (Phase E): Drawing Revision Register — list / create / detail /
   // patch / soft-delete. Auth gate lives inside the route file
   // (requireAuth for reads, requireFreshAdmin for mutations).
@@ -558,6 +562,11 @@ function createApp(deps = {}) {
   // backend/src/routes/internal-upload-sweep.js for the three passes.
   const internalUploadSweepRoutes = require('./routes/internal-upload-sweep');
   app.use('/api/internal/upload', internalUploadSweepRoutes);
+
+  // BOQ job reconciliation is stateless across deploys; a GitHub Actions cron
+  // drives this internal-token-protected batch endpoint.
+  const internalBoqReconcileRoutes = require('./routes/internal-boq-reconcile');
+  app.use('/api/internal/boq-reconcile', internalBoqReconcileRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ error: 'Not found' });

@@ -123,6 +123,27 @@ services:
       - key: R2_SECRET_ACCESS_KEY
         sync: false
 
+      # BOQ Generator service credential and its isolated private R2 bucket.
+      - key: BOQ_BASE_URL
+        sync: false
+      - key: BOQ_API_TOKEN
+        sync: false
+      - key: R2_BOQ_BUCKET
+        sync: false
+      - key: R2_BOQ_ACCOUNT_ID
+        sync: false
+      - key: R2_BOQ_ACCESS_KEY_ID
+        sync: false
+      - key: R2_BOQ_SECRET_ACCESS_KEY
+        sync: false
+      # Portal employee IDs permitted during the BOQ sample-rate pilot.
+      # An unset/empty value denies employee access; administrators bypass it.
+      - key: BOQ_PILOT_EMPLOYEE_IDS
+        sync: false
+      # Explicit pilot employee IDs; empty/unset keeps the tool closed to employees.
+      - key: BOQ_PILOT_EMPLOYEE_IDS
+        sync: false
+
       # [B-3] Off-site DB backup destination. The cron-backup.yml workflow
       # reads R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY from
       # GitHub Actions secrets (mirrors the values above) and writes here.

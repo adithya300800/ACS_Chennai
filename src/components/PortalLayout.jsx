@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext.jsx';
+import { api } from '../lib/api.js';
 // SOL-P2#17: removed the useToast import; pushToast was only used by
 // the now-removed Assets coming-soon branch. Re-introduce when a
 // sidebar item genuinely needs a toast.
@@ -36,7 +37,7 @@ const readSidebarPref = () => {
 };
 
 export default function PortalLayout() {
-  const { employee, logout } = useAuth();
+  const { employee, logout, accessToken } = useAuth();
   const navigate = useNavigate();
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const [sidebarOpen, setSidebarOpenState] = useState(() => {
@@ -46,7 +47,16 @@ export default function PortalLayout() {
     const saved = readSidebarPref();
     return saved === null ? true : saved;
   });
+  const [boqPilot, setBoqPilot] = useState(null);
   const sidebarRef = useRef(null);
+
+  React.useEffect(() => {
+    let active = true;
+    api.boqGenerator.access(accessToken).then((result) => {
+      if (active) setBoqPilot(result);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [accessToken]);
 
   // Wrapper that also persists the desktop choice. On mobile the drawer
   // state isn't persisted — every reload starts closed, by design — so
@@ -234,6 +244,12 @@ const DRAWING_ICON = (
     <path d="M14 6l4 4-4 4" />
   </svg>
 );
+const BOQ_GENERATOR_ICON = (
+  <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+    <rect x="4" y="3" width="16" height="18" rx="2" />
+    <path d="M8 7h8M8 11h2m4 0h2m-8 4h2m4 0h2" />
+  </svg>
+);
 // R36: Project Reports icon — document-with-paperclip glyph echoing the
 // "weekly / monthly / due-diligence / quality" file-attachment shape.
 // Visually distinct from DRAWING_ICON (blueprint) and LIST_ICON (BOQ)
@@ -342,6 +358,12 @@ const navGroups = [
       // /portal/admin/billing-certifications (Records group). Same
       // BILLING_ICON so the two entries feel like siblings.
       { to: '/portal/certifications', label: 'My Certifications', icon: BILLING_ICON },
+    ],
+  },
+  {
+    label: 'Tools',
+    items: [
+      { to: '/portal/boq-generator', label: 'BOQ Generator', icon: BOQ_GENERATOR_ICON },
     ],
   },
   ...(employee?.isAdmin ? [
@@ -477,7 +499,7 @@ const navGroups = [
             ] : [];
             return [
               ...labelEls,
-              ...group.items.map((item) => (
+              ...group.items.filter((item) => item.to !== '/portal/boq-generator' || boqPilot?.isPilot || employee?.isAdmin).map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}

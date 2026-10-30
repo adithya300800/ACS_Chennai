@@ -29,6 +29,7 @@ const appPath = resolvePath(__dirname, '../App.jsx');
 const layoutPath = resolvePath(__dirname, '../components/PortalLayout.jsx');
 const adminPath = resolvePath(__dirname, '../pages/admin/BoqAdmin.jsx');
 const variancePath = resolvePath(__dirname, '../pages/portal/BoqVariance.jsx');
+const generatorPath = resolvePath(__dirname, '../pages/portal/BoqGenerator.jsx');
 
 const apiSource = readFileSync(apiPath, 'utf8');
 const appSource = readFileSync(appPath, 'utf8');
@@ -260,5 +261,27 @@ describe('N7 — BOQ frontend wiring', () => {
       // over" which would mislead the billing engineer.
       expect(formatVariancePct(100, 100)).toBe('0.0%');
     });
+  });
+});
+
+describe('BOQ Generator employee workflow', () => {
+  test('offers assigned-project creation, drawing uploads, saved runs and review/export actions', () => {
+    const generatorSource = readFileSync(generatorPath, 'utf8');
+    const appSrc = readFileSync(appPath, 'utf8');
+    const portalLayout = readFileSync(layoutPath, 'utf8');
+
+    expect(generatorSource).toMatch(/api\.resolveProject\(/);
+    expect(generatorSource).toMatch(/api\.getProjects\(\s*\{\s*scope:\s*['"]assigned['"]/);
+    expect(generatorSource).toMatch(/api\.boqGenerator\.presignUpload/);
+    expect(generatorSource).toMatch(/uploadBlob\(/);
+    expect(generatorSource).toMatch(/api\.boqGenerator\.confirmUpload/);
+    expect(generatorSource).toMatch(/api\.boqGenerator\.createJob/);
+    expect(generatorSource).toMatch(/api\.boqGenerator\.listJobs/);
+    expect(generatorSource).toMatch(/api\.boqGenerator\.getBoq/);
+    expect(generatorSource).toMatch(/api\.boqGenerator\.downloadExport/);
+    expect(generatorSource).toMatch(/SAMPLE/);
+    expect(appSrc).toMatch(/Route path="boq-generator"/);
+    expect(portalLayout).toMatch(/label: 'Tools'/);
+    expect(portalLayout).toMatch(/label: 'BOQ Generator'/);
   });
 });

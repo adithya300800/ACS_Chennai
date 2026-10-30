@@ -240,7 +240,9 @@ function doRefresh() {
     });
 }
 
-async function request(method, path, body, token, { _retried, _networkRetried, idempotencyKey } = {}) {
+async function request(method, path, body, token, {
+  _retried, _networkRetried, idempotencyKey, timeoutMs = DEFAULT_TIMEOUT_MS,
+} = {}) {
   const opts = {
     method,
     headers: {
@@ -263,7 +265,7 @@ async function request(method, path, body, token, { _retried, _networkRetried, i
 
   let res;
   try {
-    res = await fetchWithTimeout(`${API_BASE}/api${path}`, opts, DEFAULT_TIMEOUT_MS);
+    res = await fetchWithTimeout(`${API_BASE}/api${path}`, opts, timeoutMs);
   } catch (err) {
     // Round-26.5: cold-start network-error self-heal for mutating requests.
     // Render's free plan spins the service down after 15 min idle; the very
@@ -286,7 +288,7 @@ async function request(method, path, body, token, { _retried, _networkRetried, i
     ) {
       // Small backoff so the waking server has a beat to bind its socket.
       await new Promise((r) => setTimeout(r, 750));
-      return request(method, path, body, token, { _retried, _networkRetried: true, idempotencyKey });
+      return request(method, path, body, token, { _retried, _networkRetried: true, idempotencyKey, timeoutMs });
     }
     throw err;
   }
@@ -312,7 +314,7 @@ async function request(method, path, body, token, { _retried, _networkRetried, i
         // identity guard in doRefresh(). The single-flight guarantee is
         // preserved by the implementation in api.refreshToken itself.
         const newToken = await api.refreshToken();
-        return request(method, path, body, newToken, { _retried: true, idempotencyKey });
+        return request(method, path, body, newToken, { _retried: true, idempotencyKey, timeoutMs });
       } catch (refreshErr) {
         // [DR-030] Distinguish a transient refresh outage (server
         // returned 5xx, network timed out, fetch threw) from a
@@ -367,21 +369,21 @@ async function request(method, path, body, token, { _retried, _networkRetried, i
 }
 
 export const api = {
-  get: (path, token) => request('GET', path, null, token),
+  get: (path, token, options = {}) => request('GET', path, null, token, options),
   // DR-012: post/put/delete accept an optional idempotencyKey as the
   // 4th positional arg. Forwarded as `Idempotency-Key: <key>` so the
   // backend can dedupe a NETWORK_ERROR-retry-with-same-key to the
   // cached 201 instead of producing a duplicate row + admin fan-out.
   // The retry path inside request() preserves the key, so the
   // client only needs to mint a key ONCE per submit intent.
-  post: (path, body, token, idempotencyKey) => request('POST', path, body, token, { idempotencyKey }),
-  put: (path, body, token, idempotencyKey) => request('PUT', path, body, token, { idempotencyKey }),
+  post: (path, body, token, idempotencyKey, options = {}) => request('POST', path, body, token, { ...options, idempotencyKey }),
+  put: (path, body, token, idempotencyKey, options = {}) => request('PUT', path, body, token, { ...options, idempotencyKey }),
   // Round-29: patch was added when cube-test (N5), project updates, and
   // BOQ item updates all started using partial-update semantics.
   // Forwarded with the same idempotency-key contract as post/put so a
   // NETWORK_ERROR retry dedupes to the cached response.
-  patch: (path, body, token, idempotencyKey) => request('PATCH', path, body, token, { idempotencyKey }),
-  delete: (path, token, idempotencyKey) => request('DELETE', path, null, token, { idempotencyKey }),
+  patch: (path, body, token, idempotencyKey, options = {}) => request('PATCH', path, body, token, { ...options, idempotencyKey }),
+  delete: (path, token, idempotencyKey, options = {}) => request('DELETE', path, null, token, { ...options, idempotencyKey }),
 
   // Round-13: download() — fetch a binary response (XLSX / CSV) and return
   // a Blob + parsed Content-Disposition filename. Routes through the same
@@ -953,6 +955,30 @@ export const api = {
   softDeleteBoqItem: (id, token) => api.delete(`/boq/${id}`, token),
   getBoqVariance: (projectName, token) =>
     api.get(`/boq/variance?projectName=${encodeURIComponent(projectName)}`, token),
+
+  // Project-scoped model take-off; intentionally separate from the legacy
+  // BOQ item registry/variance routes above.
+  boqGenerator: {
+    access: (token) => api.get('/boq-generator/access', token),
+    meta: (token) => api.get('/boq-generator/meta', token, { timeoutMs: 45_000 }),
+    listJobs: (projectId, token) => api.post('/boq-generator/jobs/search', { projectId }, token),
+    presignUpload: (data, token) => api.post('/boq-generator/uploads/presign', data, token),
+    confirmUpload: (uploadId, token) => api.post('/boq-generator/uploads/confirm', { uploadId }, token),
+    createJob: (data, token, idempotencyKey) => api.post(
+      '/boq-generator/jobs', data, token, idempotencyKey, { timeoutMs: 240_000 },
+    ),
+    getJob: (id, token) => api.get(`/boq-generator/jobs/${encodeURIComponent(id)}`, token, { timeoutMs: 90_000 }),
+    retryJob: (id, token) => api.post(`/boq-generator/jobs/${encodeURIComponent(id)}/retry`, {}, token, undefined, { timeoutMs: 240_000 }),
+    getBoq: (id, token) => api.get(`/boq-generator/jobs/${encodeURIComponent(id)}/boq`, token),
+    save: (id, token) => api.post(`/boq-generator/jobs/${encodeURIComponent(id)}/save`, {}, token),
+    correctLine: (id, lineId, data, token) => api.post(
+      `/boq-generator/jobs/${encodeURIComponent(id)}/lines/${encodeURIComponent(lineId)}/corrections`, data, token,
+    ),
+    acknowledgeExport: (id, token) => api.post(
+      `/boq-generator/jobs/${encodeURIComponent(id)}/export/acknowledge`, { acknowledged: true }, token,
+    ),
+    downloadExport: (id, token) => api.get(`/boq-generator/jobs/${encodeURIComponent(id)}/export`, token),
+  },
 
   // DR-015 (audit 2026-09-08): BOQ execution ledger. The variance
   // report's executed-qty column now sums these `accepted = true` rows

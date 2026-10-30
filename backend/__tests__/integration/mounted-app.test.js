@@ -111,6 +111,8 @@ function makeMockPrisma() {
     training: { findMany: jest.fn(async () => []), findUnique: jest.fn(async () => null) },
     notification: { findMany: jest.fn(async () => []), updateMany: jest.fn(async () => ({ count: 0 })) },
     blobUsage: { findMany: jest.fn(async () => []) },
+    boqJob: { findMany: jest.fn(async () => []) },
+    appLog: { create: jest.fn(async () => ({ id: 'app-log-test' })) },
   };
 }
 
@@ -231,11 +233,16 @@ describe('DR-014 — /health liveness probe', () => {
 });
 
 // ─── /version: ops-only, X-Internal-Token required ──────────────────────────
-describe('DR-014 — /version ops endpoint + expected-SHA verification', () => {
-  const ORIGINAL_ENV = { ...process.env };
+const VERSION_ENV_KEYS = ['INTERNAL_API_TOKEN', 'DEPLOY_SHA', 'EXPECTED_SHA'];
+const ORIGINAL_VERSION_ENV = Object.fromEntries(VERSION_ENV_KEYS.map((key) => [key, process.env[key]]));
+const ENV_CLEANUP_SENTINEL = 'MOUNTED_APP_ENV_CLEANUP_SENTINEL';
 
+describe('DR-014 — /version ops endpoint + expected-SHA verification', () => {
   afterEach(() => {
-    process.env = { ...ORIGINAL_ENV };
+    for (const key of VERSION_ENV_KEYS) {
+      if (ORIGINAL_VERSION_ENV[key] === undefined) delete process.env[key];
+      else process.env[key] = ORIGINAL_VERSION_ENV[key];
+    }
   });
 
   it('returns 404 when INTERNAL_API_TOKEN is unset (no token = endpoint hidden)', async () => {
@@ -297,6 +304,15 @@ describe('DR-014 — /version ops endpoint + expected-SHA verification', () => {
     expect(res.body.deploySha).toBe('deployed-this-sha');
     expect(res.body.expectedSha).toBe('workflow-intended-this-sha');
   });
+
+  it('preserves unrelated environment changes while cleaning version variables', () => {
+    process.env[ENV_CLEANUP_SENTINEL] = 'preserve-across-suite-cleanup';
+  });
+
+  it('does not erase environment variables owned by another test suite', () => {
+    expect(process.env[ENV_CLEANUP_SENTINEL]).toBe('preserve-across-suite-cleanup');
+    delete process.env[ENV_CLEANUP_SENTINEL];
+  });
 });
 
 // ─── /ready: deep readiness — DB + R2 buckets ──────────────────────────────
@@ -356,6 +372,29 @@ describe('DR-014 — 404 catch-all + correlation', () => {
   it('propagates X-Request-Id on the 404 response', async () => {
     const res = await request(app).get('/api/no-such-route');
     expect(res.headers['x-request-id']).toBeDefined();
+  });
+});
+
+describe('BOQ internal reconcile is mounted at its production path', () => {
+  const ORIGINAL_TOKEN = process.env.INTERNAL_API_TOKEN;
+
+  afterAll(() => {
+    if (ORIGINAL_TOKEN === undefined) delete process.env.INTERNAL_API_TOKEN;
+    else process.env.INTERNAL_API_TOKEN = ORIGINAL_TOKEN;
+  });
+
+  it('hides the route without a token and accepts the configured internal token', async () => {
+    process.env.INTERNAL_API_TOKEN = 'mounted-boq-reconcile-secret';
+    const { app } = buildApp();
+
+    const denied = await request(app).post('/api/internal/boq-reconcile').send({});
+    const accepted = await request(app)
+      .post('/api/internal/boq-reconcile')
+      .set('X-Internal-Token', 'mounted-boq-reconcile-secret')
+      .send({});
+
+    expect(denied.status).toBe(403);
+    expect(accepted.status).toBe(200);
   });
 });
 

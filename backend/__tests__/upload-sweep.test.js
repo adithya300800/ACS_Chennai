@@ -30,12 +30,19 @@ const request = require('supertest');
 // jest.mock factory (Jest hoists the mock and refuses out-of-scope refs).
 let mockDeleteBlobCalls = [];
 let mockDeleteBlobBehavior = () => Promise.resolve();
+let mockBoqDeleteCalls = [];
 
 jest.mock('../src/lib/blobStorage', () => ({
   deleteBlob: jest.fn(async (container, blobPath) => {
     mockDeleteBlobCalls.push({ container, blobPath });
     return mockDeleteBlobBehavior({ container, blobPath });
   }),
+}));
+
+jest.mock('../src/lib/boqStorage', () => ({
+  DEFAULT_BUCKET: 'boq-generator',
+  bucketName: () => 'boq-generator',
+  deleteBlob: jest.fn(async (blobPath) => { mockBoqDeleteCalls.push(blobPath); }),
 }));
 
 // PII hashing is a thin wrapper — keep the real implementation for any
@@ -179,6 +186,7 @@ const seed = (overrides) => ({
 beforeEach(() => {
   mockDeleteBlobCalls = [];
   mockDeleteBlobBehavior = () => Promise.resolve();
+  mockBoqDeleteCalls = [];
 });
 
 describe('S3-7 — sweep auth (mirrors internal-training-overdue.js:97)', () => {
@@ -261,6 +269,21 @@ describe('DR-001 — destructive sweep is refused without explicit override', ()
     expect(res.status).toBe(200);
     expect(res.body.blobsCleaned).toBe(1);
     expect(mockDeleteBlobCalls).toHaveLength(1);
+  });
+
+  it('deletes BOQ-bucket objects through the dedicated private storage client', async () => {
+    const rows = [seed({
+      status: 'PENDING',
+      container: 'boq-generator',
+      blobPath: 'drawings/project-1/employee-1/upload.dxf',
+      expiresAt: past(60_000),
+      confirmedAt: null,
+    })];
+    const res = await postSweep(buildApp(buildPrisma(rows)));
+
+    expect(res.status).toBe(200);
+    expect(mockDeleteBlobCalls).toHaveLength(0);
+    expect(mockBoqDeleteCalls).toEqual(['drawings/project-1/employee-1/upload.dxf']);
   });
 });
 

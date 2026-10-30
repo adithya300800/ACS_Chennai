@@ -78,6 +78,7 @@ const PortalNotFound = React.lazy(() => import('./pages/portal/PortalNotFound.js
 // AdminOverview. Lazy-loaded so they don't bloat the initial bundle.
 const BoqAdmin = React.lazy(() => import('./pages/admin/BoqAdmin.jsx'));
 const BoqVariance = React.lazy(() => import('./pages/portal/BoqVariance.jsx'));
+const BoqGenerator = React.lazy(() => import('./pages/portal/BoqGenerator.jsx'));
 // Phase-D (N2): RFI feature was REMOVED in Round-29. Variation Orders
 // remain as standalone work items (no escalation-from-RFI flow).
 const VariationOrdersAdmin = React.lazy(() => import('./pages/admin/VariationOrdersAdmin.jsx'));
@@ -226,6 +227,7 @@ function App() {
               CRUD surface lives at /admin/boq. No literal-vs-param ordering
               concerns here since neither route takes a path param. */}
           <Route path="boq" element={<BoqVariance />} />
+          <Route path="boq-generator" element={<BoqGenerator />} />
           <Route path="admin/boq" element={<BoqAdmin />} />
           {/* Phase-D (N2): RFI routes REMOVED in Round-29. Variation
               Orders remain as standalone work items. */}

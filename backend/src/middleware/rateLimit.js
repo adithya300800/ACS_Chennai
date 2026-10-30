@@ -306,6 +306,55 @@ const payslipDownloadLimiter = rateLimit({
   message: { error: 'Too many payslip download requests. Please slow down.', code: 'PAYSLIP_DOWNLOAD_THROTTLED' },
 });
 
+const boqUploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.employeeId ? `emp:${req.employeeId}` : ipKey(req)),
+  validate: { trustProxy: true },
+  message: { error: 'Too many BOQ upload requests. Please try again later.', code: 'BOQ_UPLOAD_THROTTLED' },
+});
+
+const boqApiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.employeeId ? `emp:${req.employeeId}` : ipKey(req)),
+  validate: { trustProxy: true },
+  message: { error: 'Too many BOQ requests. Please slow down.', code: 'BOQ_API_THROTTLED' },
+});
+
+const boqApiIpLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  message: { error: 'Too many BOQ requests from this address. Please slow down.', code: 'BOQ_API_IP_THROTTLED' },
+});
+
+const boqJobLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.employeeId ? `emp:${req.employeeId}` : ipKey(req)),
+  validate: { trustProxy: true },
+  message: { error: 'Too many BOQ runs. Please try again later.', code: 'BOQ_JOB_THROTTLED' },
+});
+
+const boqWriteLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.employeeId ? `emp:${req.employeeId}` : ipKey(req)),
+  validate: { trustProxy: true },
+  message: { error: 'Too many BOQ updates. Please slow down.', code: 'BOQ_WRITE_THROTTLED' },
+});
+
 module.exports = {
   loginLimiter,
   loginEmailLimiter,
@@ -319,6 +368,11 @@ module.exports = {
   payslipUploadLimiter,
   payslipAdminLimiter,
   payslipDownloadLimiter,
+  boqUploadLimiter,
+  boqApiLimiter,
+  boqApiIpLimiter,
+  boqJobLimiter,
+  boqWriteLimiter,
   googleStartLimiter,
   googleCallbackLimiter,
   googleSpaCallbackLimiter,
