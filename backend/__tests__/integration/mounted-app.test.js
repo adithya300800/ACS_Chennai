@@ -236,7 +236,6 @@ describe('DR-014 — /health liveness probe', () => {
 const VERSION_ENV_KEYS = ['INTERNAL_API_TOKEN', 'DEPLOY_SHA', 'EXPECTED_SHA'];
 const ORIGINAL_VERSION_ENV = Object.fromEntries(VERSION_ENV_KEYS.map((key) => [key, process.env[key]]));
 const ENV_CLEANUP_SENTINEL = 'MOUNTED_APP_ENV_CLEANUP_SENTINEL';
-const ORIGINAL_ENV_CLEANUP_SENTINEL = process.env[ENV_CLEANUP_SENTINEL];
 
 describe('DR-014 — /version ops endpoint + expected-SHA verification', () => {
   afterEach(() => {
@@ -244,11 +243,6 @@ describe('DR-014 — /version ops endpoint + expected-SHA verification', () => {
       if (ORIGINAL_VERSION_ENV[key] === undefined) delete process.env[key];
       else process.env[key] = ORIGINAL_VERSION_ENV[key];
     }
-  });
-
-  afterAll(() => {
-    if (ORIGINAL_ENV_CLEANUP_SENTINEL === undefined) delete process.env[ENV_CLEANUP_SENTINEL];
-    else process.env[ENV_CLEANUP_SENTINEL] = ORIGINAL_ENV_CLEANUP_SENTINEL;
   });
 
   it('returns 404 when INTERNAL_API_TOKEN is unset (no token = endpoint hidden)', async () => {
@@ -317,6 +311,7 @@ describe('DR-014 — /version ops endpoint + expected-SHA verification', () => {
 
   it('does not erase environment variables owned by another test suite', () => {
     expect(process.env[ENV_CLEANUP_SENTINEL]).toBe('preserve-across-suite-cleanup');
+    delete process.env[ENV_CLEANUP_SENTINEL];
   });
 });
 
