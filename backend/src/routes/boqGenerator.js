@@ -11,7 +11,7 @@ const {
   complete: completeIdempotency,
   release: releaseIdempotency,
 } = require('../lib/idempotency');
-const { boqUploadLimiter, boqApiLimiter, boqJobLimiter, boqWriteLimiter } = require('../middleware/rateLimit');
+const { boqUploadLimiter, boqApiLimiter, boqApiIpLimiter, boqJobLimiter, boqWriteLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
@@ -517,6 +517,7 @@ function projectServiceMeta(upstream = {}) {
   };
 }
 
+router.use(boqApiIpLimiter);
 router.use(requireAuth, boqApiLimiter);
 
 function pilotAccess(req, isAdmin = req.isAdmin) {
@@ -1288,10 +1289,11 @@ router.post('/jobs/:boqJobId/export/regenerate', boqWriteLimiter, asyncHandler(a
 }));
 
 router.resetMetaCacheForTests = () => { metaCache = null; };
-router.resetRateLimitsForTests = async (employeeIds = []) => {
+router.resetRateLimitsForTests = async (employeeIds = [], ipAddresses = []) => {
   await Promise.all([boqUploadLimiter, boqApiLimiter, boqJobLimiter, boqWriteLimiter].map(async (limiter) => {
     await Promise.all(employeeIds.map((employeeId) => limiter.resetKey(`emp:${employeeId}`)));
   }));
+  await Promise.all(ipAddresses.map((ipAddress) => boqApiIpLimiter.resetKey(ipAddress)));
 };
 router.captureCompletedServiceJob = captureCompletedServiceJob;
 

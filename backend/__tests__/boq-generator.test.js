@@ -252,6 +252,7 @@ function buildPrisma() {
 function buildApp(prisma) {
   process.env.INTERNAL_API_TOKEN = 'test-boq-reconcile-token';
   const app = express();
+  app.set('trust proxy', 1);
   app.use(express.json());
   app.use((req, _res, next) => {
     req.id = req.headers['x-request-id'] || 'test-request-id';
@@ -291,7 +292,10 @@ beforeEach(async () => {
   delete process.env.BOQ_PILOT_EMPLOYEE_IDS;
   process.env.BOQ_PILOT_EMPLOYEE_IDS = [EMPLOYEE_ID, OTHER_EMPLOYEE_ID, RATE_LIMIT_EMPLOYEE_ID, NON_PILOT_EMPLOYEE_ID].join(',');
   router.resetMetaCacheForTests();
-  await router.resetRateLimitsForTests([EMPLOYEE_ID, OTHER_EMPLOYEE_ID, ADMIN_ID, RATE_LIMIT_EMPLOYEE_ID, NON_PILOT_EMPLOYEE_ID]);
+  await router.resetRateLimitsForTests(
+    [EMPLOYEE_ID, OTHER_EMPLOYEE_ID, ADMIN_ID, RATE_LIMIT_EMPLOYEE_ID, NON_PILOT_EMPLOYEE_ID],
+    ['203.0.113.10', '::ffff:127.0.0.1', '::1', '127.0.0.1'],
+  );
   require('../src/lib/idempotency')._clearCache();
   mockUploadSequence = 0;
   mockStoredArtifacts.clear();
@@ -334,6 +338,32 @@ describe('BOQ Generator private upload lifecycle', () => {
     expect(responses[120].status).toBe(429);
     expect(responses[120].body.code).toBe('BOQ_API_THROTTLED');
     expect(otherEmployee.status).toBe(200);
+  });
+
+  it('limits unauthenticated BOQ API requests per IP before authentication', async () => {
+    const app = buildApp(buildPrisma());
+    const responses = [];
+    for (let index = 0; index < 601; index += 1) {
+      responses.push(await request(app)
+        .get('/api/boq-generator/access')
+        .set('x-forwarded-for', '203.0.113.10'));
+    }
+
+    expect(responses.slice(0, 600).every((response) => response.status === 401)).toBe(true);
+    expect(responses[600].status).toBe(429);
+    expect(responses[600].body.code).toBe('BOQ_API_IP_THROTTLED');
+  });
+
+  it('keeps the anonymous IP limit separate from authenticated employee limits', async () => {
+    const app = buildApp(buildPrisma());
+    const responses = [];
+    for (let index = 0; index < 121; index += 1) {
+      responses.push(await request(app)
+        .get('/api/boq-generator/meta')
+        .set('x-test-employee', EMPLOYEE_ID));
+    }
+    expect(responses.slice(0, 120).every((response) => response.status === 200)).toBe(true);
+    expect(responses[120].body.code).toBe('BOQ_API_THROTTLED');
   });
 
   it('requires authentication and allows assigned employees to upload', async () => {
