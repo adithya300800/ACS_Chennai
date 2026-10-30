@@ -1837,6 +1837,8 @@ model BoqSnapshot {
   totalsAmount     Decimal?  @map("totals_amount") @db.Decimal(15, 2)
   lineCount        Int       @default(0) @map("line_count")
   withheldCount    Int       @default(0) @map("withheld_count")
+  pricedLineCount   Int?      @map("priced_line_count")
+  unpricedLineCount Int?     @map("unpriced_line_count")
   snapshotBlobPath String    @map("snapshot_blob_path")
   exportBlobPath   String?   @map("export_blob_path")
   dxfScale         Float?    @map("dxf_scale")

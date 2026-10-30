@@ -219,11 +219,11 @@ primary path — the user should not re-upload a drawing the project already has
 |---|---|---|---|---|
 | GET | `/health` | **no** | 200 | `{status, production_mode, data_status, data_status_notes[], worker, storage, converter, build_commit}`. Always 200. |
 | GET | `/health/ready` | **no** | 200 | DB reachability + cached reader self-test. |
-| GET | `/meta` | yes | 200 | Capabilities, limits, data status, SOR sources, WBS groups. |
+| GET | `/meta` | yes | 200 | Capabilities, limits, data status, SOR sources, WBS groups, and the service-owned `scale_presets[]`, `scale_guidance`, and `scale_plausibility`. |
 | POST | `/jobs` | yes | **202** | Submit drawings. `Location: /jobs/{id}`. |
-| GET | `/jobs/{id}` | yes | 200 | Status + timestamps + error. 404 `JOB_NOT_FOUND`. |
+| GET | `/jobs/{id}` | yes | 200 | Status + timestamps + error + `drawing_scale` (`dxf_scale` alias), `flags[]`, `scale_diagnostics[]`, and `needs_scale_check`. 404 `JOB_NOT_FOUND`. |
 | GET | `/jobs/{id}/boq` | yes | 200 | BOQ JSON, corrections applied. 409 `JOB_NOT_READY` / `JOB_FAILED`. |
-| GET | `/jobs/{id}/snapshot` | yes | 200 | Versioned self-contained document. Same 409s. |
+| GET | `/jobs/{id}/snapshot` | yes | 200 | Versioned self-contained document. Result flags are serialized in both top-level `flags[]` and `withheld[]`; snapshot fields include `scale.factor`/`scale.value`, `status`, `needs_scale_check`, and `scale_diagnostics[]`. Same 409s. |
 | GET | `/jobs/{id}/boq.xlsx` | yes | 200 | Workbook, 3 sheets, `Content-Disposition: attachment; filename="boq-{id}.xlsx"`. |
 | PATCH | `/jobs/{id}/lines/{line_id}` | yes | 200 | One reviewer correction. |
 | DELETE | `/jobs/{id}` | yes | 200 | Deletes the job, its files, its corrections **and its idempotency key**. |
@@ -241,7 +241,8 @@ primary path — the user should not re-upload a drawing the project already has
 #### 1.7.2 The job lifecycle
 
 `queued → running → done` or `queued → running → failed`. **Exactly four
-status strings**, lowercase: `queued`, `running`, `done`, `failed`.
+service status strings**, lowercase: `queued`, `running`, `done`, `failed`.
+`needs_scale_check` is a separate advisory review marker, not a service status.
 
 - The worker is a **daemon thread in the same process**, polling every 1.0 s
   and processing **one job per poll cycle**. Jobs queue behind each other.
@@ -263,6 +264,11 @@ status strings**, lowercase: `queued`, `running`, `done`, `failed`.
   "job_id": "...", "name": "...", "project_ref": "...",
   "currency": "INR",              // hard-coded
   "total": 12345.67,              // sum of the ROUNDED per-line amounts
+  "status": "done",               // queued | running | done | failed
+  "drawing_scale": 1.0,            // real-world size / size as drawn
+  "dxf_scale": 1.0,                // legacy response alias
+  "needs_scale_check": true,       // advisory; status remains done
+  "scale_diagnostics": [ /* per-file measurement evidence */ ],
   "data_status": "SAMPLE",        // REAL | DRAFT | SAMPLE
   "data_status_notes": ["..."],
   "used_sample_rates": true,
@@ -274,6 +280,8 @@ status strings**, lowercase: `queued`, `running`, `done`, `failed`.
   "derivations": [ /* per-line coefficient rollups */ ],
   "withheld_count": 3,
   "withheld_by_reason": { "SAMPLE_RATE_BLOCKED": 2, "WBS_UNMAPPED": 1 },
+  "flags": [ { "description": "Drawing scale plausibility check",
+               "reason_code": "SCALE_IMPLAUSIBLE", "detail": "..." } ],
   "withheld": [ { "description": "...", "reason_code": "NO_CANDIDATE_IN_ANY_SOURCE",
                   "qty": 1.0, "unit": "cum", "detail": "...", "item_code": "RCC-09" } ],
   "corrections": [ /* the whole trail, oldest first */ ],
@@ -307,9 +315,12 @@ A line (`items[]`) carries:
 
 1. `/boq` returns **`items[]`**; `/snapshot` returns **`lines[]`**. They are
    different documents with different line fields.
-2. **There is no `flags` key in `/boq`** — the field is `reason_codes`. The
-   `flags` key appears **only** in snapshot lines, as a duplicate of
-   `reason_codes`.
+2. `/boq` returns top-level `flags[]` for result flags (including
+   `SCALE_IMPLAUSIBLE`); each item's `reason_codes[]` and `flags[]` describe
+   line-level flags. The snapshot builder serializes aggregate result-flag
+   records in both top-level `flags[]` and `withheld[]`. `SCALE_IMPLAUSIBLE` is
+   advisory: its presence in `withheld[]` does not mean measured quantities
+   were withheld.
 3. **Groups are flat, one level.** `groups[].items[]` carries only
    `line_id`, `item_code`, `level` — **no quantities**. Quantities live in
    `items[]`. Chapters are `sor_chapters[]` on the line; there is no nested
@@ -369,37 +380,57 @@ job record's `error`. The portal's mapper must read both defensively.
 
 `GET /jobs/{id}/snapshot` → `schema_version: "1.0"`, `kind: "acs.boq.snapshot"`.
 
-Top level: `run{}`, `data_status`, `data_status_notes[]`, `used_sample_rates`,
-`sor_sources[]`, `converter{}`, `inputs[]` (each with `name`, `type`,
-`size_bytes`, `sha256` — **never a URL**), `scale{}`, `lines[]`, `materials[]`,
-`derivations[]`, `withheld[]`, `totals{currency, amount, line_count,
+Top level: `run{}`, `status`, `needs_scale_check`, `scale_diagnostics[]`,
+`data_status`, `data_status_notes[]`, `used_sample_rates`, `sor_sources[]`,
+`converter{}`, `inputs[]` (each with `name`, `type`, `size_bytes`, `sha256` —
+**never a URL**), `scale{}`, `lines[]`, `materials[]`,
+`derivations[]`, `flags[]`, `withheld[]`, `totals{currency, amount, line_count,
 withheld_count}`, `corrections[]`.
 
-`scale{}` is `{value, denominator, confirmed_by, suggested, source}` where
-`source` is `"confirmed"` or `"none"`.
+`scale{}` is `{value, factor, denominator, semantics, confirmed_by, suggested,
+source}`. Read `factor` (or `value`); `denominator` is always `null` and is
+retained only for compatibility. `source` is `"confirmed"` or `"none"`.
 
 The snapshot is self-contained, deterministic for the same inputs, and is the
 document the portal persists. The service's own copy is purged after 168 h; on
 Render free the whole SQLite file may vanish sooner.
 
+| `scale` | Confirmed `drawing_scale` factor (`factor`, also `value`: real-world size / size as drawn), reviewer and suggestion, if applicable; IFC reports no scale requirement. `denominator` is always `null`, retained only for compatibility, and must not drive the UI. |
+| `scale_diagnostics[]` | Per-file DXF bounds/extent, drawing-unit conversion, measurement basis, and mapped opening widths. Show these diagnostics alongside the user's declared factor; do not present them as a suggested scale. |
+| `flags[]`, `withheld[]` | Both include aggregate result-flag records, including `SCALE_IMPLAUSIBLE`. That flag is advisory and does not withhold measured quantities; quantities remain present and unchanged. |
+
 #### 1.7.7 Reviewer-confirmed drawing scale
 
-- Field: **`dxf_scale`**, a **denominator** as a number — `100` means 1:100.
-  It is `float | None`; `None` means *no scale confirmed*. The only validation
-  is `> 0`. There is no enumeration of permitted scales.
+- Canonical field: **`drawing_scale`**, a positive real-size factor:
+  **real-world size ÷ size as drawn**. `1` means the model geometry is already
+  full size in real units; `100` means it is drawn at one hundredth of real
+  size. The title-block plotting scale is **not** the answer for full-size
+  geometry. The service guidance is available from `/meta`.
+- The API accepts `dxf_scale` as a backwards-compatible request alias and
+  continues to emit it in job/config payloads. The portal should send
+  `drawing_scale` and store the canonical factor.
 - It is one value **for the whole job** — see §2, D7.
-- A DXF job without one **fails**: the job's `error.code` becomes
-  `SOURCE_UNCALIBRATED` and `error_details` names the offending files.
-  A drawing whose **units are unknown** is refused the same way.
-- `scale_suggestion` is the **layer map's** scale, reported separately and
-  **never applied automatically**.
+- A DXF job with no confirmed factor **fails**: the job's `error.code` becomes
+  `SOURCE_UNCALIBRATED`. An otherwise scaled DXF whose `$INSUNITS` is unitless
+  also fails: re-export it with millimetres (or another explicit unit) set; do
+  not ask the user to confirm a scale to compensate for missing units.
+- `/meta` publishes `scale_presets` (`full_size` and `reduced`),
+  `scale_guidance`, and `scale_plausibility`. Use the full-size preset (factor
+  `1`) as the default for ACS, while making the user explicitly confirm it.
+  The layer-map `scale_suggestion` is separate and must never be auto-applied.
+- A plausibility warning is **review-only**. The service retains all measured
+  quantities and returns `status: "done"`, `needs_scale_check: true`,
+  `scale_diagnostics[]` and a `SCALE_IMPLAUSIBLE` flag. Do not turn this warning
+  into a failure or a separate polling terminal status.
 
-> ⚠️ **The layer map is sample data.** `data/layer_maps/sample_layers.SAMPLE.yaml`
-> has `scale: 1`, and the file itself says: *"The value below is the synthetic
-> test drawing's own scale, not a claim about ACS Chennai's drawings."* So in
-> the current deployment **`scale_suggestion` is `1`**, which is meaningless for
-> any real ACS drawing. **The portal must not show `1` as a suggestion.** See
-> §3, the settings screen, and §8.
+> **Estimator review required:** local anonymized diagnostics found that whole-
+> model extents on 23 of 23 measurable ACS drawings are dominated by a common
+> site boundary and exceed the current 3–500 m range at the correct factor 1.
+> The extent warning is therefore not a discriminating signal for these plans;
+> mapped opening widths may be more useful once ACS door/window layers are
+> mapped. Keep the warning informational and do not tune or suppress the check
+> until an estimator reviews the thresholds and measurement basis. Diagnostic
+> drawings and tables stay local and are not committed.
 
 #### 1.7.8 Limits and behaviours that shape the UX
 
@@ -434,7 +465,7 @@ Render free the whole SQLite file may vanish sooner.
 | 6 | README error list | **Incomplete** — omits `JOB_NOT_FOUND`, `RATE_LIMITED`, `IDEMPOTENCY_CONFLICT`, `REQUEST_TOO_LARGE`, `TOO_MANY_SOURCES` and all twelve `FETCH_*` codes; and lists `INVALID_STATE`, which is **never raised**. |
 | 7 | README `PORT` default 8000 | The Docker image uses **10000**. |
 | 8 | README "The database ships empty" | True of the git tree, but **the container loads SAMPLE data on every cold start**, so `data_status` is always `SAMPLE` in the current deployment. |
-| 9 | `SOURCE_UNCALIBRATED` as an HTTP error | It is a **job-level** error code on `GET /jobs/{id}`, not an HTTP envelope code. The portal maps it from the job record. |
+| `SOURCE_UNCALIBRATED` as an HTTP error | It is a **job-level** error code on `GET /jobs/{id}`, not an HTTP envelope code. The portal maps it from the job record. For a unitless DXF, tell the user to re-export with `$INSUNITS` set; scale confirmation cannot supply a missing unit. |
 | 10 | `RESULT-SNAPSHOT.md` example line | The example shows `confidence: {}`; the code returns the **full** object `{value, factors[]}`. Do not build a schema from the example. |
 
 #### 1.7.10 The service's own deployment state
@@ -576,8 +607,9 @@ cost index is not loaded.
 
 #### D7 — Scale is per job in the service, but drawings differ
 
-The engineer flagged this: `dxf_scale` is **one value per job**. Two DXFs at
-1:100 and 1:50 in one job produce silently wrong quantities on one of them.
+The engineer flagged this: `drawing_scale` is **one value per job**. Two DXFs
+with different real-size factors in one job produce silently wrong quantities
+on one of them.
 
 **Decision:** the portal captures the scale **per drawing** (a row per drawing
 with its own scale field). Drawings with the same scale are grouped into one
@@ -633,14 +665,14 @@ above 5 MB** with the note *"Upload drawings from a computer — this file is
 too large for a phone connection."* Existing drawings can still be selected
 and run on a phone.
 
-#### D10 — "Confirm the scale" is a false comfort; the QS wants a calibration
+#### D10 — drawing scale is a real-size factor, not the title-block plot ratio
 
 The QS's verdict was blunt: *"1:100 is a plotting scale printed in the title
-block; it does not calibrate the file."* If the CAD was drawn in real
-millimetres and plotted at 1:100, the model is already correct and entering
-`100` divides or multiplies everything by 100; if the drafter drew at 1:100
-and plotted 1:1, the model is 1/100 of real. **I checked the code — the QS is
-right about the arithmetic and right about the risk.** The service computes:
+block; it does not calibrate the file."* The service now defines
+`drawing_scale` at the API boundary as **real-world size ÷ size as drawn**. If
+the CAD was drawn full-size in real millimetres and plotted at 1:100, the
+correct factor is `1`, not `100`. Only geometry actually drawn at one hundredth
+of real size uses factor `100`. The service computes:
 
 ```python
 # app/extractors/dxf.py:191
@@ -648,38 +680,37 @@ units_per_m = INSUNITS_TO_METRES[insunits] * scale
 ```
 
 The scale **multiplies** the drawing unit. The unit comes from the file's
-`$INSUNITS` (or the layer map); the scale is the only thing the user supplies.
-A DXF job with no confirmed scale is **failed outright** by the worker
-(`SOURCE_UNCALIBRATED`, `app/api/worker.py:286-300`).
+`$INSUNITS` (or the layer map). The user confirms the model geometry's real
+size factor, not a plotted sheet ratio. A DXF job without a factor, or with
+units still unknown, is **failed outright** with `SOURCE_UNCALIBRATED`.
 
-**What the service cannot do (and therefore what v1 cannot promise):**
+**The service cannot do (and therefore what v1 cannot promise):**
 
 | The QS asked for | Is it possible today? |
 |---|---|
 | Per-**file** unit declaration | **No.** The unit is read from `$INSUNITS` by the service; the API accepts no unit parameter. |
-| Per-**file** scale | **No.** `dxf_scale` is one float per job. (v1 works around this by splitting jobs — D7.) |
-| Echo the calibration back ("one unit = X mm") | **No.** The snapshot's `scale` block is `{value, denominator, confirmed_by, suggested, source}` — no unit, no calibration note. |
+| Per-**file** scale | **No.** `drawing_scale` is one factor per job. (v1 works around this by splitting jobs — D7.) |
+| Echo the calibration back ("one unit = X mm") | **Partly.** The snapshot reports `scale.factor` / `scale.value` and each file's `scale_diagnostics[]`, including the unit conversion basis and extent; it does not return a separately verified calibration echo. |
 | Verify a known dimension automatically | **No.** Neither the service nor the portal can measure the drawing; there is no DXF parser in the portal. |
 
 **Decision — v1 ships the service's model, but stops pretending it is more
 than it is:**
 
-1. The screen is called **"Drawing calibration"**, not "Scale", and always
-   shows the arithmetic: *"The service reads the drawing unit from the file
-   and multiplies it by the number you enter."*
-2. The **1:1-in-real-millimetres warning is permanent**, not a tooltip.
-3. The **known-dimension check** is an optional field, **recorded** on the job,
-   printed on the review screen and in the export — and explicitly labelled
-   *"v1 records this; it does not check it for you."*
-4. The **QS's full calibration** (per-file unit + measured dimension + an echo
-   the portal can verify) is listed as **open question 1 for the service
-   owner** (§11). It is a service change, not a portal change.
-
-> **Open for you (decision 3):** if the drawings that will actually be used
-> are drawn in real millimetres (the common case for exported BIM/IFC-derived
-> DXF), the safe default is **1** — and the portal should offer a
-> **"the file is already in real millimetres"** preset that fills `1` and
-> records *who* chose it. That is a one-field change if you want it.
+1. The screen is called **"Drawing scale"** and defines the input plainly:
+   *"real-world size divided by size as drawn."* It always states that the
+   title-block plotting scale is not the answer for full-size geometry.
+2. The full-size preset is the default for ACS: factor `1`. The user still
+   explicitly confirms the choice; it is never inferred from the title block.
+3. Show the service's per-file `scale_diagnostics[]` beside the declared
+   factor on review: filename, bounds/extent, basis, unit conversion and any
+   mapped opening widths. The evidence is review context, not an automatic
+   factor recommendation.
+4. A unitless source is a separate blocking problem: tell the user to
+   re-export with `$INSUNITS` set to millimetres (or the correct explicit unit).
+   Do not ask them to change the scale factor to compensate.
+5. Plausibility warnings are advisory and never alter quantities. An estimator
+   must review the extent range and layer-map coverage before the portal treats
+   this check as a strong signal (§1.7.7).
 
 #### D11 — What is this thing called while the rates are sample?
 
@@ -761,7 +792,7 @@ with the exclusions card above saying so.
 
 | # | The QS's demand | Landed? |
 |---|---|---|
-| 1 | Per-file calibration with a measured dimension | **Partly.** v1 keeps the service's one-scale-per-job model, adds the permanent multiplier warning and records an unverified known-dimension note (§2.2 D10). The rest needs a service change. |
+| 1 | Per-file calibration with a measured dimension | **Partly.** v1 keeps the service's one-factor-per-job model, shows per-file diagnostics beside the user-confirmed factor, and records an unverified known-dimension note (§2.2 D10). The rest needs a service change. |
 | 2 | Coverage and exclusions on the summary and every export | **Yes** — §2.2 D12. |
 | 3 | Real rates with a stamped SOR edition, or it is not a BOQ | **Yes for the label** (§2.2 D11). The real rates are a data task, not a code task — the portal reads `sor_sources[]` from `/meta` and stamps the edition if one exists. |
 | 4 | PDF, DWG, own template, manual item insertion | **No** — PDF and DWG are service limits; template and insertion are a v2 product (§11). |
@@ -906,30 +937,27 @@ Upload failure (inline, per file, never a toast):
 │  │  because ACS Chennai's Schedule of Rates has not been loaded yet.        │  │
 │  │  This BOQ must not be issued to a client.                                │  │
 │  │                                                                          │  │
-│  │  CHECK THE DRAWING CALIBRATION BEFORE MEASUREMENT                       │  │
-│  │  A DXF file does not carry its plotting scale — it is printed in the     │  │
-│  │  title block. Every quantity below is measured at the scale you confirm. │  │
+│  │  CONFIRM THE DRAWING SCALE FACTOR BEFORE MEASUREMENT                    │  │
+│  │  Enter real-world size ÷ size as drawn. This is not the title-block      │  │
+│  │  plotting scale. Full-size model geometry uses factor 1.                 │  │
 │  │                                                                          │  │
 │  │  ┌────────────────────────────────────────────────────────────────────┐  │  │
-│  │  │ Drawing                     Scale on drawing   Confirm (1:___)   │  │  │
+│  │  │ Drawing                     Preset / factor    Confirm factor      │  │  │
 │  │  │ ────────────────────────────────────────────────────────────────── │  │  │
-│  │  │ BlockA_Ground_Plan.dxf       1 : ___            [ ___ ]  [1:100]│  │  │
-│  │  │ BlockA_Section_AA.dxf        1 : ___            [ ___ ]  [1:100]│  │  │
+│  │  │ BlockA_Ground_Plan.dxf       Full size (1)      [ 1 ]             │  │  │
+│  │  │ BlockA_Section_AA.dxf        Full size (1)      [ 1 ]             │  │  │
 │  │  └────────────────────────────────────────────────────────────────────┘  │  │
-│  │  Enter the denominator only: 100 for a 1:100 drawing.                   │  │
-│  │  ℹ Our drawing-library suggestion is not used for your drawings — read   │  │
-│  │    the title block.                                                       │  │
+│  │  Factor = real-world size ÷ size as drawn. Full-size geometry = 1.       │  │
+│  │  ℹ Use /meta scale_guidance and scale_presets; do not infer from a       │  │
+│  │    title-block plotting scale or auto-apply scale_suggestion.            │  │
 │  │  ⓘ BlockA_Ground_Plan.dxf and BlockA_Section_AA.dxf are at different    │  │
 │  │    scales. They will be measured as two separate BOQs.                  │  │
-│  │  ⚠ Read this once — it decides every number in the BOQ.                │  │
-│  │    The service reads the drawing unit from the file and MULTIPLIES it   │  │
-│  │    by the number you enter: 1 drawing mm × 100 = 100 mm real.           │  │
-│  │    If the DXF was drawn in real millimetres (title block says 1:100    │  │
-│  │    but the file itself is already 1:1), enter 1 — not 100.              │  │
+│  │  ⚠ The service multiplies the drawing-unit conversion by this factor.   │  │
+│  │    Example: full-size 5,000 mm geometry × factor 1 = 5 m real.           │  │
+│  │    A title-block plot ratio does not establish model-space size.         │  │
 │  │    A wrong number here scales every quantity by the same factor.        │  │
-│  │  │  Known-dimension check (optional, recorded on the BOQ):              │  │
+│  │  │  Known-dimension note (optional, recorded, not verified):             │  │
 │  │  │  [ e.g. grid spacing 6.0 m measured against the plan ]              │  │
-│  │  │  ⚠ v1 records this note; it does not check it for you.              │  │
 │  │                                                                          │  │
 │  │  RATE SOURCE                                                            │  │
 │  │  ┌────────────────────────────────────────────────────────────────────┐  │  │
@@ -947,21 +975,28 @@ Upload failure (inline, per file, never a toast):
 ```
 
 **Rules on this screen**
-- The scale field is **required** whenever a DXF is selected. The "Generate"
-  button stays disabled and says *"Confirm the drawing scale to continue"*.
-- The scale is a **denominator** (`100` = 1:100) with a `1:` prefix in the UI.
-- The service's `scale_suggestion` is **not shown as a suggestion**, because in
-  the current deployment it is `1`, taken from a synthetic sample layer map
-  that explicitly disclaims any relation to ACS drawings (§1.7.7). If a real
-  ACS layer map is ever supplied, this becomes a "suggested, unverified" hint.
+- The factor is **required** whenever a DXF is selected. The default choice is
+  the `/meta` `full_size` preset (`drawing_scale: 1`), and the user must confirm
+  it. The alternative `reduced` preset requires an explicit factor.
+- The field means **real-world size ÷ size as drawn**, not a denominator. A
+  full-size drawing plotted at 1:100 still uses factor `1`; the title-block
+  plotting scale is never treated as the answer.
+- Render `scale_guidance`, `scale_presets[]`, and `scale_plausibility` from
+  `/meta`; do not hardcode service-owned guidance or infer a factor from
+  `scale_suggestion`.
+- If a DXF is unitless (`$INSUNITS` unset/unknown), it cannot be rescued by
+  changing the factor. Tell the user to re-export it with millimetres (or its
+  correct explicit unit) set.
 - The scale is recorded with **who confirmed it and when**, and it is stored on
   the portal's job row *and* sent as the service's `requested_by` so it lands
   in the service's audit trail.
-- **The multiplier warning is always shown, not only on hover.** The service
-  computes `units_per_m = drawing_unit_in_metres × scale` — the scale
-  **multiplies** (`app/extractors/dxf.py:191`). This is the single most
-  dangerous number in the whole flow, because a 100× error produces a BOQ that
-  looks completely ordinary (§2.2 D10).
+- **The factor arithmetic is always visible.** The service multiplies its
+  drawing-unit conversion by `drawing_scale`; the definition, not a 1:` prefix,
+  is the critical safety copy (§2.2 D10).
+- A `needs_scale_check` warning is informational, not a disabled/export-blocking
+  state. Show `scale_diagnostics[]` beside the declared factor so the reviewer
+  can inspect per-file extents, basis, units and mapped opening widths. Never
+  alter or suppress quantities because this warning fired.
 - **The known-dimension note is optional but recorded.** It is stored on the
   portal's job row, printed on the review screen under "What this number
   covers", and written into the export. **v1 does not verify it** — the portal
@@ -1082,8 +1117,9 @@ the first ~60 s.
 │                                                     │  PROVENANCE                   │
 │                                                     │  File   BlockA_Ground_Plan.dxf│
 │                                                     │  Layer  A-WALL                │
-│                                                     │  Scale  1:100 (confirmed by   │
-│                                                     │         you on 26 Oct)        │
+│                                                     │  Scale factor 1.0             │
+│                                                     │  real-world size ÷ size as    │
+│                                                     │  drawn; confirmed by you      │
 │                                                     │                              │
 │                                                     │  WHAT DO YOU WANT TO CHANGE?  │
 │                                                     │  ( ) Quantity                 │
@@ -1127,7 +1163,7 @@ the first ~60 s.
 │  │  │ Generated  26 Oct 2026, 14:22  by Adithya M                          │  │  │
 │  │  │ Inputs     BlockA_Ground_Plan.dxf (sha256 3f2a…c901, 4.2 MB)       │  │  │
 │  │  │            BlockA_Section_AA.dxf  (sha256 9b71…4e2f, 1.8 MB)        │  │  │
-│  │  │ Scale      1:100 confirmed by Adithya M on 26 Oct 2026, 14:20      │  │  │
+│  │  │  Scale factor 1.0 (real-world size ÷ size as drawn; confirmed by Adithya M) │  │  │
 │  │  │ Reader     ezdxf 1.x  ·  data status SAMPLE                        │  │  │
 │  │  │                                                                     │  │  │
 │  │  │ Corrections                                                      │  │  │
@@ -1206,15 +1242,14 @@ Mobile is one column. The sidebar is a drawer; the bottom tab bar is unchanged
 │ 2.6 MB of 4.2 MB     │          │ ⚠ SAMPLE DATA —      │
 │                      │          │   NOT AN ESTIMATE     │
 │ ✓ Section_AA.dxf     │          │                      │
-│                      │          │ CHECK THE SCALE      │
-│                      │          │ Your DXF has no scale │
-│                      │          │ — read the title     │
-│                      │          │ block.                │
+│                      │          │ DRAWING SCALE FACTOR │
+│                      │          │ Full-size geometry = 1│
+│                      │          │ Not the plot ratio.   │
 │                      │          │                      │
 │                      │          │ Ground_Plan.dxf       │
-│                      │          │ 1: [___] [1:100]     │
+│                      │          │ Factor [1] Full size │
 │                      │          │ Section_AA.dxf        │
-│                      │          │ 1: [___] [1:100]     │
+│                      │          │ Factor [1] Full size │
 │                      │          │                      │
 │                      │          │ [ Generate BOQ → ]   │
 └──────────────────────┘          └──────────────────────┘
@@ -1315,7 +1350,8 @@ mapping came from the quantity-surveyer review.
 
 | Machine code | What the user reads | Tier |
 |---|---|---|
-| `SOURCE_UNCALIBRATED` | The drawing was not calibrated, so nothing could be measured from it. Confirm the scale and run it again. | ⛔ Blocking |
+| `SOURCE_UNCALIBRATED` | This drawing has no usable calibration, so no quantities could be measured. If its units are missing or unitless, re-export it with `$INSUNITS` set to millimetres (or the correct explicit unit); confirming a scale factor cannot replace missing units. | ⛔ Blocking |
+| `SCALE_IMPLAUSIBLE` | The measured drawing evidence is outside the service's plausibility range. Check the declared factor, units and per-file diagnostics; the service kept the measured quantities unchanged. This is an advisory review point, not a failed BOQ. | ℹ Review |
 | `UNIT_UNRECOGNISED` | The unit on this drawing is not one we recognise, so the quantity cannot be priced. | ⛔ Blocking |
 | `NO_CANDIDATE_IN_ANY_SOURCE` | No rate for this item in any schedule. The amount is kept out of the total — enter a rate if you have one. | ⛔ Blocking |
 | `PRIORITY_EXHAUSTED` | No rate found in the rate sources you chose. It is kept out of the total. | ⛔ Blocking |
@@ -1418,11 +1454,14 @@ effectiveStatus = (data_status === "REAL" && production_mode === true) ? "REAL" 
 | No drawings in the project | "This project has no drawings uploaded yet. Upload a DXF or IFC to get started." |
 | PDF picked | "PDF drawings cannot be measured yet — the service reads IFC and DXF only. It is listed here so you know it is there." |
 | DWG picked | "DWG is not supported. Convert it to DXF first (ODA File Converter or LibreDWG)." |
-| Scale missing | "Confirm the drawing scale to continue." |
+| Scale factor missing | "Choose and confirm a drawing scale factor to continue. Enter real-world size divided by size as drawn; do not copy the title-block plotting scale for full-size geometry." |
+| Source unitless (`SOURCE_UNCALIBRATED`) | "{filename} has no drawing units set, so it cannot be measured. Re-export it with millimetres (or the correct unit) set, then upload it again. Changing the scale factor will not fix missing units." |
+| Plausibility warning (`SCALE_IMPLAUSIBLE`) | "Scale check: the service measured the evidence shown below, but it cannot confirm that the factor is right. Review the declared factor, units and each file's diagnostics. Quantities are retained; this warning does not block the result." |
 | Scale differs between drawings | "{A} and {B} are at different scales. They will be measured as two separate BOQs." |
 | Service waking | "The drawing service is waking up. This can take a minute the first time you use it after a break." |
 | Job failed — interrupted | "The drawing service restarted while this was running, so the job was stopped. Run it again — nothing you entered was lost." |
-| Job failed — uncalibrated | "The drawing scale was not confirmed, so this drawing could not be measured. Confirm the scale and run it again." |
+| Job failed — no scale factor | "The drawing scale factor was not confirmed, so this drawing could not be measured. Confirm its real-size factor and run it again." |
+| Job failed — unitless drawing | "{filename} has no drawing units set, so it cannot be measured. Re-export with millimetres (or the correct unit) set; confirming a scale factor will not fix it." |
 | Job failed — unsupported file | "We could not read {filename}. We can measure IFC and DXF files only." |
 | Job lost (404) | "The drawing service forgot this job (it restarts and loses unfinished work). Run it again." |
 | Export acknowledgement | "I understand these rates are placeholders and this file is not for issue." |
@@ -1460,7 +1499,7 @@ These four panels come straight from the practitioner review and are what turns
 │  │                                                                      │  │
 │  │  Additional exclusions (your note):  [ ______________________ ]        │  │
 │  │                                                                      │  │
-│  │  Calibration  1:100, confirmed by Adithya M on 26 Oct 2026, 14:20      │  │
+| Scale factor 1.0 — real-world size ÷ size as drawn                       │  │
 │  │  Known dimension  grid spacing 6.0 m (recorded, not checked)          │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 ```
@@ -1616,9 +1655,9 @@ that is the existing `BoqItem` API and its error shape differs.
 | 3 | Existing drawings | *existing* `GET /api/projects/:projectId/attachments?category=DESIGN_DRAWINGS` | — | Reuse. |
 | 4 | Request an upload URL | `POST /api/boq-generator/uploads/presign` | — | Body: `{ projectId, filename, sizeBytes }`. Returns `{ uploadId, sasUrl, blobPath, expiresAt }`. Server derives the extension from an allowlist (`dxf`, `ifc`) and **binds `application/octet-stream`** so the browser need not guess a type. |
 | 5 | Confirm an upload | `POST /api/boq-generator/uploads/confirm` | — | Body: `{ uploadId }`. Server `HEAD`s the blob, checks the length matches exactly, and **sniffs the first bytes** (`AutoCAD Binary DXF`, `ISO-10303-21`, ASCII DXF) — a PDF renamed to `.dxf` is rejected here, before a job is ever created. |
-| 6 | Create a job | `POST /api/boq-generator/jobs` | `POST /jobs` | Body: `{ projectId, uploads: [uploadId…], dxfScale, rateSource, wastagePct }`. **Requires the `Idempotency-Key` header** (client-generated, ≤128 chars). |
-| 7 | Poll status | `GET /api/boq-generator/jobs/:boqJobId` | `GET /jobs/{serviceJobId}` | The browser polls **the portal**, not the service. The portal calls the service at most once per poll. On `done`, the portal fetches and stores the snapshot + xlsx (§5.4). |
-| 8 | Read the BOQ | `GET /api/boq-generator/jobs/:boqJobId/boq` | `GET /jobs/{id}/boq` **or** the stored snapshot | Served from the stored snapshot when the service is gone. |
+| 6 | Create a job | `POST /api/boq-generator/jobs` | `POST /jobs` | Body: `{ projectId, uploads: [uploadId…], drawing_scale, rateSource, wastagePct }`. Keep `dxf_scale` only as an accepted legacy request alias. **Requires the `Idempotency-Key` header** (client-generated, ≤128 chars). |
+| 7 | Poll status | `GET /api/boq-generator/jobs/:boqJobId` | `GET /jobs/{serviceJobId}` | The browser polls **the portal**, not the service. Stop on service `done` or `failed`. A completed job may include `needs_scale_check: true`; this advisory marker does not change status or delay snapshot/export capture (§5.4). |
+| 8 | Read the BOQ | `GET /api/boq-generator/jobs/:boqJobId/boq` | `GET /jobs/{id}/boq` **or** the stored snapshot | Served from the stored snapshot when the service is gone. Expose `drawing_scale`, `status`, `needs_scale_check`, `scale_diagnostics[]`, and top-level `flags[]`. |
 | 9 | Correct a line | `POST /api/boq-generator/jobs/:boqJobId/lines/:lineId/corrections` | `PATCH /jobs/{id}/lines/{line_id}` | Body: `{ kind, reason, value… }`. The portal adds `requested_by` itself (never from the client). |
 | 10 | Save (freeze) | `POST /api/boq-generator/jobs/:boqJobId/save` | `GET /snapshot` + `GET /boq.xlsx` | Fetches both back-to-back, stores both in R2, writes a `BoqSnapshot` row. Idempotent. |
 | 11 | Download the export | `GET /api/boq-generator/jobs/:boqJobId/export` | — | Serves the stored `.xlsx` from R2 via a 10-minute presigned GET. `410 BOQ_EXPORT_GONE` if the blob is missing and regeneration also fails. |
@@ -1700,12 +1739,18 @@ are naturally idempotent or are protected by the `revision` counter (§8.2).
 
 Stops on `done`, `failed`, or when the tab is hidden (the browser pauses
 polling on `visibilitychange`; the portal's own reconcile cron covers the gap).
+`needs_scale_check` is not a status and must never keep the poller running.
+When `status === "done" && needs_scale_check === true`, capture the snapshot
+and workbook as usual, then route the completed job into the portal's
+informational **"needs scale check"** review state. It is not a failure or an
+export blocker; the reviewer sees the advisory, diagnostics, and unchanged
+quantities.
 
 **Portal → service:** at most one `GET /jobs/{id}` per incoming poll per job.
 No background loop — a Render free instance's in-process timer dies with the
 instance and burns instance-hours.
 
-**On observing `done`, the portal immediately, server-side:**
+**On observing `done` (whether or not `needs_scale_check` is true), the portal immediately, server-side:**
 
 1. `GET /jobs/{id}/snapshot` → write the JSON to R2 `snapshots/{projectId}/{boqJobId}/rev-{n}.json` → write a `BoqSnapshot` row.
 2. `GET /jobs/{id}/boq.xlsx` → write the bytes to R2 `exports/{projectId}/{boqJobId}/boq-{boqJobId}-rev-{n}.xlsx` → point the snapshot row at it.
@@ -1782,10 +1827,10 @@ model BoqJob {
   // | FAILED | LOST | DELETED
   dataStatus  String?  @map("data_status")          // REAL | DRAFT | SAMPLE
   productionMode Boolean? @map("production_mode")
-  // The scale the reviewer confirmed, as a denominator (100 = 1:100).
-  // Per-drawing scales live in `inputFiles`; this is the single scale sent
+  // The confirmed factor: real-world size divided by size as drawn.
+  // Per-file factors live in `inputFiles`; this is the single factor sent
   // to the service for this job.
-  dxfScale    Float?   @map("dxf_scale")
+  drawingScale Float? @map("drawing_scale")
   scaleConfirmedBy String? @map("scale_confirmed_by")
   scaleConfirmedAt DateTime? @map("scale_confirmed_at")
   // The client's Idempotency-Key, namespaced under the employee id in
@@ -1796,7 +1841,7 @@ model BoqJob {
   // The settings actually sent, for the audit trail.
   settingsJson Json?   @map("settings_json")
   // [{ uploadId, filename, contentType, sizeBytes, sha256, blobPath,
-  //    drawingId?, level?, dxfScale? }]
+  //    drawingId?, level?, drawingScale? }]
   inputFiles  Json     @map("input_files")
   errorCode   String?  @map("error_code")
   errorMessage String? @map("error_message")
@@ -1843,8 +1888,8 @@ model BoqSnapshot {
   snapshotBlobPath String @map("snapshot_blob_path")
   // R2 key of the workbook, when it was produced. NULL if the export failed.
   exportBlobPath  String? @map("export_blob_path")
-  // The scale + who confirmed it, copied from the snapshot's `scale` block.
-  dxfScale   Float? @map("dxf_scale")
+  // The real-size factor + who confirmed it, copied from snapshot `scale.factor`.
+  drawingScale Float? @map("drawing_scale")
   scaleConfirmedBy String? @map("scale_confirmed_by")
   // The export acknowledgement: who accepted the SAMPLE warning, and when.
   acknowledgedById String? @map("acknowledged_by_id")
@@ -1867,8 +1912,8 @@ model BoqSnapshot {
 | The BOQ **document** (the full snapshot JSON) | **R2** `boq-generator/snapshots/{projectId}/{boqJobId}/rev-{n}.json` | It is 100 KB–2 MB. Keeping it in Postgres would bloat the job list. It must never expire — it is the record. |
 | The BOQ **spreadsheet** | **R2** `boq-generator/exports/{projectId}/{boqJobId}/boq-{boqJobId}-rev-{n}.xlsx` | The exact file the user reviewed. Re-fetching later from the service would silently produce a *different* file (the service regenerates from the current view), which would make the audit trail fiction. |
 | The **original drawings** | **R2** `boq-generator/drawings/{projectId}/{employeeId}/{ulid}.{ext}` | Working copies. The BOQ is the product; the drawing belongs to ACS. The key carries the employee id because the drawing is uploaded before the job exists; the job→drawing link is the `boq_job.inputFiles` row. |
-| The snapshot **metadata** (totals, counts, status, paths, who/when) | **Postgres** `boq_snapshot` | Cheap to list, cheap to filter, immutable. |
-| The **job** (status, settings, scale, files, error) | **Postgres** `boq_job` | The portal's index of service jobs — the service has no "list my jobs" endpoint. |
+| The snapshot **metadata** (totals, counts, status, paths, who/when, confirmed drawing factor) | **Postgres** `boq_snapshot` | Cheap to list, cheap to filter, immutable. |
+| The **job** (status, settings, drawing-scale factor, files, error, advisory review state) | **Postgres** `boq_job` | The portal's index of service jobs — the service has no "list my jobs" endpoint. |
 | The **correction trail** | Inside the snapshot's `corrections[]` (in R2) | The service already provides the whole trail, oldest first, with who/when/old/new/reason. No third table. |
 | The service's own copy | The service's ephemeral SQLite | Disposable by design. |
 
@@ -1891,7 +1936,7 @@ CREATE TABLE IF NOT EXISTS public.boq_job (
   status            TEXT NOT NULL DEFAULT 'DRAFT',
   data_status       TEXT,
   production_mode   BOOLEAN,
-  dxf_scale         DOUBLE PRECISION,
+  drawing_scale     DOUBLE PRECISION,
   scale_confirmed_by TEXT,
   scale_confirmed_at TIMESTAMPTZ,
   idempotency_key   TEXT,
@@ -1927,7 +1972,7 @@ CREATE TABLE IF NOT EXISTS public.boq_snapshot (
   withheld_count    INTEGER NOT NULL DEFAULT 0,
   snapshot_blob_path TEXT NOT NULL,
   export_blob_path   TEXT,
-  dxf_scale         DOUBLE PRECISION,
+  drawing_scale     DOUBLE PRECISION,
   scale_confirmed_by TEXT,
   acknowledged_by_id TEXT REFERENCES public.employee(id) ON DELETE SET NULL,
   acknowledged_at   TIMESTAMPTZ,
@@ -2201,9 +2246,10 @@ recorded on the `BoqSnapshot` row (`acknowledgedById`, `acknowledgedAt`).
      buckets and rewrite CORS.
 3. **Apply the CORS policy.** Either
    - run the sanctioned script with an **admin-capable** credential:
-     `node backend/scripts/provisionR2.js --bucket boq-generator --origins https://acschennai.com,https://acs-portal-spa.onrender.com`
-     (add the bucket to `ALLOWED_R2_BUCKETS` first so it is picked up by
-     default), or
+     `node backend/scripts/provisionR2.js --bucket boq-generator --origin https://acschennai.com --origin https://acs-portal-spa.onrender.com`
+     (`--bucket` works on its own — the bucket does **not** need to be in
+     `ALLOWED_R2_BUCKETS`; and the flag is `--origin`, **repeatable**, not
+     `--origins` — the script rejects an unknown argument), or
    - paste the rule into the dashboard's **Settings → CORS**:
      `AllowedOrigins: https://acschennai.com, https://acs-portal-spa.onrender.com` ·
      `AllowedMethods: PUT, GET, HEAD` · `AllowedHeaders: *` ·
@@ -2217,13 +2263,15 @@ recorded on the `BoqSnapshot` row (`acknowledgedById`, `acknowledgedAt`).
 5. **Note the bucket host** for the service allowlist:
    `boq-generator.{ACCOUNT_ID}.r2.cloudflarestorage.com`
    (visible on the bucket's Overview page).
-6. **Add the bucket to the portal's CORS provisioning list** — one line in
-   `backend/src/lib/blobStorage.js`:
-   `process.env.BUCKET_BOQ_GENERATOR || 'boq-generator'` in `ALLOWED_R2_BUCKETS`.
-   **Not** in `REQUIRED_BUCKETS`: the new token is scoped to object access only
-   and has no bucket-list permission, so a `HeadBucket` probe would 403 and
-   fail `/ready` spuriously. The BOQ routes instead return a clear
-   `503 BOQ_STORAGE_NOT_CONFIGURED` when the env vars are absent.
+6. **Do not add the bucket to `ALLOWED_R2_BUCKETS`.** The BOQ bucket is
+   reached through a **separate S3 client** (`backend/src/lib/boqStorage.js`)
+   with its own bucket-scoped credential, so the general-purpose client in
+   `blobStorage.js` cannot touch it even by accident — keeping it out of that
+   allow-list is deliberate and stronger than listing it. It is also **not**
+   in `REQUIRED_BUCKETS`: the new token has no bucket-list permission, so a
+   `HeadBucket` probe would 403 and fail `/ready` spuriously. When the env
+   vars are absent, the BOQ routes return a clear
+   `503 BOQ_STORAGE_NOT_CONFIGURED` instead.
 7. **Do not** add the bucket to the nightly DB backup (that backs up Postgres,
    not R2) and do not expect the R2 export to be covered by it — see §11.
 
@@ -2479,13 +2527,16 @@ through the existing `createApp({ prisma, blobStorage })` seam
 | Return `202` with a job id, then flip `queued → running → done` over a few polls | The real service is asynchronous; a synchronous fake would not test the waiting screen |
 | Honour `JOB_NOT_READY` when `/boq` is called too early | That is a real 409 the portal must map |
 | Fail with `JOB_INTERRUPTED` and `retryable: true` when told to | The service's restart behaviour is the most common real failure |
-| Fail with `SOURCE_UNCALIBRATED` when `dxf_scale` is absent | The scale gate must be tested at the portal boundary |
+| Fail with `SOURCE_UNCALIBRATED` when `drawing_scale` is absent or the DXF is unitless | The scale gate and unitless re-export guidance must be tested at the portal boundary |
 | Fail with `PDF_NOT_SUPPORTED` and `UNSUPPORTED_FILE_TYPE` | The two file errors the user will actually hit |
 | Fail with `UPLOAD_TOO_LARGE` above 100 MB | The service's cap, not the portal's |
 | Fail with `RATE_LIMITED` and `IDEMPOTENCY_CONFLICT` | Both are real service codes |
 | Fail with `CORRECTION_REFUSED` on a wrong-state correction | The service's `INVALID_STATE` is dead code; `CORRECTION_REFUSED` is the live one |
 | Return `data_status: "SAMPLE"`, `used_sample_rates: true` | The banner must appear in every test |
-| Return `scale.suggested: 1` | The fake must reproduce the meaningless suggestion so the test proves it is not shown |
+| Return `/meta` `scale_presets`, `scale_guidance`, and `scale_plausibility` | The settings UI consumes service-owned labels, guidance and configured thresholds |
+| Return `scale.factor` / `scale.value`, `denominator: null`, and top-level `drawing_scale` | Tests assert that the portal reads the factor and never uses the retired denominator as the UI value |
+| Return `needs_scale_check: true`, per-file `scale_diagnostics[]`, and `SCALE_IMPLAUSIBLE` in top-level `flags[]` with `status: "done"` | The result goes to a completed advisory-review state and the poller still terminates on `done` |
+| Return the same aggregate `SCALE_IMPLAUSIBLE` flag in both snapshot `flags[]` and `withheld[]` | Snapshot fixtures match the current serializer; the advisory does not remove quantities |
 | Return `level: ""` on one line and `UNKNOWN_STOREY` on another | The "Level not stated" path |
 | Return `withheld_count`, `withheld_by_reason`, `withheld[]` and a line with `BBOX_FALLBACK` | The "kept out of the total" card |
 | Return `corrections[]` with `old_value`/`new_value`/`reason`/`requested_by`/`created_at` | The change log |
@@ -2548,7 +2599,7 @@ absorbed shows up as a red diff rather than as a production error.
 | `backend/__tests__/boqGenerator.routes.test.js` | The happy path: create → poll → review → correct → save → download, against the fake. |
 | `backend/__tests__/boqGenerator.errors.test.js` | A table-driven test: every service `error.code` in §1.7 maps to the right portal code and the right user-facing copy. A new service code with no mapping **fails the test**. |
 | `backend/__tests__/boqGenerator.upload.test.js` | The presign is PUT-only, 900 s, under `drawings/{projectId}/{employeeId}/{ulid}.{ext}`; the content-type allow-list rejects PDF; the size cap rejects > 100 MB; `confirm-upload` runs the magic-byte check and rejects a PDF declared as DXF; the key contains no part of the client's filename. |
-| `backend/__tests__/boqGenerator.scale.test.js` | A DXF with no scale never reaches the service; two drawings at different scales produce **two** service jobs and one portal run; `scale.suggested` is never sent to the browser. |
+| `backend/__tests__/boqGenerator.scale.test.js` | The request sends canonical `drawing_scale`; a legacy `dxf_scale` fixture is accepted; a unitless DXF gets re-export guidance; a `done` response with `needs_scale_check: true` stops polling, captures the snapshot/export and opens the informational review state; per-file diagnostics render beside the declared factor; `/meta` presets and guidance are used; two drawings at different factors produce **two** service jobs. |
 | `backend/__tests__/boqGenerator.snapshot.test.js` | The snapshot row is immutable — a second revision creates a **new** row and leaves the first untouched; `data_status: "SAMPLE"` gives the SAMPLE banner; `data_status: "REAL"` **with** `production_mode: false` still gives the DRAFT/SAMPLE banner (the `effectiveStatus` rule); an unknown `schema_version` is refused with a clear message. |
 | `backend/__tests__/boqGenerator.export.test.js` | The regenerated workbook carries the banner in the header **and** the footer, the filename carries the status, the export is blocked without the acknowledgement, and the acknowledgement is stored with who and when. |
 | `backend/__tests__/boqGenerator.idempotency.test.js` | The same `Idempotency-Key` + the same body replays the first response; the same key + a different body returns `409 IDEMPOTENCY_MISMATCH`. (The durable `request_dedupe` table already does this — this test proves the BOQ routes use it.) |
@@ -2659,11 +2710,11 @@ the suite green** (`node node_modules/.bin/jest`). Nothing here modifies
 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|---|
-| 1 | **A wrong scale factor (100× or 1000×) across the whole take-off.** The BOQ still looks plausible — right items, right groups, sane quantities, wrong by a factor. | High — this is the QS's #1 fear and the code confirms the arithmetic (`units_per_m = unit × scale`) | **Severe.** One number, silently wrong across every line. | The permanent multiplier warning; the recorded known-dimension note; the coverage card; the "not the project cost" line. **Not fully mitigated in v1** — there is no automated verification. **This is the top residual risk of the feature.** |
+| 1 | **A wrong drawing-scale factor (100× or 1000×) across the whole take-off.** The BOQ still looks plausible — right items, right groups, sane quantities, wrong by a factor. | High — this is the QS's #1 fear and the code confirms the arithmetic (`units_per_m = unit × drawing_scale`) | **Severe.** One number, silently wrong across every line. | The permanent factor definition; per-file scale diagnostics; the recorded known-dimension note; the coverage card; the "not the project cost" line. **Not fully mitigated in v1** — diagnostics do not verify the factor. **This is the top residual risk of the feature.** |
 | 2 | The service is on a **free Render instance** — cold start ~60 s, restarts without warning. | Certain | Medium | The portal's outbound timeout is 180 s; the waiting screen explains it; a restart mid-job is reported as "the service restarted", with `retryable: true` and a one-click re-run. |
 | 3 | The service's state is **disposable** — the job can be gone before the user saves it. | High | Medium | The portal captures the snapshot the moment the job reaches `done`; the snapshot is the record; the export is stored in R2 at save time (§7.8). |
 | 4 | The service's **240 req/min** limit, with every portal call coming from one IP. | Low | Medium | Polling backoff (3 → 5 → 10 s); the 5-concurrent-jobs cap; the service's per-IP limit is currently disabled. |
-| 5 | The service's `scale_suggestion` is **`1`**, from a synthetic sample map that disclaims any relation to ACS drawings. | Certain | High if shown | The portal never shows it. If a real ACS layer map lands, it becomes an "unverified" hint — never an auto-fill. |
+| 5 | The service's `scale_suggestion` is **`1`**, from a synthetic sample map that disclaims any relation to ACS drawings. | Certain | High if shown | Never auto-apply or present it as a recommendation. The user confirms the `/meta` full-size preset (factor 1) explicitly; expose the service's guidance and diagnostics. |
 | 6 | **Sample rates escape to a client.** The QS named this as the abandonment trigger. | Low, if the gates hold | **Severe for the business** | The banner in five places; the SAMPLE filename; the export acknowledgement; the exclusions card; the pilot gate. |
 | 7 | The service and the portal **disagree on the snapshot schema**. | Low | Medium | The portal refuses an unknown `schema_version` with a clear message instead of guessing, and the contract check (§9.2) catches it before a user does. |
 | 8 | The portal's `boq_job` table gets **ahead of reality** (a DB restore, a lost service). | Low | Low | The reconcile cron marks orphans as "the service forgot this job" and offers a re-run. |
@@ -2678,10 +2729,11 @@ the suite green** (`node node_modules/.bin/jest`). Nothing here modifies
 **For the service owner (they need a service change, not a portal change):**
 
 1. **Per-file calibration.** Can the service accept a per-file drawing unit and
-   a measured dimension, and echo the calibration back in the snapshot? Today
-   it accepts one denominator per job, reads the unit from `$INSUNITS`, and
-   exposes no unit. **Default if unanswered:** keep the current model, with
-   the multiplier warning (D10).
+   a measured dimension, and echo a verified calibration in the snapshot?
+   Today it accepts one `drawing_scale` factor per job, reads the unit from
+   `$INSUNITS`, and exposes per-file `scale_diagnostics[]` but no verified
+   calibration echo. **Default if unanswered:** keep the current model and
+   show factor guidance plus diagnostics (D10).
 2. **Inserting a line.** Is there a way to add an item the model does not
    contain (doors, sanitary, painting)? Today `PATCH` only edits existing
    lines. **Default:** not in v1 (D14).
@@ -2728,7 +2780,7 @@ Each has a default that I will implement unless you say otherwise.
 | 1 | Show the **sample total**, or hide all money until the rates are real? | **Show it**, walled off behind the banner, with the "Amount (sample rate)" column header and the export gate. |
 | 2 | **Pilot only**, or open to everyone? | **Pilot only** while the rates are sample. |
 | 3 | Page title: **"BOQ Generator"** or **"Quantity take-off"**? | Nav says **"BOQ Generator"**; the page title follows the data status (§2.2 D11). |
-| 4 | Do the drawings get a **"1 — already in real millimetres"** preset? | **No preset.** The warning is enough, and a wrong preset is worse than no preset. |
+| 4 | Do the drawings get a **"1 — full-size geometry"** preset? | **Yes.** The service `/meta` `full_size` preset sets factor `1`, the evidence supports full-size ACS millimetre drawings, and the user must explicitly confirm it. |
 | 5 | Reuse **existing project attachments** as drawing sources in v1? | **No** — v1 uploads into the BOQ bucket only (§11.2, question 7). |
 
 ### 11.5 What I will not do without asking

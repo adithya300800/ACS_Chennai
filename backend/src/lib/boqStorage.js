@@ -114,6 +114,47 @@ async function readSnapshot(blobPath) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
+async function writeSnapshot({ blobPath, document }) {
+  await getClient().send(new PutObjectCommand({
+    Bucket: bucketName(),
+    Key: blobPath,
+    Body: Buffer.from(JSON.stringify(document)),
+    ContentType: 'application/json',
+  }));
+}
+
+async function writeExport({ blobPath, buffer }) {
+  await getClient().send(new PutObjectCommand({
+    Bucket: bucketName(),
+    Key: blobPath,
+    Body: Buffer.from(buffer),
+    ContentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  }));
+}
+
+async function readExport(blobPath) {
+  const response = await getClient().send(new GetObjectCommand({ Bucket: bucketName(), Key: blobPath }));
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of response.Body) {
+    const bytes = Buffer.from(chunk);
+    size += bytes.length;
+    if (size > 25 * 1024 * 1024) throw new Error('BOQ export exceeds the 25 MB read limit');
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function blobExists(blobPath) {
+  try {
+    await getClient().send(new HeadObjectCommand({ Bucket: bucketName(), Key: blobPath }));
+    return true;
+  } catch (error) {
+    if (error?.$metadata?.httpStatusCode === 404) return false;
+    throw error;
+  }
+}
+
 async function deleteBlob(blobPath) {
   await getClient().send(new DeleteObjectCommand({ Bucket: bucketName(), Key: blobPath }));
 }
@@ -133,6 +174,10 @@ module.exports = {
   verifyUpload,
   createReadUrl,
   readSnapshot,
+  writeSnapshot,
+  writeExport,
+  readExport,
+  blobExists,
   deleteBlob,
   resetClientForTests,
 };

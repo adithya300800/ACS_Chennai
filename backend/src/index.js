@@ -563,6 +563,11 @@ function createApp(deps = {}) {
   const internalUploadSweepRoutes = require('./routes/internal-upload-sweep');
   app.use('/api/internal/upload', internalUploadSweepRoutes);
 
+  // BOQ job reconciliation is stateless across deploys; a GitHub Actions cron
+  // drives this internal-token-protected batch endpoint.
+  const internalBoqReconcileRoutes = require('./routes/internal-boq-reconcile');
+  app.use('/api/internal/boq-reconcile', internalBoqReconcileRoutes);
+
   app.use((req, res) => {
     res.status(404).json({ error: 'Not found' });
   });

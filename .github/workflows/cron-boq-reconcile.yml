@@ -1,0 +1,35 @@
+name: BOQ job reconciliation
+
+# Reconcile portal jobs with the short-lived BOQ service so closed tabs,
+# restarts, and delayed exports do not strand durable portal jobs.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: 'boq-reconcile'
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Reconcile BOQ jobs
+        run: |
+          url="https://acs-chennai.onrender.com/api/internal/boq-reconcile"
+          echo "[boq-reconcile] POST $url"
+          response=$(curl -X POST "$url" \
+            -H "X-Internal-Token: ${{ secrets.INTERNAL_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -fsS -m 180 -w "\nHTTP_STATUS:%{http_code}")
+          echo "$response"
+          status=$(echo "$response" | tail -n 1 | sed 's/HTTP_STATUS://')
+          if [ "$status" != "200" ]; then
+            echo "[boq-reconcile] non-200 response (status=$status)"
+            exit 1
+          fi

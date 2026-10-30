@@ -139,4 +139,33 @@ describe('SOL S5 — network/timeout copy is user-facing, codes preserved', () =
     expect(out).toEqual({});
     expect(calls).toBe(2); // initial + ONE retry
   });
+
+  test('JSON methods accept a per-call timeout without changing the default', async () => {
+    jest.useFakeTimers();
+    try {
+      let signal;
+      global.fetch = jest.fn((_url, options) => new Promise((_resolve, reject) => {
+        signal = options.signal;
+        signal.addEventListener('abort', () => {
+          const error = new Error('Aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      }));
+
+      const call = api.get('/boq-generator/meta', 'token', { timeoutMs: 300 });
+      const settled = call.catch((error) => error);
+      await jest.advanceTimersByTimeAsync(299);
+      expect(signal.aborted).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(signal.aborted).toBe(true);
+      await expect(settled).resolves.toMatchObject({ code: 'TIMEOUT' });
+      global.fetch.mockClear();
+      global.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
+      await api.post('/boq-generator/jobs', {}, 'token', 'key', { timeoutMs: 240_000 });
+      expect(global.fetch.mock.calls[0][1].signal.aborted).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
