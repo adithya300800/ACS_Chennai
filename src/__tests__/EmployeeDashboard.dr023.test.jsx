@@ -142,7 +142,7 @@ describe('EmployeeDashboard today-report activity', () => {
 
     expect(api.getDprs).toHaveBeenCalledWith({ my: 'true', from: today, to: today, limit: '50' }, 'test-token');
     expect(api.getInspections).toHaveBeenCalledWith({ my: 'true', from: today, to: today, limit: '50' }, 'test-token');
-    expect(await screen.findByRole('link', { name: 'Create DPR' })).toHaveAttribute('href', '/portal/dpr/submit');
+    expect(await screen.findByRole('link', { name: 'Create DPR' })).toHaveAttribute('href', `/portal/dpr/submit?date=${today}`);
     expect(await screen.findByRole('link', { name: 'Create Inspection' })).toHaveAttribute('href', `/portal/inspection/submit?date=${today}`);
   });
 
@@ -156,7 +156,8 @@ describe('EmployeeDashboard today-report activity', () => {
 
     expect(await screen.findByText("Couldn't load")).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Create DPR' })).toHaveAttribute('href', '/portal/dpr/submit');
+    const today = require('../lib/businessDate.js').getBusinessToday();
+    expect(screen.getByRole('link', { name: 'Create DPR' })).toHaveAttribute('href', `/portal/dpr/submit?date=${today}`);
   });
 });
 

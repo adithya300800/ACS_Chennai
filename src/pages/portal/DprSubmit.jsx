@@ -10,6 +10,7 @@ import FormProgress from '../../components/FormProgress.jsx';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import DrawingPicker from '../../components/DrawingPicker.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import { getBusinessToday } from '../../lib/businessDate.js';
 import { formatShortDate } from '../../lib/format.js';
 import { parseManpowerSummary, serializeManpowerRows } from '../../lib/manpowerSerialization.js';
 import {
@@ -80,9 +81,7 @@ const validateReportDate = (value) => {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return 'Report date must be in YYYY-MM-DD format. Please refresh the page.';
   }
-  const today = new Date();
-  today.setHours(23, 59, 59, 999);
-  if (new Date(value) > today) return 'Report date cannot be in the future.';
+  if (value > getBusinessToday()) return 'Report date cannot be in the future.';
   return null;
 };
 
@@ -214,6 +213,17 @@ export default function DprSubmit() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const draftId = searchParams.get('draftId') || null;
+  const requestedReportDate = searchParams.get('date');
+  const businessToday = getBusinessToday();
+  const parsedRequestedDate = new Date(`${requestedReportDate}T00:00:00.000Z`);
+  const useRequestedReportDate = Boolean(
+    requestedReportDate
+    && /^\d{4}-\d{2}-\d{2}$/.test(requestedReportDate)
+    && !Number.isNaN(parsedRequestedDate.getTime())
+    && parsedRequestedDate.toISOString().slice(0, 10) === requestedReportDate
+    && requestedReportDate <= businessToday
+  );
+  const reportDateDefault = useRequestedReportDate ? requestedReportDate : businessToday;
   // SOL-P1 mobile: order matters — draftId must be declared before
   // useDocumentTitle's first call so the minifier doesn't trip the TDZ
   // ("Cannot access 'g' before initialization") when the document-title
@@ -227,7 +237,7 @@ export default function DprSubmit() {
   // ownerScopedDraft.js for the migration contract.
   const currentEmployeeId = employee?.id ?? null;
   const initialDraft = loadDraftForEmployee(currentEmployeeId);
-  const [form, setForm] = useState(initialDraft?.form || {
+  const initialForm = initialDraft?.form || {
     // [N1 Phase B] projectId drives the new project picker; projectName
     // is the denormalized canonical name we keep sending on the wire
     // for legacy compatibility (the backend still requires it alongside
@@ -237,7 +247,7 @@ export default function DprSubmit() {
     projectId: '',
     projectName: '',
     location: '',
-    reportDate: getLocalDate(),
+    reportDate: businessToday,
     // BUG-2 (round-37): was 'Sunny' — silently biased the dataset so the
     // vast majority of historical DPRs report Sunny regardless of site.
     // Engineers now have to pick weather (or confirm Sunny) themselves.
@@ -254,7 +264,12 @@ export default function DprSubmit() {
     // survives even if the drawing is later superseded or renamed.
     drawingId: '',
     drawingRev: '',
-  });
+  };
+  const [form, setForm] = useState(
+    !draftId && !initialDraft && useRequestedReportDate
+      ? { ...initialForm, reportDate: reportDateDefault }
+      : initialForm
+  );
   // [N1 Phase B] project picker data — same payload the admin
   // ProjectsAdmin page uses (registered + auto-discovered). We merge
   // them into one list keyed by name (the dropdown's value is the
@@ -612,7 +627,7 @@ export default function DprSubmit() {
         projectId: '',
         projectName: '',
         location: '',
-        reportDate: getLocalDate(),
+        reportDate: reportDateDefault,
         // BUG-2 (round-37): empty default; see comment at line 201.
         weather: '',
         temperature: '',
@@ -1475,7 +1490,7 @@ export default function DprSubmit() {
       projectId: '',
       projectName: '',
       location: '',
-      reportDate: getLocalDate(),
+      reportDate: reportDateDefault,
       // BUG-2 (round-37): empty default; see comment at line 201.
       weather: '',
       temperature: '',
@@ -1847,7 +1862,7 @@ export default function DprSubmit() {
                 className="form-input"
                 value={form.reportDate}
                 onChange={handleChange}
-                max={getLocalDate()}
+                max={getBusinessToday()}
               />
             </div>
           </div>

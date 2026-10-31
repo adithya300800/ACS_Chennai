@@ -1,7 +1,7 @@
 function recordActivity(records, kind, today) {
   const listPath = kind === 'DPR' ? '/portal/dpr/my' : '/portal/inspection/my';
   const submitPath = kind === 'DPR'
-    ? '/portal/dpr/submit'
+    ? `/portal/dpr/submit?date=${encodeURIComponent(today)}`
     : `/portal/inspection/submit?date=${encodeURIComponent(today)}`;
   if (!Array.isArray(records)) return { kind, state: "Couldn't load", action: 'Retry', failed: true };
   const rows = records;

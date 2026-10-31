@@ -5,7 +5,7 @@ const TODAY = '2026-10-31';
 describe('deriveDailyActivity', () => {
   test('offers creation shortcuts when there are no records today', () => {
     expect(deriveDailyActivity([], [], TODAY)).toEqual([
-      { kind: 'DPR', state: 'No record yet', action: 'Create DPR', to: '/portal/dpr/submit' },
+      { kind: 'DPR', state: 'No record yet', action: 'Create DPR', to: '/portal/dpr/submit?date=2026-10-31' },
       { kind: 'Inspection', state: 'No record yet', action: 'Create Inspection', to: '/portal/inspection/submit?date=2026-10-31' },
     ]);
   });
