@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 const mockApi = {
   getProjects: jest.fn(async () => ({ projects: [], discovered: [] })),
-    resolveProject: jest.fn(async (name) => ({ id: 'project-new', name, isActive: true, allocationPending: true, linkedTotal: 0 })),
+    resolveProject: jest.fn(async (name) => ({ id: 'project-new', name, isActive: true, allocationPending: true, uploadsAllowed: true, linkedTotal: 0 })),
   boqGenerator: {
     access: jest.fn(async () => ({ isPilot: true, pilotEnabled: false })),
     meta: jest.fn(async () => ({
@@ -54,6 +54,9 @@ describe('BOQ Generator user workflow', () => {
   });
 
   test('lets the creator upload drawings while the new project awaits admin allocation', async () => {
+    mockApi.resolveProject.mockResolvedValueOnce({
+      id: 'project-new', name: 'North Tower', isActive: true, allocationPending: true, uploadsAllowed: true,
+    });
     render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
 
     await screen.findByText('No assigned projects yet. Add a project to get started.');
@@ -80,7 +83,7 @@ describe('BOQ Generator user workflow', () => {
 
   test('restores the upload-only flow when the creator resolves an existing unassigned project', async () => {
     mockApi.resolveProject.mockResolvedValueOnce({
-      id: 'project-existing', name: 'North Tower', isActive: true, allocationPending: true,
+      id: 'project-existing', name: 'North Tower', isActive: true, allocationPending: true, uploadsAllowed: true,
     });
     render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
 
@@ -126,7 +129,7 @@ describe('BOQ Generator user workflow', () => {
 
   test('restores confirmed pending uploads after reload and reuses them after assignment', async () => {
     mockApi.resolveProject.mockResolvedValue({
-      id: 'project-new', name: 'North Tower', isActive: true, allocationPending: true,
+      id: 'project-new', name: 'North Tower', isActive: true, allocationPending: true, uploadsAllowed: true,
     });
     const firstPage = render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
     await screen.findByText('No assigned projects yet. Add a project to get started.');

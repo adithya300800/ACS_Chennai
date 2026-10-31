@@ -33,7 +33,7 @@ function cleanError(err) {
 
 export default function BoqGenerator() {
   useDocumentTitle('BOQ Generator');
-  const { accessToken, employee } = useAuth();
+  const { accessToken, employee, isAdmin } = useAuth();
   const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const [projects, setProjects] = useState([]);
@@ -331,12 +331,14 @@ export default function BoqGenerator() {
     setJobs([]);
     if (project.allocationPending && !isAdmin) {
       localProjectsRef.current.set(project.id, { ...project, allocationPending: true });
+      const uploadsAllowed = project.uploadsAllowed !== false;
       if (savedDraft?.projectId && savedDraft.projectId !== project.id) {
         clearScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
         setFiles([]);
         setConfirmedUploads([]);
       }
       setPendingUploadProjectId(project.id);
+      setProjects((current) => current.map((candidate) => candidate.id === project.id ? { ...project, allocationPending: true, uploadsAllowed } : candidate));
       toast.push(`Project “${project.name}” is pending administrator allocation.`, 'info');
       return;
     }
@@ -389,7 +391,7 @@ export default function BoqGenerator() {
     setFiles((current) => [...current.filter((file) => !newFiles.some((next) => next.id === file.id)), ...newFiles]);
     if (replacedFiles.length) {
       setConfirmedUploads((current) => current.filter((upload) => !replacedFiles.some((file) => file.id === upload.fileId)));
-      if (selectedProject?.allocationPending && !isAdmin) {
+      if (selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed !== false) {
         const keptUploads = confirmedUploads.filter((upload) => !replacedFiles.some((file) => file.id === upload.fileId));
         if (keptUploads.length) saveScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id, {
           projectId,
@@ -435,7 +437,7 @@ export default function BoqGenerator() {
       uploadsByFileId.set(item.id, signed.uploadId);
       const nextUploads = [...confirmedFileIds].map((fileId) => ({ fileId, uploadId: uploadsByFileId.get(fileId) }));
       setConfirmedUploads(nextUploads);
-      if (selectedProject?.allocationPending) {
+      if (selectedProject?.allocationPending && selectedProject.uploadsAllowed !== false) {
         setPendingUploadProjectId(projectId);
         saveScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id, {
           projectId,
@@ -468,10 +470,15 @@ export default function BoqGenerator() {
     setError('');
     setProgress(0);
     try {
-      if (selectedProject?.allocationPending) {
+      if (selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed !== false) {
         await prepareUploads();
         setUploading(false);
         setNotice(`Drawings for “${selectedProject.name}” are uploaded privately. BOQ generation will be available after an administrator assigns you. If allocation takes longer than an hour, you may need to upload the drawings again.`);
+        return;
+      }
+      if (selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed === false) {
+        setUploading(false);
+        setNotice('This project is assigned to another employee. You cannot upload or generate a BOQ until you are assigned.');
         return;
       }
       if (!submissionRef.current) {
@@ -646,7 +653,7 @@ export default function BoqGenerator() {
           <button type="submit" className="btn btn-primary" disabled={creatingProject}>{creatingProject ? 'Creating…' : 'Create project'}</button>
         </form>}
         {projects.length === 0 && !showProjectForm && <p style={{ color: 'var(--steel)', marginBottom: 0 }}>No assigned projects yet. Add a project to get started.</p>}
-        {selectedProject?.allocationPending && <div role="status" style={{ color: '#78350F', background: '#FFFBEB', border: '1px solid #FCD34D', borderRadius: 10, padding: '0.75rem 1rem', marginTop: '0.75rem' }}><p style={{ margin: 0 }}><strong>Pending administrator allocation.</strong> You can upload drawings now; BOQ generation will be available after an administrator assigns you. Unprocessed uploads are cleaned up after an hour, so you may need to upload them again if allocation takes longer.</p><button type="button" className="btn btn-secondary" style={{ marginTop: '0.5rem' }} onClick={refreshProjects}>Check allocation</button></div>}
+        {selectedProject?.allocationPending && !isAdmin && <div role="status" style={{ color: '#78350F', background: '#FFFBEB', border: '1px solid #FCD34D', borderRadius: 10, padding: '0.75rem 1rem', marginTop: '0.75rem' }}><p style={{ margin: 0 }}><strong>Pending administrator allocation.</strong> {selectedProject.uploadsAllowed === false ? 'The project is assigned to another employee. You cannot upload or generate a BOQ until you are assigned.' : 'You can upload drawings now; BOQ generation will be available after you are assigned. Unprocessed uploads are cleaned up after an hour, so you may need to upload them again if allocation takes longer.'}</p><button type="button" className="btn btn-secondary" style={{ marginTop: '0.5rem' }} onClick={refreshProjects}>Check allocation</button></div>}
         {selectedProject && !selectedProject.allocationPending && <p style={{ color: 'var(--steel)', marginBottom: 0, marginTop: '0.5rem' }}>Your project and uploads are private to your portal account.</p>}
       </section>
 
@@ -680,7 +687,7 @@ export default function BoqGenerator() {
               setFiles((current) => current.filter((file) => file.id !== item.id));
               const remainingUploads = confirmedUploads.filter((upload) => upload.fileId !== item.id);
               setConfirmedUploads(remainingUploads);
-              if (selectedProject?.allocationPending) {
+              if (selectedProject?.allocationPending && selectedProject.uploadsAllowed !== false) {
                 if (remainingUploads.length) {
                   const currentDraft = loadScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
                   const draftFiles = files.filter((file) => file.id !== item.id).map((file) => ({
@@ -715,8 +722,8 @@ export default function BoqGenerator() {
             </select> : <span style={{ display: 'block', padding: '0.6rem 0' }}>{activeRateSource}{rateSources[0]?.isSample || isSample ? ' — sample rates' : ''}</span>}
           </label>
         </details>}
-        <button type="button" className="btn btn-primary" style={{ marginTop: '1rem' }} disabled={!projectId || !files.length || submitting || (!selectedProject?.allocationPending && files.some((file) => (file.file?.name || file.filename).toLowerCase().endsWith('.dxf') && (!(Number(scaleByFileId[file.id]) > 0) || !confirmedScaleFileIds.includes(file.id))))} onClick={generate}>
-          {uploading ? 'Uploading drawings…' : submitting ? 'Starting take-off…' : selectedProject?.allocationPending ? 'Upload drawings' : 'Generate BOQ'}
+        <button type="button" className="btn btn-primary" style={{ marginTop: '1rem' }} disabled={!projectId || !files.length || submitting || (selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed === false) || (!(selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed !== false) && files.some((file) => (file.file?.name || file.filename).toLowerCase().endsWith('.dxf') && (!(Number(scaleByFileId[file.id]) > 0) || !confirmedScaleFileIds.includes(file.id))))} onClick={generate}>
+          {uploading ? 'Uploading drawings…' : submitting ? 'Starting take-off…' : selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed !== false ? 'Upload drawings' : 'Generate BOQ'}
         </button>
       </section>
 
