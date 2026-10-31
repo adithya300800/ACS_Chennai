@@ -13,6 +13,11 @@ const MAX_FILES = 20;
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const PENDING_UPLOAD_DRAFT = 'boq_pending_uploads_v1';
 const RATE_NOTICE = 'Sample rates are placeholders. This take-off is not an estimate or project cost. Check every quantity before use.';
+const PORTAL_SUPPORTED_EXTENSIONS = ['ifc', 'dxf', 'dwg'];
+
+function needsConfirmedScale(filename) {
+  return /\.(dxf|dwg)$/i.test(filename || '');
+}
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes)) return '';
@@ -82,7 +87,8 @@ export default function BoqGenerator() {
     : completedJob
       ? job.dataStatus !== 'REAL' || job.productionMode !== true
       : !meta || meta.effectiveStatus !== 'REAL' || meta.productionMode !== true;
-  const supportedTypes = (meta?.supportedInputTypes || ['ifc', 'dxf']).filter((type) => ['ifc', 'dxf'].includes(type));
+  const supportedTypes = (meta?.supportedInputTypes || ['ifc', 'dxf'])
+    .filter((type) => PORTAL_SUPPORTED_EXTENSIONS.includes(type));
   const acceptedExtensions = supportedTypes.length ? supportedTypes : ['ifc', 'dxf'];
 
   useEffect(() => {
@@ -400,7 +406,7 @@ export default function BoqGenerator() {
       saveScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id, { ...savedDraft, projectPending: false });
     }
     if (project.linkedTotal > 0) setNotice(`${project.linkedTotal} existing record${project.linkedTotal === 1 ? '' : 's'} linked to this project.`);
-    toast.push(`Project “${project.name}” is ready. Add your IFC or DXF drawings below.`, 'success');
+    toast.push(`Project “${project.name}” is ready. Add your ${acceptedExtensions.map((type) => type.toUpperCase()).join(', ')} drawings below.`, 'success');
   };
 
   const createProject = async (event) => {
@@ -543,7 +549,7 @@ export default function BoqGenerator() {
             : `boq-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           batches: Object.values(uploadsByScale.reduce((batches, upload) => {
             const filename = upload.file.file?.name || upload.file.filename;
-            const key = filename.toLowerCase().endsWith('.dxf') ? String(scaleByFileId[upload.file.id] || 1) : 'ifc';
+            const key = needsConfirmedScale(filename) ? String(scaleByFileId[upload.file.id] || 1) : 'ifc';
             batches[key] ||= { projectId, uploads: [], dxfScale: key === 'ifc' ? null : Number(key), rateSource: activeRateSource, wastagePct: Number(wastagePct) || 0 };
             batches[key].uploads.push(upload.uploadId);
             return batches;
@@ -676,7 +682,7 @@ export default function BoqGenerator() {
         <Breadcrumb items={[{ label: 'Tools' }, { label: 'BOQ Generator' }]} />
         <h1 id="boq-generator-title" className="dpr-page-title">BOQ Generator</h1>
         <p style={{ color: 'var(--steel)', maxWidth: 760, marginTop: 0 }}>
-          Upload an IFC or DXF model to create a quantity take-off. Review the measured lines before saving a workbook.
+          Upload {acceptedExtensions.map((type) => type.toUpperCase()).join(', ')} models to create a quantity take-off. Review the measured lines before saving a workbook.
         </p>
       </div>
 
@@ -730,10 +736,10 @@ export default function BoqGenerator() {
         {files.length > 0 && <ul aria-label="Selected drawings" style={{ listStyle: 'none', padding: 0, margin: '0.75rem 0' }}>
           {files.map((item) => <li key={item.id} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', padding: '0.55rem 0', borderBottom: '1px solid var(--border)' }}>
             <span style={{ flex: 1 }}>{item.file?.name || item.filename} <span style={{ color: 'var(--steel)' }}>({formatBytes(item.file?.size ?? item.sizeBytes)})</span></span>
-            {(item.file?.name || item.filename).toLowerCase().endsWith('.dxf') && <label>Scale factor
+            {needsConfirmedScale(item.file?.name || item.filename) && <label>Scale factor
               <input className="form-input" aria-label={`Scale factor for ${item.file?.name || item.filename}`} type="number" min="0.000001" step="any" value={scaleByFileId[item.id] ?? '1'} onChange={(event) => setFileScale(item.id, event.target.value)} />
             </label>}
-            {(item.file?.name || item.filename).toLowerCase().endsWith('.dxf') && <label><input type="checkbox" aria-label={`Confirm scale for ${item.file?.name || item.filename}`} checked={confirmedScaleFileIds.includes(item.id)} onChange={(event) => setConfirmedScaleFileIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /> Confirm scale</label>}
+            {needsConfirmedScale(item.file?.name || item.filename) && <label><input type="checkbox" aria-label={`Confirm scale for ${item.file?.name || item.filename}`} checked={confirmedScaleFileIds.includes(item.id)} onChange={(event) => setConfirmedScaleFileIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /> Confirm scale</label>}
             {uploading && <span aria-label="Upload progress">{progress}%</span>}
             <button type="button" className="btn btn-secondary" onClick={() => {
               submissionRef.current = null;
@@ -775,7 +781,7 @@ export default function BoqGenerator() {
             </select> : <span style={{ display: 'block', padding: '0.6rem 0' }}>{activeRateSource}{rateSources[0]?.isSample || isSample ? ' — sample rates' : ''}</span>}
           </label>
         </details>}
-        <button type="button" className="btn btn-primary" style={{ marginTop: '1rem' }} disabled={!projectId || !files.length || submitting || (selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed === false) || (!(selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed !== false) && files.some((file) => (file.file?.name || file.filename).toLowerCase().endsWith('.dxf') && (!(Number(scaleByFileId[file.id]) > 0) || !confirmedScaleFileIds.includes(file.id))))} onClick={generate}>
+        <button type="button" className="btn btn-primary" style={{ marginTop: '1rem' }} disabled={!projectId || !files.length || submitting || (selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed === false) || (!(selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed !== false) && files.some((file) => needsConfirmedScale(file.file?.name || file.filename) && (!(Number(scaleByFileId[file.id]) > 0) || !confirmedScaleFileIds.includes(file.id))))} onClick={generate}>
           {uploading ? 'Uploading drawings…' : submitting ? 'Starting take-off…' : selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed !== false ? 'Upload drawings' : 'Generate BOQ'}
         </button>
       </section>

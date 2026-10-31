@@ -172,6 +172,15 @@ describe('BOQ service client', () => {
       details: ['floor.dxf'],
     });
     expect(mapServiceJobError({
+      code: 'DWG_READ_FAILED',
+      message: 'DWG conversion failed',
+      details: ['plan.dwg: DWG conversion failed'],
+    })).toMatchObject({
+      status: 409,
+      body: { error: 'BOQ_DWG_READ_FAILED', code: 'BOQ_DWG_READ_FAILED' },
+      details: ['plan.dwg: DWG conversion failed'],
+    });
+    expect(mapServiceJobError({
       code: 'SOURCE_UNCALIBRATED',
       message: 'Confirm scale',
       details: ['one.dxf', { internal: true }, ...Array.from({ length: 12 }, (_, index) => `detail-${index}`)],

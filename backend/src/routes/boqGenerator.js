@@ -21,7 +21,11 @@ const MAX_FILENAME_LENGTH = 200;
 const MAX_EMPLOYEE_IN_FLIGHT_JOBS = 2;
 const IN_FLIGHT_STATUSES = ['SUBMITTED', 'RUNNING', 'COMPLETED_PENDING_EXPORT'];
 const LISTABLE_STATUSES = [...IN_FLIGHT_STATUSES, 'DRAFT', 'COMPLETED', 'FAILED', 'LOST'];
-const ALLOWED_EXTENSIONS = new Set(['dxf', 'ifc']);
+const ALLOWED_EXTENSIONS = new Set(['dxf', 'ifc', 'dwg']);
+const DWG_SIGNATURES = new Set([
+  'AC1002', 'AC1003', 'AC1004', 'AC1006', 'AC1009', 'AC1012', 'AC1014',
+  'AC1015', 'AC1018', 'AC1021', 'AC1024', 'AC1027', 'AC1032',
+]);
 const META_CACHE_TTL_MS = 5 * 60 * 1000;
 let metaCache = null;
 
@@ -51,6 +55,7 @@ function sniffFile(prefix, extension) {
   const text = bytes.toString('utf8');
   let detected;
   if (text.startsWith('AutoCAD Binary DXF')) detected = 'dxf';
+  else if (DWG_SIGNATURES.has(bytes.subarray(0, 6).toString('ascii'))) detected = 'dwg';
   else if (text.startsWith('ISO-10303-21')) detected = 'ifc';
   else if (/^\s*0[\r\n]+\s*SECTION\b/i.test(text)) detected = 'dxf';
   else if (text.startsWith('%PDF-')) return { error: 'PDF_NOT_SUPPORTED' };
@@ -573,7 +578,7 @@ router.post('/uploads/presign', boqUploadLimiter, asyncHandler(async (req, res) 
   const { projectId, filename, sizeBytes } = req.body || {};
   const safeName = sanitizeFilename(filename);
   if (typeof projectId !== 'string' || !projectId || !safeName) {
-    return res.status(400).json(errorBody('VALIDATION_ERROR', 'projectId and a .dxf or .ifc filename are required'));
+    return res.status(400).json(errorBody('VALIDATION_ERROR', 'projectId and a .dxf, .ifc or .dwg filename are required'));
   }
   if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) {
     return res.status(400).json(errorBody('INVALID_SIZE', 'sizeBytes must be a positive integer'));
@@ -649,8 +654,8 @@ router.post('/uploads/confirm', boqUploadLimiter, asyncHandler(async (req, res) 
   const detected = sniffFile(verified.prefix, intent.originalFilename.split('.').pop().toLowerCase());
   if (detected.error) {
     const message = detected.error === 'PDF_NOT_SUPPORTED'
-      ? 'PDF drawings are not supported; upload DXF or IFC'
-      : 'The uploaded bytes do not match a supported DXF or IFC file';
+      ? 'PDF drawings are not supported; upload DXF, IFC or DWG'
+      : 'The uploaded bytes do not match a supported DXF, IFC or DWG file';
     return res.status(400).json(errorBody(detected.error, message));
   }
 
