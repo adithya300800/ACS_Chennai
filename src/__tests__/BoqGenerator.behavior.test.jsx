@@ -26,9 +26,10 @@ const mockApi = {
 };
 const mockToastPush = jest.fn();
 const mockUploadBlob = jest.fn(async () => {});
+let mockEmployee = { id: 'employee-test', isAdmin: false };
 
 jest.mock('../lib/api.js', () => ({ api: mockApi }));
-jest.mock('../contexts/AuthContext.jsx', () => ({ useAuth: () => ({ accessToken: 'test-token', employee: { id: 'employee-test' } }) }));
+jest.mock('../contexts/AuthContext.jsx', () => ({ useAuth: () => ({ accessToken: 'test-token', employee: mockEmployee, isAdmin: mockEmployee.isAdmin }) }));
 jest.mock('../contexts/ToastContext.jsx', () => ({ useToast: () => ({ push: mockToastPush }) }));
 jest.mock('../lib/blobUpload.js', () => ({ uploadBlob: (...args) => mockUploadBlob(...args) }));
 
@@ -38,6 +39,7 @@ describe('BOQ Generator user workflow', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     localStorage.clear();
+    mockEmployee = { id: 'employee-test', isAdmin: false };
     mockApi.getProjects.mockResolvedValue({ projects: [], discovered: [] });
     mockApi.boqGenerator.meta.mockResolvedValue({
       effectiveStatus: 'SAMPLE', productionMode: false,
@@ -104,6 +106,19 @@ describe('BOQ Generator user workflow', () => {
     await screen.findByText('No assigned projects yet. Add a project to get started.');
     fireEvent.click(screen.getByRole('button', { name: '+ Add project' }));
     fireEvent.change(screen.getByLabelText('New project name'), { target: { value: 'North Tower' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
+
+    expect(await screen.findByRole('button', { name: 'Generate BOQ' })).toBeInTheDocument();
+  });
+
+  test('lets admins generate immediately when project resolution has no pending allocation flag', async () => {
+    mockEmployee = { id: 'admin-test', isAdmin: true };
+    mockApi.resolveProject.mockResolvedValueOnce({ id: 'project-admin-new', name: 'Admin Project', isActive: true });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+
+    await screen.findByText('No assigned projects yet. Add a project to get started.');
+    fireEvent.click(screen.getByRole('button', { name: '+ Add project' }));
+    fireEvent.change(screen.getByLabelText('New project name'), { target: { value: 'Admin Project' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
 
     expect(await screen.findByRole('button', { name: 'Generate BOQ' })).toBeInTheDocument();

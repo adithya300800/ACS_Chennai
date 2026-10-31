@@ -69,12 +69,14 @@ async function activeProjectAccess(prisma, projectId, employeeId, allowCreatorUp
   if (!project?.isActive || !employee) return false;
   if (employee.isAdmin) return true;
   if (allowCreatorUpload && project.createdById === employeeId) {
-    const assignments = await prisma.projectAssignment.findMany({
-      where: { projectId },
-      select: { id: true },
-      take: 1,
-    });
-    if (assignments.length === 0) return true;
+    const [assignments, creatorAssignment] = await Promise.all([
+      prisma.projectAssignment.findMany({ where: { projectId }, select: { employeeId: true } }),
+      prisma.projectAssignment.findUnique({
+        where: { projectId_employeeId: { projectId, employeeId } },
+        select: { id: true },
+      }),
+    ]);
+    return assignments.length === 0 || Boolean(creatorAssignment);
   }
   const assignment = await prisma.projectAssignment.findUnique({
     where: { projectId_employeeId: { projectId, employeeId } },

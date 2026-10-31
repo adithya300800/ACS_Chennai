@@ -329,7 +329,7 @@ export default function BoqGenerator() {
     setError('');
     setSearchParams({ projectId: project.id });
     setJobs([]);
-    if (project.allocationPending) {
+    if (project.allocationPending && !isAdmin) {
       localProjectsRef.current.set(project.id, { ...project, allocationPending: true });
       if (savedDraft?.projectId && savedDraft.projectId !== project.id) {
         clearScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
@@ -389,7 +389,7 @@ export default function BoqGenerator() {
     setFiles((current) => [...current.filter((file) => !newFiles.some((next) => next.id === file.id)), ...newFiles]);
     if (replacedFiles.length) {
       setConfirmedUploads((current) => current.filter((upload) => !replacedFiles.some((file) => file.id === upload.fileId)));
-      if (selectedProject?.allocationPending) {
+      if (selectedProject?.allocationPending && !isAdmin) {
         const keptUploads = confirmedUploads.filter((upload) => !replacedFiles.some((file) => file.id === upload.fileId));
         if (keptUploads.length) saveScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id, {
           projectId,

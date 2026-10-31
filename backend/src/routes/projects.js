@@ -1008,8 +1008,13 @@ router.post('/resolve', asyncHandler(async (req, res) => {
           message: 'Project with this name is archived; ask an admin to re-activate or rename',
         });
       }
-      const allocationPending = !req.isAdmin && existing.createdById === req.employeeId &&
-        await prisma.projectAssignment.count({ where: { projectId: existing.id } }) === 0;
+      const creatorAssignment = !req.isAdmin && existing.createdById === req.employeeId
+        ? await prisma.projectAssignment.findUnique({
+          where: { projectId_employeeId: { projectId: existing.id, employeeId: req.employeeId } },
+          select: { id: true },
+        })
+        : null;
+      const allocationPending = !req.isAdmin && existing.createdById === req.employeeId && !creatorAssignment;
       return res.json({
         ...serializeProject(existing),
         isRegistered: true,
@@ -1081,22 +1086,14 @@ router.post('/resolve', asyncHandler(async (req, res) => {
     // render a "X orphans re-linked" banner. Same shape as the dryRun
     // preview minus `dryRun: true` — keeps the response surface
     // symmetric so the picker can show the same UI in preview and
-    // commit states.
-    //
-    // [DR-016] `allocationPending: true` on the create-branch ONLY. The
-    // endpoint does NOT auto-assign the creator to the new project —
-    // roster membership remains an admin-only gesture per the chosen
-    // policy ("creation requests administrator allocation"). Because the
-    // My Projects list scopes to `?scope=assigned`, which requires an
-    // active ProjectAssignment row (S7/ISRO-LEAK fix), the new project
-    // would otherwise silently vanish from the creator's My Projects
-    // the flag tells the frontend to surface a clear
+    // [DR-016] Non-admin creation requests administrator allocation; admins
+    // create usable projects without waiting for a roster assignment.
     // "pending administrator allocation" message. Existing projects
     // return the same flag only to their creator while no assignments exist.
     return res.status(201).json({
       ...serializeProject(result.created),
       isRegistered: true,
-      allocationPending: true,
+      ...(!req.isAdmin ? { allocationPending: true } : {}),
       linkedCounts: result.counts,
       linkedTotal: result.counts.dpr + result.counts.inspection + result.counts.boq,
     });
@@ -1109,8 +1106,13 @@ router.post('/resolve', asyncHandler(async (req, res) => {
         where: { name: { equals: rawName, mode: 'insensitive' } },
       });
       if (race) {
-        const allocationPending = !req.isAdmin && race.createdById === req.employeeId &&
-          await prisma.projectAssignment.count({ where: { projectId: race.id } }) === 0;
+        const creatorAssignment = !req.isAdmin && race.createdById === req.employeeId
+          ? await prisma.projectAssignment.findUnique({
+            where: { projectId_employeeId: { projectId: race.id, employeeId: req.employeeId } },
+            select: { id: true },
+          })
+          : null;
+        const allocationPending = !req.isAdmin && race.createdById === req.employeeId && !creatorAssignment;
         return res.json({
           ...serializeProject(race),
           isRegistered: true,

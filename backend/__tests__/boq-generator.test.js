@@ -129,7 +129,7 @@ function buildPrisma() {
 
   const api = {
     project: {
-      findUnique: jest.fn(async ({ where }) => where.id === PROJECT_ID ? { id: PROJECT_ID, name: 'Test Project', isActive: true } : null),
+      findUnique: jest.fn(async ({ where }) => where.id === PROJECT_ID ? { id: PROJECT_ID, name: 'Test Project', isActive: true, createdById: EMPLOYEE_ID } : null),
     },
     projectAssignment: {
       findUnique: jest.fn(async ({ where }) => (
@@ -437,7 +437,7 @@ describe('BOQ Generator private upload lifecycle', () => {
   it('does not grant the project creator upload access after an administrator allocates it', async () => {
     const prisma = buildPrisma();
     prisma.project.findUnique.mockResolvedValue({ id: PROJECT_ID, name: 'Test Project', isActive: true, createdById: EMPLOYEE_ID });
-    prisma.projectAssignment.findMany.mockResolvedValue([{ id: 'assignment-for-another-employee' }]);
+    prisma.projectAssignment.findMany.mockResolvedValue([{ employeeId: OTHER_EMPLOYEE_ID }]);
     prisma.projectAssignment.findUnique.mockResolvedValue(null);
     const app = buildApp(prisma);
     const upload = await request(app)
