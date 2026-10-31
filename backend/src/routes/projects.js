@@ -1015,10 +1015,14 @@ router.post('/resolve', asyncHandler(async (req, res) => {
         })
         : null;
       const allocationPending = !req.isAdmin && existing.createdById === req.employeeId && !creatorAssignment;
+      const existingAssignments = allocationPending
+        ? await prisma.projectAssignment.findMany({ where: { projectId: existing.id } })
+        : [];
+      const uploadsAllowed = allocationPending && existingAssignments.length === 0;
       return res.json({
         ...serializeProject(existing),
         isRegistered: true,
-        ...(allocationPending ? { allocationPending: true } : {}),
+        ...(allocationPending ? { allocationPending: true, uploadsAllowed } : {}),
       });
     }
 
@@ -1113,10 +1117,14 @@ router.post('/resolve', asyncHandler(async (req, res) => {
           })
           : null;
         const allocationPending = !req.isAdmin && race.createdById === req.employeeId && !creatorAssignment;
+        const raceAssignments = allocationPending
+          ? await prisma.projectAssignment.findMany({ where: { projectId: race.id } })
+          : [];
+        const uploadsAllowed = allocationPending && raceAssignments.length === 0;
         return res.json({
           ...serializeProject(race),
           isRegistered: true,
-          ...(allocationPending ? { allocationPending: true } : {}),
+          ...(allocationPending ? { allocationPending: true, uploadsAllowed } : {}),
         });
       }
     }

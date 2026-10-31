@@ -130,7 +130,6 @@ export default function BoqGenerator() {
   useEffect(() => {
     if (pendingUploadProjectId && projectId !== pendingUploadProjectId) {
       const draft = loadScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
-      if (draft?.projectId === pendingUploadProjectId) clearScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
       if (draft?.projectId !== projectId && draft?.projectPending !== true) setPendingUploadProjectId('');
     }
   }, [employee?.id, pendingUploadProjectId, projectId]);
@@ -282,7 +281,6 @@ export default function BoqGenerator() {
     openedJobIdRef.current = '';
     if (id !== pendingUploadProjectId) {
       const draft = loadScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
-      if (draft?.projectId === pendingUploadProjectId) clearScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
       if (draft?.projectId !== id && draft?.projectPending !== true) setPendingUploadProjectId('');
     }
     setProjectId(id);
@@ -297,6 +295,16 @@ export default function BoqGenerator() {
     setAcknowledgedRevision(null);
     setError('');
     setNotice('');
+    const draft = id && loadScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+    if (draft?.projectId === id && Array.isArray(draft.files)) {
+      const restoredFiles = draft.files.filter((file) => file && typeof file.uploadId === 'string').map((file) => ({ ...file, progress: 0 }));
+      setFiles(restoredFiles);
+      setConfirmedUploads(restoredFiles.map(({ id: fileId, uploadId }) => ({ fileId, uploadId })));
+      setScaleByFileId(draft.scaleByFileId || {});
+      setConfirmedScaleFileIds(draft.confirmedScaleFileIds || []);
+      if (draft.projectPending) setPendingUploadProjectId(id);
+      setNotice('Restored privately uploaded drawings for this project.');
+    }
     if (id) setSearchParams({ projectId: id });
     else setSearchParams({});
   };
@@ -391,7 +399,7 @@ export default function BoqGenerator() {
     setFiles((current) => [...current.filter((file) => !newFiles.some((next) => next.id === file.id)), ...newFiles]);
     if (replacedFiles.length) {
       setConfirmedUploads((current) => current.filter((upload) => !replacedFiles.some((file) => file.id === upload.fileId)));
-      if (selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed !== false) {
+              if (selectedProject?.allocationPending && selectedProject.uploadsAllowed !== false) {
         const keptUploads = confirmedUploads.filter((upload) => !replacedFiles.some((file) => file.id === upload.fileId));
         if (keptUploads.length) saveScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id, {
           projectId,
@@ -467,16 +475,17 @@ export default function BoqGenerator() {
     }
     setSubmitting(true);
     setUploading(true);
-    setError('');
     setProgress(0);
     try {
-      if (selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed !== false) {
+      if (selectedProject?.allocationPending && selectedProject.uploadsAllowed !== false) {
         await prepareUploads();
         setUploading(false);
-        setNotice(`Drawings for “${selectedProject.name}” are uploaded privately. BOQ generation will be available after an administrator assigns you. If allocation takes longer than an hour, you may need to upload the drawings again.`);
+        setNotice(selectedProject.uploadsAllowed
+          ? `Drawings for “${selectedProject.name}” are uploaded privately. BOQ generation will be available after you are assigned. If allocation takes longer than an hour, you may need to upload the drawings again.`
+          : `Drawings for “${selectedProject.name}” are saved. You can use them after you are assigned.`);
         return;
       }
-      if (selectedProject?.allocationPending && !isAdmin && selectedProject.uploadsAllowed === false) {
+      if (selectedProject?.allocationPending && !selectedProject.uploadsAllowed && !isAdmin) {
         setUploading(false);
         setNotice('This project is assigned to another employee. You cannot upload or generate a BOQ until you are assigned.');
         return;

@@ -225,6 +225,8 @@ describe('POST /api/projects/resolve — existing-branch (DR-016)', () => {
     expect(res.status).toBe(200);
     expect(res.body.id).toBe(existingId);
     expect(res.body.allocationPending).toBe(true);
+    expect(res.body.uploadsAllowed).toBe(true);
+    expect(prisma.projectAssignment.findMany).toHaveBeenCalledWith({ where: { projectId: existingId } });
     expect(prisma.projectAssignment.findUnique).toHaveBeenCalledWith({
       where: { projectId_employeeId: { projectId: existingId, employeeId: USER_ID } }, select: { id: true },
     });
@@ -285,6 +287,8 @@ describe('POST /api/projects/resolve — existing-branch (DR-016)', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.allocationPending).toBe(true);
+    expect(res.body.uploadsAllowed).toBe(false);
+    expect(prisma.projectAssignment.findMany).toHaveBeenCalledWith({ where: { projectId: existingId } });
     expect(prisma.projectAssignment.findUnique).toHaveBeenCalledWith({
       where: { projectId_employeeId: { projectId: existingId, employeeId: USER_ID } }, select: { id: true },
     });
