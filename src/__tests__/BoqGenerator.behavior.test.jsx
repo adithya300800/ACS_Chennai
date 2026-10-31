@@ -127,6 +127,25 @@ describe('BOQ Generator user workflow', () => {
     expect(await screen.findByRole('button', { name: 'Generate BOQ' })).toBeInTheDocument();
   });
 
+  test('re-resolves upload eligibility when allocation is checked in an open page', async () => {
+    const pending = { id: 'project-new', name: 'North Tower', isActive: true, allocationPending: true, uploadsAllowed: true };
+    mockApi.resolveProject.mockResolvedValue(pending);
+    mockApi.getProjects.mockResolvedValue({ projects: [], discovered: [] });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByText('No assigned projects yet. Add a project to get started.');
+    fireEvent.click(screen.getByRole('button', { name: '+ Add project' }));
+    fireEvent.change(screen.getByLabelText('New project name'), { target: { value: 'North Tower' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
+    expect(await screen.findByRole('button', { name: 'Upload drawings' })).toBeInTheDocument();
+
+    mockApi.resolveProject.mockResolvedValueOnce({ ...pending, uploadsAllowed: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Check allocation' }));
+
+    expect(await screen.findByText(/assigned to another employee\. You cannot upload or generate BOQs until you are assigned/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Upload drawings' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Generate BOQ' })).toBeDisabled();
+  });
+
   test('restores confirmed pending uploads after reload and reuses them after assignment', async () => {
     mockApi.resolveProject.mockResolvedValue({
       id: 'project-new', name: 'North Tower', isActive: true, allocationPending: true, uploadsAllowed: true,

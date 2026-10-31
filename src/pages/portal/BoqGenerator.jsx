@@ -143,14 +143,26 @@ export default function BoqGenerator() {
     }
   }, [accessToken]);
 
-  const refreshProjects = async () => {
+  const refreshProjects = async (projectIdToRefresh = projectId) => {
     try {
+      const selected = projects.find((project) => project.id === projectIdToRefresh);
+      if (selected?.allocationPending) {
+        const resolved = await api.resolveProject(selected.name, accessToken);
+        if (resolved.id !== projectIdToRefresh) return;
+        const updated = { ...selected, ...resolved };
+        localProjectsRef.current.set(projectIdToRefresh, updated);
+        setProjects((current) => current.map((project) => project.id === projectIdToRefresh ? updated : project));
+        setNotice(resolved.allocationPending
+          ? (resolved.uploadsAllowed ? 'You can upload drawings now; BOQ generation remains assignment-gated.' : 'This project is assigned to another employee. You cannot upload or generate BOQs until you are assigned.')
+          : 'Your project assignment is active. You can generate a BOQ now.');
+        return;
+      }
       const response = await api.getProjects({ scope: 'assigned' }, accessToken);
       setProjects((current) => [
         ...(response.projects || []),
         ...current.filter((project) => !(response.projects || []).some((assigned) => assigned.id === project.id)),
       ]);
-      if ((response.projects || []).some((project) => project.id === projectId)) {
+      if ((response.projects || []).some((project) => project.id === projectIdToRefresh)) {
         setNotice('Your project assignment is active. You can upload drawings now.');
       }
     } catch (err) {
@@ -662,7 +674,7 @@ export default function BoqGenerator() {
           <button type="submit" className="btn btn-primary" disabled={creatingProject}>{creatingProject ? 'Creating…' : 'Create project'}</button>
         </form>}
         {projects.length === 0 && !showProjectForm && <p style={{ color: 'var(--steel)', marginBottom: 0 }}>No assigned projects yet. Add a project to get started.</p>}
-        {selectedProject?.allocationPending && !isAdmin && <div role="status" style={{ color: '#78350F', background: '#FFFBEB', border: '1px solid #FCD34D', borderRadius: 10, padding: '0.75rem 1rem', marginTop: '0.75rem' }}><p style={{ margin: 0 }}><strong>Pending administrator allocation.</strong> {selectedProject.uploadsAllowed === false ? 'The project is assigned to another employee. You cannot upload or generate a BOQ until you are assigned.' : 'You can upload drawings now; BOQ generation will be available after you are assigned. Unprocessed uploads are cleaned up after an hour, so you may need to upload them again if allocation takes longer.'}</p><button type="button" className="btn btn-secondary" style={{ marginTop: '0.5rem' }} onClick={refreshProjects}>Check allocation</button></div>}
+        {selectedProject?.allocationPending && !isAdmin && <div role="status" style={{ color: '#78350F', background: '#FFFBEB', border: '1px solid #FCD34D', borderRadius: 10, padding: '0.75rem 1rem', marginTop: '0.75rem' }}><p style={{ margin: 0 }}><strong>Pending administrator allocation.</strong> {selectedProject.uploadsAllowed === false ? 'The project is assigned to another employee. You cannot upload or generate a BOQ until you are assigned.' : 'You can upload drawings now; BOQ generation will be available after you are assigned. Unprocessed uploads are cleaned up after an hour, so you may need to upload them again if allocation takes longer.'}</p><button type="button" className="btn btn-secondary" style={{ marginTop: '0.5rem' }} onClick={() => refreshProjects(projectId)}>Check allocation</button></div>}
         {selectedProject && !selectedProject.allocationPending && <p style={{ color: 'var(--steel)', marginBottom: 0, marginTop: '0.5rem' }}>Your project and uploads are private to your portal account.</p>}
       </section>
 
