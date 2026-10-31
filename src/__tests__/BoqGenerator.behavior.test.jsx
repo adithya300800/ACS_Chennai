@@ -284,6 +284,52 @@ describe('BOQ Generator user workflow', () => {
     expect(mockApi.boqGenerator.createJob.mock.calls[0][0].dxfScale).toBe(1);
   });
 
+  test('accepts advertised DWG files and requires confirmed scale before submission', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.meta.mockResolvedValue({
+      effectiveStatus: 'SAMPLE', productionMode: false,
+      rateSources: [{ name: 'TN_PWD_SOR', isSample: true }],
+      supportedInputTypes: ['dxf', 'ifc', 'dwg'],
+      scaleSuggestion: 100,
+    });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'project-assigned' } });
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['AC1027'], 'plan.dwg', { type: 'application/octet-stream' })] },
+    });
+
+    expect(screen.getByLabelText('Scale factor for plan.dwg')).toHaveValue(1);
+    expect(screen.getByLabelText('Confirm scale for plan.dwg')).not.toBeChecked();
+    const generateButton = screen.getByRole('button', { name: 'Generate BOQ' });
+    expect(generateButton).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText('Confirm scale for plan.dwg'));
+    expect(generateButton).toBeEnabled();
+    fireEvent.click(generateButton);
+    await waitFor(() => expect(mockApi.boqGenerator.createJob).toHaveBeenCalledTimes(1));
+    expect(mockApi.boqGenerator.createJob.mock.calls[0][0].dxfScale).toBe(1);
+  });
+
+  test('does not offer DWG when service metadata does not advertise it', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.meta.mockResolvedValue({
+      effectiveStatus: 'SAMPLE', productionMode: false,
+      rateSources: [{ name: 'TN_PWD_SOR', isSample: true }],
+      supportedInputTypes: ['dxf', 'ifc'],
+    });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'project-assigned' } });
+
+    expect(screen.getByLabelText('Select model drawings')).toHaveAttribute('accept', '.dxf,.ifc');
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['AC1027'], 'plan.dwg', { type: 'application/octet-stream' })] },
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('the service does not support DWG files');
+    expect(screen.queryByText('plan.dwg')).not.toBeInTheDocument();
+  });
+
   test('retains selected drawings after a failed service submission so the user can retry', async () => {
     mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
     mockApi.boqGenerator.createJob.mockRejectedValueOnce(Object.assign(new Error('Drawing service is starting'), { code: 'BOQ_TIMEOUT' }));

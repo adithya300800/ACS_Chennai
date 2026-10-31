@@ -483,6 +483,55 @@ describe('BOQ Generator private upload lifecycle', () => {
     });
   });
 
+  it('presigns and verifies DWG input by its binary signature', async () => {
+    const prisma = buildPrisma();
+    const app = buildApp(prisma);
+    const presign = await request(app)
+      .post('/api/boq-generator/uploads/presign')
+      .set('x-test-employee', EMPLOYEE_ID)
+      .send({ projectId: PROJECT_ID, filename: 'plan.dwg', sizeBytes: 128 });
+
+    expect(presign.status).toBe(201);
+    expect(presign.body.blobPath).toBe(`drawings/${PROJECT_ID}/${EMPLOYEE_ID}/${presign.body.uploadId}.dwg`);
+
+    mockVerifiedUpload = {
+      contentLength: 128,
+      contentType: 'application/octet-stream',
+      prefix: Buffer.from('AC1027'),
+    };
+    const confirmed = await request(app)
+      .post('/api/boq-generator/uploads/confirm')
+      .set('x-test-employee', EMPLOYEE_ID)
+      .send({ uploadId: presign.body.uploadId });
+
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.body).toMatchObject({ verified: true, sizeBytes: 128, fileType: 'dwg' });
+  });
+
+  it('rejects DXF bytes uploaded with a DWG filename', async () => {
+    const prisma = buildPrisma();
+    const app = buildApp(prisma);
+    const presign = await request(app)
+      .post('/api/boq-generator/uploads/presign')
+      .set('x-test-employee', EMPLOYEE_ID)
+      .send({ projectId: PROJECT_ID, filename: 'plan.dwg', sizeBytes: 128 });
+    expect(presign.status).toBe(201);
+
+    mockVerifiedUpload = {
+      contentLength: 128,
+      contentType: 'application/octet-stream',
+      prefix: Buffer.from('0\nSECTION\n'),
+    };
+    const confirmed = await request(app)
+      .post('/api/boq-generator/uploads/confirm')
+      .set('x-test-employee', EMPLOYEE_ID)
+      .send({ uploadId: presign.body.uploadId });
+
+    expect(confirmed.status).toBe(400);
+    expect(confirmed.body.code).toBe('FILE_EXTENSION_MISMATCH');
+    expect(prisma._intents[0].status).toBe('PENDING');
+  });
+
   it('refuses mismatched size and PDF bytes without confirming the intent', async () => {
     const prisma = buildPrisma();
     const app = buildApp(prisma);
