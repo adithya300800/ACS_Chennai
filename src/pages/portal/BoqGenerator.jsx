@@ -23,7 +23,8 @@ function formatCurrency(value, currency = 'INR') {
 }
 
 function cleanError(err) {
-  if (err?.code === 'BOQ_SERVICE_UNAVAILABLE') return 'The drawing service is not available right now. Your upload is safe; try again shortly.';
+  if (err?.code === 'BOQ_SERVICE_UNAVAILABLE') return 'The BOQ processor connection is not configured. Ask an administrator to check BOQ_BASE_URL and BOQ_API_TOKEN on the ACS_Chennai Render service. If you have selected drawings, keep this page open; they remain listed here for retry after setup is fixed.';
+  if (err?.code === 'BOQ_SERVICE_AUTH_FAILED') return 'The BOQ processor rejected the portal credentials. Ask an administrator to verify that BOQ_API_TOKEN matches on both Render services. If you have selected drawings, keep this page open; they remain listed here for retry after setup is fixed.';
   if (err?.code === 'BOQ_TIMEOUT' || err?.code === 'TIMEOUT') return 'The service is taking longer than expected. Your run is saved; check Recent runs in a moment.';
   return err?.message || 'Something went wrong. Please try again.';
 }
@@ -265,8 +266,6 @@ export default function BoqGenerator() {
     setJobs([]);
     if (project.allocationPending) {
       localProjectsRef.current.set(project.id, { ...project, allocationPending: true });
-      setNotice(`“${project.name}” is pending administrator allocation. Choose an assigned project, or wait until an administrator assigns you before uploading drawings.`);
-      localProjectsRef.current.set(project.id, { ...project, allocationPending: true });
       toast.push(`Project “${project.name}” is pending administrator allocation.`, 'info');
       return;
     }
@@ -349,6 +348,12 @@ export default function BoqGenerator() {
     setError('');
     setProgress(0);
     try {
+      if (selectedProject?.allocationPending) {
+        await prepareUploads();
+        setUploading(false);
+        setNotice(`Drawings for “${selectedProject.name}” are uploaded privately. BOQ generation will be available after an administrator assigns you. If allocation takes longer than an hour, you may need to upload the drawings again.`);
+        return;
+      }
       if (!submissionRef.current) {
         const uploadsByScale = await prepareUploads();
         if (!uploadsByScale.length) throw new Error('The selected drawings could not be confirmed. Choose them again and retry.');
@@ -390,6 +395,7 @@ export default function BoqGenerator() {
     } catch (err) {
       setError(cleanError(err));
     } finally {
+      setUploading(false);
       setSubmitting(false);
     }
   };
@@ -517,22 +523,22 @@ export default function BoqGenerator() {
           <button type="submit" className="btn btn-primary" disabled={creatingProject}>{creatingProject ? 'Creating…' : 'Create project'}</button>
         </form>}
         {projects.length === 0 && !showProjectForm && <p style={{ color: 'var(--steel)', marginBottom: 0 }}>No assigned projects yet. Add a project to get started.</p>}
-        {selectedProject?.allocationPending && <div role="status" style={{ color: 'var(--steel)', marginTop: '0.5rem' }}><p style={{ margin: 0 }}>This project is pending administrator allocation. Choose an assigned project or ask an administrator to assign you before uploading drawings.</p><button type="button" className="btn btn-secondary" style={{ marginTop: '0.5rem' }} onClick={refreshProjects}>Check allocation</button></div>}
+        {selectedProject?.allocationPending && <div role="status" style={{ color: '#78350F', background: '#FFFBEB', border: '1px solid #FCD34D', borderRadius: 10, padding: '0.75rem 1rem', marginTop: '0.75rem' }}><p style={{ margin: 0 }}><strong>Pending administrator allocation.</strong> You can upload drawings now; BOQ generation will be available after an administrator assigns you. Unprocessed uploads are cleaned up after an hour, so you may need to upload them again if allocation takes longer.</p><button type="button" className="btn btn-secondary" style={{ marginTop: '0.5rem' }} onClick={refreshProjects}>Check allocation</button></div>}
         {selectedProject && !selectedProject.allocationPending && <p style={{ color: 'var(--steel)', marginBottom: 0, marginTop: '0.5rem' }}>Your project and uploads are private to your portal account.</p>}
       </section>
 
       <section className="dpr-card" aria-labelledby="boq-drawings-heading" style={{ padding: '1.25rem', marginBottom: '1rem', opacity: projectId ? 1 : 0.7 }}>
         <h2 id="boq-drawings-heading" style={{ marginTop: 0 }}>2. Add model drawings</h2>
         <p style={{ color: 'var(--steel)', marginTop: 0 }}>Choose {acceptedExtensions.map((type) => type.toUpperCase()).join(' or ')} files from your device. PDF sheets can be kept in the drawing register, but cannot be measured here.</p>
-        <input ref={fileInputRef} aria-label="Select model drawings" type="file" accept={acceptedExtensions.map((type) => `.${type}`).join(',')} multiple disabled={!projectId || selectedProject?.allocationPending} onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }} style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }} />
+        <input ref={fileInputRef} aria-label="Select model drawings" type="file" accept={acceptedExtensions.map((type) => `.${type}`).join(',')} multiple disabled={!projectId} onChange={(event) => { addFiles(event.target.files); event.target.value = ''; }} style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }} />
         <button
           type="button"
           className="boq-upload-dropzone"
-          disabled={!projectId || selectedProject?.allocationPending}
+          disabled={!projectId}
           aria-label={`Choose ${acceptedExtensions.map((type) => type.toUpperCase()).join(' or ')} drawing files`}
-          onClick={() => projectId && !selectedProject?.allocationPending && fileInputRef.current?.click()}
+          onClick={() => projectId && fileInputRef.current?.click()}
           onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => { event.preventDefault(); if (projectId && !selectedProject?.allocationPending) addFiles(event.dataTransfer.files); }}
+          onDrop={(event) => { event.preventDefault(); if (projectId) addFiles(event.dataTransfer.files); }}
           style={{ display: 'block', width: '100%', border: '2px dashed #94A3B8', borderRadius: 12, padding: '1.5rem', textAlign: 'center', cursor: projectId ? 'pointer' : 'not-allowed', background: '#F8FAFC', color: 'inherit', font: 'inherit' }}
         >
           <strong>{projectId ? `Drop ${acceptedExtensions.map((type) => type.toUpperCase()).join('/')} files here or browse` : 'Choose a project first'}</strong>
@@ -563,8 +569,8 @@ export default function BoqGenerator() {
             </select> : <span style={{ display: 'block', padding: '0.6rem 0' }}>{activeRateSource}{rateSources[0]?.isSample || isSample ? ' — sample rates' : ''}</span>}
           </label>
         </details>}
-        <button type="button" className="btn btn-primary" style={{ marginTop: '1rem' }} disabled={!projectId || selectedProject?.allocationPending || !files.length || submitting || files.some((file) => file.file?.name.toLowerCase().endsWith('.dxf') && (!(Number(scaleByFileId[file.id]) > 0) || !confirmedScaleFileIds.includes(file.id)))} onClick={generate}>
-          {uploading ? 'Uploading drawings…' : submitting ? 'Starting take-off…' : 'Generate BOQ'}
+        <button type="button" className="btn btn-primary" style={{ marginTop: '1rem' }} disabled={!projectId || !files.length || submitting || (!selectedProject?.allocationPending && files.some((file) => file.file?.name.toLowerCase().endsWith('.dxf') && (!(Number(scaleByFileId[file.id]) > 0) || !confirmedScaleFileIds.includes(file.id))))} onClick={generate}>
+          {uploading ? 'Uploading drawings…' : submitting ? 'Starting take-off…' : selectedProject?.allocationPending ? 'Upload drawings' : 'Generate BOQ'}
         </button>
       </section>
 

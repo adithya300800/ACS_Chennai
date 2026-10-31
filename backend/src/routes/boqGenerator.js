@@ -58,16 +58,24 @@ function sniffFile(prefix, extension) {
   return detected === extension ? { fileType: detected } : { error: 'FILE_EXTENSION_MISMATCH' };
 }
 
-async function activeProjectAccess(prisma, projectId, employeeId) {
+async function activeProjectAccess(prisma, projectId, employeeId, allowCreatorUpload = false) {
   const [project, employee] = await Promise.all([
     prisma.project.findUnique({
       where: { id: projectId },
-      select: { id: true, isActive: true },
+      select: { id: true, isActive: true, createdById: true },
     }),
     prisma.employee.findUnique({ where: { id: employeeId }, select: { id: true, isAdmin: true } }),
   ]);
   if (!project?.isActive || !employee) return false;
   if (employee.isAdmin) return true;
+  if (allowCreatorUpload && project.createdById === employeeId) {
+    const assignments = await prisma.projectAssignment.findMany({
+      where: { projectId },
+      select: { id: true },
+      take: 1,
+    });
+    if (assignments.length === 0) return true;
+  }
   const assignment = await prisma.projectAssignment.findUnique({
     where: { projectId_employeeId: { projectId, employeeId } },
     select: { id: true },
@@ -571,7 +579,7 @@ router.post('/uploads/presign', boqUploadLimiter, asyncHandler(async (req, res) 
   if (sizeBytes > MAX_FILE_BYTES) {
     return res.status(413).json(errorBody('BOQ_FILE_TOO_LARGE', `Each drawing must be no larger than ${MAX_FILE_BYTES} bytes`));
   }
-  if (!await activeProjectAccess(prisma, projectId, req.employeeId)) return respondUnauthorizedProject(res);
+  if (!await activeProjectAccess(prisma, projectId, req.employeeId, true)) return respondUnauthorizedProject(res);
 
   const uploadId = boqStorage.generateULID();
   const signed = await boqStorage.createUploadUrl({
@@ -607,7 +615,7 @@ router.post('/uploads/confirm', boqUploadLimiter, asyncHandler(async (req, res) 
     where: { employeeId_ulid: { employeeId: req.employeeId, ulid: uploadId } },
   });
   if (!intent || intent.container !== boqStorage.bucketName() || !intent.projectId ||
-      !await activeProjectAccess(prisma, intent.projectId, req.employeeId)) {
+      !await activeProjectAccess(prisma, intent.projectId, req.employeeId, true)) {
     return respondUnauthorizedProject(res);
   }
   if (intent.status === 'CONFIRMED' && intent.verifiedAt && intent.verifiedSizeBytes === intent.expectedSizeBytes) {

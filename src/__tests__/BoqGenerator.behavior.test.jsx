@@ -50,7 +50,7 @@ describe('BOQ Generator user workflow', () => {
     mockApi.boqGenerator.access.mockResolvedValue({ isPilot: true, pilotEnabled: false });
   });
 
-  test('creates a project from the empty state, uploads an IFC and starts its take-off', async () => {
+  test('lets the creator upload drawings while the new project awaits admin allocation', async () => {
     render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
 
     await screen.findByText('No assigned projects yet. Add a project to get started.');
@@ -59,8 +59,20 @@ describe('BOQ Generator user workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
 
     await waitFor(() => expect(mockApi.resolveProject).toHaveBeenCalledWith('North Tower', 'test-token'));
-    expect(await screen.findByText(/This project is pending administrator allocation/i)).toBeInTheDocument();
-    expect(screen.getByLabelText('Select model drawings')).toBeDisabled();
+    expect(await screen.findByText(/Pending administrator allocation/i)).toBeInTheDocument();
+    expect(screen.getByText(/You can upload drawings now/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Select model drawings')).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['ISO-10303-21;'], 'tower.ifc', { type: 'application/octet-stream' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Upload drawings' }));
+
+    expect(await screen.findByText(/Drawings for “North Tower” are uploaded privately/i)).toBeInTheDocument();
+    expect(screen.getByText('tower.ifc')).toBeInTheDocument();
+    expect(mockApi.boqGenerator.presignUpload).toHaveBeenCalledTimes(1);
+    expect(mockApi.boqGenerator.confirmUpload).toHaveBeenCalledTimes(1);
+    expect(mockApi.boqGenerator.createJob).not.toHaveBeenCalled();
   });
 
   test('does not hide the page behind loading again when job search params change', async () => {
@@ -172,6 +184,50 @@ describe('BOQ Generator user workflow', () => {
     expect(mockApi.boqGenerator.presignUpload).toHaveBeenCalledTimes(1);
     expect(mockApi.boqGenerator.createJob.mock.calls[1][0].uploads).toEqual(mockApi.boqGenerator.createJob.mock.calls[0][0].uploads);
     expect(mockApi.boqGenerator.createJob.mock.calls[1][2]).toBe(mockApi.boqGenerator.createJob.mock.calls[0][2]);
+  });
+
+  test('directs service configuration failures to an administrator without claiming uploads are safe', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.createJob.mockRejectedValueOnce(Object.assign(
+      new Error('The drawing service is not configured'),
+      { code: 'BOQ_SERVICE_UNAVAILABLE' },
+    ));
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'project-assigned' } });
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['ISO-10303-21;'], 'tower.ifc', { type: 'application/octet-stream' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate BOQ' }));
+
+    await waitFor(() => expect(mockApi.boqGenerator.createJob).toHaveBeenCalledTimes(1));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/processor connection is not configured/i);
+    expect(alert).toHaveTextContent('BOQ_BASE_URL');
+    expect(alert).toHaveTextContent('BOQ_API_TOKEN');
+    expect(alert).not.toHaveTextContent(/upload is safe|try again shortly/i);
+    expect(screen.getByText('tower.ifc')).toBeInTheDocument();
+  });
+
+  test('directs processor credential rejection to an administrator', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.createJob.mockRejectedValueOnce(Object.assign(
+      new Error('The BOQ processor rejected the portal credentials'),
+      { code: 'BOQ_SERVICE_AUTH_FAILED' },
+    ));
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'project-assigned' } });
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['ISO-10303-21;'], 'tower.ifc', { type: 'application/octet-stream' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate BOQ' }));
+
+    await waitFor(() => expect(mockApi.boqGenerator.createJob).toHaveBeenCalledTimes(1));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/processor rejected the portal credentials/i);
+    expect(alert).toHaveTextContent('BOQ_API_TOKEN');
+    expect(screen.getByText('tower.ifc')).toBeInTheDocument();
   });
 
   test('shows actual result flags, defaults to flagged and unpriced lines, and exposes alternatives', async () => {
