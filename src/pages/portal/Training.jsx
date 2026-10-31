@@ -7,6 +7,7 @@ import { TRAINING_PROVIDER_LABELS, TRAINING_STATUSES, TRACKABLE_PROVIDERS, isTra
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { useBusinessDateKey } from '../../lib/businessDate.js';
 import { formatShortDate } from '../../lib/format.js';
+import Breadcrumb from '../../components/Breadcrumb.jsx';
 
 // "My Learning" hub for the employee. Mirrors the Leave page's
 // structure (state, fetch + error/loading/empty triple, pill pattern)
@@ -106,6 +107,7 @@ export default function Training() {
     <div className="training-page">
       <div className="training-page-header">
         <div>
+          <Breadcrumb items={[{ label: 'Dashboard', to: '/portal/dashboard' }, { label: 'My Training' }]} />
           <h1 className="training-page-title">My Training</h1>
           <p className="training-page-sub">Watch assigned courses and track your progress</p>
         </div>

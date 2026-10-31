@@ -35,7 +35,7 @@ const formSrc = readFileSync(projectFormPath, 'utf8');
 describe('DR-034 — truthful widget load/empty/error states', () => {
   test('1. EmployeeDashboard tracks per-widget ok/error state', () => {
     expect(dashSrc).toMatch(/\[widgetStatus,\s*setWidgetStatus\]\s*=\s*useState/);
-    // Status map covers all five widgets.
+    // Existing independently-fetched widgets keep their error state contracts.
     expect(dashSrc).toMatch(/today:\s*null,\s*draft:\s*null,\s*training:\s*null,\s*leaves:\s*null,\s*notifications:\s*null/);
     // Parallel fetch records each result's ok flag.
     expect(dashSrc).toMatch(/\.then\(\(v\)\s*=>\s*\(\{\s*ok:\s*true,\s*v\s*\}\),\s*\(\)\s*=>\s*\(\{\s*ok:\s*false\s*\}\)/);

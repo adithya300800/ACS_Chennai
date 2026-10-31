@@ -3,14 +3,17 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatDateOnly, formatFullDate, formatShortDate, formatTime } from '../../lib/format.js';
-import { getBusinessToday } from '../../lib/businessDate.js';
+import { useBusinessDateKey } from '../../lib/businessDate.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { MapPinIcon, ClockIcon, DocIcon, BookIcon, PlaneIcon, BellIcon } from '../../components/Icons.jsx';
 import { isOverdueEnrollment, isDueSoonEnrollment } from '../../lib/constants.js';
+import Breadcrumb from '../../components/Breadcrumb.jsx';
+import { summariseLeave } from '../../lib/leaveSummary.js';
+import { deriveDailyActivity } from '../../lib/dailyActivity.js';
 
 // SOL-P2#16: employee home dashboard. Lands employees on a single screen
 // with their today-check-in status, open DPR draft, training due,
-// leave-balance, and recent activity. Keeps Attendance as a separate
+// recent leave activity, and recent updates. Keeps Attendance as a separate
 // destination for full history. Two-column responsive layout fills the
 // empty canvas noted by the audit on desktop.
 //
@@ -18,8 +21,10 @@ import { isOverdueEnrollment, isDueSoonEnrollment } from '../../lib/constants.js
 //   /attendance/today?localDate=YYYY-MM-DD  → sessions, active check-in
 //   /attendance?month=YYYY-MM               → month context (week totals)
 //   /dpr?status=DRAFT&limit=1               → any open draft (Resume CTA)
+//   /dpr?my=true&from/to=today              → today's DPR activity
+//   /inspection?my=true&from/to=today       → today's inspection activity
 //   /training/enrollments/my               → due-soon / overdue subset
-//   /leave/my                               → leave balance widget
+//   /leave/my                               → recent leave requests (no entitlement data)
 //   /dpr/notifications/list                 → last 5 notifications
 
 // DR-005: training attention predicates now live in src/lib/constants.js
@@ -78,8 +83,11 @@ export default function EmployeeDashboard() {
   const [loading, setLoading] = useState(true);
   const [todayRecord, setTodayRecord] = useState(null);
   const [draft, setDraft] = useState(null);
+  const [todayDprs, setTodayDprs] = useState(null);
+  const [todayInspections, setTodayInspections] = useState(null);
   const [training, setTraining] = useState([]);
   const [leaves, setLeaves] = useState([]);
+  const [leaveTotal, setLeaveTotal] = useState(0);
   const [notifications, setNotifications] = useState([]);
   const [error, setError] = useState('');
   // [DR-034] Per-widget fetch state so a failed request renders as
@@ -92,7 +100,7 @@ export default function EmployeeDashboard() {
     today: null, draft: null, training: null, leaves: null, notifications: null,
   });
 
-  const today = getBusinessToday();
+  const today = useBusinessDateKey();
   const navigate = useNavigate();
 
   const refresh = useCallback(async (showSpinner = true) => {
@@ -104,17 +112,22 @@ export default function EmployeeDashboard() {
       // widget records its own ok/error status. A failed render
       // displays "Couldn't load — retry" rather than masquerading as
       // a healthy empty card.
-      const [todayRes, draftsRes, trainingRes, leavesRes, notifRes] = await Promise.all([
+      const [todayRes, draftsRes, dprsRes, inspectionsRes, trainingRes, leavesRes, notifRes] = await Promise.all([
         api.get(`/attendance/today?localDate=${today}`, accessToken).then((v) => ({ ok: true, v }), () => ({ ok: false })),
         api.getDprs({ status: 'DRAFT', my: 'true', limit: '1' }, accessToken).then((v) => ({ ok: true, v }), () => ({ ok: false })),
+        api.getDprs({ my: 'true', from: today, to: today, limit: '50' }, accessToken).then((v) => ({ ok: true, v }), () => ({ ok: false })),
+        api.getInspections({ my: 'true', from: today, to: today, limit: '50' }, accessToken).then((v) => ({ ok: true, v }), () => ({ ok: false })),
         api.getMyTraining({}, accessToken).then((v) => ({ ok: true, v }), () => ({ ok: false })),
         api.getMyLeaves(accessToken).then((v) => ({ ok: true, v }), () => ({ ok: false })),
         api.getNotifications(null, accessToken).then((v) => ({ ok: true, v }), () => ({ ok: false })),
       ]);
       setTodayRecord(todayRes.ok ? todayRes.v : null);
       setDraft(draftsRes.ok ? draftsRes.v.dprs?.[0] ?? null : null);
+      setTodayDprs(dprsRes.ok ? dprsRes.v.dprs || [] : null);
+      setTodayInspections(inspectionsRes.ok ? inspectionsRes.v.inspections || [] : null);
       setTraining(trainingRes.ok ? trainingRes.v.enrollments || [] : []);
       setLeaves(leavesRes.ok ? leavesRes.v.requests || [] : []);
+      setLeaveTotal(leavesRes.ok ? leavesRes.v.total ?? leavesRes.v.requests?.length ?? 0 : 0);
       setNotifications(notifRes.ok ? notifRes.v.notifications || [] : []);
       setWidgetStatus({
         today: todayRes.ok ? 'ok' : 'error',
@@ -175,6 +188,8 @@ export default function EmployeeDashboard() {
   // coerce the array to NaN and silently drop every row.
   const overdueTraining = training.filter((e) => isOverdueEnrollment(e));
   const dueSoonTraining = training.filter((e) => isDueSoonEnrollment(e));
+  const dailyActivity = deriveDailyActivity(todayDprs, todayInspections, today);
+  const leaveSummary = summariseLeave(leaves, today);
 
   const firstName = employee?.name?.split(' ')[0] || 'there';
   const friendlyDate = formatFullDate(today);
@@ -183,6 +198,7 @@ export default function EmployeeDashboard() {
     <div className="dpr-page dashboard-page">
       <div className="dpr-page-header">
         <div>
+          <Breadcrumb items={[{ label: 'Dashboard' }]} />
           <h1 className="dpr-page-title">Welcome back, {firstName}</h1>
           <p className="dpr-page-sub" style={{ color: 'var(--steel)', margin: 0, fontSize: '0.9rem' }}>
             {friendlyDate}
@@ -283,6 +299,44 @@ export default function EmployeeDashboard() {
 
       {/* Dashboard grid */}
       <div className="dashboard-grid">
+        <section className="dashboard-card dashboard-card-wide" aria-label="Today's report activity" aria-busy={loading}>
+          <header className="dashboard-card-header">
+            <h2 className="dashboard-card-title">
+              <DocIcon size={16} style={{ verticalAlign: '-3px', marginRight: 6, color: 'var(--steel)' }} />
+              Today's reports
+            </h2>
+            <span className="dashboard-card-meta">{friendlyDate}</span>
+          </header>
+          {loading ? (
+              <div>
+              <span className="sr-only" role="status">Loading today's reports…</span>
+              <Skeleton w="75%" h={18} />
+            </div>
+          ) : (
+            <ul className="dashboard-activity-list">
+              {dailyActivity.map((item) => (
+                <li key={item.kind} className="dashboard-activity-task">
+                  <span className={`dashboard-activity-indicator ${item.state.startsWith('Filed today') ? 'is-done' : ''}`} aria-hidden="true">
+                    {item.state.startsWith('Filed today') ? '✓' : '·'}
+                  </span>
+                  <span className="dashboard-activity-task-copy">
+                    <strong>{item.kind}</strong>
+                    <span>{item.state}</span>
+                  </span>
+                  {item.failed ? (
+                    <button type="button" className="btn btn-secondary btn-sm" onClick={() => refresh()}>{item.action}</button>
+                  ) : (
+                    <Link className="btn btn-secondary btn-sm" to={item.to}>{item.action}</Link>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="dashboard-card-meta dashboard-activity-note">
+            Reports depend on today's work; no report is required when there is nothing to record.
+          </p>
+        </section>
+
         {/* Open draft */}
         <section className="dashboard-card" aria-label="Open DPR draft" aria-busy={loading}>
           <header className="dashboard-card-header">
@@ -403,12 +457,12 @@ export default function EmployeeDashboard() {
           )}
         </section>
 
-        {/* Leave balance / Recent */}
-        <section className="dashboard-card" aria-label="Leave balance" aria-busy={loading}>
+        {/* There is no leave entitlement/balance endpoint. Show request history instead. */}
+        <section className="dashboard-card" aria-label="Recent leave" aria-busy={loading}>
           <header className="dashboard-card-header">
             <h2 className="dashboard-card-title">
               <PlaneIcon size={16} style={{ verticalAlign: '-3px', marginRight: 6, color: 'var(--steel)' }} />
-              Leave
+              Recent leave
             </h2>
             <Link to="/portal/leave" className="dashboard-card-link">All</Link>
           </header>
@@ -426,22 +480,35 @@ export default function EmployeeDashboard() {
                 Retry
               </button>
             </div>
-          ) : leaves.length === 0 ? (
-            <p className="dashboard-card-empty">No leave history yet.</p>
           ) : (
-            <ul className="dashboard-card-list">
-              {leaves.slice(0, 3).map((l) => (
-                <li key={l.id} className="dashboard-card-list-row">
-                  <span className="dashboard-card-list-text">
-                    {l.leaveType || 'Leave'} · {l.startDate ? formatDateShort(l.startDate) : ''}
-                    {l.endDate && l.endDate !== l.startDate ? `–${formatDateShort(l.endDate)}` : ''}
-                  </span>
-                  <span className={`dashboard-pill dashboard-pill-${(l.status || 'PENDING').toLowerCase()}`}>
-                    {l.status}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <>
+              {leaves.length > 0 && (
+                <div className="dashboard-leave-summary" aria-label="Leave request summary">
+                  <span><strong>{leaveTotal > leaves.length ? 'At least ' : ''}{leaveSummary.daysTaken}</strong> days in approved requests for {leaveSummary.year}</span>
+                  <span><strong>{leaveTotal > leaves.length ? 'At least ' : ''}{leaveSummary.pendingCount}</strong> pending</span>
+                </div>
+              )}
+              {leaveTotal > leaves.length && leaves.length > 0 && (
+                <p className="dashboard-card-meta">Summary is based on the most recent {leaves.length} requests.</p>
+              )}
+              {leaves.length === 0 ? (
+                <p className="dashboard-card-empty">No leave history yet.</p>
+              ) : (
+                <ul className="dashboard-card-list">
+                  {leaves.slice(0, 3).map((l) => (
+                    <li key={l.id} className="dashboard-card-list-row">
+                      <span className="dashboard-card-list-text">
+                        {l.leaveType || 'Leave'} · {l.startDate ? formatDateShort(l.startDate) : ''}
+                        {l.endDate && l.endDate !== l.startDate ? `–${formatDateShort(l.endDate)}` : ''}
+                      </span>
+                      <span className={`dashboard-pill dashboard-pill-${(l.status || 'PENDING').toLowerCase()}`}>
+                        {l.status}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
           )}
         </section>
 

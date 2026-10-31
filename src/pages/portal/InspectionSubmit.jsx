@@ -9,6 +9,7 @@ import {
 } from '../../lib/constants.js';
 import WorkEntryAdder from './WorkEntryAdder.jsx';
 import FormProgress from '../../components/FormProgress.jsx';
+import Breadcrumb from '../../components/Breadcrumb.jsx';
 import DrawingPicker from '../../components/DrawingPicker.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { getBusinessToday } from '../../lib/businessDate.js';
@@ -1281,6 +1282,7 @@ export default function InspectionSubmit() {
   return (
     <div className="dpr-page">
       <div className="dpr-card">
+        <Breadcrumb items={[{ label: 'Dashboard', to: '/portal/dashboard' }, { label: 'My Inspection Records', to: '/portal/inspection/my' }, { label: draftId ? 'Edit inspection' : 'New inspection' }]} />
         <h1 className="dpr-page-title">New Inspection / Compliance Record</h1>
         <p style={{ color: 'var(--steel)', marginBottom: '1rem', fontSize: '0.9rem' }}>
           File a structured inspection record — material receipt, water

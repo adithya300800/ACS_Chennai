@@ -7,6 +7,7 @@ import { uploadBlob } from '../../lib/blobUpload.js';
 import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../../lib/constants.js';
 import DprCustomSection from './DprCustomSection.jsx';
 import FormProgress from '../../components/FormProgress.jsx';
+import Breadcrumb from '../../components/Breadcrumb.jsx';
 import DrawingPicker from '../../components/DrawingPicker.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 import { formatShortDate } from '../../lib/format.js';
@@ -1539,6 +1540,7 @@ export default function DprSubmit() {
   return (
     <div className="dpr-page">
       <div className="dpr-card">
+        <Breadcrumb items={[{ label: 'Dashboard', to: '/portal/dashboard' }, { label: 'My Daily Reports', to: '/portal/dpr/my' }, { label: draftId ? 'Edit DPR' : 'New DPR' }]} />
         <h1 className="dpr-page-title">Submit Daily Progress Report</h1>
         <p style={{ color: 'var(--steel)', fontSize: '0.9rem', marginBottom: '1rem' }}>
           Daily narrative for the cover page. Detailed material receipts,
@@ -1584,41 +1586,6 @@ export default function DprSubmit() {
             },
           ]}
         />
-
-        {/* §8.3 (Fresh24 wave-4 batch-B): required-fields side panel.
-            Renders ONLY when blockingRequirements is non-empty — a clean
-            form stays silent. The panel lists each missing required field
-            as a focus-link so the engineer can jump straight to the gap.
-            Sticky on desktop (≥1024px, via .dpr-required-fields-sticky)
-            and top-of-page on narrower viewports. The panel sits above
-            the draft banner + error banner so a brand-new DPR sees the
-            gaps first, and a draft-resumed DPR sees the gaps above the
-            "Restored unsaved draft" hint. */}
-        {blockingRequirements.length > 0 && (
-          <div
-            id="dpr-required-fields"
-            role="status"
-            aria-live="polite"
-            className="dpr-required-fields"
-          >
-            <div className="dpr-required-fields-title">Required to submit</div>
-            <ul className="dpr-required-fields-list">
-              {blockingRequirements.map((req) => (
-                <li key={req.field}>
-                  <button
-                    type="button"
-                    className="dpr-required-fields-link"
-                    onClick={() => focusRequirement(req.anchorId)}
-                    aria-label={`Focus ${req.label}`}
-                    data-anchor-id={req.anchorId}
-                  >
-                    {req.label}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
 
         {showDraftBanner && (
           <div
@@ -1692,6 +1659,28 @@ export default function DprSubmit() {
             <button type="button" className="btn btn-secondary btn-sm" onClick={handleDiscardDraft}>
               Discard
             </button>
+          </div>
+        )}
+
+        {/* Show draft context before the missing-field checklist. */}
+        {blockingRequirements.length > 0 && (
+          <div id="dpr-required-fields" role="status" aria-live="polite" className="dpr-required-fields">
+            <div className="dpr-required-fields-title">Required to submit</div>
+            <ul className="dpr-required-fields-list">
+              {blockingRequirements.map((req) => (
+                <li key={req.field}>
+                  <button
+                    type="button"
+                    className="dpr-required-fields-link"
+                    onClick={() => focusRequirement(req.anchorId)}
+                    aria-label={`Focus ${req.label}`}
+                    data-anchor-id={req.anchorId}
+                  >
+                    {req.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 
@@ -2406,11 +2395,11 @@ export default function DprSubmit() {
           )}
 
           <div className="dpr-form-actions dpr-form-actions-sticky" style={{ marginTop: '1.5rem' }}>
-            <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting' || hasInFlightUploads}>
-              {status === 'submitting' ? 'Saving...' : 'Save as Draft'}
-            </button>
             <button type="button" className="btn btn-primary" onClick={() => handleSubmit('SUBMITTED')} disabled={status === 'submitting' || hasInFlightUploads}>
               {status === 'submitting' ? 'Submitting...' : hasInFlightUploads ? 'Waiting for photos…' : 'Submit Report'}
+            </button>
+            <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting' || hasInFlightUploads}>
+              {status === 'submitting' ? 'Saving...' : 'Save as Draft'}
             </button>
           </div>
         </div>

@@ -21,6 +21,11 @@ describe('PortalLayout — S5 nav grouping taxonomy', () => {
     expect(src).toMatch(/label:\s*['"]My Reports['"]/);
   });
 
+  test('daily reporting destinations are grouped under My Work and personal links under Personal', () => {
+    expect(src).toMatch(/label:\s*['"]My Work['"][\s\S]{0,500}label:\s*['"]My Daily Reports['"][\s\S]{0,250}label:\s*['"]My Inspection Records['"]/);
+    expect(src).toMatch(/label:\s*['"]Personal['"][\s\S]{0,250}label:\s*['"]My Payslips['"][\s\S]{0,150}label:\s*['"]Help & Support['"]/);
+  });
+
   test('declares the three admin-only section labels', () => {
     expect(src).toMatch(/label:\s*['"]Review['"]/);
     expect(src).toMatch(/label:\s*['"]Records['"]/);
