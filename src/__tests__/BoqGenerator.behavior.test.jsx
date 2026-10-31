@@ -127,6 +127,20 @@ describe('BOQ Generator user workflow', () => {
     expect(await screen.findByRole('button', { name: 'Generate BOQ' })).toBeInTheDocument();
   });
 
+  test('resolves a URL-selected pending project before enabling drawing uploads', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [], discovered: [] });
+    mockApi.getProject = jest.fn(async () => ({ id: 'project-new', name: 'North Tower', isActive: true }));
+    mockApi.resolveProject.mockResolvedValueOnce({
+      id: 'project-new', name: 'North Tower', isActive: true, allocationPending: true, uploadsAllowed: true,
+    });
+    render(<MemoryRouter initialEntries={['/portal/boq-generator?projectId=project-new']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+
+    expect(await screen.findByRole('button', { name: 'Upload drawings' })).toBeInTheDocument();
+    expect(mockApi.getProject).toHaveBeenCalledWith('project-new', 'test-token');
+    expect(mockApi.resolveProject).toHaveBeenCalledWith('North Tower', 'test-token');
+    expect(screen.getByLabelText('Select model drawings')).toBeEnabled();
+  });
+
   test('re-resolves upload eligibility when allocation is checked in an open page', async () => {
     const pending = { id: 'project-new', name: 'North Tower', isActive: true, allocationPending: true, uploadsAllowed: true };
     mockApi.resolveProject.mockResolvedValue(pending);

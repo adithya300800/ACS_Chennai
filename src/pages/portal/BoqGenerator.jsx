@@ -41,6 +41,7 @@ export default function BoqGenerator() {
   const [newProjectName, setNewProjectName] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
   const [showProjectForm, setShowProjectForm] = useState(false);
+  const [resolvingProject, setResolvingProject] = useState(false);
   const [files, setFiles] = useState([]);
   const [confirmedUploads, setConfirmedUploads] = useState([]);
   const [pendingUploadProjectId, setPendingUploadProjectId] = useState('');
@@ -214,7 +215,38 @@ export default function BoqGenerator() {
         });
         setProjects(assigned);
         const fromQuery = searchParams.get('projectId');
-        if (fromQuery && assigned.some((project) => project.id === fromQuery)) setProjectId(fromQuery);
+        if (fromQuery && !assigned.some((project) => project.id === fromQuery)) {
+          setResolvingProject(true);
+          const urlDraft = loadScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+          const draftName = urlDraft?.projectId === fromQuery ? urlDraft.projectName : '';
+          const lookup = draftName
+            ? api.resolveProject(draftName, accessToken)
+            : api.getProject(fromQuery, accessToken).then((project) => project?.name
+              ? api.resolveProject(project.name, accessToken)
+              : project);
+          lookup.then((project) => {
+            if (!alive || !project?.id) return;
+            if (!isAdmin && !project.allocationPending) {
+              setProjectId('');
+              setSearchParams({});
+              return;
+            }
+            const pendingProject = project.allocationPending && !isAdmin;
+            const resolvedProject = { ...project, allocationPending: pendingProject, uploadsAllowed: pendingProject && project.uploadsAllowed === true };
+            localProjectsRef.current.set(project.id, resolvedProject);
+            setProjects((current) => [...current.filter((candidate) => candidate.id !== project.id), resolvedProject]);
+            setProjectId(project.id);
+            if (pendingProject) setPendingUploadProjectId(project.id);
+            if (urlDraft?.projectId === project.id && Array.isArray(urlDraft.files)) {
+              const restoredFiles = urlDraft.files.filter((file) => file && typeof file.uploadId === 'string').map((file) => ({ ...file, progress: 0 }));
+              setFiles(restoredFiles);
+              setConfirmedUploads(restoredFiles.map(({ id: fileId, uploadId }) => ({ fileId, uploadId })));
+            }
+          }).catch((err) => {
+            if (alive && err?.code !== 'PROJECT_NOT_FOUND') setError(cleanError(err));
+            if (alive) setSearchParams({});
+          }).finally(() => { if (alive) setResolvingProject(false); });
+        } else if (fromQuery) setProjectId(fromQuery);
         else if (!projectId && assigned.length === 1) setProjectId(assigned[0].id);
       } else setError(cleanError(projectsResult.reason));
       if (accessResult.status === 'fulfilled') setPilotAccess(accessResult.value);
@@ -634,7 +666,7 @@ export default function BoqGenerator() {
     }
   }, [loading, searchParams, job, error, accessToken]);
 
-  if (loading) return <div className="dpr-page"><p role="status">Loading BOQ Generator…</p></div>;
+  if (loading || resolvingProject) return <div className="dpr-page"><p role="status">{resolvingProject ? 'Loading selected project…' : 'Loading BOQ Generator…'}</p></div>;
 
   if (pilotAccess && !pilotAccess.isPilot) return <main className="dpr-page"><h1>BOQ Generator</h1><p role="status">This tool is in pilot and is not available to your account.</p></main>;
 
