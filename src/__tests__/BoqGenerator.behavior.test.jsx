@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const mockApi = {
@@ -28,7 +28,7 @@ const mockToastPush = jest.fn();
 const mockUploadBlob = jest.fn(async () => {});
 
 jest.mock('../lib/api.js', () => ({ api: mockApi }));
-jest.mock('../contexts/AuthContext.jsx', () => ({ useAuth: () => ({ accessToken: 'test-token' }) }));
+jest.mock('../contexts/AuthContext.jsx', () => ({ useAuth: () => ({ accessToken: 'test-token', employee: { id: 'employee-test' } }) }));
 jest.mock('../contexts/ToastContext.jsx', () => ({ useToast: () => ({ push: mockToastPush }) }));
 jest.mock('../lib/blobUpload.js', () => ({ uploadBlob: (...args) => mockUploadBlob(...args) }));
 
@@ -37,6 +37,7 @@ const BoqGenerator = require('../pages/portal/BoqGenerator.jsx').default;
 describe('BOQ Generator user workflow', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    localStorage.clear();
     mockApi.getProjects.mockResolvedValue({ projects: [], discovered: [] });
     mockApi.boqGenerator.meta.mockResolvedValue({
       effectiveStatus: 'SAMPLE', productionMode: false,
@@ -106,6 +107,41 @@ describe('BOQ Generator user workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
 
     expect(await screen.findByRole('button', { name: 'Generate BOQ' })).toBeInTheDocument();
+  });
+
+  test('restores confirmed pending uploads after reload and reuses them after assignment', async () => {
+    mockApi.resolveProject.mockResolvedValue({
+      id: 'project-new', name: 'North Tower', isActive: true, allocationPending: true,
+    });
+    const firstPage = render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByText('No assigned projects yet. Add a project to get started.');
+    fireEvent.click(screen.getByRole('button', { name: '+ Add project' }));
+    fireEvent.change(screen.getByLabelText('New project name'), { target: { value: 'North Tower' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
+    await screen.findByText(/Pending administrator allocation/i);
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['ISO-10303-21;'], 'tower.ifc', { type: 'application/octet-stream' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Upload drawings' }));
+    await screen.findByText(/Drawings for “North Tower” are uploaded privately/i);
+    const savedUploadId = JSON.parse(localStorage.getItem('boq_pending_uploads_v1:employee-test')).files[0].uploadId;
+
+    firstPage.unmount();
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    expect(await screen.findByText(/Pending administrator allocation/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Upload drawings' }));
+    await screen.findByText(/Drawings for “North Tower” are uploaded privately/i);
+    expect(mockApi.boqGenerator.presignUpload).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-new', name: 'North Tower' }], discovered: [] });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+
+    expect(await screen.findByText('tower.ifc')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Generate BOQ' }));
+    await waitFor(() => expect(mockApi.boqGenerator.createJob).toHaveBeenCalledTimes(1));
+    expect(mockApi.boqGenerator.createJob.mock.calls[0][0].uploads).toEqual([savedUploadId]);
+    expect(mockApi.boqGenerator.presignUpload).toHaveBeenCalledTimes(1);
   });
 
   test('does not hide the page behind loading again when job search params change', async () => {

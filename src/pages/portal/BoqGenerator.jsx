@@ -4,12 +4,14 @@ import { useAuth } from '../../contexts/AuthContext.jsx';
 import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { uploadBlob } from '../../lib/blobUpload.js';
+import { clear as clearScopedDraft, load as loadScopedDraft, save as saveScopedDraft } from '../../lib/ownerScopedDraft.js';
 import Breadcrumb from '../../components/Breadcrumb.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
 
 const POLL_INTERVAL_MS = 5000;
 const MAX_FILES = 20;
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
+const PENDING_UPLOAD_DRAFT = 'boq_pending_uploads_v1';
 const RATE_NOTICE = 'Sample rates are placeholders. This take-off is not an estimate or project cost. Check every quantity before use.';
 
 function formatBytes(bytes) {
@@ -31,7 +33,7 @@ function cleanError(err) {
 
 export default function BoqGenerator() {
   useDocumentTitle('BOQ Generator');
-  const { accessToken } = useAuth();
+  const { accessToken, employee } = useAuth();
   const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const [projects, setProjects] = useState([]);
@@ -41,6 +43,7 @@ export default function BoqGenerator() {
   const [showProjectForm, setShowProjectForm] = useState(false);
   const [files, setFiles] = useState([]);
   const [confirmedUploads, setConfirmedUploads] = useState([]);
+  const [pendingUploadProjectId, setPendingUploadProjectId] = useState('');
   const [scaleByFileId, setScaleByFileId] = useState({});
   const [confirmedScaleFileIds, setConfirmedScaleFileIds] = useState([]);
   const wastagePct = '0';
@@ -80,6 +83,57 @@ export default function BoqGenerator() {
       : !meta || meta.effectiveStatus !== 'REAL' || meta.productionMode !== true;
   const supportedTypes = (meta?.supportedInputTypes || ['ifc', 'dxf']).filter((type) => ['ifc', 'dxf'].includes(type));
   const acceptedExtensions = supportedTypes.length ? supportedTypes : ['ifc', 'dxf'];
+
+  useEffect(() => {
+    const draft = loadScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+    if (!employee?.id || !draft || draft.__quarantined || !Array.isArray(draft.files)) return;
+    const restoredFiles = draft.files.filter((file) => file && typeof file.id === 'string' && typeof file.uploadId === 'string' && typeof file.filename === 'string')
+      .map((file) => ({ ...file, progress: 0 }));
+    if (!restoredFiles.length) return;
+    const restoredProject = { id: draft.projectId, name: draft.projectName, isActive: true, allocationPending: true };
+    localProjectsRef.current.set(draft.projectId, restoredProject);
+    setProjects((current) => current.some((project) => project.id === draft.projectId) ? current : [...current, restoredProject]);
+    setFiles(restoredFiles);
+    setConfirmedUploads(restoredFiles.map(({ id, uploadId }) => ({ fileId: id, uploadId })));
+    setProjectId(draft.projectId || '');
+    setPendingUploadProjectId(draft.projectId || '');
+    setScaleByFileId(draft.scaleByFileId || {});
+    setConfirmedScaleFileIds(draft.confirmedScaleFileIds || []);
+    setNotice('Restored privately uploaded drawings from this browser. They remain available until cleaned up; if an upload has expired, select the file again.');
+    if (!draft.projectName) return;
+    let active = true;
+    api.resolveProject(draft.projectName, accessToken).then((project) => {
+      if (!active || project.id !== draft.projectId) return;
+      localProjectsRef.current.set(project.id, project);
+      setProjects((current) => current.map((candidate) => candidate.id === project.id ? project : candidate));
+      setPendingUploadProjectId(project.allocationPending ? project.id : '');
+      if (!project.allocationPending) {
+        setNotice('Your project assignment is active. You can generate a BOQ using the drawings uploaded earlier.');
+        saveScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id, { ...draft, projectPending: false });
+      }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [accessToken, employee?.id]);
+
+  useEffect(() => {
+    const clearDraft = (event) => {
+      if (!employee?.id || event.detail?.employeeId !== employee.id) return;
+      clearScopedDraft(PENDING_UPLOAD_DRAFT, employee.id);
+      setFiles([]);
+      setConfirmedUploads([]);
+      setPendingUploadProjectId('');
+    };
+    window.addEventListener('draft:clear-current', clearDraft);
+    return () => window.removeEventListener('draft:clear-current', clearDraft);
+  }, [employee?.id]);
+
+  useEffect(() => {
+    if (pendingUploadProjectId && projectId !== pendingUploadProjectId) {
+      const draft = loadScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+      if (draft?.projectId === pendingUploadProjectId) clearScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+      if (draft?.projectId !== projectId && draft?.projectPending !== true) setPendingUploadProjectId('');
+    }
+  }, [employee?.id, pendingUploadProjectId, projectId]);
 
   const loadJobs = useCallback(async (forProject = projectId) => {
     try {
@@ -226,6 +280,11 @@ export default function BoqGenerator() {
   const selectProject = (id) => {
     submissionRef.current = null;
     openedJobIdRef.current = '';
+    if (id !== pendingUploadProjectId) {
+      const draft = loadScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+      if (draft?.projectId === pendingUploadProjectId) clearScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+      if (draft?.projectId !== id && draft?.projectPending !== true) setPendingUploadProjectId('');
+    }
     setProjectId(id);
     setJob(null);
     setBoq(null);
@@ -245,19 +304,25 @@ export default function BoqGenerator() {
   const loadCreatedProjectAndContinue = async (project) => {
     submissionRef.current = null;
     openedJobIdRef.current = '';
+    const previousProjectId = projectId;
+    const savedDraft = loadScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+    const savedFiles = savedDraft?.projectId === project.id && Array.isArray(savedDraft.files)
+      ? savedDraft.files.filter((file) => file && typeof file.uploadId === 'string').map((file) => ({ ...file, progress: 0 }))
+      : [];
+    if (savedFiles.length || project.allocationPending) setPendingUploadProjectId(project.id);
     localProjectsRef.current.set(project.id, project);
-    setProjects((current) => current.some((candidate) => candidate.id === project.id)
-      ? current
-      : [...current, project]);
+    setProjects((current) => [...current.filter((candidate) => candidate.id !== project.id), project]);
     setShowProjectForm(false);
     setNewProjectName('');
     setProjectId(project.id);
     setJob(null);
     setBoq(null);
-    setFiles([]);
-    setConfirmedUploads([]);
-    setScaleByFileId({});
-    setConfirmedScaleFileIds([]);
+    setFiles(savedFiles);
+    setConfirmedUploads(savedFiles.map(({ id, uploadId }) => ({ fileId: id, uploadId })));
+    setScaleByFileId(savedDraft?.projectId === project.id ? savedDraft.scaleByFileId || {} : {});
+    setConfirmedScaleFileIds(savedDraft?.projectId === project.id ? savedDraft.confirmedScaleFileIds || [] : []);
+    if (savedDraft?.projectId && savedDraft.projectId !== project.id) clearScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+    if (savedFiles.length && previousProjectId !== project.id) setNotice('Restored privately uploaded drawings from this browser. They remain available until cleaned up; if an upload has expired, select the file again.');
     setOnlyFlagged(true);
     setExpandedLineId('');
     setAcknowledgedRevision(null);
@@ -266,8 +331,19 @@ export default function BoqGenerator() {
     setJobs([]);
     if (project.allocationPending) {
       localProjectsRef.current.set(project.id, { ...project, allocationPending: true });
+      if (savedDraft?.projectId && savedDraft.projectId !== project.id) {
+        clearScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+        setFiles([]);
+        setConfirmedUploads([]);
+      }
+      setPendingUploadProjectId(project.id);
       toast.push(`Project “${project.name}” is pending administrator allocation.`, 'info');
       return;
+    }
+    if (savedFiles.length) {
+      setPendingUploadProjectId('');
+      setNotice('Your project assignment is active. You can generate a BOQ using the drawings uploaded earlier.');
+      saveScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id, { ...savedDraft, projectPending: false });
     }
     if (project.linkedTotal > 0) setNotice(`${project.linkedTotal} existing record${project.linkedTotal === 1 ? '' : 's'} linked to this project.`);
     toast.push(`Project “${project.name}” is ready. Add your IFC or DXF drawings below.`, 'success');
@@ -301,15 +377,36 @@ export default function BoqGenerator() {
       else if (file.size <= 0 || file.size > MAX_FILE_BYTES) rejected.push(`${file.name}: maximum file size is 50 MB.`);
       else accepted.push({ file, id: `${file.name}-${file.size}-${file.lastModified}`, progress: 0 });
     }
-    const newFiles = accepted.filter((next) => !files.some((file) => file.id === next.id));
-    if (files.length + newFiles.length > MAX_FILES) {
+    const newFiles = accepted.filter((next) => !files.some((file) => file.id === next.id && file.file));
+    const replacedFiles = newFiles.filter((next) => files.some((file) => file.id === next.id && !file.file));
+    if (files.length + newFiles.length - replacedFiles.length > MAX_FILES) {
       setError(`A run can include up to ${MAX_FILES} drawings. Remove some files or start another run.`);
       return;
     }
     if (rejected.length) setError(rejected.join(' '));
     setScaleByFileId((current) => ({ ...current, ...Object.fromEntries(newFiles.map((item) => [item.id, '1'])) }));
     setConfirmedScaleFileIds((current) => current.filter((id) => files.some((file) => file.id === id)));
-    setFiles((current) => [...current, ...newFiles]);
+    setFiles((current) => [...current.filter((file) => !newFiles.some((next) => next.id === file.id)), ...newFiles]);
+    if (replacedFiles.length) {
+      setConfirmedUploads((current) => current.filter((upload) => !replacedFiles.some((file) => file.id === upload.fileId)));
+      if (selectedProject?.allocationPending) {
+        const keptUploads = confirmedUploads.filter((upload) => !replacedFiles.some((file) => file.id === upload.fileId));
+        if (keptUploads.length) saveScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id, {
+          projectId,
+          projectName: selectedProject.name,
+          projectPending: true,
+          files: files.filter((file) => !replacedFiles.some((next) => next.id === file.id)).map((file) => ({
+            id: file.id,
+            filename: file.filename || file.file?.name,
+            sizeBytes: file.sizeBytes ?? file.file?.size,
+            lastModified: file.lastModified ?? file.file?.lastModified,
+            uploadId: keptUploads.find((upload) => upload.fileId === file.id)?.uploadId,
+          })).filter((file) => file.uploadId),
+          scaleByFileId,
+        });
+        else clearScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+      }
+    }
     if (accepted.length) setError('');
   };
 
@@ -318,6 +415,7 @@ export default function BoqGenerator() {
     const uploadsByFileId = new Map(confirmedUploads.map((upload) => [upload.fileId, upload.uploadId]));
     for (const item of files) {
       if (confirmedFileIds.has(item.id)) continue;
+      if (!item.file) throw new Error(`Re-select ${item.filename} to upload it again; the saved upload is no longer available.`);
       const signed = await api.boqGenerator.presignUpload({
         projectId,
         filename: item.file.name,
@@ -335,7 +433,25 @@ export default function BoqGenerator() {
       await api.boqGenerator.confirmUpload(signed.uploadId, accessToken);
       confirmedFileIds.add(item.id);
       uploadsByFileId.set(item.id, signed.uploadId);
-      setConfirmedUploads((current) => [...current.filter((upload) => upload.fileId !== item.id), { fileId: item.id, uploadId: signed.uploadId }]);
+      const nextUploads = [...confirmedFileIds].map((fileId) => ({ fileId, uploadId: uploadsByFileId.get(fileId) }));
+      setConfirmedUploads(nextUploads);
+      if (selectedProject?.allocationPending) {
+        setPendingUploadProjectId(projectId);
+        saveScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id, {
+          projectId,
+          projectName: selectedProject.name,
+          projectPending: true,
+          files: files.map((file) => ({
+            id: file.id,
+            filename: file.file?.name || file.filename,
+            sizeBytes: file.file?.size ?? file.sizeBytes,
+            lastModified: file.file?.lastModified ?? file.lastModified,
+            uploadId: uploadsByFileId.get(file.id),
+          })).filter((file) => file.uploadId),
+          scaleByFileId,
+          confirmedScaleFileIds,
+        });
+      }
     }
     return files.map((file) => ({ uploadId: uploadsByFileId.get(file.id), file })).filter(({ uploadId }) => uploadId);
   };
@@ -343,6 +459,10 @@ export default function BoqGenerator() {
   const generate = async (event) => {
     event.preventDefault();
     if (!projectId || !files.length || submitting || uploading) return;
+    if (files.some((file) => !file.file && (file.fileType || file.filename.split('.').pop()).toLowerCase() === 'dxf' && (!confirmedScaleFileIds.includes(file.id) || !(Number(scaleByFileId[file.id]) > 0)))) {
+      setError('Confirm the scale factor for every DXF drawing before generating the BOQ.');
+      return;
+    }
     setSubmitting(true);
     setUploading(true);
     setError('');
@@ -362,7 +482,8 @@ export default function BoqGenerator() {
             ? crypto.randomUUID()
             : `boq-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           batches: Object.values(uploadsByScale.reduce((batches, upload) => {
-            const key = upload.file.file.name.toLowerCase().endsWith('.dxf') ? String(scaleByFileId[upload.file.id] || 1) : 'ifc';
+            const filename = upload.file.file?.name || upload.file.filename;
+            const key = filename.toLowerCase().endsWith('.dxf') ? String(scaleByFileId[upload.file.id] || 1) : 'ifc';
             batches[key] ||= { projectId, uploads: [], dxfScale: key === 'ifc' ? null : Number(key), rateSource: activeRateSource, wastagePct: Number(wastagePct) || 0 };
             batches[key].uploads.push(upload.uploadId);
             return batches;
@@ -388,6 +509,8 @@ export default function BoqGenerator() {
       setBoq(null);
       setFiles([]);
       setConfirmedUploads([]);
+      clearScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+      setPendingUploadProjectId('');
       setScaleByFileId({});
       setConfirmedScaleFileIds([]);
       setSearchParams({ projectId, jobId: created.id });
@@ -547,15 +670,38 @@ export default function BoqGenerator() {
         {files.length > 0 && <ul aria-label="Selected drawings" style={{ listStyle: 'none', padding: 0, margin: '0.75rem 0' }}>
           {files.map((item) => <li key={item.id} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', padding: '0.55rem 0', borderBottom: '1px solid var(--border)' }}>
             <span style={{ flex: 1 }}>{item.file?.name || item.filename} <span style={{ color: 'var(--steel)' }}>({formatBytes(item.file?.size ?? item.sizeBytes)})</span></span>
-            {item.file?.name.toLowerCase().endsWith('.dxf') && <label>Scale factor
-              <input className="form-input" aria-label={`Scale factor for ${item.file.name}`} type="number" min="0.000001" step="any" value={scaleByFileId[item.id] ?? '1'} onChange={(event) => setFileScale(item.id, event.target.value)} />
+            {(item.file?.name || item.filename).toLowerCase().endsWith('.dxf') && <label>Scale factor
+              <input className="form-input" aria-label={`Scale factor for ${item.file?.name || item.filename}`} type="number" min="0.000001" step="any" value={scaleByFileId[item.id] ?? '1'} onChange={(event) => setFileScale(item.id, event.target.value)} />
             </label>}
-            {item.file?.name.toLowerCase().endsWith('.dxf') && <label><input type="checkbox" aria-label={`Confirm scale for ${item.file.name}`} checked={confirmedScaleFileIds.includes(item.id)} onChange={(event) => setConfirmedScaleFileIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /> Confirm scale</label>}
+            {(item.file?.name || item.filename).toLowerCase().endsWith('.dxf') && <label><input type="checkbox" aria-label={`Confirm scale for ${item.file?.name || item.filename}`} checked={confirmedScaleFileIds.includes(item.id)} onChange={(event) => setConfirmedScaleFileIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /> Confirm scale</label>}
             {uploading && <span aria-label="Upload progress">{progress}%</span>}
             <button type="button" className="btn btn-secondary" onClick={() => {
               submissionRef.current = null;
               setFiles((current) => current.filter((file) => file.id !== item.id));
-              setConfirmedUploads((current) => current.filter((upload) => upload.fileId !== item.id));
+              const remainingUploads = confirmedUploads.filter((upload) => upload.fileId !== item.id);
+              setConfirmedUploads(remainingUploads);
+              if (selectedProject?.allocationPending) {
+                if (remainingUploads.length) {
+                  const currentDraft = loadScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+                  const draftFiles = files.filter((file) => file.id !== item.id).map((file) => ({
+                    id: file.id,
+                    filename: file.file?.name || file.filename,
+                    sizeBytes: file.file?.size ?? file.sizeBytes,
+                    lastModified: file.file?.lastModified ?? file.lastModified,
+                    uploadId: remainingUploads.find((upload) => upload.fileId === file.id)?.uploadId,
+                  })).filter((file) => file.uploadId);
+                  saveScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id, {
+                  projectId,
+                  projectName: selectedProject.name,
+                  projectPending: true,
+                    files: currentDraft?.projectId === projectId
+                      ? currentDraft.files.filter((file) => file.id !== item.id).filter((file) => draftFiles.some((next) => next.id === file.id))
+                      : draftFiles,
+                  scaleByFileId,
+                  confirmedScaleFileIds,
+                  });
+                } else clearScopedDraft(PENDING_UPLOAD_DRAFT, employee?.id);
+              }
               setScaleByFileId((current) => { const next = { ...current }; delete next[item.id]; return next; });
               setConfirmedScaleFileIds((current) => current.filter((id) => id !== item.id));
             }} disabled={uploading} aria-label={`Remove ${item.file?.name || item.filename}`}>Remove</button>
@@ -569,7 +715,7 @@ export default function BoqGenerator() {
             </select> : <span style={{ display: 'block', padding: '0.6rem 0' }}>{activeRateSource}{rateSources[0]?.isSample || isSample ? ' — sample rates' : ''}</span>}
           </label>
         </details>}
-        <button type="button" className="btn btn-primary" style={{ marginTop: '1rem' }} disabled={!projectId || !files.length || submitting || (!selectedProject?.allocationPending && files.some((file) => file.file?.name.toLowerCase().endsWith('.dxf') && (!(Number(scaleByFileId[file.id]) > 0) || !confirmedScaleFileIds.includes(file.id))))} onClick={generate}>
+        <button type="button" className="btn btn-primary" style={{ marginTop: '1rem' }} disabled={!projectId || !files.length || submitting || (!selectedProject?.allocationPending && files.some((file) => (file.file?.name || file.filename).toLowerCase().endsWith('.dxf') && (!(Number(scaleByFileId[file.id]) > 0) || !confirmedScaleFileIds.includes(file.id))))} onClick={generate}>
           {uploading ? 'Uploading drawings…' : submitting ? 'Starting take-off…' : selectedProject?.allocationPending ? 'Upload drawings' : 'Generate BOQ'}
         </button>
       </section>
