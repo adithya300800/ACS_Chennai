@@ -23,7 +23,7 @@ import { subscribeToSessionChanges } from '../lib/sessionCoordination.js';
 // this event and wipes its in-memory state. We also clear the persisted
 // localStorage keys via `clearScopedDraftForUser` so the next account on a
 // shared machine starts with a blank form, not the previous engineer's draft.
-const DRAFT_CLEAR_BASES = ['dpr_draft_v1', 'inspection_draft_v1'];
+const DRAFT_CLEAR_BASES = ['dpr_draft_v1', 'inspection_draft_v1', 'boq_pending_uploads_v1'];
 
 function clearAllDraftsForEmployee(employeeId) {
   if (!employeeId) return;

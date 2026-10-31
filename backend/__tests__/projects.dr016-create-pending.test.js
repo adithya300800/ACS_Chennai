@@ -16,8 +16,8 @@
  * frontend needs a discoverable signal so it can explain to the
  * employee where the project went after reload. The fix is additive:
  *   - `POST /api/projects/resolve` returns `allocationPending: true`
- *     on the create branch ONLY (not on the existing-branch, because
- *     no new project was created so there is no pending allocation).
+ *     on creation and when the creator resolves their still-unassigned
+ *     project again; existing allocated projects are not pending.
  *   - The endpoint does NOT create a `ProjectAssignment` row for the
  *     creator — the policy is to leave roster membership as an
  *     admin-only gesture.
@@ -31,8 +31,8 @@
  *   1. Create branch response carries `allocationPending: true`.
  *   2. Create branch does NOT create a `ProjectAssignment` row for
  *      the creator (no out-of-policy self-assignment).
- *   3. Existing-branch response does NOT carry `allocationPending:
- *      true` (no new allocation to wait on).
+ *   3. Existing-branch returns pending only for its creator before any
+ *      assignment exists.
  *   4. Existing DR-014 wire shape is preserved on the create branch
  *      (status 201, isRegistered true, linkedCounts, linkedTotal).
  *   5. Auth: 401 without Authorization header.
@@ -93,6 +93,7 @@ function makePrisma() {
     // to leave roster allocation as an admin-only gesture.
     create: jest.fn(async () => { throw new Error('projectAssignment.create must not be called on /resolve'); }),
     createMany: jest.fn(async () => { throw new Error('projectAssignment.createMany must not be called on /resolve'); }),
+    findUnique: jest.fn(async () => null),
     findMany: jest.fn(async () => assignments),
     count: jest.fn(async () => assignments.length),
   };
@@ -203,7 +204,113 @@ describe('POST /api/projects/resolve — allocationPending contract (DR-016)', (
 
 // ─── 2. Existing-branch does NOT advertise pending allocation ───────────────
 describe('POST /api/projects/resolve — existing-branch (DR-016)', () => {
-  it('4. Existing project response does NOT carry allocationPending: true', async () => {
+  it('restores pending allocation for the creator when an existing project is still unassigned', async () => {
+    const existingId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const prisma = makePrisma();
+    prisma.project.findFirst = jest.fn(async () => ({
+      id: existingId,
+      name: 'T-Nagar',
+      code: 'T-NAGAR',
+      isActive: true,
+      createdById: USER_ID,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    }));
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post('/api/projects/resolve')
+      .set('Authorization', userJwt())
+      .send({ name: 'T-NAGAR' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(existingId);
+    expect(res.body.allocationPending).toBe(true);
+    expect(res.body.uploadsAllowed).toBe(true);
+    expect(prisma.projectAssignment.findMany).toHaveBeenCalledWith({ where: { projectId: existingId } });
+    expect(prisma.projectAssignment.findUnique).toHaveBeenCalledWith({
+      where: { projectId_employeeId: { projectId: existingId, employeeId: USER_ID } }, select: { id: true },
+    });
+  });
+
+  it('does not report pending allocation after the project has been assigned', async () => {
+    const existingId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const prisma = makePrisma();
+    prisma.project.findFirst = jest.fn(async () => ({
+      id: existingId,
+      name: 'T-Nagar',
+      code: 'T-NAGAR',
+      isActive: true,
+      createdById: USER_ID,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    }));
+    prisma.projectAssignment.findUnique.mockResolvedValue({ id: 'creator-assignment' });
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post('/api/projects/resolve')
+      .set('Authorization', userJwt())
+      .send({ name: 'T-NAGAR' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(existingId);
+    expect(res.body.allocationPending).toBeUndefined();
+  });
+
+  it('does not report pending allocation when the project creator is the assigned employee', async () => {
+    const existingId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const prisma = makePrisma();
+    prisma.project.findFirst = jest.fn(async () => ({
+      id: existingId, name: 'T-Nagar', code: 'T-NAGAR', isActive: true, createdById: USER_ID,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'), updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    }));
+    prisma.projectAssignment.findUnique.mockResolvedValue({ id: 'creator-assignment' });
+    const app = buildApp(prisma);
+    const res = await request(app).post('/api/projects/resolve')
+      .set('Authorization', userJwt()).send({ name: 'T-NAGAR' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.allocationPending).toBeUndefined();
+  });
+
+  it('keeps pending state when another employee is assigned but the creator is not', async () => {
+    const existingId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const prisma = makePrisma();
+    prisma.project.findFirst = jest.fn(async () => ({
+      id: existingId, name: 'T-Nagar', code: 'T-NAGAR', isActive: true, createdById: USER_ID,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'), updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    }));
+    prisma.projectAssignment.findUnique.mockResolvedValue(null);
+    prisma.projectAssignment.findMany.mockResolvedValue([{ id: 'other-employee-assignment' }]);
+    const app = buildApp(prisma);
+    const res = await request(app).post('/api/projects/resolve')
+      .set('Authorization', userJwt()).send({ name: 'T-NAGAR' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.allocationPending).toBe(true);
+    expect(res.body.uploadsAllowed).toBe(false);
+    expect(prisma.projectAssignment.findMany).toHaveBeenCalledWith({ where: { projectId: existingId } });
+    expect(prisma.projectAssignment.findUnique).toHaveBeenCalledWith({
+      where: { projectId_employeeId: { projectId: existingId, employeeId: USER_ID } }, select: { id: true },
+    });
+  });
+
+  it('does not mark an admin-created project pending when an admin resolves it', async () => {
+    const existingId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const prisma = makePrisma();
+    prisma.project.findFirst = jest.fn(async () => ({
+      id: existingId, name: 'T-Nagar', code: 'T-NAGAR', isActive: true, createdById: ADMIN_ID,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'), updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    }));
+    const app = buildApp(prisma);
+    const res = await request(app).post('/api/projects/resolve')
+      .set('Authorization', userJwt(ADMIN_ID, true)).send({ name: 'T-NAGAR' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.allocationPending).toBeUndefined();
+    expect(prisma.projectAssignment.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('does not mark an existing project pending when someone else created it', async () => {
     const existingId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
     const prisma = makePrisma();
     // Override findFirst to return an existing curated row so the
@@ -235,6 +342,19 @@ describe('POST /api/projects/resolve — existing-branch (DR-016)', () => {
     expect(prisma.project.create).not.toHaveBeenCalled();
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(prisma.projectAssignment.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/projects/resolve — administrator-created project', () => {
+  it('does not mark an admin-created new project as allocation-pending', async () => {
+    const prisma = makePrisma();
+    const app = buildApp(prisma);
+    const res = await request(app).post('/api/projects/resolve')
+      .set('Authorization', userJwt(ADMIN_ID, true)).send({ name: 'Admin Project' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.allocationPending).toBeUndefined();
+    expect(prisma._internal.projects[0].createdById).toBe(ADMIN_ID);
   });
 });
 

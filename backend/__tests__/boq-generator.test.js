@@ -129,7 +129,7 @@ function buildPrisma() {
 
   const api = {
     project: {
-      findUnique: jest.fn(async ({ where }) => where.id === PROJECT_ID ? { id: PROJECT_ID, name: 'Test Project', isActive: true } : null),
+      findUnique: jest.fn(async ({ where }) => where.id === PROJECT_ID ? { id: PROJECT_ID, name: 'Test Project', isActive: true, createdById: EMPLOYEE_ID } : null),
     },
     projectAssignment: {
       findUnique: jest.fn(async ({ where }) => (
@@ -410,6 +410,41 @@ describe('BOQ Generator private upload lifecycle', () => {
       .post('/api/boq-generator/uploads/presign')
       .set('x-test-employee', OTHER_EMPLOYEE_ID)
       .send({ projectId: PROJECT_ID, filename: 'floor.dxf', sizeBytes: 128 });
+    expect(upload.status).toBe(404);
+    expect(mockCreateUploadUrl).not.toHaveBeenCalled();
+  });
+
+  it('lets a project creator upload while pending but still requires assignment to create a job', async () => {
+    const prisma = buildPrisma();
+    prisma.project.findUnique
+      .mockResolvedValueOnce({ id: PROJECT_ID, name: 'Test Project', isActive: true, createdById: EMPLOYEE_ID })
+      .mockResolvedValueOnce({ id: PROJECT_ID, name: 'Test Project', isActive: true, createdById: EMPLOYEE_ID })
+      .mockResolvedValueOnce({ id: PROJECT_ID, name: 'Test Project', isActive: true, createdById: EMPLOYEE_ID });
+    prisma.projectAssignment.findUnique.mockResolvedValue(null);
+    const app = buildApp(prisma);
+    const { presign, confirm } = await createConfirmedUpload(app, prisma, { employeeId: EMPLOYEE_ID });
+    const job = await request(app)
+      .post('/api/boq-generator/jobs')
+      .set('x-test-employee', EMPLOYEE_ID)
+      .set('Idempotency-Key', 'pending-project-job')
+      .send({ projectId: PROJECT_ID, uploads: [presign.body.uploadId] });
+
+    expect(confirm.status).toBe(200);
+    expect(job.status).toBe(404);
+    expect(prisma.boqJob.create).not.toHaveBeenCalled();
+  });
+
+  it('does not grant the project creator upload access after an administrator allocates it', async () => {
+    const prisma = buildPrisma();
+    prisma.project.findUnique.mockResolvedValue({ id: PROJECT_ID, name: 'Test Project', isActive: true, createdById: EMPLOYEE_ID });
+    prisma.projectAssignment.findMany.mockResolvedValue([{ employeeId: OTHER_EMPLOYEE_ID }]);
+    prisma.projectAssignment.findUnique.mockResolvedValue(null);
+    const app = buildApp(prisma);
+    const upload = await request(app)
+      .post('/api/boq-generator/uploads/presign')
+      .set('x-test-employee', EMPLOYEE_ID)
+      .send({ projectId: PROJECT_ID, filename: 'floor.dxf', sizeBytes: 128 });
+
     expect(upload.status).toBe(404);
     expect(mockCreateUploadUrl).not.toHaveBeenCalled();
   });
