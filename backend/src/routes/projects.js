@@ -1008,7 +1008,13 @@ router.post('/resolve', asyncHandler(async (req, res) => {
           message: 'Project with this name is archived; ask an admin to re-activate or rename',
         });
       }
-      return res.json({ ...serializeProject(existing), isRegistered: true });
+      const allocationPending = !req.isAdmin && existing.createdById === req.employeeId &&
+        await prisma.projectAssignment.count({ where: { projectId: existing.id } }) === 0;
+      return res.json({
+        ...serializeProject(existing),
+        isRegistered: true,
+        ...(allocationPending ? { allocationPending: true } : {}),
+      });
     }
 
     // [DR-014] Orphan cohort WHERE shape — locks to projectId:null so
@@ -1084,10 +1090,9 @@ router.post('/resolve', asyncHandler(async (req, res) => {
     // My Projects list scopes to `?scope=assigned`, which requires an
     // active ProjectAssignment row (S7/ISRO-LEAK fix), the new project
     // would otherwise silently vanish from the creator's My Projects
-    // view on reload. The flag tells the frontend to surface a clear
-    // "pending administrator allocation" message. The existing branch
-    // (project already exists, no new row created) intentionally omits
-    // the flag — there is no new allocation to wait on.
+    // the flag tells the frontend to surface a clear
+    // "pending administrator allocation" message. Existing projects
+    // return the same flag only to their creator while no assignments exist.
     return res.status(201).json({
       ...serializeProject(result.created),
       isRegistered: true,
@@ -1103,7 +1108,15 @@ router.post('/resolve', asyncHandler(async (req, res) => {
       const race = await prisma.project.findFirst({
         where: { name: { equals: rawName, mode: 'insensitive' } },
       });
-      if (race) return res.json({ ...serializeProject(race), isRegistered: true });
+      if (race) {
+        const allocationPending = !req.isAdmin && race.createdById === req.employeeId &&
+          await prisma.projectAssignment.count({ where: { projectId: race.id } }) === 0;
+        return res.json({
+          ...serializeProject(race),
+          isRegistered: true,
+          ...(allocationPending ? { allocationPending: true } : {}),
+        });
+      }
     }
     console.error('Projects resolve error', {
       employeeHash: hashIdentifier(req.employeeId),

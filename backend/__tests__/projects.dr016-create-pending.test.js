@@ -16,8 +16,8 @@
  * frontend needs a discoverable signal so it can explain to the
  * employee where the project went after reload. The fix is additive:
  *   - `POST /api/projects/resolve` returns `allocationPending: true`
- *     on the create branch ONLY (not on the existing-branch, because
- *     no new project was created so there is no pending allocation).
+ *     on creation and when the creator resolves their still-unassigned
+ *     project again; existing allocated projects are not pending.
  *   - The endpoint does NOT create a `ProjectAssignment` row for the
  *     creator — the policy is to leave roster membership as an
  *     admin-only gesture.
@@ -31,8 +31,8 @@
  *   1. Create branch response carries `allocationPending: true`.
  *   2. Create branch does NOT create a `ProjectAssignment` row for
  *      the creator (no out-of-policy self-assignment).
- *   3. Existing-branch response does NOT carry `allocationPending:
- *      true` (no new allocation to wait on).
+ *   3. Existing-branch returns pending only for its creator before any
+ *      assignment exists.
  *   4. Existing DR-014 wire shape is preserved on the create branch
  *      (status 201, isRegistered true, linkedCounts, linkedTotal).
  *   5. Auth: 401 without Authorization header.
@@ -203,7 +203,55 @@ describe('POST /api/projects/resolve — allocationPending contract (DR-016)', (
 
 // ─── 2. Existing-branch does NOT advertise pending allocation ───────────────
 describe('POST /api/projects/resolve — existing-branch (DR-016)', () => {
-  it('4. Existing project response does NOT carry allocationPending: true', async () => {
+  it('restores pending allocation for the creator when an existing project is still unassigned', async () => {
+    const existingId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const prisma = makePrisma();
+    prisma.project.findFirst = jest.fn(async () => ({
+      id: existingId,
+      name: 'T-Nagar',
+      code: 'T-NAGAR',
+      isActive: true,
+      createdById: USER_ID,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    }));
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post('/api/projects/resolve')
+      .set('Authorization', userJwt())
+      .send({ name: 'T-NAGAR' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(existingId);
+    expect(res.body.allocationPending).toBe(true);
+    expect(prisma.projectAssignment.count).toHaveBeenCalledWith({ where: { projectId: existingId } });
+  });
+
+  it('does not report pending allocation after the project has been assigned', async () => {
+    const existingId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const prisma = makePrisma();
+    prisma.project.findFirst = jest.fn(async () => ({
+      id: existingId,
+      name: 'T-Nagar',
+      code: 'T-NAGAR',
+      isActive: true,
+      createdById: USER_ID,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    }));
+    prisma.projectAssignment.count.mockResolvedValue(1);
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post('/api/projects/resolve')
+      .set('Authorization', userJwt())
+      .send({ name: 'T-NAGAR' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(existingId);
+    expect(res.body.allocationPending).toBeUndefined();
+  });
+
+  it('does not mark an existing project pending when someone else created it', async () => {
     const existingId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
     const prisma = makePrisma();
     // Override findFirst to return an existing curated row so the

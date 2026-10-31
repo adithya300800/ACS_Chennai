@@ -75,6 +75,39 @@ describe('BOQ Generator user workflow', () => {
     expect(mockApi.boqGenerator.createJob).not.toHaveBeenCalled();
   });
 
+  test('restores the upload-only flow when the creator resolves an existing unassigned project', async () => {
+    mockApi.resolveProject.mockResolvedValueOnce({
+      id: 'project-existing', name: 'North Tower', isActive: true, allocationPending: true,
+    });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+
+    await screen.findByText('No assigned projects yet. Add a project to get started.');
+    fireEvent.click(screen.getByRole('button', { name: '+ Add project' }));
+    fireEvent.change(screen.getByLabelText('New project name'), { target: { value: 'North Tower' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
+
+    expect(await screen.findByText(/Pending administrator allocation/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['ISO-10303-21;'], 'tower.ifc', { type: 'application/octet-stream' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Upload drawings' }));
+
+    expect(await screen.findByText(/Drawings for “North Tower” are uploaded privately/i)).toBeInTheDocument();
+    expect(mockApi.boqGenerator.createJob).not.toHaveBeenCalled();
+  });
+
+  test('uses normal BOQ generation when resolving an existing project that has already been assigned', async () => {
+    mockApi.resolveProject.mockResolvedValueOnce({ id: 'project-assigned', name: 'North Tower', isActive: true });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+
+    await screen.findByText('No assigned projects yet. Add a project to get started.');
+    fireEvent.click(screen.getByRole('button', { name: '+ Add project' }));
+    fireEvent.change(screen.getByLabelText('New project name'), { target: { value: 'North Tower' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
+
+    expect(await screen.findByRole('button', { name: 'Generate BOQ' })).toBeInTheDocument();
+  });
+
   test('does not hide the page behind loading again when job search params change', async () => {
     mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
     mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [{ id: 'job-sample', projectId: 'project-assigned', status: 'COMPLETED', createdAt: '2026-10-28T00:00:00Z' }] });
