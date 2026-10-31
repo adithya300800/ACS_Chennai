@@ -7,8 +7,10 @@ import { uploadBlob } from '../../lib/blobUpload.js';
 import { MAX_PHOTO_BYTES, MAX_PHOTOS_PER_DPR, ACCEPTED_PHOTO_TYPES } from '../../lib/constants.js';
 import DprCustomSection from './DprCustomSection.jsx';
 import FormProgress from '../../components/FormProgress.jsx';
+import Breadcrumb from '../../components/Breadcrumb.jsx';
 import DrawingPicker from '../../components/DrawingPicker.jsx';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import { getBusinessToday } from '../../lib/businessDate.js';
 import { formatShortDate } from '../../lib/format.js';
 import { parseManpowerSummary, serializeManpowerRows } from '../../lib/manpowerSerialization.js';
 import {
@@ -79,9 +81,7 @@ const validateReportDate = (value) => {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return 'Report date must be in YYYY-MM-DD format. Please refresh the page.';
   }
-  const today = new Date();
-  today.setHours(23, 59, 59, 999);
-  if (new Date(value) > today) return 'Report date cannot be in the future.';
+  if (value > getBusinessToday()) return 'Report date cannot be in the future.';
   return null;
 };
 
@@ -213,6 +213,17 @@ export default function DprSubmit() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const draftId = searchParams.get('draftId') || null;
+  const requestedReportDate = searchParams.get('date');
+  const businessToday = getBusinessToday();
+  const parsedRequestedDate = new Date(`${requestedReportDate}T00:00:00.000Z`);
+  const useRequestedReportDate = Boolean(
+    requestedReportDate
+    && /^\d{4}-\d{2}-\d{2}$/.test(requestedReportDate)
+    && !Number.isNaN(parsedRequestedDate.getTime())
+    && parsedRequestedDate.toISOString().slice(0, 10) === requestedReportDate
+    && requestedReportDate <= businessToday
+  );
+  const reportDateDefault = useRequestedReportDate ? requestedReportDate : businessToday;
   // SOL-P1 mobile: order matters — draftId must be declared before
   // useDocumentTitle's first call so the minifier doesn't trip the TDZ
   // ("Cannot access 'g' before initialization") when the document-title
@@ -226,7 +237,7 @@ export default function DprSubmit() {
   // ownerScopedDraft.js for the migration contract.
   const currentEmployeeId = employee?.id ?? null;
   const initialDraft = loadDraftForEmployee(currentEmployeeId);
-  const [form, setForm] = useState(initialDraft?.form || {
+  const initialForm = initialDraft?.form || {
     // [N1 Phase B] projectId drives the new project picker; projectName
     // is the denormalized canonical name we keep sending on the wire
     // for legacy compatibility (the backend still requires it alongside
@@ -236,7 +247,7 @@ export default function DprSubmit() {
     projectId: '',
     projectName: '',
     location: '',
-    reportDate: getLocalDate(),
+    reportDate: businessToday,
     // BUG-2 (round-37): was 'Sunny' — silently biased the dataset so the
     // vast majority of historical DPRs report Sunny regardless of site.
     // Engineers now have to pick weather (or confirm Sunny) themselves.
@@ -253,7 +264,12 @@ export default function DprSubmit() {
     // survives even if the drawing is later superseded or renamed.
     drawingId: '',
     drawingRev: '',
-  });
+  };
+  const [form, setForm] = useState(
+    !draftId && !initialDraft && useRequestedReportDate
+      ? { ...initialForm, reportDate: reportDateDefault }
+      : initialForm
+  );
   // [N1 Phase B] project picker data — same payload the admin
   // ProjectsAdmin page uses (registered + auto-discovered). We merge
   // them into one list keyed by name (the dropdown's value is the
@@ -611,7 +627,7 @@ export default function DprSubmit() {
         projectId: '',
         projectName: '',
         location: '',
-        reportDate: getLocalDate(),
+        reportDate: reportDateDefault,
         // BUG-2 (round-37): empty default; see comment at line 201.
         weather: '',
         temperature: '',
@@ -1474,7 +1490,7 @@ export default function DprSubmit() {
       projectId: '',
       projectName: '',
       location: '',
-      reportDate: getLocalDate(),
+      reportDate: reportDateDefault,
       // BUG-2 (round-37): empty default; see comment at line 201.
       weather: '',
       temperature: '',
@@ -1539,6 +1555,7 @@ export default function DprSubmit() {
   return (
     <div className="dpr-page">
       <div className="dpr-card">
+        <Breadcrumb items={[{ label: 'Dashboard', to: '/portal/dashboard' }, { label: 'My Daily Reports', to: '/portal/dpr/my' }, { label: draftId ? 'Edit DPR' : 'New DPR' }]} />
         <h1 className="dpr-page-title">Submit Daily Progress Report</h1>
         <p style={{ color: 'var(--steel)', fontSize: '0.9rem', marginBottom: '1rem' }}>
           Daily narrative for the cover page. Detailed material receipts,
@@ -1584,41 +1601,6 @@ export default function DprSubmit() {
             },
           ]}
         />
-
-        {/* §8.3 (Fresh24 wave-4 batch-B): required-fields side panel.
-            Renders ONLY when blockingRequirements is non-empty — a clean
-            form stays silent. The panel lists each missing required field
-            as a focus-link so the engineer can jump straight to the gap.
-            Sticky on desktop (≥1024px, via .dpr-required-fields-sticky)
-            and top-of-page on narrower viewports. The panel sits above
-            the draft banner + error banner so a brand-new DPR sees the
-            gaps first, and a draft-resumed DPR sees the gaps above the
-            "Restored unsaved draft" hint. */}
-        {blockingRequirements.length > 0 && (
-          <div
-            id="dpr-required-fields"
-            role="status"
-            aria-live="polite"
-            className="dpr-required-fields"
-          >
-            <div className="dpr-required-fields-title">Required to submit</div>
-            <ul className="dpr-required-fields-list">
-              {blockingRequirements.map((req) => (
-                <li key={req.field}>
-                  <button
-                    type="button"
-                    className="dpr-required-fields-link"
-                    onClick={() => focusRequirement(req.anchorId)}
-                    aria-label={`Focus ${req.label}`}
-                    data-anchor-id={req.anchorId}
-                  >
-                    {req.label}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
 
         {showDraftBanner && (
           <div
@@ -1692,6 +1674,28 @@ export default function DprSubmit() {
             <button type="button" className="btn btn-secondary btn-sm" onClick={handleDiscardDraft}>
               Discard
             </button>
+          </div>
+        )}
+
+        {/* Show draft context before the missing-field checklist. */}
+        {blockingRequirements.length > 0 && (
+          <div id="dpr-required-fields" role="status" aria-live="polite" className="dpr-required-fields">
+            <div className="dpr-required-fields-title">Required to submit</div>
+            <ul className="dpr-required-fields-list">
+              {blockingRequirements.map((req) => (
+                <li key={req.field}>
+                  <button
+                    type="button"
+                    className="dpr-required-fields-link"
+                    onClick={() => focusRequirement(req.anchorId)}
+                    aria-label={`Focus ${req.label}`}
+                    data-anchor-id={req.anchorId}
+                  >
+                    {req.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 
@@ -1858,7 +1862,7 @@ export default function DprSubmit() {
                 className="form-input"
                 value={form.reportDate}
                 onChange={handleChange}
-                max={getLocalDate()}
+                max={getBusinessToday()}
               />
             </div>
           </div>
@@ -2406,11 +2410,11 @@ export default function DprSubmit() {
           )}
 
           <div className="dpr-form-actions dpr-form-actions-sticky" style={{ marginTop: '1.5rem' }}>
-            <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting' || hasInFlightUploads}>
-              {status === 'submitting' ? 'Saving...' : 'Save as Draft'}
-            </button>
             <button type="button" className="btn btn-primary" onClick={() => handleSubmit('SUBMITTED')} disabled={status === 'submitting' || hasInFlightUploads}>
               {status === 'submitting' ? 'Submitting...' : hasInFlightUploads ? 'Waiting for photos…' : 'Submit Report'}
+            </button>
+            <button type="button" className="btn btn-secondary" onClick={() => handleSubmit('DRAFT')} disabled={status === 'submitting' || hasInFlightUploads}>
+              {status === 'submitting' ? 'Saving...' : 'Save as Draft'}
             </button>
           </div>
         </div>

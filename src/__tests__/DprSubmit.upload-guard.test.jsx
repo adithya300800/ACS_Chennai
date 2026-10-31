@@ -51,10 +51,10 @@ jest.mock('../hooks/useDocumentTitle.js', () => ({
   useDocumentTitle: jest.fn(),
 }));
 
-const renderSubmit = () => {
+const renderSubmit = (entry = '/portal/dpr/submit') => {
   const DprSubmit = require('../pages/portal/DprSubmit.jsx').default;
   return render(
-    <MemoryRouter initialEntries={['/portal/dpr/submit']}>
+    <MemoryRouter initialEntries={[entry]}>
       <Routes>
         <Route path="/portal/dpr/submit" element={<DprSubmit />} />
       </Routes>
@@ -85,6 +85,12 @@ describe('SOL DR-006 (client) — Submit disabled while photo uploads are in fli
   beforeEach(() => {
     localStorage.clear();
     jest.clearAllMocks();
+  });
+
+  test('new DPR uses the business date passed by the dashboard shortcut', async () => {
+    const businessToday = require('../lib/businessDate.js').getBusinessToday();
+    renderSubmit(`/portal/dpr/submit?date=${businessToday}`);
+    await waitFor(() => expect(screen.getByLabelText('Report Date')).toHaveValue(businessToday));
   });
 
   test('Submit Report and Save as Draft buttons start enabled (no in-flight uploads)', async () => {

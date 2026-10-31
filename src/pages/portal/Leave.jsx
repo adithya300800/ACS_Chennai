@@ -4,6 +4,9 @@ import { useToast } from '../../contexts/ToastContext.jsx';
 import { api } from '../../lib/api.js';
 import { formatShortDate, formatDateTime } from '../../lib/format.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import Breadcrumb from '../../components/Breadcrumb.jsx';
+import { inclusiveDayCount, summariseLeave } from '../../lib/leaveSummary.js';
+import { getBusinessToday } from '../../lib/businessDate.js';
 
 const LEAVE_TYPES = ['CASUAL', 'SICK', 'EARNED', 'UNPAID', 'OPTIONAL'];
 
@@ -22,17 +25,6 @@ const addDaysInputValue = (n) => {
   const d = new Date();
   d.setDate(d.getDate() + n);
   return toDateInputValue(d);
-};
-
-// Compute inclusive day count between two YYYY-MM-DD strings.
-const inclusiveDayCount = (startStr, endStr) => {
-  if (!startStr || !endStr) return 0;
-  const [sy, sm, sd] = startStr.split('-').map(Number);
-  const [ey, em, ed] = endStr.split('-').map(Number);
-  const s = new Date(sy, sm - 1, sd).getTime();
-  const e = new Date(ey, em - 1, ed).getTime();
-  if (Number.isNaN(s) || Number.isNaN(e) || e < s) return 0;
-  return Math.round((e - s) / (1000 * 60 * 60 * 24)) + 1;
 };
 
 const STATUS_LABEL = {
@@ -57,9 +49,11 @@ export default function Leave() {
   const { push } = useToast();
 
   const [requests, setRequests] = useState([]);
+  const [requestTotal, setRequestTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const leaveSummary = summariseLeave(requests, getBusinessToday());
 
   // Form state
   const today = todayInputValue();
@@ -80,6 +74,7 @@ export default function Leave() {
     try {
       const data = await api.getMyLeaves(accessToken);
       setRequests(data.requests || []);
+      setRequestTotal(data.total ?? data.requests?.length ?? 0);
     } catch (err) {
       setError(err.message || 'Failed to load leave requests');
     } finally {
@@ -204,6 +199,7 @@ export default function Leave() {
   return (
     <div className="leave-page">
       <div className="leave-page-header">
+        <Breadcrumb items={[{ label: 'Dashboard', to: '/portal/dashboard' }, { label: 'My Leave' }]} />
         <h1 className="leave-page-title" aria-label="My Leave">My Leave</h1>
         <p className="leave-page-sub">Submit a leave request and track its status</p>
       </div>
@@ -323,7 +319,20 @@ export default function Leave() {
 
       {/* My requests */}
       <div className="leave-list-card">
-        <h2 className="leave-section-title">My Requests</h2>
+        <div className="leave-list-header">
+          <div>
+            <h2 className="leave-section-title">My Requests</h2>
+            {!loading && !error && (
+              <p className="leave-summary-copy">
+                {requestTotal > requests.length ? 'At least ' : ''}{leaveSummary.daysTaken} day{leaveSummary.daysTaken === 1 ? '' : 's'} in approved requests for {leaveSummary.year}
+                {' · '}{requestTotal > requests.length ? 'at least ' : ''}{leaveSummary.pendingCount} pending request{leaveSummary.pendingCount === 1 ? '' : 's'}
+              </p>
+            )}
+            {!loading && !error && requestTotal > requests.length && (
+              <p className="leave-summary-copy">Based on the most recent {requests.length} requests.</p>
+            )}
+          </div>
+        </div>
         {loading && <div className="leave-list-state">Loading...</div>}
         {error && <div className="leave-list-error" role="alert">{error}</div>}
         {!loading && !error && requests.length === 0 && (
@@ -357,7 +366,7 @@ export default function Leave() {
                   {r.status === 'PENDING' && (
                     <button
                       type="button"
-                      className="leave-btn leave-btn-ghost"
+                      className="leave-btn leave-btn-danger-outline"
                       onClick={() => handleCancel(r.id)}
                       aria-label={`Cancel leave request for ${formatShortDate(r.startDate)}`}
                     >

@@ -17,6 +17,7 @@ import usePullToRefresh from '../../hooks/usePullToRefresh.js';
 import PullToRefreshIndicator from '../../components/PullToRefreshIndicator.jsx';
 // Round-28 #7: photo lightbox for the in-place detail modal too.
 import PhotoLightbox from '../../components/PhotoLightbox.jsx';
+import FilterChip from '../../components/ui/FilterChip.jsx';
 
 const STATUS_FILTERS = [
   { value: '', label: 'All Statuses' },
@@ -646,15 +647,17 @@ export default function DprList() {
               and group the date range in a fieldset with a legend. */}
           <div className="form-row">
             <div className="form-group">
-              <label htmlFor="dpr-filter-status">Status</label>
-              <select
-                id="dpr-filter-status"
-                className="form-input"
-                value={filter.status}
-                onChange={e => handleFilterChange('status', e.target.value)}
-              >
-                {STATUS_FILTERS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
-              </select>
+              <span className="dpr-filter-label" id="dpr-filter-status-label">Status</span>
+              <div className="filter-chip-row dpr-filter-status" role="group" aria-labelledby="dpr-filter-status-label">
+                {STATUS_FILTERS.map((s) => (
+                  <FilterChip
+                    key={s.value || 'all'}
+                    label={s.value ? s.label : 'All'}
+                    active={filter.status === s.value}
+                    onClick={() => handleFilterChange('status', s.value)}
+                  />
+                ))}
+              </div>
             </div>
             <fieldset className="form-group" style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
               <legend style={{ fontSize: '0.85rem', fontWeight: 500, color: 'var(--steel)', padding: 0 }}>Date range</legend>
@@ -856,7 +859,6 @@ export default function DprList() {
                           <button
                             type="button"
                             className="btn btn-secondary btn-sm"
-                            style={{ padding: '0.25rem 0.55rem', fontSize: '0.78rem' }}
                             onClick={() => setConfirmDeleteId(null)}
                             disabled={deleting}
                           >
@@ -864,14 +866,7 @@ export default function DprList() {
                           </button>
                           <button
                             type="button"
-                            className="btn btn-sm"
-                            style={{
-                              padding: '0.25rem 0.55rem',
-                              fontSize: '0.78rem',
-                              background: 'var(--danger)',
-                              color: '#fff',
-                              border: 'none',
-                            }}
+                            className="btn btn-danger btn-sm"
                             onClick={() => handleDeleteDraft(dpr.id)}
                             disabled={deleting}
                           >
@@ -881,12 +876,7 @@ export default function DprList() {
                       ) : (
                         <button
                           type="button"
-                          className="btn btn-ghost btn-sm"
-                          style={{
-                            padding: '0.25rem 0.55rem',
-                            fontSize: '0.78rem',
-                            color: 'var(--danger)',
-                          }}
+                          className="btn btn-ghost btn-sm dpr-delete-trigger"
                           onClick={(e) => {
                             e.stopPropagation();
                             setConfirmDeleteId(dpr.id);

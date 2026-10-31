@@ -5,6 +5,7 @@ import { api } from '../../lib/api.js';
 import { formatDate, formatFullDate, formatMonthLabel, formatTime, getMapUrl, formatCoords, getCurrentIstMonth } from '../../lib/format.js';
 import { getBusinessToday } from '../../lib/businessDate.js';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle.js';
+import Breadcrumb from '../../components/Breadcrumb.jsx';
 // §8.13 (Fresh24 wave-4 batch-C): migrate the date-detail overlay from
 // a hand-rolled `<div className="modal-overlay">` to the shared Modal
 // primitive (DR-017). The shared primitive supplies role/aria-modal/
@@ -387,6 +388,7 @@ export default function Attendance() {
     <div className="attendance-page">
       {/* Header */}
       <div className="attendance-page-header">
+        <Breadcrumb items={[{ label: 'Dashboard', to: '/portal/dashboard' }, { label: 'Attendance' }]} />
         <h1 className="attendance-page-title">Attendance</h1>
         <p className="attendance-page-sub">Mark your daily attendance with location</p>
       </div>

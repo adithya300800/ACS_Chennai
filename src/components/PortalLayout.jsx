@@ -301,26 +301,14 @@ const navGroups = [
       { to: '/portal/attendance', label: 'My Attendance', icon: ATTENDANCE_ICON },
       { to: '/portal/leave', label: 'My Leave', icon: CALENDAR_ICON },
       { to: '/portal/training', label: 'My Training', icon: BOOK_ICON },
-      // §8.10: Help & Support link at the end of the personal section
-      // so daily-flow items keep their original positions. The page is
-      // a static four-section reference (login / attendance / leave+training /
-      // contact-form) — discoverable via the UserMenu dropdown too, but
-      // a sidebar entry lets a new employee reach it without having to
-      // know the dropdown exists.
-      { to: '/portal/support', label: 'Help & Support', icon: HELP_ICON },
-      // [Sidebar 2026-10-06] "My Payslips" moved out of "My Reports" into
-      // "My Work". Payslips are a personal HR self-service item alongside
-      // attendance / leave / training / support, not a filed report. Admin
-      // cross-org coverage stays under Records as "Payslips".
-      { to: '/portal/payslips', label: 'My Payslips', icon: PAYSLIP_ICON },
+      { to: '/portal/dpr/my', label: 'My Daily Reports', icon: DOC_ICON },
+      { to: '/portal/inspection/my', label: 'My Inspection Records', icon: CLIPBOARD_ICON },
     ],
   },
   {
     // Per-user filed records — visible to everyone.
     label: 'My Reports',
     items: [
-      { to: '/portal/dpr/my', label: 'My Daily Reports', icon: DOC_ICON },
-      { to: '/portal/inspection/my', label: 'My Inspection Records', icon: CLIPBOARD_ICON },
       // S7/MyReports (2026-09-12): cross-project "Project Reports" page
       // (weekly / monthly / due-diligence / quality) — surface point for
       // the per-project upload/list flow that previously only lived inside
@@ -358,6 +346,13 @@ const navGroups = [
       // /portal/admin/billing-certifications (Records group). Same
       // BILLING_ICON so the two entries feel like siblings.
       { to: '/portal/certifications', label: 'My Certifications', icon: BILLING_ICON },
+    ],
+  },
+  {
+    label: 'Personal',
+    items: [
+      { to: '/portal/payslips', label: 'My Payslips', icon: PAYSLIP_ICON },
+      { to: '/portal/support', label: 'Help & Support', icon: HELP_ICON },
     ],
   },
   {

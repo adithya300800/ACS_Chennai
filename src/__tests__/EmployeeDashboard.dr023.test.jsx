@@ -70,6 +70,7 @@ jest.mock('../lib/api.js', () => ({
   api: {
     get: jest.fn(),
     getDprs: jest.fn(),
+    getInspections: jest.fn(),
     getMyTraining: jest.fn(),
     getMyLeaves: jest.fn(),
     getNotifications: jest.fn(),
@@ -89,6 +90,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   api.get.mockResolvedValue(EMPTY_TODAY);
   api.getDprs.mockResolvedValue(EMPTY_DPRS);
+  api.getInspections.mockResolvedValue({ inspections: [] });
   api.getMyTraining.mockResolvedValue(EMPTY_TRAINING);
   api.getMyLeaves.mockResolvedValue(EMPTY_LEAVES);
   api.getNotifications.mockResolvedValue(EMPTY_NOTIFS);
@@ -126,6 +128,36 @@ describe('DR-023 — EmployeeDashboard real-mount coverage', () => {
     const heading = await screen.findByTestId('observed-location');
     expect(heading.textContent).toMatch(/pathname=\/portal\/attendance/);
     expect(heading.textContent).toMatch(/search=.*action=check-in/);
+  });
+});
+
+describe('EmployeeDashboard today-report activity', () => {
+  test('loads both owner-scoped report lists using the ACS business date', async () => {
+    const today = require('../lib/businessDate.js').getBusinessToday();
+    render(
+      <MemoryRouter initialEntries={['/portal/dashboard']}>
+        <EmployeeDashboardProbe />
+      </MemoryRouter>
+    );
+
+    expect(api.getDprs).toHaveBeenCalledWith({ my: 'true', from: today, to: today, limit: '50' }, 'test-token');
+    expect(api.getInspections).toHaveBeenCalledWith({ my: 'true', from: today, to: today, limit: '50' }, 'test-token');
+    expect(await screen.findByRole('link', { name: 'Create DPR' })).toHaveAttribute('href', `/portal/dpr/submit?date=${today}`);
+    expect(await screen.findByRole('link', { name: 'Create Inspection' })).toHaveAttribute('href', `/portal/inspection/submit?date=${today}`);
+  });
+
+  test('a failed report list is disclosed while the healthy list stays usable', async () => {
+    api.getInspections.mockRejectedValueOnce(new Error('Inspection service unavailable'));
+    render(
+      <MemoryRouter initialEntries={['/portal/dashboard']}>
+        <EmployeeDashboardProbe />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("Couldn't load")).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    const today = require('../lib/businessDate.js').getBusinessToday();
+    expect(screen.getByRole('link', { name: 'Create DPR' })).toHaveAttribute('href', `/portal/dpr/submit?date=${today}`);
   });
 });
 

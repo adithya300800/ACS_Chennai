@@ -164,6 +164,7 @@ jest.mock('../lib/api.js', () => ({
   api: {
     get: jest.fn(),
     getDprs: jest.fn(),
+    getInspections: jest.fn(),
     getMyTraining: jest.fn(),
     getMyLeaves: jest.fn(),
     getNotifications: jest.fn(),
@@ -182,6 +183,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   api.get.mockResolvedValue(EMPTY_TODAY);
   api.getDprs.mockResolvedValue(EMPTY_DPRS);
+  api.getInspections.mockResolvedValue({ inspections: [] });
   api.getMyLeaves.mockResolvedValue(EMPTY_LEAVES);
   api.getNotifications.mockResolvedValue(EMPTY_NOTIFS);
   api.post.mockResolvedValue({});
