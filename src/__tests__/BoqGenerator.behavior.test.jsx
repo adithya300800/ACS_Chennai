@@ -1,10 +1,10 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const mockApi = {
   getProjects: jest.fn(async () => ({ projects: [], discovered: [] })),
-    resolveProject: jest.fn(async (name) => ({ id: 'project-new', name, isActive: true, allocationPending: true, linkedTotal: 0 })),
+    resolveProject: jest.fn(async (name) => ({ id: 'project-new', name, isActive: true, allocationPending: true, uploadsAllowed: true, linkedTotal: 0 })),
   boqGenerator: {
     access: jest.fn(async () => ({ isPilot: true, pilotEnabled: false })),
     meta: jest.fn(async () => ({
@@ -26,9 +26,10 @@ const mockApi = {
 };
 const mockToastPush = jest.fn();
 const mockUploadBlob = jest.fn(async () => {});
+let mockEmployee = { id: 'employee-test', isAdmin: false };
 
 jest.mock('../lib/api.js', () => ({ api: mockApi }));
-jest.mock('../contexts/AuthContext.jsx', () => ({ useAuth: () => ({ accessToken: 'test-token' }) }));
+jest.mock('../contexts/AuthContext.jsx', () => ({ useAuth: () => ({ accessToken: 'test-token', employee: mockEmployee, isAdmin: mockEmployee.isAdmin }) }));
 jest.mock('../contexts/ToastContext.jsx', () => ({ useToast: () => ({ push: mockToastPush }) }));
 jest.mock('../lib/blobUpload.js', () => ({ uploadBlob: (...args) => mockUploadBlob(...args) }));
 
@@ -37,6 +38,8 @@ const BoqGenerator = require('../pages/portal/BoqGenerator.jsx').default;
 describe('BOQ Generator user workflow', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    localStorage.clear();
+    mockEmployee = { id: 'employee-test', isAdmin: false };
     mockApi.getProjects.mockResolvedValue({ projects: [], discovered: [] });
     mockApi.boqGenerator.meta.mockResolvedValue({
       effectiveStatus: 'SAMPLE', productionMode: false,
@@ -50,7 +53,10 @@ describe('BOQ Generator user workflow', () => {
     mockApi.boqGenerator.access.mockResolvedValue({ isPilot: true, pilotEnabled: false });
   });
 
-  test('creates a project from the empty state, uploads an IFC and starts its take-off', async () => {
+  test('lets the creator upload drawings while the new project awaits admin allocation', async () => {
+    mockApi.resolveProject.mockResolvedValueOnce({
+      id: 'project-new', name: 'North Tower', isActive: true, allocationPending: true, uploadsAllowed: true,
+    });
     render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
 
     await screen.findByText('No assigned projects yet. Add a project to get started.');
@@ -59,8 +65,134 @@ describe('BOQ Generator user workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
 
     await waitFor(() => expect(mockApi.resolveProject).toHaveBeenCalledWith('North Tower', 'test-token'));
-    expect(await screen.findByText(/This project is pending administrator allocation/i)).toBeInTheDocument();
-    expect(screen.getByLabelText('Select model drawings')).toBeDisabled();
+    expect(await screen.findByText(/Pending administrator allocation/i)).toBeInTheDocument();
+    expect(screen.getByText(/You can upload drawings now/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Select model drawings')).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['ISO-10303-21;'], 'tower.ifc', { type: 'application/octet-stream' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Upload drawings' }));
+
+    expect(await screen.findByText(/Drawings for “North Tower” are uploaded privately/i)).toBeInTheDocument();
+    expect(screen.getByText('tower.ifc')).toBeInTheDocument();
+    expect(mockApi.boqGenerator.presignUpload).toHaveBeenCalledTimes(1);
+    expect(mockApi.boqGenerator.confirmUpload).toHaveBeenCalledTimes(1);
+    expect(mockApi.boqGenerator.createJob).not.toHaveBeenCalled();
+  });
+
+  test('restores the upload-only flow when the creator resolves an existing unassigned project', async () => {
+    mockApi.resolveProject.mockResolvedValueOnce({
+      id: 'project-existing', name: 'North Tower', isActive: true, allocationPending: true, uploadsAllowed: true,
+    });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+
+    await screen.findByText('No assigned projects yet. Add a project to get started.');
+    fireEvent.click(screen.getByRole('button', { name: '+ Add project' }));
+    fireEvent.change(screen.getByLabelText('New project name'), { target: { value: 'North Tower' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
+
+    expect(await screen.findByText(/Pending administrator allocation/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['ISO-10303-21;'], 'tower.ifc', { type: 'application/octet-stream' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Upload drawings' }));
+
+    expect(await screen.findByText(/Drawings for “North Tower” are uploaded privately/i)).toBeInTheDocument();
+    expect(mockApi.boqGenerator.createJob).not.toHaveBeenCalled();
+  });
+
+  test('uses normal BOQ generation when resolving an existing project that has already been assigned', async () => {
+    mockApi.resolveProject.mockResolvedValueOnce({ id: 'project-assigned', name: 'North Tower', isActive: true });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+
+    await screen.findByText('No assigned projects yet. Add a project to get started.');
+    fireEvent.click(screen.getByRole('button', { name: '+ Add project' }));
+    fireEvent.change(screen.getByLabelText('New project name'), { target: { value: 'North Tower' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
+
+    expect(await screen.findByRole('button', { name: 'Generate BOQ' })).toBeInTheDocument();
+  });
+
+  test('lets admins generate immediately when project resolution has no pending allocation flag', async () => {
+    mockEmployee = { id: 'admin-test', isAdmin: true };
+    mockApi.resolveProject.mockResolvedValueOnce({ id: 'project-admin-new', name: 'Admin Project', isActive: true });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+
+    await screen.findByText('No assigned projects yet. Add a project to get started.');
+    fireEvent.click(screen.getByRole('button', { name: '+ Add project' }));
+    fireEvent.change(screen.getByLabelText('New project name'), { target: { value: 'Admin Project' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
+
+    expect(await screen.findByRole('button', { name: 'Generate BOQ' })).toBeInTheDocument();
+  });
+
+  test('resolves a URL-selected pending project before enabling drawing uploads', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [], discovered: [] });
+    mockApi.getProject = jest.fn(async () => ({ id: 'project-new', name: 'North Tower', isActive: true }));
+    mockApi.resolveProject.mockResolvedValueOnce({
+      id: 'project-new', name: 'North Tower', isActive: true, allocationPending: true, uploadsAllowed: true,
+    });
+    render(<MemoryRouter initialEntries={['/portal/boq-generator?projectId=project-new']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+
+    expect(await screen.findByRole('button', { name: 'Upload drawings' })).toBeInTheDocument();
+    expect(mockApi.getProject).toHaveBeenCalledWith('project-new', 'test-token');
+    expect(mockApi.resolveProject).toHaveBeenCalledWith('North Tower', 'test-token');
+    expect(screen.getByLabelText('Select model drawings')).toBeEnabled();
+  });
+
+  test('re-resolves upload eligibility when allocation is checked in an open page', async () => {
+    const pending = { id: 'project-new', name: 'North Tower', isActive: true, allocationPending: true, uploadsAllowed: true };
+    mockApi.resolveProject.mockResolvedValue(pending);
+    mockApi.getProjects.mockResolvedValue({ projects: [], discovered: [] });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByText('No assigned projects yet. Add a project to get started.');
+    fireEvent.click(screen.getByRole('button', { name: '+ Add project' }));
+    fireEvent.change(screen.getByLabelText('New project name'), { target: { value: 'North Tower' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
+    expect(await screen.findByRole('button', { name: 'Upload drawings' })).toBeInTheDocument();
+
+    mockApi.resolveProject.mockResolvedValueOnce({ ...pending, uploadsAllowed: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Check allocation' }));
+
+    expect(await screen.findByText(/assigned to another employee\. You cannot upload or generate BOQs until you are assigned/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Upload drawings' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Generate BOQ' })).toBeDisabled();
+  });
+
+  test('restores confirmed pending uploads after reload and reuses them after assignment', async () => {
+    mockApi.resolveProject.mockResolvedValue({
+      id: 'project-new', name: 'North Tower', isActive: true, allocationPending: true, uploadsAllowed: true,
+    });
+    const firstPage = render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByText('No assigned projects yet. Add a project to get started.');
+    fireEvent.click(screen.getByRole('button', { name: '+ Add project' }));
+    fireEvent.change(screen.getByLabelText('New project name'), { target: { value: 'North Tower' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create project' }));
+    await screen.findByText(/Pending administrator allocation/i);
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['ISO-10303-21;'], 'tower.ifc', { type: 'application/octet-stream' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Upload drawings' }));
+    await screen.findByText(/Drawings for “North Tower” are uploaded privately/i);
+    const savedUploadId = JSON.parse(localStorage.getItem('boq_pending_uploads_v1:employee-test')).files[0].uploadId;
+
+    firstPage.unmount();
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    expect(await screen.findByText(/Pending administrator allocation/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Upload drawings' }));
+    await screen.findByText(/Drawings for “North Tower” are uploaded privately/i);
+    expect(mockApi.boqGenerator.presignUpload).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-new', name: 'North Tower' }], discovered: [] });
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+
+    expect(await screen.findByText('tower.ifc')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Generate BOQ' }));
+    await waitFor(() => expect(mockApi.boqGenerator.createJob).toHaveBeenCalledTimes(1));
+    expect(mockApi.boqGenerator.createJob.mock.calls[0][0].uploads).toEqual([savedUploadId]);
+    expect(mockApi.boqGenerator.presignUpload).toHaveBeenCalledTimes(1);
   });
 
   test('does not hide the page behind loading again when job search params change', async () => {
@@ -172,6 +304,50 @@ describe('BOQ Generator user workflow', () => {
     expect(mockApi.boqGenerator.presignUpload).toHaveBeenCalledTimes(1);
     expect(mockApi.boqGenerator.createJob.mock.calls[1][0].uploads).toEqual(mockApi.boqGenerator.createJob.mock.calls[0][0].uploads);
     expect(mockApi.boqGenerator.createJob.mock.calls[1][2]).toBe(mockApi.boqGenerator.createJob.mock.calls[0][2]);
+  });
+
+  test('directs service configuration failures to an administrator without claiming uploads are safe', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.createJob.mockRejectedValueOnce(Object.assign(
+      new Error('The drawing service is not configured'),
+      { code: 'BOQ_SERVICE_UNAVAILABLE' },
+    ));
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'project-assigned' } });
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['ISO-10303-21;'], 'tower.ifc', { type: 'application/octet-stream' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate BOQ' }));
+
+    await waitFor(() => expect(mockApi.boqGenerator.createJob).toHaveBeenCalledTimes(1));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/processor connection is not configured/i);
+    expect(alert).toHaveTextContent('BOQ_BASE_URL');
+    expect(alert).toHaveTextContent('BOQ_API_TOKEN');
+    expect(alert).not.toHaveTextContent(/upload is safe|try again shortly/i);
+    expect(screen.getByText('tower.ifc')).toBeInTheDocument();
+  });
+
+  test('directs processor credential rejection to an administrator', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.createJob.mockRejectedValueOnce(Object.assign(
+      new Error('The BOQ processor rejected the portal credentials'),
+      { code: 'BOQ_SERVICE_AUTH_FAILED' },
+    ));
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'project-assigned' } });
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['ISO-10303-21;'], 'tower.ifc', { type: 'application/octet-stream' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate BOQ' }));
+
+    await waitFor(() => expect(mockApi.boqGenerator.createJob).toHaveBeenCalledTimes(1));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/processor rejected the portal credentials/i);
+    expect(alert).toHaveTextContent('BOQ_API_TOKEN');
+    expect(screen.getByText('tower.ifc')).toBeInTheDocument();
   });
 
   test('shows actual result flags, defaults to flagged and unpriced lines, and exposes alternatives', async () => {
