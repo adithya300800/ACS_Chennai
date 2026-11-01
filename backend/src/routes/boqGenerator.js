@@ -115,6 +115,7 @@ function sanitizeJob(job) {
     delete userSettings.serviceAdvisory;
     delete userSettings.deletion;
     delete userSettings.pendingSnapshotRevision;
+    delete userSettings.serviceSubmissionKey;
   }
   return {
     id: job.id,
@@ -397,8 +398,10 @@ async function submitServiceJob({ prisma, job, req, serviceAttempt = 0 }) {
       requested_by: employee?.name || job.employeeId,
     },
   };
+  const serviceSubmissionKey = job.settingsJson?.serviceSubmissionKey ||
+    (serviceAttempt ? `${job.id}:retry:${serviceAttempt}` : job.id);
   const serviceJob = await boqClient.submitJob({
-    jobId: serviceAttempt ? `${job.id}:retry:${serviceAttempt}` : job.id,
+    jobId: serviceSubmissionKey,
     requestId: requestId(req),
     payload,
   });
@@ -418,6 +421,7 @@ async function submitServiceJob({ prisma, job, req, serviceAttempt = 0 }) {
         : (typeof meta.productionMode === 'boolean' ? meta.productionMode : job.productionMode),
       settingsJson: {
         ...(job.settingsJson || {}),
+        serviceSubmissionKey: undefined,
         ...(serviceAttempt ? { retryAttempt: serviceAttempt } : {}),
         serviceAdvisory: {
           ...(job.settingsJson?.serviceAdvisory || {}),
@@ -453,6 +457,9 @@ async function respondWithServiceSubmission({ prisma, job, req, res, statusCode 
           completedAt: new Date(),
           errorCode: mapped.body.code,
           errorMessage: mapped.body.message,
+          settingsJson: err?.kind === 'network' || err?.kind === 'timeout'
+            ? { ...(job.settingsJson || {}), serviceSubmissionKey: job.settingsJson?.serviceSubmissionKey || job.id }
+            : job.settingsJson,
         },
       }),
       prisma.uploadIntent.updateMany({

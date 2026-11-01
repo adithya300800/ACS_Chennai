@@ -735,6 +735,8 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
 
     expect(response.status).toBe(504);
     expect(prisma._jobs[0]).toMatchObject({ status: 'FAILED', errorCode: 'BOQ_TIMEOUT' });
+    const originalServiceJobKey = mockBoqClient.submitJob.mock.calls[0][0].jobId;
+    expect(prisma._jobs[0].settingsJson.serviceSubmissionKey).toBe(originalServiceJobKey);
     expect(prisma._intents[0]).toMatchObject({ boundAt: expect.any(Date), boundType: 'boq_job' });
     expect(mockBoqClient.submitJob).toHaveBeenCalledTimes(1);
 
@@ -743,6 +745,7 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
       .set('x-test-employee', EMPLOYEE_ID);
     expect(opened.status).toBe(200);
     expect(opened.body).toMatchObject({ status: 'FAILED', error: { code: 'BOQ_TIMEOUT' } });
+    expect(opened.body.settings).not.toHaveProperty('serviceSubmissionKey');
     expect(mockBoqClient.submitJob).toHaveBeenCalledTimes(1);
 
     mockBoqClient.submitJob.mockResolvedValueOnce({ job_id: 'service-job-retry', status: 'queued' });
@@ -753,7 +756,34 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     expect(retry.status).toBe(200);
     expect(retry.body.status).toBe('SUBMITTED');
     expect(prisma._intents[0]).toMatchObject({ boundAt: expect.any(Date), boundType: 'boq_job' });
+    expect(mockBoqClient.submitJob.mock.calls[1][0].jobId).toBe(originalServiceJobKey);
     expect(mockBoqClient.submitJob).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses a fresh upstream idempotency key when retrying a definite fetch rejection', async () => {
+    const prisma = buildPrisma();
+    mockBoqClient.submitJob.mockRejectedValueOnce({ code: 'FETCH_HOST_REFUSED', status: 400 });
+    const app = buildApp(prisma);
+    const { presign } = await createConfirmedUpload(app, prisma);
+    const response = await request(app)
+      .post('/api/boq-generator/jobs')
+      .set('x-test-employee', EMPLOYEE_ID)
+      .set('Idempotency-Key', 'job-key-host-rejected')
+      .send({ projectId: PROJECT_ID, uploads: [presign.body.uploadId] });
+
+    expect(response.status).toBe(502);
+    expect(prisma._jobs[0]).toMatchObject({ status: 'FAILED', errorCode: 'BOQ_FETCH_FAILED' });
+    expect(prisma._jobs[0].settingsJson).not.toHaveProperty('serviceSubmissionKey');
+    const originalServiceJobKey = mockBoqClient.submitJob.mock.calls[0][0].jobId;
+
+    mockBoqClient.submitJob.mockResolvedValueOnce({ job_id: 'service-job-after-host-fix', status: 'queued' });
+    const retry = await request(app)
+      .post(`/api/boq-generator/jobs/${prisma._jobs[0].id}/retry`)
+      .set('x-test-employee', EMPLOYEE_ID)
+      .send({});
+
+    expect(retry.status).toBe(200);
+    expect(mockBoqClient.submitJob.mock.calls[1][0].jobId).toBe(`${originalServiceJobKey}:retry:1`);
   });
 
   it('denies non-pilot employees before BOQ metadata or project work', async () => {
