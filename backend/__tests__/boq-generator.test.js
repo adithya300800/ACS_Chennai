@@ -786,6 +786,28 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     expect(mockBoqClient.submitJob.mock.calls[1][0].jobId).toBe(`${originalServiceJobKey}:retry:1`);
   });
 
+  it('reuses a retry idempotency key if the retry response is also ambiguous', async () => {
+    const prisma = buildPrisma();
+    const app = buildApp(prisma);
+    const uploadId = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
+    prisma._jobs.push({
+      id: 'job-retry-timeout', employeeId: EMPLOYEE_ID, projectId: PROJECT_ID, status: 'FAILED',
+      dxfScale: null, serviceJobId: null, inputFiles: [{ uploadId, filename: 'plan.ifc', fileType: 'ifc', sizeBytes: 128, blobPath: 'drawings/project-1/employee-1/file.ifc' }],
+      settingsJson: {}, createdAt: new Date(), updatedAt: new Date(),
+    });
+    mockBoqClient.submitJob.mockRejectedValueOnce({ kind: 'network' }).mockResolvedValueOnce({ job_id: 'retry-accepted', status: 'queued' });
+
+    const firstRetry = await request(app).post('/api/boq-generator/jobs/job-retry-timeout/retry').set('x-test-employee', EMPLOYEE_ID);
+    const originalRetryKey = mockBoqClient.submitJob.mock.calls[0][0].jobId;
+    expect(firstRetry.status).toBe(504);
+    expect(prisma._jobs[0].settingsJson.serviceSubmissionKey).toBe(originalRetryKey);
+
+    const secondRetry = await request(app).post('/api/boq-generator/jobs/job-retry-timeout/retry').set('x-test-employee', EMPLOYEE_ID);
+    expect(secondRetry.status).toBe(200);
+    expect(mockBoqClient.submitJob.mock.calls[1][0].jobId).toBe(originalRetryKey);
+    expect(prisma._jobs[0].settingsJson).not.toHaveProperty('serviceSubmissionKey');
+  });
+
   it('denies non-pilot employees before BOQ metadata or project work', async () => {
     process.env.BOQ_PILOT_EMPLOYEE_IDS = EMPLOYEE_ID;
     const prisma = buildPrisma();
