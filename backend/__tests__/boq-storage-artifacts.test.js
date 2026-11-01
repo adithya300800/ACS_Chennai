@@ -123,6 +123,7 @@ describe('BOQ artifact storage', () => {
   it('uses the shared access-key pair when BOQ-specific key fields are incomplete', async () => {
     delete process.env.R2_BOQ_SECRET_ACCESS_KEY;
     delete process.env.R2_BOQ_BUCKET;
+    process.env.R2_BOQ_ACCOUNT_ID = 'other-account';
     jest.resetModules();
     storage = require('../src/lib/boqStorage');
     mockS3Send.mockResolvedValue({});
@@ -130,6 +131,7 @@ describe('BOQ artifact storage', () => {
     await storage.writeSnapshot({ blobPath: 'snapshots/project/job/rev-1.json', document: { lines: [] } });
 
     expect(mockS3Client).toHaveBeenCalledWith(expect.objectContaining({
+      endpoint: 'https://shared-account.r2.cloudflarestorage.com',
       credentials: { accessKeyId: 'shared-key', secretAccessKey: 'shared-secret' },
     }));
     expect(storage.bucketName()).toBe('dpr-documents');
