@@ -433,6 +433,7 @@ async function submitServiceJob({ prisma, job, req, serviceAttempt = 0 }) {
         },
       },
       startedAt: job.startedAt || new Date(),
+      completedAt: null,
       errorCode: null,
       errorMessage: null,
     },

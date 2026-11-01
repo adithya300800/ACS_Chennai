@@ -755,6 +755,7 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
       .send({});
     expect(retry.status).toBe(200);
     expect(retry.body.status).toBe('SUBMITTED');
+    expect(prisma._jobs[0].completedAt).toBeNull();
     expect(prisma._intents[0]).toMatchObject({ boundAt: expect.any(Date), boundType: 'boq_job' });
     expect(mockBoqClient.submitJob.mock.calls[1][0].jobId).toBe(originalServiceJobKey);
     expect(mockBoqClient.submitJob).toHaveBeenCalledTimes(2);
