@@ -763,7 +763,7 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
 
   it('uses a fresh upstream idempotency key when retrying a definite fetch rejection', async () => {
     const prisma = buildPrisma();
-    mockBoqClient.submitJob.mockRejectedValueOnce({ code: 'FETCH_HOST_REFUSED', status: 400 });
+    mockBoqClient.submitJob.mockRejectedValueOnce({ kind: 'http', code: 'FETCH_HOST_REFUSED', status: 400 });
     const app = buildApp(prisma);
     const { presign } = await createConfirmedUpload(app, prisma);
     const response = await request(app)
@@ -785,6 +785,32 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
 
     expect(retry.status).toBe(200);
     expect(mockBoqClient.submitJob.mock.calls[1][0].jobId).toBe(`${originalServiceJobKey}:retry:1`);
+  });
+
+  it('reuses the upstream key when the service accepts a submission but returns an invalid response', async () => {
+    const prisma = buildPrisma();
+    mockBoqClient.submitJob.mockResolvedValueOnce({ status: 'queued' });
+    const app = buildApp(prisma);
+    const { presign } = await createConfirmedUpload(app, prisma);
+    const response = await request(app)
+      .post('/api/boq-generator/jobs')
+      .set('x-test-employee', EMPLOYEE_ID)
+      .set('Idempotency-Key', 'job-key-invalid-upstream-response')
+      .send({ projectId: PROJECT_ID, uploads: [presign.body.uploadId] });
+
+    expect(response.status).toBe(502);
+    expect(prisma._jobs[0]).toMatchObject({ status: 'FAILED', errorCode: 'BOQ_SERVICE_ERROR' });
+    const originalServiceJobKey = mockBoqClient.submitJob.mock.calls[0][0].jobId;
+    expect(prisma._jobs[0].settingsJson.serviceSubmissionKey).toBe(originalServiceJobKey);
+
+    mockBoqClient.submitJob.mockResolvedValueOnce({ job_id: 'accepted-upstream-job', status: 'queued' });
+    const retry = await request(app)
+      .post(`/api/boq-generator/jobs/${prisma._jobs[0].id}/retry`)
+      .set('x-test-employee', EMPLOYEE_ID)
+      .send({});
+
+    expect(retry.status).toBe(200);
+    expect(mockBoqClient.submitJob.mock.calls[1][0].jobId).toBe(originalServiceJobKey);
   });
 
   it('reuses a retry idempotency key if the retry response is also ambiguous', async () => {

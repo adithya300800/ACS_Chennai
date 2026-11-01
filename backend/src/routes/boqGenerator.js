@@ -459,7 +459,7 @@ async function respondWithServiceSubmission({ prisma, job, req, res, statusCode 
           completedAt: new Date(),
           errorCode: mapped.body.code,
           errorMessage: mapped.body.message,
-          settingsJson: err?.kind === 'network' || err?.kind === 'timeout'
+          settingsJson: err?.kind !== 'http'
             ? { ...(job.settingsJson || {}), serviceSubmissionKey: job.settingsJson?.serviceSubmissionKey || job.id }
             : job.settingsJson,
         },
