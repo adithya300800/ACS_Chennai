@@ -181,6 +181,19 @@ describe('BOQ service client', () => {
       details: ['plan.dwg: DWG conversion failed'],
     });
     expect(mapServiceJobError({
+      code: 'NO_MEASURABLE_ITEMS',
+      message: 'No measurable BOQ items were produced.',
+      details: ["4 entities on layer 'FO AREA' were not measured."],
+    })).toMatchObject({
+      status: 409,
+      body: {
+        error: 'BOQ_NO_MEASURABLE_ITEMS',
+        code: 'BOQ_NO_MEASURABLE_ITEMS',
+        message: expect.stringContaining('layer mapping'),
+      },
+      details: ["4 entities on layer 'FO AREA' were not measured."],
+    });
+    expect(mapServiceJobError({
       code: 'SOURCE_UNCALIBRATED',
       message: 'Confirm scale',
       details: ['one.dxf', { internal: true }, ...Array.from({ length: 12 }, (_, index) => `detail-${index}`)],

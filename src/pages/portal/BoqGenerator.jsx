@@ -872,6 +872,10 @@ export default function BoqGenerator() {
             <span style={{ flex: 1 }}>{projects.find((project) => project.id === run.projectId)?.name || run.projectId} · {new Date(run.createdAt).toLocaleString()}</span>
             <span>{failed ? 'failed' : String(run.status || 'unknown').replaceAll('_', ' ').toLowerCase()}</span>
             {failed && run.error?.message && <span role="status">{run.error.message}</span>}
+            {failed && run.error?.code === 'BOQ_NO_MEASURABLE_ITEMS' && run.error.details?.length > 0 && <details>
+              <summary style={{ cursor: 'pointer' }}>Drawing diagnostics ({run.error.details.length})</summary>
+              <ul>{run.error.details.map((detail, index) => <li key={`${index}-${detail}`}>{detail}</li>)}</ul>
+            </details>}
             {!retryable && <button type="button" className="btn btn-secondary" onClick={() => openJob(run)}>Open</button>}
             {retryable && <button type="button" className="btn btn-secondary" onClick={() => retryJob(run)}>Run again</button>}
           </li>;

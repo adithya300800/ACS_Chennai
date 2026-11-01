@@ -20,6 +20,7 @@ const ERROR_MAP = Object.freeze({
   TOO_MANY_SOURCES: [400, 'BOQ_TOO_MANY_FILES', 'A run may contain at most 20 files.'],
   PRODUCTION_DATA_BLOCKED: [409, 'BOQ_PRODUCTION_BLOCKED', 'The drawing service is configured to refuse this data. Tell your admin.'],
   JOB_NOT_READY: [409, 'BOQ_NOT_READY', 'The BOQ is not ready yet.'],
+  NO_MEASURABLE_ITEMS: [409, 'BOQ_NO_MEASURABLE_ITEMS', 'No BOQ lines could be measured. Review the drawing contents and estimator-approved layer mapping.'],
   JOB_FAILED: [409, 'BOQ_JOB_FAILED', 'The drawing service could not complete this job.'],
   CORRECTION_REFUSED: [409, 'BOQ_CORRECTION_REFUSED', 'That change was not accepted.'],
   RATE_LIMITED: [429, 'BOQ_SERVICE_BUSY', 'The drawing service is busy. Try again shortly.'],
