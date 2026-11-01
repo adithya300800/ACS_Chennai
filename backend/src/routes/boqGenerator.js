@@ -448,7 +448,12 @@ async function respondWithServiceSubmission({ prisma, job, req, res, statusCode 
     await Promise.all([
       prisma.boqJob.update({
         where: { id: job.id },
-        data: { status: 'DRAFT', errorCode: mapped.body.code, errorMessage: mapped.body.message },
+        data: {
+          status: 'FAILED',
+          completedAt: new Date(),
+          errorCode: mapped.body.code,
+          errorMessage: mapped.body.message,
+        },
       }),
       prisma.uploadIntent.updateMany({
         where: { employeeId: job.employeeId, ulid: { in: (job.inputFiles || []).map((file) => file.uploadId) }, boundType: 'boq_job', boundAt: { not: null } },
@@ -720,7 +725,7 @@ router.post('/jobs', boqJobLimiter, asyncHandler(async (req, res) => {
     const replayedId = reservation.cached.body?.id || reservation.cached.body?.recordId;
     if (replayedId) {
       const existingJob = await prisma.boqJob.findUnique({ where: { id: replayedId } });
-      if (existingJob && existingJob.employeeId === req.employeeId && existingJob.status === 'DRAFT') return respondWithServiceSubmission({ prisma, job: existingJob, req, res });
+      if (existingJob && existingJob.employeeId === req.employeeId && ['DRAFT', 'FAILED'].includes(existingJob.status) && !existingJob.serviceJobId) return respondWithServiceSubmission({ prisma, job: existingJob, req, res });
       if (existingJob && existingJob.employeeId === req.employeeId) {
         const replayBody = {
           ...sanitizeJob(existingJob),
@@ -977,9 +982,6 @@ router.get('/jobs/:boqJobId', asyncHandler(async (req, res) => {
     orderBy: { revision: 'desc' },
   });
   const respondWithJob = (result) => res.json({ ...sanitizeJob(result), snapshot: sanitizeSnapshot(snapshot) });
-  if (!job.serviceJobId && job.status === 'DRAFT') {
-    return respondWithServiceSubmission({ prisma, job, req, res });
-  }
   if (job.serviceJobId && job.status === 'COMPLETED_PENDING_EXPORT') {
     try {
       const completed = await captureCompletedServiceJob({ prisma, job, req });
@@ -1054,9 +1056,6 @@ router.get('/jobs/:boqJobId', asyncHandler(async (req, res) => {
       const mapped = mapServiceError(err);
       return res.status(mapped.status).json(mapped.body);
     }
-  }
-  if (!job.serviceJobId && job.status === 'DRAFT') {
-    return respondWithServiceSubmission({ prisma, job, req, res });
   }
   return respondWithJob(job);
 }));

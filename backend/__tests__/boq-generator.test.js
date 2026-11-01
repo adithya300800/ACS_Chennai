@@ -722,7 +722,7 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     expect(replay.body.settings).not.toHaveProperty('serviceAdvisory');
   });
 
-  it('keeps upload claims bound to a retryable draft after service submission fails', async () => {
+  it('marks a failed service submission as failed, keeps its uploads bound, and retries only on explicit retry', async () => {
     const prisma = buildPrisma();
     mockBoqClient.submitJob.mockRejectedValueOnce({ kind: 'network' });
     const app = buildApp(prisma);
@@ -734,15 +734,22 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
       .send({ projectId: PROJECT_ID, uploads: [presign.body.uploadId] });
 
     expect(response.status).toBe(504);
-    expect(prisma._jobs[0]).toMatchObject({ status: 'DRAFT', errorCode: 'BOQ_TIMEOUT' });
+    expect(prisma._jobs[0]).toMatchObject({ status: 'FAILED', errorCode: 'BOQ_TIMEOUT' });
     expect(prisma._intents[0]).toMatchObject({ boundAt: expect.any(Date), boundType: 'boq_job' });
+    expect(mockBoqClient.submitJob).toHaveBeenCalledTimes(1);
+
+    const opened = await request(app)
+      .get(`/api/boq-generator/jobs/${prisma._jobs[0].id}`)
+      .set('x-test-employee', EMPLOYEE_ID);
+    expect(opened.status).toBe(200);
+    expect(opened.body).toMatchObject({ status: 'FAILED', error: { code: 'BOQ_TIMEOUT' } });
+    expect(mockBoqClient.submitJob).toHaveBeenCalledTimes(1);
 
     mockBoqClient.submitJob.mockResolvedValueOnce({ job_id: 'service-job-retry', status: 'queued' });
     const retry = await request(app)
-      .post('/api/boq-generator/jobs')
+      .post(`/api/boq-generator/jobs/${prisma._jobs[0].id}/retry`)
       .set('x-test-employee', EMPLOYEE_ID)
-      .set('Idempotency-Key', 'job-key-service-failure-release')
-      .send({ projectId: PROJECT_ID, uploads: [presign.body.uploadId] });
+      .send({});
     expect(retry.status).toBe(200);
     expect(retry.body.status).toBe('SUBMITTED');
     expect(prisma._intents[0]).toMatchObject({ boundAt: expect.any(Date), boundType: 'boq_job' });

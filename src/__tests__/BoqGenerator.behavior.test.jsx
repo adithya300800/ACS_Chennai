@@ -1,5 +1,5 @@
 import React from 'react';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const mockApi = {
@@ -19,6 +19,7 @@ const mockApi = {
     presignUpload: jest.fn(async () => ({ uploadId: `upload-${mockApi.boqGenerator.presignUpload.mock.calls.length}`, sasUrl: 'https://upload.test/signed' })),
     confirmUpload: jest.fn(async () => ({ verified: true })),
     createJob: jest.fn(async () => ({ id: 'job-new', projectId: 'project-new', status: 'SUBMITTED' })),
+    retryJob: jest.fn(async () => ({ id: 'job-retried', projectId: 'project-assigned', status: 'SUBMITTED' })),
     getJob: jest.fn(async () => ({ id: 'job-new', status: 'SUBMITTED' })),
     getBoq: jest.fn(async () => ({ lines: [], withheld: [], totals: {} })),
     save: jest.fn(), correctLine: jest.fn(), acknowledgeExport: jest.fn(), downloadExport: jest.fn(),
@@ -265,6 +266,29 @@ describe('BOQ Generator user workflow', () => {
     expect(await screen.findByRole('button', { name: /run again/i })).toBeInTheDocument();
   });
 
+  test('shows a failed legacy draft as retryable, not as a result to open', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [{
+      id: 'job-failed-draft', projectId: 'project-assigned', status: 'DRAFT',
+      error: { code: 'BOQ_FETCH_FAILED', message: 'Could not fetch drawing' }, createdAt: '2026-10-31T00:00:00Z',
+    }, {
+      id: 'job-completed', projectId: 'project-assigned', status: 'COMPLETED', createdAt: '2026-10-30T00:00:00Z',
+    }] });
+    render(<MemoryRouter initialEntries={['/portal/boq-generator?projectId=project-assigned']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+
+    expect(await screen.findByText('failed')).toBeInTheDocument();
+    expect(screen.getByText('Could not fetch drawing')).toBeInTheDocument();
+    const failedRun = screen.getByText('Could not fetch drawing').closest('li');
+    expect(within(failedRun).queryByRole('button', { name: 'Open' })).not.toBeInTheDocument();
+    expect(within(failedRun).getByRole('button', { name: 'Run again' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open' })).toBeInTheDocument();
+    fireEvent.click(within(failedRun).getByRole('button', { name: 'Run again' }));
+
+    await waitFor(() => expect(mockApi.boqGenerator.retryJob).toHaveBeenCalledWith('job-failed-draft', 'test-token'));
+    expect(mockApi.boqGenerator.getJob).not.toHaveBeenCalled();
+  });
+
   test('lets an assigned employee start a job with the one required DXF scale confirmation', async () => {
     mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
     render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
@@ -295,6 +319,8 @@ describe('BOQ Generator user workflow', () => {
     render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
     await screen.findByRole('option', { name: 'Assigned Project' });
     fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'project-assigned' } });
+    expect(screen.getByLabelText('Select model drawings')).toHaveAttribute('accept', '.dxf,.ifc,.dwg');
+    expect(screen.getByLabelText('Select model drawings')).toHaveAttribute('multiple');
     fireEvent.change(screen.getByLabelText('Select model drawings'), {
       target: { files: [new File(['AC1027'], 'plan.dwg', { type: 'application/octet-stream' })] },
     });
