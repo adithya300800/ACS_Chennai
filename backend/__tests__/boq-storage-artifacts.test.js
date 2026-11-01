@@ -1,9 +1,10 @@
 'use strict';
 
 const mockS3Send = jest.fn();
+const mockS3Client = jest.fn(() => ({ send: (...args) => mockS3Send(...args), destroy: jest.fn() }));
 
 jest.mock('@aws-sdk/client-s3', () => ({
-  S3Client: jest.fn(() => ({ send: (...args) => mockS3Send(...args), destroy: jest.fn() })),
+  S3Client: mockS3Client,
   PutObjectCommand: class { constructor(input) { this.input = input; } },
   GetObjectCommand: class { constructor(input) { this.input = input; } },
   HeadObjectCommand: class { constructor(input) { this.input = input; } },
@@ -19,6 +20,10 @@ describe('BOQ artifact storage', () => {
     accessKeyId: process.env.R2_BOQ_ACCESS_KEY_ID,
     secretAccessKey: process.env.R2_BOQ_SECRET_ACCESS_KEY,
     bucket: process.env.R2_BOQ_BUCKET,
+    sharedAccountId: process.env.R2_ACCOUNT_ID,
+    sharedAccessKeyId: process.env.R2_ACCESS_KEY_ID,
+    sharedSecretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+    sharedBucket: process.env.R2_BUCKET_DPR_DOCUMENTS,
   };
 
   beforeEach(() => {
@@ -26,7 +31,12 @@ describe('BOQ artifact storage', () => {
     process.env.R2_BOQ_ACCESS_KEY_ID = 'test-key';
     process.env.R2_BOQ_SECRET_ACCESS_KEY = 'test-secret';
     process.env.R2_BOQ_BUCKET = 'boq-generator-test';
+    process.env.R2_ACCOUNT_ID = 'shared-account';
+    process.env.R2_ACCESS_KEY_ID = 'shared-key';
+    process.env.R2_SECRET_ACCESS_KEY = 'shared-secret';
+    process.env.R2_BUCKET_DPR_DOCUMENTS = 'dpr-documents';
     mockS3Send.mockReset();
+    mockS3Client.mockClear();
     jest.resetModules();
     storage = require('../src/lib/boqStorage');
   });
@@ -37,6 +47,10 @@ describe('BOQ artifact storage', () => {
       R2_BOQ_ACCESS_KEY_ID: env.accessKeyId,
       R2_BOQ_SECRET_ACCESS_KEY: env.secretAccessKey,
       R2_BOQ_BUCKET: env.bucket,
+      R2_ACCOUNT_ID: env.sharedAccountId,
+      R2_ACCESS_KEY_ID: env.sharedAccessKeyId,
+      R2_SECRET_ACCESS_KEY: env.sharedSecretAccessKey,
+      R2_BUCKET_DPR_DOCUMENTS: env.sharedBucket,
     })) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -72,5 +86,46 @@ describe('BOQ artifact storage', () => {
     await expect(storage.readExport('exports/project/job/rev-1.xlsx')).resolves.toEqual(binary);
     await expect(storage.blobExists('exports/project/job/rev-1.xlsx')).resolves.toBe(true);
     await expect(storage.blobExists('exports/project/job/missing.xlsx')).resolves.toBe(false);
+  });
+
+  it('falls back to the portal R2 credentials and dpr-documents bucket when BOQ overrides are absent', async () => {
+    delete process.env.R2_BOQ_ACCOUNT_ID;
+    delete process.env.R2_BOQ_ACCESS_KEY_ID;
+    delete process.env.R2_BOQ_SECRET_ACCESS_KEY;
+    delete process.env.R2_BOQ_BUCKET;
+    jest.resetModules();
+    storage = require('../src/lib/boqStorage');
+    mockS3Send.mockResolvedValue({});
+
+    await storage.writeSnapshot({ blobPath: 'snapshots/project/job/rev-1.json', document: { lines: [] } });
+
+    expect(storage.bucketName()).toBe('dpr-documents');
+    expect(mockS3Client).toHaveBeenCalledWith(expect.objectContaining({
+      endpoint: 'https://shared-account.r2.cloudflarestorage.com',
+      credentials: { accessKeyId: 'shared-key', secretAccessKey: 'shared-secret' },
+    }));
+    expect(mockS3Send.mock.calls[0][0].input.Bucket).toBe('dpr-documents');
+  });
+
+  it('prefers dedicated BOQ credentials and bucket when configured', async () => {
+    mockS3Send.mockResolvedValue({});
+
+    await storage.writeSnapshot({ blobPath: 'snapshots/project/job/rev-1.json', document: { lines: [] } });
+
+    expect(storage.bucketName()).toBe('boq-generator-test');
+    expect(mockS3Client).toHaveBeenCalledWith(expect.objectContaining({
+      endpoint: 'https://test-account.r2.cloudflarestorage.com',
+      credentials: { accessKeyId: 'test-key', secretAccessKey: 'test-secret' },
+    }));
+    expect(mockS3Send.mock.calls[0][0].input.Bucket).toBe('boq-generator-test');
+  });
+
+  it('uses the configured portal documents bucket when the BOQ bucket override is absent', () => {
+    delete process.env.R2_BOQ_BUCKET;
+    process.env.R2_BUCKET_DPR_DOCUMENTS = 'shared-documents';
+    jest.resetModules();
+    storage = require('../src/lib/boqStorage');
+
+    expect(storage.bucketName()).toBe('shared-documents');
   });
 });
