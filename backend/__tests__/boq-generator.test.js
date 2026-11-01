@@ -1438,6 +1438,36 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     expect(response.body.error.details).toBeUndefined();
   });
 
+  it('returns bounded layer diagnostics only for an empty BOQ failure', async () => {
+    const prisma = buildPrisma();
+    prisma._jobs.push({
+      id: 'portal-job-no-items', employeeId: EMPLOYEE_ID, projectId: PROJECT_ID,
+      serviceJobId: 'service-job-no-items', status: 'SUBMITTED', inputFiles: [], settingsJson: {},
+      createdAt: new Date(), updatedAt: new Date(),
+    });
+    mockBoqClient.getJob.mockResolvedValueOnce({
+      job_id: 'service-job-no-items',
+      status: 'failed',
+      error: {
+        code: 'NO_MEASURABLE_ITEMS',
+        message: 'No measurable BOQ items were produced.',
+        details: ["4 entities on layer 'FO AREA' were not measured."],
+      },
+    });
+    const app = buildApp(prisma);
+
+    const response = await request(app)
+      .get('/api/boq-generator/jobs/portal-job-no-items')
+      .set('x-test-employee', EMPLOYEE_ID);
+
+    expect(response.status).toBe(200);
+    expect(response.body.error).toMatchObject({
+      code: 'BOQ_NO_MEASURABLE_ITEMS',
+      details: ["4 entities on layer 'FO AREA' were not measured."],
+    });
+    expect(prisma._jobs[0].errorDetails).toEqual(["4 entities on layer 'FO AREA' were not measured."]);
+  });
+
   it('provides service metadata through the authenticated portal route', async () => {
     mockBoqClient.getMeta.mockResolvedValue({
       schema_version: '1',

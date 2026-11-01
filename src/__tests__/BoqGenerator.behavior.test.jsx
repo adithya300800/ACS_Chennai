@@ -306,6 +306,28 @@ describe('BOQ Generator user workflow', () => {
     expect(mockApi.boqGenerator.getJob).not.toHaveBeenCalled();
   });
 
+  test('shows layer diagnostics for failed runs with no measurable BOQ items', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [{
+      id: 'job-no-items', projectId: 'project-assigned', status: 'FAILED',
+      error: {
+        code: 'BOQ_NO_MEASURABLE_ITEMS',
+        message: 'No BOQ lines could be measured. Review the drawing and layer mapping.',
+        details: ["4 entities on layer 'FO AREA' were not measured."],
+      },
+      createdAt: '2026-10-31T00:00:00Z',
+    }] });
+
+    render(<MemoryRouter initialEntries={['/portal/boq-generator?projectId=project-assigned']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+
+    const diagnosticSummary = await screen.findByText('Drawing diagnostics (1)');
+    const failedRun = diagnosticSummary.closest('li');
+    fireEvent.click(diagnosticSummary);
+    expect(within(failedRun).getByText("4 entities on layer 'FO AREA' were not measured.")).toBeInTheDocument();
+    expect(within(failedRun).getByRole('button', { name: 'Run again' })).toBeInTheDocument();
+  });
+
   test('lets an assigned employee start a job with the one required DXF scale confirmation', async () => {
     mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
     render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);

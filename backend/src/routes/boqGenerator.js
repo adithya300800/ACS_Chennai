@@ -136,7 +136,13 @@ function sanitizeJob(job) {
       fileType: file.fileType,
       sizeBytes: file.sizeBytes,
     })) : [],
-    error: job.errorCode ? { code: job.errorCode, message: job.errorMessage } : null,
+    error: job.errorCode ? {
+      code: job.errorCode,
+      message: job.errorMessage,
+      ...(job.errorCode === 'BOQ_NO_MEASURABLE_ITEMS' && Array.isArray(job.errorDetails)
+        ? { details: job.errorDetails.filter((detail) => typeof detail === 'string').slice(0, 10) }
+        : {}),
+    } : null,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     completedAt: job.completedAt,
