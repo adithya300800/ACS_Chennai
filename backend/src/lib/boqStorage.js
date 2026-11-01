@@ -22,7 +22,7 @@ function hasDedicatedKeyPair() {
 }
 
 function bucketName() {
-  return (hasDedicatedKeyPair() && process.env.R2_BOQ_BUCKET) ||
+  return process.env.R2_BOQ_BUCKET ||
     (hasDedicatedKeyPair() ? DEFAULT_BUCKET : process.env.R2_BUCKET_DPR_DOCUMENTS || 'dpr-documents');
 }
 
