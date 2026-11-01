@@ -215,6 +215,23 @@ describe('BOQ Generator user workflow', () => {
     expect(screen.getAllByText(/SAMPLE DATA/)).toHaveLength(1);
   });
 
+  test('updates the recent-run status after opening a completed job', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [{
+      id: 'job-finished', projectId: 'project-assigned', status: 'RUNNING', createdAt: '2026-10-31T00:00:00Z',
+    }] });
+    mockApi.boqGenerator.getJob.mockResolvedValue({ id: 'job-finished', projectId: 'project-assigned', status: 'COMPLETED' });
+    mockApi.boqGenerator.getBoq.mockResolvedValue({ lines: [], withheld: [], totals: {} });
+
+    render(<MemoryRouter initialEntries={['/portal/boq-generator?projectId=project-assigned']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    const runRow = screen.getByText('running').closest('li');
+    fireEvent.click(within(runRow).getByRole('button', { name: 'Open' }));
+
+    await screen.findByRole('heading', { name: 'Review your take-off' });
+    await waitFor(() => expect(within(runRow).getByText('completed')).toBeInTheDocument());
+  });
+
   test('shows saved SAMPLE status when current service metadata is real', async () => {
     mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
     mockApi.boqGenerator.meta.mockResolvedValue({ effectiveStatus: 'REAL', productionMode: true, rateSources: [{ name: 'TN_PWD_SOR', isSample: false }] });

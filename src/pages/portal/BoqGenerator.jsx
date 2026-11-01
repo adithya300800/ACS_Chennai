@@ -590,6 +590,7 @@ export default function BoqGenerator() {
       if (run.projectId !== projectId) selectProject(run.projectId);
       openedJobIdRef.current = run.id;
       const next = await loadJob(run.id);
+      setJobs((current) => current.map((item) => item.id === next.id ? { ...item, ...next } : item));
       setSearchParams({ ...(next.projectId ? { projectId: next.projectId } : {}), jobId: run.id });
     } catch (err) {
       setError(cleanError(err));
