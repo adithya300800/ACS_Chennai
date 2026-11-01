@@ -115,6 +115,7 @@ function sanitizeJob(job) {
     delete userSettings.serviceAdvisory;
     delete userSettings.deletion;
     delete userSettings.pendingSnapshotRevision;
+    delete userSettings.serviceSubmissionKey;
   }
   return {
     id: job.id,
@@ -397,8 +398,12 @@ async function submitServiceJob({ prisma, job, req, serviceAttempt = 0 }) {
       requested_by: employee?.name || job.employeeId,
     },
   };
+  const persistedSettings = { ...(job.settingsJson || {}) };
+  delete persistedSettings.serviceSubmissionKey;
+  const serviceSubmissionKey = job.settingsJson?.serviceSubmissionKey ||
+    (serviceAttempt ? `${job.id}:retry:${serviceAttempt}` : job.id);
   const serviceJob = await boqClient.submitJob({
-    jobId: serviceAttempt ? `${job.id}:retry:${serviceAttempt}` : job.id,
+    jobId: serviceSubmissionKey,
     requestId: requestId(req),
     payload,
   });
@@ -417,7 +422,7 @@ async function submitServiceJob({ prisma, job, req, serviceAttempt = 0 }) {
         ? serviceJob.production_mode
         : (typeof meta.productionMode === 'boolean' ? meta.productionMode : job.productionMode),
       settingsJson: {
-        ...(job.settingsJson || {}),
+        ...persistedSettings,
         ...(serviceAttempt ? { retryAttempt: serviceAttempt } : {}),
         serviceAdvisory: {
           ...(job.settingsJson?.serviceAdvisory || {}),
@@ -428,6 +433,7 @@ async function submitServiceJob({ prisma, job, req, serviceAttempt = 0 }) {
         },
       },
       startedAt: job.startedAt || new Date(),
+      completedAt: null,
       errorCode: null,
       errorMessage: null,
     },
@@ -448,7 +454,15 @@ async function respondWithServiceSubmission({ prisma, job, req, res, statusCode 
     await Promise.all([
       prisma.boqJob.update({
         where: { id: job.id },
-        data: { status: 'DRAFT', errorCode: mapped.body.code, errorMessage: mapped.body.message },
+        data: {
+          status: 'FAILED',
+          completedAt: new Date(),
+          errorCode: mapped.body.code,
+          errorMessage: mapped.body.message,
+          settingsJson: err?.kind !== 'http'
+            ? { ...(job.settingsJson || {}), serviceSubmissionKey: job.settingsJson?.serviceSubmissionKey || job.id }
+            : job.settingsJson,
+        },
       }),
       prisma.uploadIntent.updateMany({
         where: { employeeId: job.employeeId, ulid: { in: (job.inputFiles || []).map((file) => file.uploadId) }, boundType: 'boq_job', boundAt: { not: null } },
@@ -456,6 +470,35 @@ async function respondWithServiceSubmission({ prisma, job, req, res, statusCode 
       }),
     ]);
     return res.status(mapped.status).json(mapped.body);
+  }
+}
+
+async function retryServiceSubmission({ prisma, job, req, serviceAttempt, failedStatus }) {
+  const serviceSubmissionKey = job.settingsJson?.serviceSubmissionKey || `${job.id}:retry:${serviceAttempt}`;
+  const retryableJob = {
+    ...job,
+    serviceJobId: null,
+    status: 'DRAFT',
+    settingsJson: { ...(job.settingsJson || {}), retryAttempt: serviceAttempt, serviceSubmissionKey },
+  };
+  try {
+    const submitted = await submitServiceJob({ prisma, job: retryableJob, req, serviceAttempt });
+    return { job: submitted };
+  } catch (err) {
+    const mapped = mapServiceError(err);
+    const ambiguous = err?.kind === 'network' || err?.kind === 'timeout';
+    await prisma.boqJob.update({
+      where: { id: job.id },
+      data: {
+        status: failedStatus,
+        settingsJson: ambiguous
+          ? retryableJob.settingsJson
+          : Object.fromEntries(Object.entries(retryableJob.settingsJson).filter(([key]) => key !== 'serviceSubmissionKey')),
+        errorCode: mapped.body.code,
+        errorMessage: mapped.body.message,
+      },
+    });
+    return { error: mapped };
   }
 }
 
@@ -720,7 +763,7 @@ router.post('/jobs', boqJobLimiter, asyncHandler(async (req, res) => {
     const replayedId = reservation.cached.body?.id || reservation.cached.body?.recordId;
     if (replayedId) {
       const existingJob = await prisma.boqJob.findUnique({ where: { id: replayedId } });
-      if (existingJob && existingJob.employeeId === req.employeeId && existingJob.status === 'DRAFT') return respondWithServiceSubmission({ prisma, job: existingJob, req, res });
+      if (existingJob && existingJob.employeeId === req.employeeId && ['DRAFT', 'FAILED'].includes(existingJob.status) && !existingJob.serviceJobId) return respondWithServiceSubmission({ prisma, job: existingJob, req, res });
       if (existingJob && existingJob.employeeId === req.employeeId) {
         const replayBody = {
           ...sanitizeJob(existingJob),
@@ -900,25 +943,13 @@ router.post('/jobs/:boqJobId/retry', boqJobLimiter, asyncHandler(async (req, res
   if (job.status === 'LOST') {
     if (!job.inputFiles?.length) return res.status(409).json(errorBody('BOQ_NOT_RETRYABLE', 'This lost run has no stored drawing files. Select and upload the drawings again'));
     const attempt = (job.settingsJson?.retryAttempt || 0) + 1;
-    const retryableJob = { ...job, serviceJobId: null, status: 'DRAFT', settingsJson: { ...(job.settingsJson || {}), retryAttempt: attempt } };
-    try {
-      return res.json(sanitizeJob(await submitServiceJob({ prisma, job: retryableJob, req, serviceAttempt: attempt })));
-    } catch (err) {
-      const mapped = mapServiceError(err);
-      await prisma.boqJob.update({ where: { id: job.id }, data: { status: 'LOST', settingsJson: retryableJob.settingsJson, errorCode: mapped.body.code, errorMessage: mapped.body.message } });
-      return res.status(mapped.status).json(mapped.body);
-    }
+    const result = await retryServiceSubmission({ prisma, job, req, serviceAttempt: attempt, failedStatus: 'LOST' });
+    return result.error ? res.status(result.error.status).json(result.error.body) : res.json(sanitizeJob(result.job));
   }
   if (job.status !== 'FAILED') return res.status(409).json(errorBody('BOQ_NOT_RETRYABLE', 'Only failed or lost runs can be retried'));
   const attempt = (job.settingsJson?.retryAttempt || 0) + 1;
-  const retryableJob = { ...job, serviceJobId: null, status: 'DRAFT', settingsJson: { ...(job.settingsJson || {}), retryAttempt: attempt } };
-  try {
-    return res.json(sanitizeJob(await submitServiceJob({ prisma, job: retryableJob, req, serviceAttempt: attempt })));
-  } catch (err) {
-    const mapped = mapServiceError(err);
-    await prisma.boqJob.update({ where: { id: job.id }, data: { status: job.status, settingsJson: retryableJob.settingsJson, errorCode: mapped.body.code, errorMessage: mapped.body.message } });
-    return res.status(mapped.status).json(mapped.body);
-  }
+  const result = await retryServiceSubmission({ prisma, job, req, serviceAttempt: attempt, failedStatus: 'FAILED' });
+  return result.error ? res.status(result.error.status).json(result.error.body) : res.json(sanitizeJob(result.job));
 }));
 
 router.post('/jobs/search', asyncHandler(async (req, res) => {
@@ -977,9 +1008,6 @@ router.get('/jobs/:boqJobId', asyncHandler(async (req, res) => {
     orderBy: { revision: 'desc' },
   });
   const respondWithJob = (result) => res.json({ ...sanitizeJob(result), snapshot: sanitizeSnapshot(snapshot) });
-  if (!job.serviceJobId && job.status === 'DRAFT') {
-    return respondWithServiceSubmission({ prisma, job, req, res });
-  }
   if (job.serviceJobId && job.status === 'COMPLETED_PENDING_EXPORT') {
     try {
       const completed = await captureCompletedServiceJob({ prisma, job, req });
@@ -1054,9 +1082,6 @@ router.get('/jobs/:boqJobId', asyncHandler(async (req, res) => {
       const mapped = mapServiceError(err);
       return res.status(mapped.status).json(mapped.body);
     }
-  }
-  if (!job.serviceJobId && job.status === 'DRAFT') {
-    return respondWithServiceSubmission({ prisma, job, req, res });
   }
   return respondWithJob(job);
 }));

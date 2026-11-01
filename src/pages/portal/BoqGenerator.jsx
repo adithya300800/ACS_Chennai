@@ -191,16 +191,11 @@ export default function BoqGenerator() {
   const retryJob = async (run) => {
     setError('');
     try {
-      const original = await api.boqGenerator.getJob(run.id, accessToken);
-      if (['DRAFT', 'LOST'].includes(original.status)) {
-        const retried = await api.boqGenerator.retryJob(run.id, accessToken);
-        setJob(retried);
-        if (original.status === 'LOST') setBoq(null);
-        setSearchParams({ projectId: retried.projectId, jobId: retried.id });
-        return;
-      }
-      setNotice(`The original files for this ${run.status.toLowerCase()} run are not in this browser. Select and upload them again to create a new run.`);
-      setSearchParams({ projectId: original.projectId });
+      const retried = await api.boqGenerator.retryJob(run.id, accessToken);
+      setJob(retried);
+      setBoq(null);
+      openedJobIdRef.current = retried.id;
+      setSearchParams({ projectId: retried.projectId, jobId: retried.id });
     } catch (err) {
       setError(cleanError(err));
     }
@@ -869,12 +864,17 @@ export default function BoqGenerator() {
       <section className="dpr-card" aria-labelledby="boq-recent-heading" style={{ padding: '1.25rem' }}>
         <h2 id="boq-recent-heading" style={{ marginTop: 0 }}>Recent runs</h2>
         {jobs.length === 0 ? <p style={{ color: 'var(--steel)', marginBottom: 0 }}>{projectId ? 'No runs for this project yet.' : 'Choose or create a project to see its runs.'}</p> : <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-          {jobs.map((run) => <li key={run.id} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', padding: '0.6rem 0', borderBottom: '1px solid var(--border)' }}>
+          {jobs.map((run) => {
+            const failed = run.status === 'FAILED' || (run.status === 'DRAFT' && run.error?.code);
+            const retryable = ['DRAFT', 'FAILED', 'LOST'].includes(run.status);
+            return <li key={run.id} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', padding: '0.6rem 0', borderBottom: '1px solid var(--border)' }}>
             <span style={{ flex: 1 }}>{projects.find((project) => project.id === run.projectId)?.name || run.projectId} · {new Date(run.createdAt).toLocaleString()}</span>
-            <span>{String(run.status || 'unknown').replaceAll('_', ' ').toLowerCase()}</span>
-            <button type="button" className="btn btn-secondary" onClick={() => openJob(run)}>Open</button>
-            {['DRAFT', 'LOST'].includes(run.status) && <button type="button" className="btn btn-secondary" onClick={() => retryJob(run)}>Run again</button>}
-          </li>)}
+            <span>{failed ? 'failed' : String(run.status || 'unknown').replaceAll('_', ' ').toLowerCase()}</span>
+            {failed && run.error?.message && <span role="status">{run.error.message}</span>}
+            {!retryable && <button type="button" className="btn btn-secondary" onClick={() => openJob(run)}>Open</button>}
+            {retryable && <button type="button" className="btn btn-secondary" onClick={() => retryJob(run)}>Run again</button>}
+          </li>;
+          })}
         </ul>}
         <button type="button" className="btn btn-secondary" style={{ marginTop: '0.75rem' }} onClick={() => loadJobs(projectId)}>Refresh runs</button>
       </section>
