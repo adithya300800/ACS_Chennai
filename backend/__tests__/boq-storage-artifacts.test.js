@@ -120,6 +120,19 @@ describe('BOQ artifact storage', () => {
     expect(mockS3Send.mock.calls[0][0].input.Bucket).toBe('boq-generator-test');
   });
 
+  it('uses the shared access-key pair when BOQ-specific key fields are incomplete', async () => {
+    delete process.env.R2_BOQ_SECRET_ACCESS_KEY;
+    jest.resetModules();
+    storage = require('../src/lib/boqStorage');
+    mockS3Send.mockResolvedValue({});
+
+    await storage.writeSnapshot({ blobPath: 'snapshots/project/job/rev-1.json', document: { lines: [] } });
+
+    expect(mockS3Client).toHaveBeenCalledWith(expect.objectContaining({
+      credentials: { accessKeyId: 'shared-key', secretAccessKey: 'shared-secret' },
+    }));
+  });
+
   it('uses the configured portal documents bucket when the BOQ bucket override is absent', () => {
     delete process.env.R2_BOQ_BUCKET;
     delete process.env.R2_BOQ_ACCOUNT_ID;

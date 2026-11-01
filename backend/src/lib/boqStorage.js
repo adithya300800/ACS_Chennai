@@ -28,8 +28,9 @@ function bucketName() {
 function getClient() {
   if (s3Client) return s3Client;
   const accountId = process.env.R2_BOQ_ACCOUNT_ID || process.env.R2_ACCOUNT_ID;
-  const accessKeyId = process.env.R2_BOQ_ACCESS_KEY_ID || process.env.R2_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.R2_BOQ_SECRET_ACCESS_KEY || process.env.R2_SECRET_ACCESS_KEY;
+  const hasBoqKeyPair = process.env.R2_BOQ_ACCESS_KEY_ID && process.env.R2_BOQ_SECRET_ACCESS_KEY;
+  const accessKeyId = hasBoqKeyPair ? process.env.R2_BOQ_ACCESS_KEY_ID : process.env.R2_ACCESS_KEY_ID;
+  const secretAccessKey = hasBoqKeyPair ? process.env.R2_BOQ_SECRET_ACCESS_KEY : process.env.R2_SECRET_ACCESS_KEY;
   if (!accountId || !accessKeyId || !secretAccessKey) {
     throw new Error('BOQ storage is not configured');
   }
