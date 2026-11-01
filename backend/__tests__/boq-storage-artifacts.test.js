@@ -131,6 +131,7 @@ describe('BOQ artifact storage', () => {
     expect(mockS3Client).toHaveBeenCalledWith(expect.objectContaining({
       credentials: { accessKeyId: 'shared-key', secretAccessKey: 'shared-secret' },
     }));
+    expect(storage.bucketName()).toBe('dpr-documents');
   });
 
   it('uses the configured portal documents bucket when the BOQ bucket override is absent', () => {

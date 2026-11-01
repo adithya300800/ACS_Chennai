@@ -17,18 +17,19 @@ const READ_TTL_SECONDS = 600;
 const DEFAULT_BUCKET = 'boq-generator';
 let s3Client;
 
-function hasDedicatedCredentials() {
-  return Boolean(process.env.R2_BOQ_ACCOUNT_ID || process.env.R2_BOQ_ACCESS_KEY_ID || process.env.R2_BOQ_SECRET_ACCESS_KEY);
+function hasDedicatedKeyPair() {
+  return Boolean(process.env.R2_BOQ_ACCESS_KEY_ID && process.env.R2_BOQ_SECRET_ACCESS_KEY);
 }
 
 function bucketName() {
-  return process.env.R2_BOQ_BUCKET || (hasDedicatedCredentials() ? DEFAULT_BUCKET : process.env.R2_BUCKET_DPR_DOCUMENTS || 'dpr-documents');
+  return (hasDedicatedKeyPair() && process.env.R2_BOQ_BUCKET) ||
+    (hasDedicatedKeyPair() ? DEFAULT_BUCKET : process.env.R2_BUCKET_DPR_DOCUMENTS || 'dpr-documents');
 }
 
 function getClient() {
   if (s3Client) return s3Client;
   const accountId = process.env.R2_BOQ_ACCOUNT_ID || process.env.R2_ACCOUNT_ID;
-  const hasBoqKeyPair = process.env.R2_BOQ_ACCESS_KEY_ID && process.env.R2_BOQ_SECRET_ACCESS_KEY;
+  const hasBoqKeyPair = hasDedicatedKeyPair();
   const accessKeyId = hasBoqKeyPair ? process.env.R2_BOQ_ACCESS_KEY_ID : process.env.R2_ACCESS_KEY_ID;
   const secretAccessKey = hasBoqKeyPair ? process.env.R2_BOQ_SECRET_ACCESS_KEY : process.env.R2_SECRET_ACCESS_KEY;
   if (!accountId || !accessKeyId || !secretAccessKey) {
