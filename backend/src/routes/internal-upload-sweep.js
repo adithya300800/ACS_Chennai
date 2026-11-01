@@ -166,9 +166,9 @@ const EXPIRED_VERIFY_AFTER_MS = readPositiveInt(process.env.UPLOAD_SWEEP_EXPIRED
  */
 async function tryDeleteBlob(intent) {
   try {
-    // The BOQ bucket uses separate credentials and is private. Never pass
-    // these keys through the generic photo/document bucket client.
-    if (intent.container === boqStorage.bucketName()) {
+    // Route by intent type or BOQ-only key prefix, not bucket name: BOQ may
+    // share dpr-documents with regular uploads, including before binding.
+    if (intent.boundType === 'boq_job' || intent.blobPath?.startsWith('drawings/')) {
       await boqStorage.deleteBlob(intent.blobPath);
     } else {
       await deleteBlob(intent.container, intent.blobPath);

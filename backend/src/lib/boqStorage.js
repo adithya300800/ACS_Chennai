@@ -1,7 +1,7 @@
 'use strict';
 
-// BOQ drawings and artifacts use a separate private R2 bucket and credential
-// set from the portal's general-purpose blobStorage client.
+// BOQ objects keep dedicated prefixes while reusing the portal's R2 account
+// credentials when BOQ-specific credentials are not configured.
 const {
   S3Client,
   PutObjectCommand,
@@ -17,15 +17,21 @@ const READ_TTL_SECONDS = 600;
 const DEFAULT_BUCKET = 'boq-generator';
 let s3Client;
 
+function hasDedicatedKeyPair() {
+  return Boolean(process.env.R2_BOQ_ACCESS_KEY_ID && process.env.R2_BOQ_SECRET_ACCESS_KEY);
+}
+
 function bucketName() {
-  return process.env.R2_BOQ_BUCKET || DEFAULT_BUCKET;
+  return process.env.R2_BOQ_BUCKET ||
+    (hasDedicatedKeyPair() ? DEFAULT_BUCKET : process.env.R2_BUCKET_DPR_DOCUMENTS || 'dpr-documents');
 }
 
 function getClient() {
   if (s3Client) return s3Client;
-  const accountId = process.env.R2_BOQ_ACCOUNT_ID;
-  const accessKeyId = process.env.R2_BOQ_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.R2_BOQ_SECRET_ACCESS_KEY;
+  const hasBoqKeyPair = hasDedicatedKeyPair();
+  const accountId = hasBoqKeyPair ? process.env.R2_BOQ_ACCOUNT_ID || process.env.R2_ACCOUNT_ID : process.env.R2_ACCOUNT_ID;
+  const accessKeyId = hasBoqKeyPair ? process.env.R2_BOQ_ACCESS_KEY_ID : process.env.R2_ACCESS_KEY_ID;
+  const secretAccessKey = hasBoqKeyPair ? process.env.R2_BOQ_SECRET_ACCESS_KEY : process.env.R2_SECRET_ACCESS_KEY;
   if (!accountId || !accessKeyId || !secretAccessKey) {
     throw new Error('BOQ storage is not configured');
   }
