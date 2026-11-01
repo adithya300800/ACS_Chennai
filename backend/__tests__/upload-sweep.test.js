@@ -41,7 +41,7 @@ jest.mock('../src/lib/blobStorage', () => ({
 
 jest.mock('../src/lib/boqStorage', () => ({
   DEFAULT_BUCKET: 'boq-generator',
-  bucketName: () => 'boq-generator',
+  bucketName: () => process.env.TEST_BOQ_BUCKET || 'boq-generator',
   deleteBlob: jest.fn(async (blobPath) => { mockBoqDeleteCalls.push(blobPath); }),
 }));
 
@@ -276,6 +276,7 @@ describe('DR-001 — destructive sweep is refused without explicit override', ()
       status: 'PENDING',
       container: 'boq-generator',
       blobPath: 'drawings/project-1/employee-1/upload.dxf',
+      boundType: 'boq_job',
       expiresAt: past(60_000),
       confirmedAt: null,
     })];
@@ -284,6 +285,51 @@ describe('DR-001 — destructive sweep is refused without explicit override', ()
     expect(res.status).toBe(200);
     expect(mockDeleteBlobCalls).toHaveLength(0);
     expect(mockBoqDeleteCalls).toEqual(['drawings/project-1/employee-1/upload.dxf']);
+  });
+
+  it('routes shared-bucket deletions by intent type, not by container name', async () => {
+    process.env.TEST_BOQ_BUCKET = 'dpr-documents';
+    const rows = [
+      seed({
+        id: 'shared-boq-bound-upload',
+        status: 'PENDING',
+        container: 'dpr-documents',
+        blobPath: 'drawings/project-1/employee-1/upload.dwg',
+        boundType: 'boq_job',
+        expiresAt: past(60_000),
+        confirmedAt: null,
+      }),
+      seed({
+        id: 'shared-boq-abandoned-upload',
+        status: 'PENDING',
+        container: 'dpr-documents',
+        blobPath: 'drawings/project-1/employee-1/abandoned.dwg',
+        boundType: null,
+        expiresAt: past(60_000),
+        confirmedAt: null,
+      }),
+      seed({
+        id: 'shared-document-upload',
+        status: 'PENDING',
+        container: 'dpr-documents',
+        blobPath: 'project-attachments/project-1/upload.pdf',
+        boundType: null,
+        expiresAt: past(60_000),
+        confirmedAt: null,
+      }),
+    ];
+    const res = await postSweep(buildApp(buildPrisma(rows)));
+    delete process.env.TEST_BOQ_BUCKET;
+
+    expect(res.status).toBe(200);
+    expect(mockBoqDeleteCalls).toEqual([
+      'drawings/project-1/employee-1/upload.dwg',
+      'drawings/project-1/employee-1/abandoned.dwg',
+    ]);
+    expect(mockDeleteBlobCalls).toEqual([{
+      container: 'dpr-documents',
+      blobPath: 'project-attachments/project-1/upload.pdf',
+    }]);
   });
 });
 

@@ -122,10 +122,24 @@ describe('BOQ artifact storage', () => {
 
   it('uses the configured portal documents bucket when the BOQ bucket override is absent', () => {
     delete process.env.R2_BOQ_BUCKET;
+    delete process.env.R2_BOQ_ACCOUNT_ID;
+    delete process.env.R2_BOQ_ACCESS_KEY_ID;
+    delete process.env.R2_BOQ_SECRET_ACCESS_KEY;
     process.env.R2_BUCKET_DPR_DOCUMENTS = 'shared-documents';
     jest.resetModules();
     storage = require('../src/lib/boqStorage');
 
     expect(storage.bucketName()).toBe('shared-documents');
+  });
+
+  it('preserves the legacy default bucket for dedicated BOQ credentials without a bucket override', () => {
+    delete process.env.R2_BOQ_BUCKET;
+    process.env.R2_BOQ_ACCOUNT_ID = 'test-account';
+    process.env.R2_BOQ_ACCESS_KEY_ID = 'test-key';
+    process.env.R2_BOQ_SECRET_ACCESS_KEY = 'test-secret';
+    jest.resetModules();
+    storage = require('../src/lib/boqStorage');
+
+    expect(storage.bucketName()).toBe('boq-generator');
   });
 });

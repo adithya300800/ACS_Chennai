@@ -14,11 +14,15 @@ const { randomBytes } = require('crypto');
 
 const UPLOAD_TTL_SECONDS = 900;
 const READ_TTL_SECONDS = 600;
-const DEFAULT_BUCKET = 'dpr-documents';
+const DEFAULT_BUCKET = 'boq-generator';
 let s3Client;
 
+function hasDedicatedCredentials() {
+  return Boolean(process.env.R2_BOQ_ACCOUNT_ID || process.env.R2_BOQ_ACCESS_KEY_ID || process.env.R2_BOQ_SECRET_ACCESS_KEY);
+}
+
 function bucketName() {
-  return process.env.R2_BOQ_BUCKET || process.env.R2_BUCKET_DPR_DOCUMENTS || DEFAULT_BUCKET;
+  return process.env.R2_BOQ_BUCKET || (hasDedicatedCredentials() ? DEFAULT_BUCKET : process.env.R2_BUCKET_DPR_DOCUMENTS || 'dpr-documents');
 }
 
 function getClient() {
