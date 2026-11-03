@@ -328,6 +328,56 @@ describe('BOQ Generator user workflow', () => {
     expect(within(failedRun).getByRole('button', { name: 'Run again' })).toBeInTheDocument();
   });
 
+  test('shows production blockers when the processor refuses placeholder data', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.createJob.mockRejectedValueOnce(Object.assign(
+      new Error('Production mode requires approved production data.'),
+      {
+        code: 'BOQ_PRODUCTION_BLOCKED',
+        serviceCode: 'PRODUCTION_DATA_BLOCKED',
+        details: { blockers: ['work breakdown sample_wbs.SAMPLE.yaml is SAMPLE data'] },
+      },
+    ));
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'project-assigned' } });
+    fireEvent.change(screen.getByLabelText('Select model drawings'), {
+      target: { files: [new File(['ISO-10303-21;'], 'tower.ifc', { type: 'application/octet-stream' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate BOQ' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/approved production data/i);
+    expect(alert).toHaveTextContent('sample_wbs.SAMPLE.yaml');
+    expect(alert).toHaveTextContent('PRODUCTION_DATA_BLOCKED');
+  });
+
+  test('shows zero-line results as a failed measurement outcome without export controls', async () => {
+    mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
+    mockApi.boqGenerator.listJobs.mockResolvedValue({ jobs: [{
+      id: 'job-empty-result', projectId: 'project-assigned', status: 'COMPLETED', createdAt: '2026-10-31T00:00:00Z',
+    }] });
+    mockApi.boqGenerator.getJob.mockResolvedValue({
+      id: 'job-empty-result', projectId: 'project-assigned', status: 'COMPLETED',
+      snapshot: { revision: 1, lineCount: 0, dataStatus: 'SAMPLE', productionMode: false },
+    });
+    mockApi.boqGenerator.getBoq.mockResolvedValue({
+      totals: { line_count: 0, amount: 0, currency: 'INR' },
+      lines: [],
+      withheld: [{ reason_code: 'DXF_LAYER_NOT_MAPPED', description: 'Layer A-FLOOR has no approved mapping.' }],
+      flags: [],
+    });
+    render(<MemoryRouter initialEntries={['/portal/boq-generator?projectId=project-assigned']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
+    await screen.findByRole('option', { name: 'Assigned Project' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Open' }));
+
+    const outcome = await screen.findByRole('alert');
+    expect(outcome).toHaveTextContent(/no measurable items were produced/i);
+    expect(outcome).toHaveTextContent('Layer A-FLOOR has no approved mapping.');
+    expect(screen.queryByRole('button', { name: 'Save & download Excel' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /reviewed revision/i })).not.toBeInTheDocument();
+  });
+
   test('lets an assigned employee start a job with the one required DXF scale confirmation', async () => {
     mockApi.getProjects.mockResolvedValue({ projects: [{ id: 'project-assigned', name: 'Assigned Project' }], discovered: [] });
     render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><BoqGenerator /></MemoryRouter>);
