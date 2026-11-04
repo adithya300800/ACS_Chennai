@@ -224,6 +224,53 @@ function noMeasuredItemsResponse(res, details = []) {
   ));
 }
 
+function emptyCorrection(document, revision) {
+  const error = new Error('No measurable BOQ items were produced.');
+  error.kind = 'empty-result';
+  error.document = document;
+  error.revision = revision;
+  error.details = (document.withheld || [])
+    .map((item) => item.detail || item.description || item.reason_code)
+    .filter(Boolean);
+  return error;
+}
+
+async function persistEmptyCorrection({ prisma, job, error }) {
+  const revision = error.revision;
+  const snapshotBlobPath = `snapshots/${job.projectId}/${job.id}/rev-${revision}.json`;
+  const oldSnapshots = await prisma.boqSnapshot.findMany({ where: { boqJobId: job.id } });
+  await boqStorage.writeSnapshot({ blobPath: snapshotBlobPath, document: error.document });
+  const failedJob = await prisma.boqJob.update({
+    where: { id: job.id },
+    data: {
+      status: 'FAILED',
+      completedAt: new Date(),
+      revision,
+      errorCode: 'BOQ_NO_MEASURABLE_ITEMS',
+      errorMessage: 'No measurable BOQ items were produced. Review the drawing diagnostics and estimator-approved layer map, then submit the drawings again.',
+      errorDetails: error.details,
+      settingsJson: Object.fromEntries(Object.entries(job.settingsJson || {}).filter(([key]) => key !== 'pendingSnapshotRevision')),
+    },
+  });
+  await prisma.boqSnapshot.create({
+    data: {
+      id: randomUUID(),
+      boqJobId: job.id,
+      ...snapshotMetadata(error.document, snapshotBlobPath, null, { ...job, revision }, job.employeeId),
+    },
+  });
+  const exportsToDelete = oldSnapshots.map((snapshot) => snapshot.exportBlobPath).filter(Boolean);
+  for (const snapshot of oldSnapshots) {
+    if (!snapshot.exportBlobPath) continue;
+    await prisma.boqSnapshot.update({
+      where: { id: snapshot.id },
+      data: { exportBlobPath: null, acknowledgedAt: null, acknowledgedById: null },
+    });
+  }
+  await Promise.all(exportsToDelete.map((blobPath) => boqStorage.deleteBlob(blobPath)));
+  return failedJob;
+}
+
 async function captureCompletedServiceJob({ prisma, job, req }) {
   let snapshot = await prisma.boqSnapshot.findFirst({
     where: { boqJobId: job.id },
@@ -238,10 +285,7 @@ async function captureCompletedServiceJob({ prisma, job, req }) {
       throw unsupported;
     }
     if (noMeasuredLines(document)) {
-      const empty = new Error('No measurable BOQ items were produced.');
-      empty.kind = 'empty-result';
-      empty.details = (document.withheld || []).map((item) => item.detail || item.description || item.reason_code).filter(Boolean);
-      throw empty;
+    throw emptyCorrection(document, job.settingsJson?.pendingSnapshotRevision || job.revision || 1);
     }
     const revision = job.settingsJson?.pendingSnapshotRevision || job.revision || 1;
     const snapshotBlobPath = `snapshots/${job.projectId}/${job.id}/rev-${revision}.json`;
@@ -291,9 +335,7 @@ async function captureCorrectionRevision({ prisma, job, req, baseSnapshot }) {
     throw unsupported;
   }
   if (noMeasuredLines(document)) {
-    const empty = new Error('No measurable BOQ items were produced.');
-    empty.kind = 'empty-result';
-    throw empty;
+    throw emptyCorrection(document, baseSnapshot.revision + 1);
   }
   const revision = baseSnapshot.revision + 1;
   const snapshotBlobPath = `snapshots/${job.projectId}/${job.id}/rev-${revision}.json`;
@@ -320,9 +362,7 @@ async function capturePendingCorrectionRevision({ prisma, job, req, baseSnapshot
     throw unsupported;
   }
   if (noMeasuredLines(document)) {
-    const empty = new Error('No measurable BOQ items were produced.');
-    empty.kind = 'empty-result';
-    throw empty;
+    throw emptyCorrection(document, revision);
   }
   const snapshotBlobPath = `snapshots/${job.projectId}/${job.id}/rev-${revision}.json`;
   await boqStorage.writeSnapshot({ blobPath: snapshotBlobPath, document });
@@ -502,6 +542,9 @@ async function respondWithServiceSubmission({ prisma, job, req, res, statusCode 
     return res.status(statusCode).json(body);
   } catch (err) {
     const mapped = mapServiceError(err);
+    const blockerDetails = err?.code === 'PRODUCTION_DATA_BLOCKED' && Array.isArray(err.details?.blockers)
+      ? err.details.blockers.filter((detail) => typeof detail === 'string').slice(0, 10).map((detail) => detail.slice(0, 240))
+      : [];
     await Promise.all([
       prisma.boqJob.update({
         where: { id: job.id },
@@ -510,6 +553,7 @@ async function respondWithServiceSubmission({ prisma, job, req, res, statusCode 
           completedAt: new Date(),
           errorCode: mapped.body.code,
           errorMessage: mapped.body.message,
+          errorDetails: blockerDetails,
           settingsJson: err?.kind !== 'http'
             ? { ...(job.settingsJson || {}), serviceSubmissionKey: job.settingsJson?.serviceSubmissionKey || job.id }
             : job.settingsJson,
@@ -1276,7 +1320,10 @@ router.post('/jobs/:boqJobId/lines/:lineId/corrections', boqWriteLimiter, asyncH
         const revision = await captureCorrectionRevision({ prisma, job, req, baseSnapshot });
         result.revision = revision;
       } catch (_captureError) {
-        if (_captureError.kind === 'empty-result') return noMeasuredItemsResponse(res);
+        if (_captureError.kind === 'empty-result') {
+          await persistEmptyCorrection({ prisma, job, error: _captureError });
+          return noMeasuredItemsResponse(res, _captureError.details || []);
+        }
         await prisma.boqJob.update({
           where: { id: job.id },
           data: { settingsJson: { ...(job.settingsJson || {}), pendingSnapshotRevision: baseSnapshot.revision + 1 } },
@@ -1375,7 +1422,22 @@ router.get('/jobs/:boqJobId/export', asyncHandler(async (req, res) => {
     orderBy: { revision: 'desc' },
   });
   if (!snapshot) return res.status(404).json(errorBody('BOQ_NOT_SAVED', 'No saved BOQ snapshot is available'));
-  if (noMeasuredLines(snapshot)) return noMeasuredItemsResponse(res);
+  if (noMeasuredLines(snapshot)) {
+    if (job.status !== 'FAILED' || job.errorCode !== 'BOQ_NO_MEASURABLE_ITEMS') {
+      const failed = await prisma.boqJob.update({
+        where: { id: job.id },
+        data: { status: 'FAILED', completedAt: new Date(), errorCode: 'BOQ_NO_MEASURABLE_ITEMS', errorMessage: 'No measurable BOQ items were produced.' },
+      });
+      await Promise.all(await prisma.boqSnapshot.findMany({ where: { boqJobId: job.id } }).then((snapshots) => snapshots
+        .filter((candidate) => candidate.exportBlobPath)
+        .map(async (candidate) => {
+          await prisma.boqSnapshot.update({ where: { id: candidate.id }, data: { exportBlobPath: null, acknowledgedAt: null, acknowledgedById: null } });
+          await boqStorage.deleteBlob(candidate.exportBlobPath);
+        })));
+      return noMeasuredItemsResponse(res, failed.errorDetails || []);
+    }
+    return noMeasuredItemsResponse(res);
+  }
   if (!snapshot.acknowledgedAt || !snapshot.acknowledgedById) {
     return res.status(409).json(errorBody('BOQ_EXPORT_ACK_REQUIRED', 'Acknowledge the sample-rate warning before downloading this workbook'));
   }

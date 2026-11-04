@@ -813,6 +813,43 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     expect(mockBoqClient.submitJob.mock.calls[1][0].jobId).toBe(originalServiceJobKey);
   });
 
+  it('persists blocker details from an inline production refusal', async () => {
+    const prisma = buildPrisma();
+    mockBoqClient.submitJob.mockRejectedValueOnce({
+      kind: 'http',
+      status: 409,
+      code: 'PRODUCTION_DATA_BLOCKED',
+      message: 'Production mode is on.',
+      details: { blockers: ['work breakdown sample_wbs.SAMPLE.yaml is SAMPLE data'] },
+    });
+    const app = buildApp(prisma);
+    const { presign } = await createConfirmedUpload(app, prisma);
+    const response = await request(app)
+      .post('/api/boq-generator/jobs')
+      .set('x-test-employee', EMPLOYEE_ID)
+      .set('Idempotency-Key', 'job-key-production-refusal')
+      .send({ projectId: PROJECT_ID, uploads: [presign.body.uploadId] });
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      code: 'BOQ_PRODUCTION_BLOCKED',
+      serviceCode: 'PRODUCTION_DATA_BLOCKED',
+      details: { blockers: ['work breakdown sample_wbs.SAMPLE.yaml is SAMPLE data'] },
+    });
+    expect(prisma._jobs[0]).toMatchObject({
+      status: 'FAILED',
+      errorCode: 'BOQ_PRODUCTION_BLOCKED',
+      errorDetails: ['work breakdown sample_wbs.SAMPLE.yaml is SAMPLE data'],
+    });
+    const reopened = await request(app)
+      .get(`/api/boq-generator/jobs/${prisma._jobs[0].id}`)
+      .set('x-test-employee', EMPLOYEE_ID);
+    expect(reopened.body.error).toMatchObject({
+      serviceCode: 'PRODUCTION_DATA_BLOCKED',
+      details: ['work breakdown sample_wbs.SAMPLE.yaml is SAMPLE data'],
+    });
+  });
+
   it('reuses a retry idempotency key if the retry response is also ambiguous', async () => {
     const prisma = buildPrisma();
     const app = buildApp(prisma);
@@ -1176,6 +1213,48 @@ describe('BOQ Generator jobs and authorized snapshot reads', () => {
     expect(response.body.error.details).toContain('Unmapped layer A-FLOOR');
     expect(prisma._snapshots).toHaveLength(0);
     expect(mockBoqClient.getBoqXlsx).not.toHaveBeenCalled();
+  });
+
+  it('invalidates the previous export when an accepted correction empties the BOQ', async () => {
+    const prisma = buildPrisma();
+    const oldExportPath = 'exports/project-1/portal-job-zero-correction/rev-1.xlsx';
+    prisma._jobs.push({
+      id: 'portal-job-zero-correction', employeeId: EMPLOYEE_ID, projectId: PROJECT_ID,
+      serviceJobId: 'service-job-zero-correction', status: 'COMPLETED', inputFiles: [], settingsJson: {},
+      dataStatus: 'SAMPLE', productionMode: false, revision: 1,
+      createdAt: new Date(), updatedAt: new Date(),
+    });
+    prisma._snapshots.push({
+      id: 'snapshot-zero-correction', boqJobId: 'portal-job-zero-correction', revision: 1,
+      lineCount: 1, snapshotBlobPath: 'snapshots/project-1/portal-job-zero-correction/rev-1.json',
+      exportBlobPath: oldExportPath, acknowledgedById: EMPLOYEE_ID, acknowledgedAt: new Date(),
+    });
+    mockStoredArtifacts.set(oldExportPath, Buffer.from('old-quantity-xlsx'));
+    mockBoqClient.correctLine.mockResolvedValueOnce({
+      correction: { id: 'correction-zero', kind: 'override_qty', requested_by: 'boqjob:portal-job-zero-correction' },
+    });
+    mockBoqClient.getSnapshot.mockResolvedValueOnce({
+      schema_version: '1.0', kind: 'acs.boq.snapshot', data_status: 'SAMPLE',
+      totals: { currency: 'INR', amount: 0, line_count: 0, withheld_count: 0 },
+      lines: [], withheld: [],
+    });
+    const app = buildApp(prisma);
+
+    const correction = await request(app)
+      .post('/api/boq-generator/jobs/portal-job-zero-correction/lines/line-1/corrections')
+      .set('x-test-employee', EMPLOYEE_ID)
+      .send({ kind: 'override_qty', qty: 0, reason: 'Measured as zero' });
+    const oldExport = await request(app)
+      .get('/api/boq-generator/jobs/portal-job-zero-correction/export')
+      .set('x-test-employee', EMPLOYEE_ID);
+
+    expect(correction.status).toBe(409);
+    expect(correction.body.code).toBe('BOQ_NO_MEASURABLE_ITEMS');
+    expect(prisma._jobs[0]).toMatchObject({ status: 'FAILED', errorCode: 'BOQ_NO_MEASURABLE_ITEMS' });
+    expect(mockDeleteBlob.mock.calls).toContainEqual([oldExportPath]);
+    expect(oldExport.status).toBe(409);
+    expect(oldExport.body.code).toBe('BOQ_NO_MEASURABLE_ITEMS');
+    expect(mockCreateReadUrl).not.toHaveBeenCalledWith(oldExportPath);
   });
 
   it('retains production blocker details and the raw service code on a polled job failure', async () => {
