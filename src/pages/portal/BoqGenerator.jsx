@@ -32,6 +32,12 @@ function formatCurrency(value, currency = 'INR') {
 function cleanError(err) {
   if (err?.code === 'BOQ_SERVICE_UNAVAILABLE') return 'The BOQ processor connection is not configured. Ask an administrator to check BOQ_BASE_URL and BOQ_API_TOKEN on the ACS_Chennai Render service. If you have selected drawings, keep this page open; they remain listed here for retry after setup is fixed.';
   if (err?.code === 'BOQ_SERVICE_AUTH_FAILED') return 'The BOQ processor rejected the portal credentials. Ask an administrator to verify that BOQ_API_TOKEN matches on both Render services. If you have selected drawings, keep this page open; they remain listed here for retry after setup is fixed.';
+  if (err?.code === 'BOQ_PRODUCTION_BLOCKED') {
+    const blockers = Array.isArray(err.details?.blockers) ? err.details.blockers : [];
+    const details = blockers.length ? ` Blockers: ${blockers.join('; ')}` : '';
+    const serviceCode = err.serviceCode ? ` (service code: ${err.serviceCode})` : '';
+    return `${err.message || 'The BOQ service requires approved production data before it can measure drawings.'}${details}${serviceCode}`;
+  }
   if (err?.code === 'BOQ_TIMEOUT' || err?.code === 'TIMEOUT') return 'The service is taking longer than expected. Your run is saved; check Recent runs in a moment.';
   return err?.message || 'Something went wrong. Please try again.';
 }
@@ -649,6 +655,9 @@ export default function BoqGenerator() {
   };
 
   const lines = useMemo(() => boq?.lines || [], [boq]);
+  const noMeasuredItems = Boolean(boq) && (Number.isInteger(boq.totals?.line_count)
+    ? boq.totals.line_count === 0
+    : job.snapshot?.lineCount === 0);
   const reviewLines = useMemo(() => {
     const flaggedIds = new Set((boq?.flags || []).map((flag) => flag.line_id || flag.element_id).filter(Boolean));
     const unpricedIds = new Set((boq?.withheld || []).map((item) => item.line_id || item.element_id).filter(Boolean));
@@ -792,7 +801,7 @@ export default function BoqGenerator() {
       </section>}
 
       {boq && completedJob && <section className="dpr-card" aria-labelledby="boq-results-heading" style={{ padding: '1.25rem', marginBottom: '1rem' }}>
-        {isSample && <div role="alert" style={{ background: '#FEF3C7', color: '#78350F', borderRadius: 8, padding: '0.75rem', marginBottom: '1rem' }}><strong>SAMPLE DATA — NOT AN ESTIMATE.</strong> {RATE_NOTICE}</div>}
+        {isSample && !noMeasuredItems && <div role="alert" style={{ background: '#FEF3C7', color: '#78350F', borderRadius: 8, padding: '0.75rem', marginBottom: '1rem' }}><strong>SAMPLE DATA — NOT AN ESTIMATE.</strong> {RATE_NOTICE}</div>}
         {(boq.flags || []).length > 0 && <div role="status" aria-label="Result flags" style={{ background: '#FFF7ED', color: '#9A3412', borderRadius: 8, padding: '0.75rem', marginBottom: '1rem' }}>
           <strong>Review flags — quantities are unchanged unless noted:</strong>
           <ul style={{ marginBottom: 0 }}>{boq.flags.map((flag, index) => <li key={`${flag.reason_code || 'flag'}-${index}`}>
@@ -801,7 +810,13 @@ export default function BoqGenerator() {
         </div>}
         {(boq.corrections || []).length > 0 && <details><summary>Correction history ({boq.corrections.length})</summary><ol>{boq.corrections.map((correction, index) => <li key={correction.id || index}>{correction.reason || correction.kind} — {correction.kind} {correction.old_qty != null && `from ${correction.old_qty} to ${correction.qty}`}</li>)}</ol></details>}
         {(boq.withheld || []).some((item) => !item.line_id) && <p role="status" style={{ color: 'var(--steel)' }}>Some diagnostics or material flags are listed with unpriced items; they are not all unpriced BOQ lines.</p>}
-        <h2 id="boq-results-heading" style={{ marginTop: 0 }}>Review your take-off</h2>
+        <h2 id="boq-results-heading" style={{ marginTop: 0 }}>{noMeasuredItems ? 'Measurement outcome' : 'Review your take-off'}</h2>
+        {noMeasuredItems && <div role="alert" style={{ background: '#FEF2F2', color: '#991B1B', border: '1px solid #FECACA', borderRadius: 10, padding: '1rem', marginBottom: '1rem' }}>
+          <strong>No measurable items were produced. This is not a completed take-off.</strong>
+          <p style={{ marginBottom: 0 }}>Review the drawing contents and estimator-approved layer mapping, then submit the drawings again.</p>
+          {(boq.withheld || []).length > 0 && <ul style={{ marginBottom: 0, marginTop: '0.5rem' }}>{boq.withheld.map((item, index) => <li key={`${item.reason_code || item.description}-${index}`}>{item.description || item.detail || item.reason_code || 'Unmapped drawing content'}</li>)}</ul>}
+        </div>}
+        {!noMeasuredItems && <>
         <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
           <span>{flaggedCount} flagged or unpriced of {lines.length} lines</span>
           {onlyFlagged
@@ -860,6 +875,7 @@ export default function BoqGenerator() {
         </label>
         <button type="button" className="btn btn-primary" style={{ marginTop: '0.75rem' }} disabled={!acknowledged} onClick={saveExport}>Save & download Excel</button>
         {job.status === 'COMPLETED_PENDING_EXPORT' && <p role="status" style={{ color: 'var(--steel)' }}>Your BOQ is saved. The workbook is still being prepared; this page will keep checking.</p>}
+        </>}
       </section>}
 
       <section className="dpr-card" aria-labelledby="boq-recent-heading" style={{ padding: '1.25rem' }}>

@@ -18,7 +18,7 @@ const ERROR_MAP = Object.freeze({
   UPLOAD_TOO_LARGE: [413, 'BOQ_FILE_TOO_LARGE', 'The file is over the service upload limit.'],
   REQUEST_TOO_LARGE: [413, 'BOQ_FILE_TOO_LARGE', 'The request is over the service upload limit.'],
   TOO_MANY_SOURCES: [400, 'BOQ_TOO_MANY_FILES', 'A run may contain at most 20 files.'],
-  PRODUCTION_DATA_BLOCKED: [409, 'BOQ_PRODUCTION_BLOCKED', 'The drawing service is configured to refuse this data. Tell your admin.'],
+  PRODUCTION_DATA_BLOCKED: [409, 'BOQ_PRODUCTION_BLOCKED', 'The BOQ service requires approved production data before it can measure drawings. Ask an estimator or administrator to replace the listed SAMPLE or DRAFT inputs.'],
   JOB_NOT_READY: [409, 'BOQ_NOT_READY', 'The BOQ is not ready yet.'],
   NO_MEASURABLE_ITEMS: [409, 'BOQ_NO_MEASURABLE_ITEMS', 'No BOQ lines could be measured. Review the drawing contents and estimator-approved layer mapping.'],
   JOB_FAILED: [409, 'BOQ_JOB_FAILED', 'The drawing service could not complete this job.'],
@@ -30,8 +30,8 @@ const ERROR_MAP = Object.freeze({
   JOB_INTERRUPTED: [409, 'BOQ_INTERRUPTED', 'The drawing service restarted while this was running. Run it again.'],
 });
 
-function flat(status, code, message) {
-  return { status, body: { error: code, code, message } };
+function flat(status, code, message, extra = {}) {
+  return { status, body: { error: code, code, message, ...extra } };
 }
 
 function mapServiceError(error) {
@@ -55,6 +55,15 @@ function mapServiceError(error) {
   }
 
   let message = mapping[2];
+  if (code === 'PRODUCTION_DATA_BLOCKED') {
+    const blockers = Array.isArray(error.details?.blockers)
+      ? error.details.blockers.filter((item) => typeof item === 'string').slice(0, 10).map((item) => item.slice(0, 240))
+      : [];
+    return flat(mapping[0], mapping[1], message, {
+      serviceCode: code,
+      details: { blockers },
+    });
+  }
   if (code === 'VALIDATION_ERROR' && typeof error.message === 'string' && error.message) {
     const safeDetail = error.message
       .replace(/https?:\/\/[^\s"'<>]+/gi, '[link redacted]')
@@ -68,12 +77,20 @@ function mapServiceError(error) {
 function mapServiceJobError(error) {
   if (!error || typeof error !== 'object') return null;
   const code = typeof error.code === 'string' ? error.code : '';
-  const normalized = { code, message: typeof error.message === 'string' ? error.message : '' };
-  // Job details are a list of strings, unlike API-envelope details objects.
   const details = Array.isArray(error.details)
-    ? error.details.filter((item) => typeof item === 'string').slice(0, 10)
+    ? error.details.filter((item) => typeof item === 'string').slice(0, 10).map((item) => item.slice(0, 240))
     : [];
-  return { ...mapServiceError(normalized), details };
+  const normalized = {
+    code,
+    message: typeof error.message === 'string' ? error.message : '',
+    ...(code === 'PRODUCTION_DATA_BLOCKED' ? { details: { blockers: details } } : {}),
+  };
+  // Job details are a list of strings, unlike API-envelope details objects.
+  const mapped = mapServiceError(normalized);
+  if (code === 'PRODUCTION_DATA_BLOCKED' && details.length) {
+    mapped.body.message = `${mapped.body.message} Blockers: ${details.join('; ')} (service code: ${code})`;
+  }
+  return { ...mapped, details };
 }
 
 module.exports = { mapServiceError, mapServiceJobError };

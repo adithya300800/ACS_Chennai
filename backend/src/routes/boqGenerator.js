@@ -142,6 +142,9 @@ function sanitizeJob(job) {
       ...(job.errorCode === 'BOQ_NO_MEASURABLE_ITEMS' && Array.isArray(job.errorDetails)
         ? { details: job.errorDetails.filter((detail) => typeof detail === 'string').slice(0, 10) }
         : {}),
+      ...(job.errorCode === 'BOQ_PRODUCTION_BLOCKED'
+        ? { serviceCode: 'PRODUCTION_DATA_BLOCKED', details: Array.isArray(job.errorDetails) ? job.errorDetails.filter((detail) => typeof detail === 'string').slice(0, 10) : [] }
+        : {}),
     } : null,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
@@ -201,6 +204,73 @@ function snapshotMetadata(document, snapshotBlobPath, exportBlobPath, job, saved
   };
 }
 
+function noMeasuredLines(snapshotOrDocument) {
+  const totals = snapshotOrDocument?.totals;
+  const lineCount = Number.isInteger(snapshotOrDocument?.lineCount)
+    ? snapshotOrDocument.lineCount
+    : Number.isInteger(totals?.line_count)
+      ? totals.line_count
+      : Array.isArray(snapshotOrDocument?.lines) ? snapshotOrDocument.lines.length : null;
+  return lineCount === 0;
+}
+
+function noMeasuredItemsResponse(res, details = []) {
+  return res.status(409).json(errorBody(
+    'BOQ_NO_MEASURABLE_ITEMS',
+    'No measurable BOQ items were produced. Review the drawing diagnostics and estimator-approved layer map, then submit the drawings again.',
+    details.filter((detail) => typeof detail === 'string').slice(0, 10).length
+      ? { details: details.filter((detail) => typeof detail === 'string').slice(0, 10) }
+      : {},
+  ));
+}
+
+function emptyCorrection(document, revision) {
+  const error = new Error('No measurable BOQ items were produced.');
+  error.kind = 'empty-result';
+  error.document = document;
+  error.revision = revision;
+  error.details = (document.withheld || [])
+    .map((item) => item.detail || item.description || item.reason_code)
+    .filter(Boolean);
+  return error;
+}
+
+async function persistEmptyCorrection({ prisma, job, error }) {
+  const revision = error.revision;
+  const snapshotBlobPath = `snapshots/${job.projectId}/${job.id}/rev-${revision}.json`;
+  const oldSnapshots = await prisma.boqSnapshot.findMany({ where: { boqJobId: job.id } });
+  await boqStorage.writeSnapshot({ blobPath: snapshotBlobPath, document: error.document });
+  const failedJob = await prisma.boqJob.update({
+    where: { id: job.id },
+    data: {
+      status: 'FAILED',
+      completedAt: new Date(),
+      revision,
+      errorCode: 'BOQ_NO_MEASURABLE_ITEMS',
+      errorMessage: 'No measurable BOQ items were produced. Review the drawing diagnostics and estimator-approved layer map, then submit the drawings again.',
+      errorDetails: error.details,
+      settingsJson: Object.fromEntries(Object.entries(job.settingsJson || {}).filter(([key]) => key !== 'pendingSnapshotRevision')),
+    },
+  });
+  await prisma.boqSnapshot.create({
+    data: {
+      id: randomUUID(),
+      boqJobId: job.id,
+      ...snapshotMetadata(error.document, snapshotBlobPath, null, { ...job, revision }, job.employeeId),
+    },
+  });
+  const exportsToDelete = oldSnapshots.map((snapshot) => snapshot.exportBlobPath).filter(Boolean);
+  for (const snapshot of oldSnapshots) {
+    if (!snapshot.exportBlobPath) continue;
+    await prisma.boqSnapshot.update({
+      where: { id: snapshot.id },
+      data: { exportBlobPath: null, acknowledgedAt: null, acknowledgedById: null },
+    });
+  }
+  await Promise.all(exportsToDelete.map((blobPath) => boqStorage.deleteBlob(blobPath)));
+  return failedJob;
+}
+
 async function captureCompletedServiceJob({ prisma, job, req }) {
   let snapshot = await prisma.boqSnapshot.findFirst({
     where: { boqJobId: job.id },
@@ -214,6 +284,9 @@ async function captureCompletedServiceJob({ prisma, job, req }) {
       unsupported.kind = 'snapshot-version';
       throw unsupported;
     }
+    if (noMeasuredLines(document)) {
+    throw emptyCorrection(document, job.settingsJson?.pendingSnapshotRevision || job.revision || 1);
+    }
     const revision = job.settingsJson?.pendingSnapshotRevision || job.revision || 1;
     const snapshotBlobPath = `snapshots/${job.projectId}/${job.id}/rev-${revision}.json`;
     await boqStorage.writeSnapshot({ blobPath: snapshotBlobPath, document });
@@ -224,6 +297,12 @@ async function captureCompletedServiceJob({ prisma, job, req }) {
         ...snapshotMetadata(document, snapshotBlobPath, null, { ...job, revision }, job.employeeId),
       },
     });
+  }
+
+  if (noMeasuredLines(snapshot)) {
+    const empty = new Error('No measurable BOQ items were produced.');
+    empty.kind = 'empty-result';
+    throw empty;
   }
 
   if (!snapshot.exportBlobPath) {
@@ -255,6 +334,9 @@ async function captureCorrectionRevision({ prisma, job, req, baseSnapshot }) {
     unsupported.kind = 'snapshot-version';
     throw unsupported;
   }
+  if (noMeasuredLines(document)) {
+    throw emptyCorrection(document, baseSnapshot.revision + 1);
+  }
   const revision = baseSnapshot.revision + 1;
   const snapshotBlobPath = `snapshots/${job.projectId}/${job.id}/rev-${revision}.json`;
   await boqStorage.writeSnapshot({ blobPath: snapshotBlobPath, document });
@@ -278,6 +360,9 @@ async function capturePendingCorrectionRevision({ prisma, job, req, baseSnapshot
     const unsupported = new Error(`Unsupported BOQ snapshot schema version: ${String(document?.schema_version || 'missing')}`);
     unsupported.kind = 'snapshot-version';
     throw unsupported;
+  }
+  if (noMeasuredLines(document)) {
+    throw emptyCorrection(document, revision);
   }
   const snapshotBlobPath = `snapshots/${job.projectId}/${job.id}/rev-${revision}.json`;
   await boqStorage.writeSnapshot({ blobPath: snapshotBlobPath, document });
@@ -457,6 +542,9 @@ async function respondWithServiceSubmission({ prisma, job, req, res, statusCode 
     return res.status(statusCode).json(body);
   } catch (err) {
     const mapped = mapServiceError(err);
+    const blockerDetails = err?.code === 'PRODUCTION_DATA_BLOCKED' && Array.isArray(err.details?.blockers)
+      ? err.details.blockers.filter((detail) => typeof detail === 'string').slice(0, 10).map((detail) => detail.slice(0, 240))
+      : [];
     await Promise.all([
       prisma.boqJob.update({
         where: { id: job.id },
@@ -465,6 +553,7 @@ async function respondWithServiceSubmission({ prisma, job, req, res, statusCode 
           completedAt: new Date(),
           errorCode: mapped.body.code,
           errorMessage: mapped.body.message,
+          errorDetails: blockerDetails,
           settingsJson: err?.kind !== 'http'
             ? { ...(job.settingsJson || {}), serviceSubmissionKey: job.settingsJson?.serviceSubmissionKey || job.id }
             : job.settingsJson,
@@ -1022,6 +1111,19 @@ router.get('/jobs/:boqJobId', asyncHandler(async (req, res) => {
       });
       return res.json({ ...sanitizeJob(completed), snapshot: sanitizeSnapshot(completedSnapshot) });
     } catch (_captureError) {
+      if (_captureError.kind === 'empty-result') {
+        const failed = await prisma.boqJob.update({
+          where: { id: job.id },
+          data: {
+            status: 'FAILED',
+            completedAt: new Date(),
+            errorCode: 'BOQ_NO_MEASURABLE_ITEMS',
+            errorMessage: 'No measurable BOQ items were produced. Review the drawing diagnostics and estimator-approved layer map, then submit the drawings again.',
+            errorDetails: _captureError.details || [],
+          },
+        });
+        return res.json({ ...sanitizeJob(failed), snapshot: sanitizeSnapshot(snapshot) });
+      }
       return respondWithJob(job);
     }
   }
@@ -1067,6 +1169,19 @@ router.get('/jobs/:boqJobId', asyncHandler(async (req, res) => {
           });
           return res.json({ ...sanitizeJob(completed), snapshot: sanitizeSnapshot(completedSnapshot) });
         } catch (captureError) {
+          if (captureError.kind === 'empty-result') {
+            const failed = await prisma.boqJob.update({
+              where: { id: job.id },
+              data: {
+                status: 'FAILED',
+                completedAt: new Date(),
+                errorCode: 'BOQ_NO_MEASURABLE_ITEMS',
+                errorMessage: 'No measurable BOQ items were produced. Review the drawing diagnostics and estimator-approved layer map, then submit the drawings again.',
+                errorDetails: captureError.details || [],
+              },
+            });
+            return res.json({ ...sanitizeJob(failed), snapshot: null });
+          }
           if (captureError.kind === 'snapshot-version') {
             return res.status(502).json(errorBody(
               'BOQ_SNAPSHOT_VERSION_UNSUPPORTED',
@@ -1121,16 +1236,40 @@ router.post('/jobs/:boqJobId/save', boqWriteLimiter, asyncHandler(async (req, re
       orderBy: { revision: 'desc' },
     });
     if (!baseSnapshot) return res.status(409).json(errorBody('BOQ_NOT_SAVED', 'The original snapshot is missing'));
-    const persisted = await capturePendingCorrectionRevision({
-      prisma,
-      job,
-      req,
-      baseSnapshot,
-      revision: job.settingsJson.pendingSnapshotRevision,
-    });
+    let persisted;
+    try {
+      persisted = await capturePendingCorrectionRevision({
+        prisma,
+        job,
+        req,
+        baseSnapshot,
+        revision: job.settingsJson.pendingSnapshotRevision,
+      });
+    } catch (captureError) {
+      if (captureError.kind === 'empty-result') return noMeasuredItemsResponse(res);
+      throw captureError;
+    }
     return res.json({ ...sanitizeJob(persisted), revision: job.settingsJson.pendingSnapshotRevision, saved: true });
   }
-  const persisted = await captureCompletedServiceJob({ prisma, job, req });
+  let persisted;
+  try {
+    persisted = await captureCompletedServiceJob({ prisma, job, req });
+  } catch (captureError) {
+    if (captureError.kind === 'empty-result') {
+      await prisma.boqJob.update({
+        where: { id: job.id },
+        data: {
+          status: 'FAILED',
+          completedAt: new Date(),
+          errorCode: 'BOQ_NO_MEASURABLE_ITEMS',
+          errorMessage: 'No measurable BOQ items were produced. Review the drawing diagnostics and estimator-approved layer map, then submit the drawings again.',
+          errorDetails: captureError.details || [],
+        },
+      });
+      return noMeasuredItemsResponse(res, captureError.details || []);
+    }
+    throw captureError;
+  }
   const snapshot = await prisma.boqSnapshot.findFirst({ where: { boqJobId: job.id }, orderBy: { revision: 'desc' } });
   return res.json({ ...sanitizeJob(persisted), revision: snapshot?.revision || job.revision || 1, saved: true });
 }));
@@ -1181,6 +1320,10 @@ router.post('/jobs/:boqJobId/lines/:lineId/corrections', boqWriteLimiter, asyncH
         const revision = await captureCorrectionRevision({ prisma, job, req, baseSnapshot });
         result.revision = revision;
       } catch (_captureError) {
+        if (_captureError.kind === 'empty-result') {
+          await persistEmptyCorrection({ prisma, job, error: _captureError });
+          return noMeasuredItemsResponse(res, _captureError.details || []);
+        }
         await prisma.boqJob.update({
           where: { id: job.id },
           data: { settingsJson: { ...(job.settingsJson || {}), pendingSnapshotRevision: baseSnapshot.revision + 1 } },
@@ -1252,6 +1395,7 @@ router.post('/jobs/:boqJobId/export/acknowledge', boqWriteLimiter, asyncHandler(
   const prisma = getPrisma(req);
   const job = await prisma.boqJob.findUnique({ where: { id: req.params.boqJobId } });
   if (!await canReadJob(prisma, job, req.employeeId)) return respondUnauthorizedProject(res);
+  if (job.errorCode === 'BOQ_NO_MEASURABLE_ITEMS') return noMeasuredItemsResponse(res, job.errorDetails || []);
   if (req.body?.acknowledged !== true) {
     return res.status(400).json(errorBody('VALIDATION_ERROR', 'Explicit export acknowledgement is required'));
   }
@@ -1260,6 +1404,7 @@ router.post('/jobs/:boqJobId/export/acknowledge', boqWriteLimiter, asyncHandler(
     orderBy: { revision: 'desc' },
   });
   if (!snapshot) return res.status(409).json(errorBody('BOQ_NOT_SAVED', 'Save the BOQ snapshot before acknowledging export'));
+  if (noMeasuredLines(snapshot)) return noMeasuredItemsResponse(res);
   const persisted = await prisma.boqSnapshot.update({
     where: { id: snapshot.id },
     data: { acknowledgedById: req.employeeId, acknowledgedAt: new Date() },
@@ -1271,11 +1416,28 @@ router.get('/jobs/:boqJobId/export', asyncHandler(async (req, res) => {
   const prisma = getPrisma(req);
   const job = await prisma.boqJob.findUnique({ where: { id: req.params.boqJobId } });
   if (!await canReadJob(prisma, job, req.employeeId)) return respondUnauthorizedProject(res);
+  if (job.errorCode === 'BOQ_NO_MEASURABLE_ITEMS') return noMeasuredItemsResponse(res, job.errorDetails || []);
   const snapshot = await prisma.boqSnapshot.findFirst({
     where: { boqJobId: job.id },
     orderBy: { revision: 'desc' },
   });
   if (!snapshot) return res.status(404).json(errorBody('BOQ_NOT_SAVED', 'No saved BOQ snapshot is available'));
+  if (noMeasuredLines(snapshot)) {
+    if (job.status !== 'FAILED' || job.errorCode !== 'BOQ_NO_MEASURABLE_ITEMS') {
+      const failed = await prisma.boqJob.update({
+        where: { id: job.id },
+        data: { status: 'FAILED', completedAt: new Date(), errorCode: 'BOQ_NO_MEASURABLE_ITEMS', errorMessage: 'No measurable BOQ items were produced.' },
+      });
+      await Promise.all(await prisma.boqSnapshot.findMany({ where: { boqJobId: job.id } }).then((snapshots) => snapshots
+        .filter((candidate) => candidate.exportBlobPath)
+        .map(async (candidate) => {
+          await prisma.boqSnapshot.update({ where: { id: candidate.id }, data: { exportBlobPath: null, acknowledgedAt: null, acknowledgedById: null } });
+          await boqStorage.deleteBlob(candidate.exportBlobPath);
+        })));
+      return noMeasuredItemsResponse(res, failed.errorDetails || []);
+    }
+    return noMeasuredItemsResponse(res);
+  }
   if (!snapshot.acknowledgedAt || !snapshot.acknowledgedById) {
     return res.status(409).json(errorBody('BOQ_EXPORT_ACK_REQUIRED', 'Acknowledge the sample-rate warning before downloading this workbook'));
   }
@@ -1286,6 +1448,7 @@ router.get('/jobs/:boqJobId/export', asyncHandler(async (req, res) => {
   try {
     const document = await boqStorage.readSnapshot(snapshot.snapshotBlobPath);
     if (document?.schema_version !== SNAPSHOT_SCHEMA_VERSION) throw new Error('unsupported snapshot version');
+    if (noMeasuredLines(document)) return noMeasuredItemsResponse(res);
     const regenerated = await buildRegeneratedWorkbook({ document, job, revision: snapshot.revision });
     const exportBlobPath = `exports/${job.projectId}/${job.id}/rev-${snapshot.revision}-regenerated.xlsx`;
     await boqStorage.writeExport({ blobPath: exportBlobPath, buffer: regenerated.buffer });
@@ -1311,6 +1474,7 @@ router.post('/jobs/:boqJobId/export/regenerate', boqWriteLimiter, asyncHandler(a
     orderBy: { revision: 'desc' },
   });
   if (!snapshot) return res.status(404).json(errorBody('BOQ_NOT_SAVED', 'No saved BOQ snapshot is available'));
+  if (noMeasuredLines(snapshot)) return noMeasuredItemsResponse(res);
   if (!snapshot.acknowledgedAt || !snapshot.acknowledgedById) {
     return res.status(409).json(errorBody('BOQ_EXPORT_ACK_REQUIRED', 'Acknowledge the sample-rate warning before regenerating this workbook'));
   }
@@ -1319,6 +1483,7 @@ router.post('/jobs/:boqJobId/export/regenerate', boqWriteLimiter, asyncHandler(a
     if (document?.schema_version !== SNAPSHOT_SCHEMA_VERSION) {
       return res.status(502).json(errorBody('BOQ_SNAPSHOT_VERSION_UNSUPPORTED', 'The saved BOQ snapshot version cannot be regenerated by this portal'));
     }
+    if (noMeasuredLines(document)) return noMeasuredItemsResponse(res);
     const workbook = await buildRegeneratedWorkbook({ document, job, revision: snapshot.revision });
     const exportBlobPath = `exports/${job.projectId}/${job.id}/rev-${snapshot.revision}-regenerated.xlsx`;
     await boqStorage.writeExport({ blobPath: exportBlobPath, buffer: workbook.buffer });

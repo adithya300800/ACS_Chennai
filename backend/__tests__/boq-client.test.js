@@ -193,6 +193,40 @@ describe('BOQ service client', () => {
       },
       details: ["4 entities on layer 'FO AREA' were not measured."],
     });
+    expect(mapServiceError(new BoqServiceError({
+      status: 409,
+      body: {
+        error: {
+          code: 'PRODUCTION_DATA_BLOCKED',
+          message: 'Production mode is on.',
+          details: { blockers: ['work breakdown sample_wbs.SAMPLE.yaml is SAMPLE data'] },
+        },
+      },
+    }))).toEqual({
+      status: 409,
+      body: {
+        error: 'BOQ_PRODUCTION_BLOCKED',
+        code: 'BOQ_PRODUCTION_BLOCKED',
+        message: expect.stringContaining('approved production data'),
+        serviceCode: 'PRODUCTION_DATA_BLOCKED',
+        details: { blockers: ['work breakdown sample_wbs.SAMPLE.yaml is SAMPLE data'] },
+      },
+    });
+    expect(mapServiceJobError({
+      code: 'PRODUCTION_DATA_BLOCKED',
+      message: 'Production mode is on.',
+      details: ['rates imported from tn_pwd_sor.SAMPLE.csv are SAMPLE data'],
+    })).toEqual({
+      status: 409,
+      body: {
+        error: 'BOQ_PRODUCTION_BLOCKED',
+        code: 'BOQ_PRODUCTION_BLOCKED',
+        message: expect.stringContaining('approved production data'),
+        serviceCode: 'PRODUCTION_DATA_BLOCKED',
+        details: { blockers: ['rates imported from tn_pwd_sor.SAMPLE.csv are SAMPLE data'] },
+      },
+      details: ['rates imported from tn_pwd_sor.SAMPLE.csv are SAMPLE data'],
+    });
     expect(mapServiceJobError({
       code: 'SOURCE_UNCALIBRATED',
       message: 'Confirm scale',
